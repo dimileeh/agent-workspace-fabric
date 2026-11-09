@@ -2,7 +2,8 @@
 
 At startup, before any dispatch, a worker checks every lease of a dead holder:
 an ``awf-exec`` still in flight is ADOPTED (new holder and epoch), otherwise the
-lease is RELEASED. If the runtime cannot be queried every lease is kept and new
+lease is RELEASED; a lease that cannot be proven either way is kept for the
+reconciler. If the runtime cannot be queried every lease is kept and new
 admission refused until a check succeeds. A reconciler then releases adopted and
 cleanup-unproven leases once their process is gone.
 """
@@ -156,6 +157,56 @@ async def test_startup_adopts_in_flight_and_releases_finished_leases_before_any_
     assert worker._work_slot_startup_checked  # noqa: SLF001
 
 
+async def test_one_unknown_probe_keeps_its_lease_without_stalling_the_node(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Docker answers, but one lease's process cannot be proven either way: only
+    # that lease is kept (fail closed for it alone). The check still completes,
+    # the other dead holders are adopted/released, and admission stays open.
+    unknown_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    in_flight = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    finished = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    unknown_lease = await add_lease(session_factory, unknown_ws, holder=_DEAD)
+    in_flight_lease = await add_lease(session_factory, in_flight, holder=_DEAD)
+    finished_lease = await add_lease(session_factory, finished, holder=_DEAD)
+    requested = await create_requested(session_factory)
+    probe = FakeProbe()
+    probe.results.update({unknown_lease: "unknown", in_flight_lease: "present"})
+    provisioner = RecordingProvisioner(session_factory, to_ready=False)
+    worker = make_worker(
+        session_factory,
+        executor=SlotAwareExecutor(),
+        provisioner=provisioner,
+        max_concurrent_executions=3,
+        work_slot_probe=probe,
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        await asyncio.wait_for(worker.run_once(), timeout=_TIMEOUT)
+
+    assert worker._work_slot_startup_checked  # noqa: SLF001
+    assert not worker._work_slot_admission_blocked  # noqa: SLF001
+    assert not any(entry.get("reason_code") == WORK_SLOT_STARTUP_CHECK_FAILED for entry in logs)
+    kept = await _lease(session_factory, unknown_lease)
+    assert kept is not None
+    assert (kept.holder_worker_id, kept.holder_epoch) == (_DEAD, 1)
+    adopted = await _lease(session_factory, in_flight_lease)
+    assert adopted is not None and adopted.holder_worker_id == worker._worker_id  # noqa: SLF001
+    assert await _lease(session_factory, finished_lease) is None
+    assert provisioner.calls == [requested]
+
+    # The kept lease is re-probed on every reconciler pass until it resolves.
+    probes_before = probe.calls.count(unknown_lease)
+    _reconcile_now(worker)
+    await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+    assert probe.calls.count(unknown_lease) == probes_before + 1
+    assert await _lease(session_factory, unknown_lease) is not None
+    probe.results[unknown_lease] = "absent"
+    _reconcile_now(worker)
+    await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+    assert await _lease(session_factory, unknown_lease) is None
+
+
 async def test_unreachable_docker_keeps_every_lease_and_refuses_all_admission(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -164,7 +215,7 @@ async def test_unreachable_docker_keeps_every_lease_and_refuses_all_admission(
     ready = await create_in_status(session_factory, WorkspaceStatus.ready, "ready")
     requested = await create_requested(session_factory)
     blocked_hook = await create_in_status(session_factory, WorkspaceStatus.running, "hook")
-    probe = FakeProbe(default="unknown")
+    probe = FakeProbe(default="unavailable")
     executor = SlotAwareExecutor(session_factory=session_factory)
     provisioner = RecordingProvisioner(session_factory, to_ready=False)
     worker = make_worker(
@@ -226,7 +277,7 @@ async def test_startup_check_retries_at_most_once_per_heartbeat_interval(
 ) -> None:
     held = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
     await add_lease(session_factory, held, holder=_DEAD)
-    probe = FakeProbe(default="unknown")
+    probe = FakeProbe(default="unavailable")
     worker = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
 
     await worker._ensure_work_slot_startup_check()  # noqa: SLF001

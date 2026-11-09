@@ -9,8 +9,9 @@ right now. ``ControlWorker`` wires these through ``WorkerDelegatesMixin``:
   :class:`InvocationWorkSlot` bound into the executor, so agent and validation
   hooks reacquire FIFO and pure waiting holds nothing;
 * at startup, before any dispatch, every lease of a dead holder is adopted (its
-  ``awf-exec`` is still in flight) or released; an unqueryable runtime keeps all
-  leases and refuses new admission until a check succeeds (fail closed);
+  ``awf-exec`` is still in flight) or released; a lease that cannot be proven
+  either way is kept for the reconciler, and only an unqueryable runtime keeps
+  all leases and refuses new admission until a check succeeds (fail closed);
 * a periodic reconciler releases adopted and cleanup-unproven leases once their
   process is gone, and takes over leases of holders that stopped heartbeating;
 * the saturation log is split into work (``worker.work_slots_saturated``) and
@@ -31,7 +32,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_text
-from awf.common.compose_exec import WorkSlotProbeResult
 from awf.common.ids import new_work_slot_invocation_id
 from awf.common.work_slot import MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
 from awf.control.worker.config import effective_worker_config_node_id
@@ -42,6 +42,7 @@ from awf.control.worker.constants import (
     WORK_SLOT_STARTUP_CHECK_FAILED,
 )
 from awf.control.worker.logging import _log
+from awf.control.worker.protocols import WorkSlotLeaseProbeResult
 from awf.control.worker.resource_broker import (
     WorkSlotLeaseRef,
     _acquire_local_capacity_scheduler_lock,
@@ -350,9 +351,11 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
     """Adopt or release every dead holder's lease before any dispatch (R5.1/R5.2).
 
     Runs on every ``run_once`` until it succeeds once (at most once per heartbeat
-    interval). Leases held by another *fresh* worker are left alone. Any probe
-    that cannot query the runtime aborts the pass with every lease kept, and the
-    worker refuses new admission until a later pass succeeds.
+    interval). Leases held by another *fresh* worker are left alone. A lease whose
+    process cannot be proven either way (``unknown``) is kept for the reconciler
+    to re-probe every pass; it never stalls the node. Only a runtime that cannot
+    be queried at all (``unavailable``) aborts the pass with every lease kept, and
+    the worker refuses new admission until a later pass succeeds.
     """
     if self._work_slot_startup_checked or self._executor is None:
         return
@@ -366,6 +369,7 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
         _fail_work_slot_startup_check(self, cause="lease_read_failed", error=exc)
         return
     decisions: list[tuple[_LeaseRuntime, _ReconcileAction]] = []
+    kept_unknown = 0
     for item in leases:
         holder = item.lease.holder_worker_id
         if holder == self._worker_id or holder in fresh:
@@ -375,14 +379,24 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
             decisions.append((item, "release"))
             continue
         outcome = await self._probe_work_slot_lease(item)
-        if outcome == "unknown":
+        if outcome == "unavailable":
             _fail_work_slot_startup_check(
                 self,
-                cause="probe_unknown",
+                cause="runtime_unavailable",
                 workspace_id=item.lease.workspace_id,
                 invocation_id=item.lease.invocation_id,
             )
             return
+        if outcome == "unknown":
+            kept_unknown += 1
+            _log.warning(
+                "worker.work_slot_startup_lease_kept",
+                worker_id=self._worker_id,
+                workspace_id=item.lease.workspace_id,
+                invocation_id=item.lease.invocation_id,
+                holder_worker_id=holder,
+            )
+            continue
         decisions.append((item, "adopt" if outcome == "present" else "release"))
     for item, action in decisions:
         await self._apply_work_slot_reconcile_action(item, action, source="startup")
@@ -392,9 +406,10 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
     _log.info(
         "worker.work_slot_startup_check_completed",
         worker_id=self._worker_id,
-        checked=len(decisions),
+        checked=len(decisions) + kept_unknown,
         adopted=sum(1 for _, action in decisions if action == "adopt"),
         released=sum(1 for _, action in decisions if action == "release"),
+        kept_unknown=kept_unknown,
     )
     if decisions or was_blocked:
         self._notify_work_slot_released()
@@ -426,8 +441,9 @@ async def _maybe_reconcile_work_slot_leases(self: Any) -> None:
 
     Probes this worker's adopted, cleanup-unproven and expired untracked leases
     plus every lease whose holder stopped heartbeating: ``absent`` releases (and
-    wakes waiters), ``present`` renews ours or adopts theirs, ``unknown`` keeps
-    and renews ours. Expired waiting/unsatisfiable tickets are deleted.
+    wakes waiters), ``present`` renews ours or adopts theirs, ``unknown`` and
+    ``unavailable`` keep (and renew ours). Expired waiting/unsatisfiable tickets
+    are deleted.
     """
     if self._executor is None or not self._work_slot_startup_checked:
         return
@@ -504,14 +520,14 @@ async def _load_work_slot_leases_for_reconcile(
     return await _work_slot_db(self, _operation, commit=False)
 
 
-async def _probe_work_slot_lease(self: Any, item: _LeaseRuntime) -> WorkSlotProbeResult:
+async def _probe_work_slot_lease(self: Any, item: _LeaseRuntime) -> WorkSlotLeaseProbeResult:
     probe = self._work_slot_probe
     if probe is None:
         # No process probe configured (e.g. provision tests): nothing in flight
         # can be proven, so this live worker reclaims the slot.
         return "absent"
     try:
-        result: WorkSlotProbeResult = await probe.probe(
+        result: WorkSlotLeaseProbeResult = await probe.probe(
             workspace_id=item.lease.workspace_id,
             invocation_id=item.lease.invocation_id,
             compose_project=item.compose_project,

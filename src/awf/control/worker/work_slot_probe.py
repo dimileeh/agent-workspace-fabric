@@ -2,8 +2,10 @@
 
 Answers "is an ``awf-exec`` tagged with this work-slot invocation still running
 in the workspace's agent container?" for the worker's startup check and periodic
-reconciler. Docker/Compose inspection failures are ``unknown`` (fail closed),
-never ``absent``: only proof that the process is gone may release a lease.
+reconciler. Only proof that the process is gone may release a lease: a runtime
+that cannot be queried at all is ``unavailable`` (the worker fails closed
+node-wide), and a lease that cannot be proven either way is ``unknown`` (that
+lease alone is kept).
 """
 
 from __future__ import annotations
@@ -14,11 +16,10 @@ from pathlib import Path
 from awf.common.commands import AsyncCommandRunner
 from awf.common.compose_exec import (
     WORK_SLOT_PROBE_TIMEOUT_SECONDS,
-    WorkSlotProbeResult,
     probe_work_slot_invocation,
 )
 from awf.control.worker.logging import _log
-from awf.control.worker.protocols import RuntimeInspectorProtocol
+from awf.control.worker.protocols import RuntimeInspectorProtocol, WorkSlotLeaseProbeResult
 
 _AGENT_SERVICE = "agent"
 
@@ -44,7 +45,7 @@ class LocalWorkSlotProcessProbe:
         invocation_id: str,
         compose_project: str | None,
         compose_file: Path | None,
-    ) -> WorkSlotProbeResult:
+    ) -> WorkSlotLeaseProbeResult:
         # Unset compose metadata is not proof of no stack: the executor runs
         # tagged execs in this default project when the column is empty.
         compose_project = compose_project or f"awf_{workspace_id}"
@@ -61,9 +62,10 @@ class LocalWorkSlotProcessProbe:
                 invocation_id=invocation_id,
                 error_type=type(exc).__name__,
             )
-            return "unknown"
+            return "unavailable"
         if snapshot.stack_state == "unavailable":
-            return "unknown"
+            # ``docker ps`` itself failed: the daemon cannot be queried.
+            return "unavailable"
         agent = next(
             (
                 service

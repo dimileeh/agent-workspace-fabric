@@ -336,8 +336,10 @@ now*. The resource broker persists each slot as a `work_slot_leases` row:
   `GET /v1/metrics/resources/saturation` (`work_slots`) show slots in use,
   waiters and unsatisfiable waiters.
 - On restart, the worker adopts a lease whose tagged `awf-exec` is still
-  running and releases the rest before dispatching anything. If Docker cannot
-  be queried, it keeps every lease and admits nothing new.
+  running and releases the rest before dispatching anything. A lease whose
+  process cannot be proven either way is kept and re-probed every reconciler
+  pass without holding up new work. Only if Docker cannot be queried at all does
+  it keep every lease and admit nothing new.
 
 Warm stacks of waiting workspaces still consume RAM and ports. On small hosts,
 set `AWF_LOCAL_CAPACITY_MEMORY_GB` so admission accounts for peak usage (unset

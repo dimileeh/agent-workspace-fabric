@@ -89,8 +89,10 @@ async def test_missing_compose_file_with_a_running_agent_is_unknown() -> None:
         RuntimeSnapshot(stack_state="unavailable", reason="daemon down"),
     ],
 )
-async def test_unqueryable_runtime_is_unknown(result: RuntimeSnapshot | BaseException) -> None:
-    assert await _run(_probe(_Inspector(result))) == "unknown"
+async def test_unqueryable_runtime_is_unavailable(result: RuntimeSnapshot | BaseException) -> None:
+    # Docker itself cannot be queried: never ``absent``, and distinct from a
+    # single lease's ``unknown`` so the worker can fail closed node-wide.
+    assert await _run(_probe(_Inspector(result))) == "unavailable"
 
 
 def _unlabeled(state: str) -> RuntimeService:
@@ -152,7 +154,7 @@ async def test_exec_failure_is_unknown() -> None:
     assert await _run(_probe(_Inspector(snapshot), _ExplodingRunner())) == "unknown"
 
 
-async def test_hung_runtime_inspection_is_bounded_and_unknown() -> None:
+async def test_hung_runtime_inspection_is_bounded_and_unavailable() -> None:
     class _HangingInspector(_Inspector):
         async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
             del compose_project_name
@@ -166,5 +168,5 @@ async def test_hung_runtime_inspection_is_bounded_and_unknown() -> None:
         inspect_timeout_seconds=0.01,
     )
 
-    assert await _run(probe) == "unknown"
+    assert await _run(probe) == "unavailable"
     assert runner.calls == []
