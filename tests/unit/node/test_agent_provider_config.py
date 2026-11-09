@@ -167,7 +167,7 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     )
     executable = tmp_path / "fake-agent"
     executable.write_text(
-        "#!/usr/local/bin/python\nimport os,json,pathlib,sys\nroot=pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['CLAUDE_CONFIG_DIR'])\nprint(json.dumps({'config':str(root),'args':sys.argv[1:],'token':os.environ.get('AWF_SELECTED_PROVIDER_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')}))\n"
+        f"#!{sys.executable}\nimport os,json,pathlib,sys\nroot=pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['CLAUDE_CONFIG_DIR'])\nprint(json.dumps({{'config':str(root),'args':sys.argv[1:],'token':os.environ.get('AWF_SELECTED_PROVIDER_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')}}))\n"
     )
     executable.chmod(0o755)
     monkeypatch.chdir(tmp_path)
@@ -211,7 +211,7 @@ def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path
     )
     executable = tmp_path / "cancel-agent"
     executable.write_text(
-        "#!/usr/local/bin/python\nimport os,signal,time\nos.kill(os.getppid(),signal.SIGTERM)\ntime.sleep(20)\n"
+        f"#!{sys.executable}\nimport os,signal,time\nos.kill(os.getppid(),signal.SIGTERM)\ntime.sleep(20)\n"
     )
     executable.chmod(0o755)
     runtime_root = tmp_path / "runtime-owned"

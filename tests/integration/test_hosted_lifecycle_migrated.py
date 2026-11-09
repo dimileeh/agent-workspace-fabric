@@ -25,7 +25,7 @@ async def engine(monkeypatch):
 
         def existing_barrier(connection):
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "c6d7e8f9a0b1"
+                connection.scalar(text("SELECT version_num FROM alembic_version")) == "85ce3f9b2a61"
             )
             assert connection.scalar(
                 text(
