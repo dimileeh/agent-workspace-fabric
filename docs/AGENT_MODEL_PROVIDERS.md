@@ -100,10 +100,11 @@ passthrough use the frozen credential reference; separate tool auth is retained.
 The declared auth resolver copies only allowed instruction/tool configuration
 into a workspace owned, read-only source file under the existing `auth/<workspace>` cleanup
 root. Source auth/config is unchanged. A standalone stdlib runner in the pinned
-agent image creates a distinct config for each invocation under the controlled
-workspace-container path `/home/agent/.awf/provider-config`, outside OS temporary
-storage. It injects only the selected model credential and removes the config
-after completion, failure or TERM cancellation. Codex uses a custom Responses provider and an
+agent image creates a distinct config for each invocation under the invoking
+user's home at `~/.awf/provider-config` (`/home/agent/.awf/provider-config` in the
+standard agent container), outside OS temporary storage. It injects only the
+selected model credential and removes the config after completion, failure or
+TERM cancellation. Codex uses a custom Responses provider and an
 untrusted project-config layer; Claude disables inherited setting sources.
 Safe instructions and allowed tool/permission configuration remain available.
 The runner scrubs the selected credential before forwarding stdout/stderr.
