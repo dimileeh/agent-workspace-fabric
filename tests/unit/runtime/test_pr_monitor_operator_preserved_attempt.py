@@ -545,6 +545,12 @@ _UNAPPLIED_CASES: list[tuple[str, Any, str]] = [
         "Reject the preserved attempt d5889e51 and resolve the thread as obsolete.",
     ),
     (
+        "multiple_threads_named",
+        _two_parks_sharing_prefix,
+        f"Reject the preserved attempt on {_THREAD} and resolve it. Keep {_OTHER_THREAD} "
+        "parked for investigation.",
+    ),
+    (
         "no_matching_item",
         lambda: (_parked_state(_thread()), (_thread(),)),
         "Reject the preserved attempt 0badc0de; resolve the thread.",

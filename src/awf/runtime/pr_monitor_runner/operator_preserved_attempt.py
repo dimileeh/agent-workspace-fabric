@@ -108,6 +108,10 @@ _PRESERVED_TIP_RE = re.compile(r"(?:attempt tip|own commit) ([0-9a-f]{7,40})\b")
 
 _UNAPPLIED_EXPLANATION: dict[str, str] = {
     "no_item_named": "it names no review thread id and no preserved attempt SHA.",
+    "multiple_threads_named": (
+        "it names more than one review thread id, so AWF cannot tell which thread the "
+        "ruling covers; rule on one thread per guide."
+    ),
     "no_matching_item": "no parked preserved correction attempt matches the named SHA.",
     "ambiguous_item": "the named SHA matches more than one parked preserved correction attempt.",
     "sha_mismatch": "the named thread's preserved attempt is not the named SHA.",
@@ -213,18 +217,20 @@ def _resolve_targets(
         elif key.startswith(retired_prefix) and value:
             retired[key[len(retired_prefix) :]] = value
     shas = disposition.shas
+    if len(disposition.thread_ids) > 1:
+        # Thread ids are collected from the whole directive, so a second id may be
+        # one the operator excluded ("keep PRRT_B parked"); never guess which.
+        return [], "multiple_threads_named"
     if disposition.thread_ids:
-        targets: list[_Target] = []
-        for thread_id in disposition.thread_ids:
-            tip = live.get(thread_id)
-            already_retired = tip is None and thread_id in retired
-            tip = tip or retired.get(thread_id)
-            if tip is None:
-                return [], "not_preserved_attempt"
-            if shas and not _sha_matches(shas, tip):
-                return [], "sha_mismatch"
-            targets.append(_Target(thread_id, tip, already_retired))
-        return targets, None
+        thread_id = disposition.thread_ids[0]
+        tip = live.get(thread_id)
+        already_retired = tip is None and thread_id in retired
+        tip = tip or retired.get(thread_id)
+        if tip is None:
+            return [], "not_preserved_attempt"
+        if shas and not _sha_matches(shas, tip):
+            return [], "sha_mismatch"
+        return [_Target(thread_id, tip, already_retired)], None
     if not shas:
         return [], "no_item_named"
     matches = [_Target(tid, tip, False) for tid, tip in live.items() if _sha_matches(shas, tip)]
