@@ -162,8 +162,9 @@ retains its identity while draining or parked.
 
 Schema/execution-v1 rollback floor: **`8322f8c33eec252d86a1ee5e95f5f313111abd9f`**
 (merged repaired foundation, PR #1199). Once diagnostic rows exist, the operational
-rollback floor is **`cbc8b529b1510481cc16774857f4ae424944bd27`** (T4–T6, worker
-capability 2, fixture v1). The foundation alone cannot resume live diagnostics.
+rollback floor is **`99bf2d1f049ef87f78271568ed65c675d523b5ee`** (fully repaired
+merged feature, T4–T6, worker capability 2, fixture v1). The foundation alone
+cannot resume live diagnostics.
 
 Workers in this release advertise capability **2** (execution selection remains v1). Expanded admissions require every live queue consumer at capability 2; legacy rows backfill to
 **0**, meaning unsupported. Admission requires every live queue consumer to be
@@ -253,25 +254,41 @@ flowchart LR
 
 ## Remaining release gates and preliminary evidence
 
-No deployed-AWF coding compatibility pass is claimed by this implementation.
-The supervisor must run four third-party paths and two native baselines in the
-pinned deployed runtime, plus real monitor repair/restart identity dogfood.
-Local Ollama is implemented and covered deterministically, **not live-verified**,
-and excluded from the live release gate by explicit operator instruction. Do
-not invoke local inference or change the unrelated host llama-server.
+Deployed-AWF coding compatibility is now measured for exactly the six paths
+below: all six deployed diagnostics in the pinned runtime
+(`sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d`)
+passed with reason `PROVIDER_DIAGNOSTIC_PASSED`, verified fixture
+`coding-cycle-v1` and passed protocol evidence (supervisor evidence captured
+2026-11-10T02:57:05Z). Real monitor repair/restart identity dogfood remains
+the gating step and is still pending; nothing is claimed about frozen-identity
+restart evidence yet. Local Ollama is implemented and covered deterministically,
+**not live-verified**, and excluded from the live release gate by explicit
+operator instruction. Do not invoke local inference or change the unrelated
+host llama-server.
+
+These measured passes cover only the exact agent/provider/model selections
+listed; they do not establish that all provider-catalog models are
+coding-compatible. Selection stays explicit through REST `task.provider`/
+`task.model`, CLI `workspace create --provider`/`--model`, and MCP
+`awf_create_workspace` parameters. Omitting provider preserves the native
+Codex/OpenAI and Claude/Anthropic defaults. Any other model still requires
+exact successful diagnostic evidence or `preflight.allow_unverified_model=true`;
+that experimental opt-in does not imply general catalog support.
 
 | Path | Preliminary CLI-only observation | Deployed AWF acceptance |
 | --- | --- | --- |
-| Codex / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed; return-code metadata missing | Pending |
-| Claude / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed | Pending |
-| Codex / OpenRouter / `moonshotai/kimi-k2.7-code` | Dependent tools and fixture observed | Pending |
-| Claude / OpenRouter / `minimax/minimax-m2.7` | Dependent tools and fixture observed | Pending |
-| Codex native | CLI 0.162.0 observed | Pending |
-| Claude native | CLI 2.1.295 observed | Pending |
-| Monitor repair/restart identity | Deterministic regressions only | Pending live dogfood |
+| Codex / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed; return-code metadata missing | **Passed** — codex-cli 0.162.0, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, model revision `eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`, evidence workspace `ws_3c4b15e47f034356973a527f`, connection scope `1098d60c…362f` |
+| Claude / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed | **Passed** — Claude Code 2.1.295, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, model revision `eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`, evidence workspace `ws_286649acb2d04a29a3301ed8`, connection scope `1098d60c…362f` |
+| Codex / OpenRouter / `moonshotai/kimi-k2.7-code` | Dependent tools and fixture observed | **Passed** — codex-cli 0.162.0, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_e13cf39dd6f8484ba824e423`, connection scope `c24e8d23…7fa3` |
+| Claude / OpenRouter / `minimax/minimax-m2.7` | Dependent tools and fixture observed | **Passed** — Claude Code 2.1.295, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_d3b54742506044039b37b9ca`, connection scope `c24e8d23…7fa3` |
+| Codex native | CLI 0.162.0 observed | **Passed** — codex-cli 0.162.0 / `gpt-6.1-sol`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_ef1c0b2d51894d8bb2c81af9`, legacy scope |
+| Claude native | CLI 2.1.295 observed | **Passed** — Claude Code 2.1.295 / `claude-opus-5-5`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_c45f6f1c738e4cb59fb1349c`, legacy scope |
+| Monitor repair/restart identity | Deterministic regressions only | Pending live dogfood (ordinary canary in progress) |
 
 The Codex/OpenRouter Minimax preliminary attempt regenerated its nonce and failed
-the fixture. Its transcript remains a negative regression. Source runtime pins
+the fixture. Its transcript remains a negative regression; like every
+preliminary observation above, it is a non-deployed CLI-only record, distinct
+from the deployed AWF passes and not evidence of deployed acceptance. Source runtime pins
 and locally observed versions are Codex **0.162.0**, Claude **2.1.295**; these do
 not identify a deployed image. Sanitized preliminary envelopes are deterministic
 parser fixtures, never live AWF passes. The supervisor-provided preliminary image
@@ -319,4 +336,4 @@ locked admission transaction. Port-free profiles retain early atomic binding
 for worker-replacement safety.
 
 Focused regressions cover these repairs. Full validation, coverage, review
-replies, push and merge remain owned by AWF/GitHub. The live compatibility matrix remains pending; no additional live compatibility pass is claimed.
+replies, push and merge remain owned by AWF/GitHub. The six deployed compatibility passes are recorded above; the monitor repair/restart identity proof remains pending and no live result is claimed for it in advance.

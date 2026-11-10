@@ -40,10 +40,14 @@ Required rollout order:
    admission; stop old processes rather than trusting metadata alone.
 4. With ordinary admission still disabled, run six deployed diagnostic workspaces:
    Codex/Claude against Ollama cloud through the configured daemon and OpenRouter
-   (four paths), plus both native baselines. Local Ollama live tests are excluded
-   by operator instruction and remain not live-verified.
-   [Evidence and limitations](AGENT_MODEL_PROVIDERS.md#remaining-release-gates-and-preliminary-evidence)
-   must distinguish auth health/preliminary transcripts from deployed AWF passes.
+   (four paths), plus both native baselines. All six deployed diagnostics have
+   passed with `PROVIDER_DIAGNOSTIC_PASSED` in the pinned runtime image; exact
+   CLI, model, runtime and workspace/connection-scope evidence identity is
+   recorded in
+   [Evidence and limitations](AGENT_MODEL_PROVIDERS.md#remaining-release-gates-and-preliminary-evidence).
+   Local Ollama live tests are excluded by operator instruction and remain not
+   live-verified. Auth health and preliminary transcripts remain distinct from
+   deployed AWF passes.
 5. After all six diagnostics pass, the supervisor must temporarily enable ordinary
    admission for a controlled ordinary workspace canary proving real PR monitor
    repair and restart with the frozen provider identity. Limit ordinary intake to
@@ -57,8 +61,8 @@ Required rollout order:
 
 The repaired foundation is the schema/execution-v1 rollback floor. It cannot
 resume or settle diagnostic semantics. Once diagnostic rows exist, the oldest
-compatible operational rollback is **`cbc8b529b1510481cc16774857f4ae424944bd27`**
-(T4–T6, worker capability 2, fixture v1) or a later compatible build. Preserve that
+compatible operational rollback is **`99bf2d1f049ef87f78271568ed65c675d523b5ee`**
+(fully repaired merged feature, T4–T6, worker capability 2, fixture v1) or a later compatible build. Preserve that
 code until all diagnostic work is terminal and disposed; do not deploy the
 foundation alone over live diagnostic rows. No additional schema migration is
 introduced by this release.
