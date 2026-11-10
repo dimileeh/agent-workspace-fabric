@@ -1,7 +1,7 @@
 """Periodic reconciliation of AWF-minted OpenRouter keys (``awf-<workspace>-<seq>``).
 
 Lists the account's keys page by page and deletes every AWF key that is not a
-live binding of a workspace in this control plane, after recording its usage.
+live binding of a workspace in this control plane, after recording a fresh usage read.
 Keys of unknown workspaces belong to another control plane sharing the account
 and are skipped (never deleted). Each sweep is bounded; one key's failure never
 blocks the others.
@@ -83,7 +83,22 @@ async def reconcile_openrouter_keys(
             report["truncated"] = True
             break
         try:
-            row_id = await _record_usage(session_factory, row, info, workspace_id, seq, current)
+            # The listing may be pages old: the key is read again right before its
+            # delete, so spend no heartbeat recorded is never lost with the key.
+            final = await client.get_key(info.hash)
+        except OpenRouterManagementError as error:
+            if error.reason_code != MANAGED_KEY_NOT_FOUND:
+                report["failed"] += 1
+                _log.warning(
+                    "provider.managed_key.orphan_usage_read_failed",
+                    workspace_id=workspace_id,
+                    key_name=info.name,
+                    reason_code=error.reason_code,
+                )
+                continue
+            final = info  # Already gone: the listing is its last readable usage.
+        try:
+            row_id = await _record_usage(session_factory, row, final, workspace_id, seq, current)
             if row_id is None:
                 continue
             try:
@@ -198,7 +213,7 @@ async def _record_usage(
     seq: int,
     now: datetime,
 ) -> str | None:
-    """Persist the listed usage before deleting (inserting an orphan row if needed).
+    """Persist the final usage read before deleting (inserting an orphan row if needed).
 
     ``None`` means the broker finalized the key after the listing: its final
     read is newer than the listing, so the row is left as it is.

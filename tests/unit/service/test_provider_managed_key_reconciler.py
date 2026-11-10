@@ -189,6 +189,60 @@ async def test_a_heartbeat_read_older_than_the_listing_never_lowers_recorded_usa
         assert fake.keys == {}
 
 
+async def test_spend_after_the_listing_is_read_before_the_orphan_is_deleted():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage(lease.key_hash, 0.2)
+        client = fake.client()
+        list_keys = client.list_keys
+
+        async def list_then_spend(**kwargs):
+            listing = await list_keys(**kwargs)
+            # The lease-expired invocation keeps spending without a heartbeat.
+            fake.set_usage(lease.key_hash, 0.5)
+            return listing
+
+        client.list_keys = list_then_spend  # type: ignore[method-assign]
+        report = await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=client,
+            now=lambda: datetime.now(UTC) + timedelta(hours=1),
+        )
+
+        assert report["deleted"] == 1
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.usage_usd, row.final_usage_read) == (
+            "orphan_deleted",
+            Decimal("0.5"),
+            True,
+        )
+        assert fake.keys == {}
+
+
+async def test_an_orphan_whose_usage_cannot_be_read_is_kept_for_the_next_sweep():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        key_hash = fake.add_key(f"awf-{ws}-1", usage=0.3)
+        fake.fail[("GET", "key")] = 503
+
+        unread = await reconcile_openrouter_keys(session_factory=factory, client=fake.client())
+
+        assert (unread["failed"], unread["deleted"]) == (1, 0)
+        assert key_hash in fake.keys
+        assert await _rows(factory, ws) == []
+        fake.fail.clear()
+        read = await reconcile_openrouter_keys(session_factory=factory, client=fake.client())
+        assert (read["failed"], read["deleted"]) == (0, 1)
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.usage_usd) == ("orphan_deleted", Decimal("0.3"))
+
+
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
     fake = FakeOpenRouterManagement()
     now = datetime.now(UTC)
