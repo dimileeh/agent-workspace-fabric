@@ -795,6 +795,7 @@ async def test_record_released_returns_when_event_already_exists(
 
     class _Workspace:
         status = WorkspaceStatus.failed.value
+        task_policy: dict[str, Any] = {}
 
     class _WorkspaceRepo:
         def __init__(self, session: object) -> None:
@@ -852,6 +853,7 @@ async def test_record_released_seeds_pending_overlay_marker_on_duplicate_release
 
     class _Workspace:
         status = WorkspaceStatus.failed.value
+        task_policy: dict[str, Any] = {}
 
     class _WorkspaceRepo:
         def __init__(self, session: object) -> None:
@@ -917,6 +919,7 @@ async def test_record_released_skips_pending_seed_when_overlay_unmounted_on_dupl
 
     class _Workspace:
         status = WorkspaceStatus.failed.value
+        task_policy: dict[str, Any] = {}
 
     class _WorkspaceRepo:
         def __init__(self, session: object) -> None:
