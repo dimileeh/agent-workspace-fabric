@@ -68,11 +68,12 @@ def test_claude_isolated_args_load_project_sources_only(tmp_path):
     ) as (args, _env, directory):
         settings = json.loads((directory / "settings.json").read_text())
     assert args == ["--setting-sources", "project", "--settings", str(directory / "settings.json")]
-    # Flag settings outrank project settings env, so project effort stays off.
+    # Flag settings outrank project settings env, so project env can neither
+    # turn subagent forcing off nor put effort back on.
     assert settings == {
         "language": "English",
         "model": "coder",
-        "env": {"CLAUDE_CODE_EFFORT_LEVEL": "auto"},
+        "env": {"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1", "CLAUDE_CODE_EFFORT_LEVEL": "auto"},
     }
 
 

@@ -88,9 +88,12 @@ def test_parallel_workspace_config_and_credentials_are_isolated(tmp_path, agent)
             config = tomllib.loads(content) if agent == "codex" else json.loads(content)
             assert "native-secret" not in content and "selected-secret" not in content
             assert "apiKeyHelper" not in config and "agent" not in config
-            # Native effortLevel is never copied; only AWF's "auto" override is.
+            # Native effortLevel is never copied; only AWF's overrides are.
             assert "effortlevel" not in content.lower() and "high" not in content
-            assert config.get("env", {}) in ({}, {"CLAUDE_CODE_EFFORT_LEVEL": "auto"})
+            assert config.get("env", {}) in (
+                {},
+                {"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1", "CLAUDE_CODE_EFFORT_LEVEL": "auto"},
+            )
             assert env.get("OPENAI_API_KEY") is None
             assert env.get("CLAUDE_CODE_USE_BEDROCK") is None
             assert env["GH_TOKEN"] == "forge-secret"
