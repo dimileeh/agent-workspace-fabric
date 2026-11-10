@@ -25,6 +25,7 @@ def codex_events(nonce=NONCE):
         },
         {"type": "item.started", "item": second},
         {"type": "item.completed", "item": {**second, "status": "completed", "exit_code": 0}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 10}},
     ]
 
 
@@ -41,7 +42,7 @@ def test_codex_two_dependent_completed_turns():
     assert NONCE in proof.events[2]["input_excerpt"]
 
 
-def test_claude_stream_json_and_string_messages():
+def claude_events():
     events = [{"type": "system", "message": "ready"}]
     for ident, command, result in [
         ("a", "awf-provider-challenge", f"AWF_NONCE={NONCE}"),
@@ -72,7 +73,15 @@ def test_claude_stream_json_and_string_messages():
                 },
             ]
         )
-    assert coding_witness("claude_code", transcript(events), prompt="fixed").status == "passed"
+    events.append({"type": "result", "subtype": "success", "is_error": False})
+    return events
+
+
+def test_claude_stream_json_and_string_messages():
+    assert (
+        coding_witness("claude_code", transcript(claude_events()), prompt="fixed").status
+        == "passed"
+    )
 
 
 @pytest.mark.parametrize(
@@ -110,7 +119,7 @@ def test_insufficient_evidence_is_inconclusive(case):
     elif case == "prose":
         events = [{"type": "result", "result": "Success, tests passed"}]
     elif case == "unfinished":
-        events.pop()
+        events.pop(-2)
     output = transcript(events)
     if case == "truncated":
         output += "\n{"
@@ -154,9 +163,22 @@ def test_supervisor_observed_pinned_cli_protocols():
 
     for path in Path("tests/fixtures/provider_protocol").glob("*.json"):
         fixture = json.loads(path.read_text())
+        # Captures contain tool excerpts only, not terminal CLI envelopes.
+        assert (
+            coding_witness(
+                fixture["agent"],
+                transcript(fixture["events"]),
+                prompt="fixed",
+                challenge_command="python /opt/awf-probe/challenge.py",
+            ).status
+            == "inconclusive"
+        )
+        terminal = codex_events()[-1] if fixture["agent"] == "codex" else claude_events()[-1]
+        # Explicitly synthetic completion tests the captured tool shapes without
+        # inventing terminal evidence in the supervisor's original fixtures.
         proof = coding_witness(
             fixture["agent"],
-            transcript(fixture["events"]),
+            transcript([*fixture["events"], terminal]),
             prompt="fixed",
             challenge_command="python /opt/awf-probe/challenge.py",
         )
@@ -170,4 +192,60 @@ def test_malformed_typed_envelopes_cannot_complete_a_proof(malformation):
         events[1]["item"]["exit_code"] = False
     else:
         events.append({})
+    assert coding_witness("codex", transcript(events), prompt="fixed").status == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    "agent,make_events", [("codex", codex_events), ("claude_code", claude_events)]
+)
+def test_every_truncated_prefix_is_inconclusive(agent, make_events):
+    events = make_events()
+    for end in range(len(events)):
+        assert (
+            coding_witness(agent, transcript(events[:end]), prompt="fixed").status == "inconclusive"
+        )
+
+
+@pytest.mark.parametrize(
+    "agent,make_events", [("codex", codex_events), ("claude_code", claude_events)]
+)
+@pytest.mark.parametrize("case", ["early", "duplicate", "after_terminal", "unfinished", "failure"])
+def test_terminal_must_succeed_once_after_all_tools(agent, make_events, case):
+    events = make_events()
+    if case == "early":
+        events.insert(0, events.pop())
+    elif case == "duplicate":
+        events.append(events[-1])
+    elif case == "after_terminal":
+        events.append({"type": "assistant", "message": {"content": []}})
+    elif case == "unfinished":
+        events.pop(-2)
+    else:
+        failure = {"type": "turn.failed", "error": {"message": "failed"}}
+        if agent == "claude_code":
+            failure = {"type": "result", "subtype": "error_during_execution", "is_error": True}
+        events.insert(-1, failure)
+    assert coding_witness(agent, transcript(events), prompt="fixed").status == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {"type": "result", "subtype": "error_during_execution", "is_error": False},
+        {"type": "result", "subtype": "success", "is_error": True},
+        {"type": "result", "subtype": "success"},
+        {"type": "result", "subtype": "success", "is_error": 0},
+    ],
+)
+def test_claude_requires_typed_success_envelope(terminal):
+    events = claude_events()
+    events[-1] = terminal
+    assert (
+        coding_witness("claude_code", transcript(events), prompt="fixed").status == "inconclusive"
+    )
+
+
+def test_codex_error_before_success_is_inconclusive():
+    events = codex_events()
+    events.insert(-1, {"type": "error", "message": "stream failed"})
     assert coding_witness("codex", transcript(events), prompt="fixed").status == "inconclusive"

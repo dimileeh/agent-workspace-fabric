@@ -26,7 +26,7 @@ class CodingWitness:
 def coding_witness(
     agent: str, output: str, *, prompt: str, challenge_command: str = "awf-provider-challenge"
 ) -> CodingWitness:
-    """Require a fresh challenge result then a distinct completed dependent tool.
+    """Require ordered dependent tools followed by the pinned CLI success event.
 
     Tool-output strings are never recursively decoded as event envelopes.
     Any malformed/truncated/oversized protocol fails closed, including tail loss.
@@ -37,6 +37,7 @@ def coding_witness(
     completed: set[str] = set()
     challenge: tuple[str, str, int] | None = None
     proof: CodingWitness | None = None
+    terminal = False
     try:
         lines = output.splitlines()
         if len(lines) > MAX_EVENTS:
@@ -44,6 +45,8 @@ def coding_witness(
         for index, line in enumerate(lines):
             if not line.strip():
                 continue
+            if terminal:
+                return CodingWitness()
             if len(line.encode()) > MAX_LINE_BYTES:
                 return CodingWitness()
             event = json.loads(line)
@@ -55,6 +58,9 @@ def coding_witness(
                 return CodingWitness()
             actions: list[tuple[str, Any, Any, Any]] = []
             if agent == "codex":
+                if event["type"] in {"turn.failed", "error"}:
+                    return CodingWitness()
+                terminal = event["type"] == "turn.completed"
                 item = event.get("item", {})
                 if isinstance(item, dict) and item.get("type") == "command_execution":
                     kind = event.get("type")
@@ -75,6 +81,10 @@ def coding_witness(
                             )
                         )
             elif agent == "claude_code":
+                if event["type"] == "result":
+                    if event.get("subtype") != "success" or event.get("is_error") is not False:
+                        return CodingWitness()
+                    terminal = True
                 message = event.get("message")
                 content = message.get("content", []) if isinstance(message, dict) else []
                 if not isinstance(content, list):
@@ -164,7 +174,11 @@ def coding_witness(
                         if challenge is not None or match[1] in prompt:
                             return CodingWitness()
                         challenge = (ident, match[1], index)
-        return (proof or CodingWitness()) if started.keys() == completed else CodingWitness()
+        return (
+            (proof or CodingWitness())
+            if terminal and started.keys() == completed
+            else CodingWitness()
+        )
     except (ValueError, TypeError):
         return CodingWitness()
 
