@@ -52,6 +52,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
 | `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
 | `awf_guide_workspace` | Operator control: guide a live monitor or supply a decision to a blocked workspace. |
+| `awf_set_workspace_provider_budget` | Operator control: set a managed OpenRouter budget (USD) and resume a provider-budget park. |
 | `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
 | `awf_refresh_workspace` | Operator control: refresh workspace state after upstream changes. |
 | `awf_rebase_workspace` | Operator control: rebase workspace work onto the current base. |
@@ -75,8 +76,9 @@ the effective retry request for that key returns `IDEMPOTENCY_CONFLICT`.
 
 **MCP control migration note:** The control tools `awf_cancel_workspace`,
 `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
-`awf_guide_workspace`, `awf_request_workspace_validation`,
-`awf_refresh_workspace`, and `awf_rebase_workspace` have a required
+`awf_guide_workspace`, `awf_set_workspace_provider_budget`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required
 `idempotency_key` argument. Existing MCP
 clients that omitted this argument or sent `null` must pass a stable non-empty
 key for each operator action. This mirrors the REST `Idempotency-Key`

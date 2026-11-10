@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from awf.adapters.base import AgentRunError, get_adapter
 from awf.adapters.diagnostic_events import coding_witness
-from awf.adapters.managed_credentials import managed_credential_scope
+from awf.adapters.managed_credentials import exec_environment, managed_credential_scope
 from awf.adapters.provider_config import RUNTIME_PYTHON_PATH
 from awf.common.agent_execution import execution_from_policy
 from awf.control.executor.work_slot_binding import work_slot_for
@@ -88,7 +87,7 @@ async def runtime_identity(
                 "--probe-json",
             ],
             timeout_seconds=12,
-            **({"env": {**os.environ, **env}} if env else {}),
+            **({"env": exec_environment(env)} if env else {}),
         )
         try:
             probe = json.loads(health.stdout)

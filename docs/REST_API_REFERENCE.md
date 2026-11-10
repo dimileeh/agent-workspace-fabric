@@ -384,6 +384,38 @@ Returns a workspace control response.
 
 ---
 
+## Provider budget
+
+Set the managed OpenRouter budget (USD) of a live workspace whose OpenRouter
+selection uses AWF-minted keys. Auth required. Requires `Idempotency-Key` and
+supports `If-Match`. `usd` is the new total budget and must exceed the exact
+provider spend already recorded.
+
+The live managed key's limit is updated first; a management-API failure returns
+502 with its reason code and changes nothing. Then the new budget is frozen,
+`provider.budget.raised` is recorded, and a workspace parked with
+`PROVIDER_BUDGET_EXHAUSTED` resumes: a pre-PR park re-invokes the agent, and a
+monitor-origin park returns to `monitoring_pr`. Errors:
+
+- `PROVIDER_BUDGET_INVALID` (422) for an amount at or below the recorded spend;
+- `PROVIDER_BUDGET_UNSUPPORTED` (409) for unmanaged or terminal workspaces;
+- `PROVIDER_MANAGEMENT_KEY_MISSING` or `PROVIDER_MANAGEMENT_API_*` (502).
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/provider-budget" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: budget-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"usd": 25, "reason": "approved larger refactor"}'
+```
+
+Returns a workspace control response. Create requests accept
+`task.provider_budget_usd` (default `AWF_OPENROUTER_WORKSPACE_LIMIT_USD`), and
+workspace, overview and task responses report `provider_spend`. See
+[Managed OpenRouter keys and budgets](AGENT_MODEL_PROVIDERS.md#managed-openrouter-keys-and-budgets).
+
+---
+
 ## Retry
 
 Retry a terminal (failed/cancelled) workspace by creating a new workspace

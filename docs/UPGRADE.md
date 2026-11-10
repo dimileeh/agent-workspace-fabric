@@ -19,8 +19,9 @@ execution contract v1 is merged repaired foundation **`8322f8c33eec252d86a1ee5e9
 It includes migration **85ce3f9b2a61**, worker capability enforcement, isolated
 runtime support and complete snapshot recovery. Package version `0.1.0` is not
 a unique rollback floor; baseline `3aae1ac6e` predates this contract and is not
-compatible with the expanded schema. Hosted checkpoint cut/restore now expects
-schema head `85ce3f9b2a61` exactly.
+compatible with the expanded schema. Hosted checkpoint cut/restore expects the
+current schema head exactly (`9e3b7c41d2a6` since
+[managed OpenRouter keys](#managed-openrouter-keys-and-budgets)).
 
 Required rollout order:
 
@@ -80,6 +81,56 @@ Parked work may resume only after compatible workers/runtime, selected
 credential references and the selected network are restored. Any deliberate
 change of connection must use an explicit complete fallback/new selection;
 do not edit a snapshot to make an old runtime silently accept it.
+
+## Managed OpenRouter keys and budgets
+
+This release adds migration **`9e3b7c41d2a6`** (table `provider_managed_keys`,
+revising `85ce3f9b2a61`) and worker capability **3**. Managed keys are opt-in:
+without `OPENROUTER_MANAGEMENT_KEY` every OpenRouter selection keeps the static
+`OPENROUTER_API_KEY` exactly as before, and pricing stays unknown. See
+[Managed OpenRouter keys and budgets](AGENT_MODEL_PROVIDERS.md#managed-openrouter-keys-and-budgets).
+
+Rollout:
+
+1. Deploy this release with `OPENROUTER_MANAGEMENT_KEY` unset. `migrate` applies
+   `9e3b7c41d2a6`; the new table stays empty and behaviour is unchanged.
+2. Restart **every** API and worker process on this release. Managed selections
+   require all live queue consumers to advertise capability 3
+   (`EXECUTION_WORKER_CONTRACT_UNSUPPORTED` otherwise), and older binaries reject
+   the `managed/openrouter` reference as `EXECUTION_CONTRACT_UNSUPPORTED`; they
+   never fall back to the static key.
+3. Create an OpenRouter **management** key, preferably dedicated to this control
+   plane (or an OpenRouter workspace of its own: the reconciler skips `awf-*`
+   keys of workspaces it does not know, but one key per plane keeps reports
+   clean). Put it in the service `.env` as `OPENROUTER_MANAGEMENT_KEY` and,
+   optionally, a default `AWF_OPENROUTER_WORKSPACE_LIMIT_USD` (10 USD when unset).
+   Compose forwards both to `api` and `worker` only; both processes drop the
+   management key from their process environment once settings resolve.
+4. Re-run `awf provider test` for each OpenRouter selection you admit: managed
+   selections use a different credential reference and connection scope, so
+   static-key diagnostic evidence does not match them.
+5. Canary one ordinary managed workspace with a small `--provider-budget-usd`.
+   Confirm a minted `awf-<workspace>-<seq>` key appears and disappears around each
+   agent invocation, `awf workspace show` reports **Exact provider spend**, and a
+   budget exhaustion parks the workspace (`PROVIDER_BUDGET_EXHAUSTED`) until
+   `awf workspace provider-budget <ws> --usd N` resumes it. A freshly minted key
+   that OpenRouter does not yet accept surfaces as its own reason code; AWF does
+   not blindly retry it.
+
+Rollback:
+
+- **Disable managed keys only:** unset `OPENROUTER_MANAGEMENT_KEY` and restart API
+  and workers. New workspaces use the static key again. Workspaces already frozen
+  as managed park with `PROVIDER_MANAGEMENT_KEY_MISSING` instead of switching to
+  the static key; restore the key to resume them, or cancel them. Leftover
+  `awf-*` keys are deleted by the reconciler once the key is restored, or
+  manually in the OpenRouter dashboard.
+- **Binary rollback:** first make every managed workspace terminal (or let the
+  reconciler finalize their keys), then roll back to a compatible earlier build.
+  Pre-capability-3 workers cannot execute managed rows and reject them closed.
+  Keep the schema; `9e3b7c41d2a6` refuses to downgrade while
+  `provider_managed_keys` has rows (`PROVIDER_MANAGED_KEYS_DOWNGRADE_UNSAFE`), so
+  recorded spend is never silently dropped.
 
 ## Orphan Resource Cleanup
 

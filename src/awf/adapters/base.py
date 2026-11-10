@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +33,7 @@ from awf.adapters.failure_reasons import (
 from awf.adapters.managed_credentials import (
     ProviderCredentialBroker,
     ProviderCredentialLease,
+    exec_environment,
     managed_credential_scope,
 )
 from awf.adapters.prompt_preamble import _AWF_PROMPT_PREAMBLE
@@ -1220,7 +1220,7 @@ class AgentAdapter(ABC):
                 {"activity_probe": activity_probe} if activity_probe is not None else {}
             )
             # Only a managed key needs an exec env; other runs keep the old call.
-            env_kwargs: dict[str, Any] = {"env": {**os.environ, **env}} if env is not None else {}
+            env_kwargs: dict[str, Any] = {"env": exec_environment(env)} if env is not None else {}
             try:
                 if run_streaming is not None:
                     result = await run_streaming(

@@ -37,6 +37,14 @@ blindly, counted against the shared circuit, or sent to a fallback provider."""
 _WATCHDOG_TIMEOUT_REASON_CODES = frozenset({"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"})
 
 
+def exec_environment(credential_env: Mapping[str, str]) -> dict[str, str]:
+    """The exec subprocess env: the worker env plus the minted key, never the management key."""
+    import os
+
+    inherited = {k: v for k, v in os.environ.items() if k != "OPENROUTER_MANAGEMENT_KEY"}
+    return {**inherited, **credential_env}
+
+
 class ProviderCredentialError(Exception):
     """A managed credential could not be provided; never carries secret values."""
 

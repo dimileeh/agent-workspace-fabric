@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import cast, select
 from sqlalchemy.dialects.postgresql import JSONB
 
+from awf.adapters.managed_credentials import exec_environment
 from awf.common.agent_execution import ExecutionSelection, execution_from_policy
 from awf.db.models import Workspace
 from awf.runtime.provider_diagnostic_fixture import FIXTURE_VERSION
@@ -114,7 +114,7 @@ async def guard_runtime_compatibility(
             "--probe-json",
         ],
         timeout_seconds=12,
-        **({"env": {**os.environ, **env}} if env else {}),
+        **({"env": exec_environment(env)} if env else {}),
     )
     try:
         probe = json.loads(health.stdout)
