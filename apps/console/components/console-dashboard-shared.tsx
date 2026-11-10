@@ -247,6 +247,7 @@ export type LogWorkspaceTarget = Pick<
   | "repo_url"
   | "base_branch"
   | "agent"
+  | "agent_provider"
   | "agent_model"
   | "agent_effort"
   | "agent_model_source"

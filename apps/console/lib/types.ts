@@ -197,6 +197,7 @@ export interface WorkspaceOverview {
   base_branch: string;
   branch_name: string | null;
   agent: AgentRuntime | string;
+  agent_provider?: string | null;
   agent_model: string | null;
   agent_effort: string | null;
   cursor_auto_mode?: CursorAutoMode | null;
@@ -550,6 +551,7 @@ export interface Workspace {
   auto_merge: boolean | null;
   initial_review_grace_period_seconds: number | null;
   agent: AgentRuntime | string;
+  agent_provider?: string | null;
   agent_model: string | null;
   agent_effort: string | null;
   cursor_auto_mode?: CursorAutoMode | null;

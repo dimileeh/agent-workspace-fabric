@@ -676,6 +676,9 @@ export function WorkspaceSummary({
             label="Agent"
             value={formatAgentIdentityLabel({
               agent: workspace?.agent ?? overview.agent,
+              agent_provider: workspace && workspace.agent_provider !== undefined
+                ? workspace.agent_provider
+                : overview.agent_provider,
               agent_model: workspace?.agent_model ?? overview.agent_model,
               cursor_auto_mode: workspace?.cursor_auto_mode ?? overview.cursor_auto_mode,
               agent_effort: workspace?.agent_effort ?? overview.agent_effort,

@@ -7,7 +7,7 @@ Codex/Claude admission defaults to disabled for new deployments through
 before provider compatibility is established. Measured acceptance covers the
 exact six tested selections below plus ordinary monitor repair/restart identity,
 subject to the proof/opt-in gates documented here; it does not release general
-third-party coding compatibility. No console interface is added.
+third-party coding compatibility. Provider selection uses REST, CLI or MCP.
 
 ## Selection contract
 
@@ -17,6 +17,12 @@ preserves native Codex/OpenAI and Claude/Anthropic defaults, including `xhigh`.
 Cursor, Antigravity, Grok and OpenCode retain their existing selection behavior.
 OpenCode continues using its qualified-model provider inference; this release
 adds no OpenCode/OpenRouter parity feature.
+
+The console shows the recorded provider beside the agent and model on workspace
+cards, in the inspector and task details, and in fullscreen log headers. For
+example, `codex · OpenRouter · moonshotai/kimi-k2.7-code` distinguishes the model
+service from the model's publisher. Older payloads without a recorded provider
+keep their existing labels; the console does not guess from the model name.
 
 Codex and Claude can describe `ollama` or `openrouter` selections. Such requests
 require an explicit model and `preflight.allow_unverified_model=true` for models
