@@ -868,6 +868,10 @@ class WorkspaceBlockStateResponse(BaseModel):
     block_epoch: int = 0
     blocked_at: datetime | None = None
     violations: list[WorkspaceBlockViolationResponse] = Field(default_factory=list)
+    # Post-PR protected-scope blocks only: the unpushed commit AWF preserved, and
+    # how to discard it (reset to the published PR head, don't revert on top).
+    preserved_head_sha: str | None = None
+    resolution_hint: str | None = None
 
 
 class WorkspaceResponse(CursorAutoModeResponseMixin):

@@ -25,6 +25,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import reported_auto_merge
 from awf.common.redaction import redact_secrets
+from awf.control.quality_gates import PROTECTED_QUALITY_GATE_BLOCK_TYPE
 from awf.db.enums import TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
@@ -35,6 +36,7 @@ from awf.profiles.compose import resolve_profile_app_endpoints
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
+from awf.runtime.pr_monitor import _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
 from awf.service.controls_helpers import remonitor_compose_runtime_available
 from awf.service.coordination import (
     coordination_warnings_from_task_policy,
@@ -148,6 +150,13 @@ def _provider_recovery_state_response(
     )
 
 
+_PRESERVED_COMMIT_RESOLUTION_HINT = (
+    "reset, don't revert: to discard the preserved commit, move the branch back to the "
+    "published PR head so the preserved commit is not an ancestor of HEAD; a revert-on-top "
+    "commit keeps it in the push range and AWF blocks again"
+)
+
+
 def _workspace_block_state_response(
     workspace: Workspace,
 ) -> WorkspaceBlockStateResponse | None:
@@ -170,13 +179,21 @@ def _workspace_block_state_response(
             # A single corrupt persisted entry (e.g. a non-int ``line``) must not
             # 500 the whole workspace GET; skip it like the non-mapping filter above.
             continue
+    block_type = getattr(workspace, "block_type", None)
+    preserved_head_sha: str | None = None
+    if block_type == PROTECTED_QUALITY_GATE_BLOCK_TYPE:
+        monitor_state = getattr(workspace, "monitor_threads_addressed", None) or {}
+        marker = monitor_state.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY)
+        preserved_head_sha = marker if isinstance(marker, str) and marker else None
     return WorkspaceBlockStateResponse(
-        block_type=getattr(workspace, "block_type", None),
+        block_type=block_type,
         block_reason_code=getattr(workspace, "block_reason_code", None),
         block_resume_phase=getattr(workspace, "block_resume_phase", None),
         block_epoch=getattr(workspace, "block_epoch", 0) or 0,
         blocked_at=getattr(workspace, "blocked_at", None),
         violations=violations,
+        preserved_head_sha=preserved_head_sha,
+        resolution_hint=_PRESERVED_COMMIT_RESOLUTION_HINT if preserved_head_sha else None,
     )
 
 

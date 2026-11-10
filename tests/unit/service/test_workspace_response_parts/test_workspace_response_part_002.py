@@ -750,3 +750,47 @@ def test_workspace_response_reports_grandfathered_legacy_auto_merge() -> None:
     )
 
     assert workspace_response(workspace).auto_merge is True  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_workspace_response_names_preserved_commit_for_protected_block() -> None:
+    """#1200: ``workspace show`` names the preserved commit and says reset, not revert."""
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+    workspace.monitor_threads_addressed = {
+        "__awf_protected_block_preserved_head__": "3" * 40,
+    }
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert response.block_state.preserved_head_sha == "3" * 40
+    hint = response.block_state.resolution_hint or ""
+    assert hint.startswith("reset, don't revert:")
+    assert "published PR head" in hint
+    assert "not an ancestor of HEAD" in hint
+
+
+@pytest.mark.unit
+def test_workspace_response_omits_reset_hint_without_preserved_commit() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert response.block_state.preserved_head_sha is None
+    assert response.block_state.resolution_hint is None
+
+
+@pytest.mark.unit
+def test_workspace_response_omits_reset_hint_for_other_block_types() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+    workspace.block_type = "other_block"
+    workspace.monitor_threads_addressed = {
+        "__awf_protected_block_preserved_head__": "3" * 40,
+    }
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert response.block_state.preserved_head_sha is None
+    assert response.block_state.resolution_hint is None

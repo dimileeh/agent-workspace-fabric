@@ -25,6 +25,9 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     OperatorHint,
 )
+from awf.runtime.pr_monitor_runner.comment_repair_provenance_retirement import (
+    retire_orphaned_item_commit_records,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictExecutionError,
     AgentVerdictProtocolError,
@@ -121,6 +124,11 @@ async def _run_operator_hint_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # A directive that dropped a rejected protected-scope commit from local history
+    # orphans the item records citing it; retire them with an audit event so they
+    # stop standing in as FIXED evidence for a commit the branch no longer has
+    # (#1200).
+    await retire_orphaned_item_commit_records(self, workspace_id=workspace_id, state=state)
 
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
@@ -259,6 +267,23 @@ async def _run_operator_hint_cycle(
     if hint.directive or not active_grant_specs:
         if not hint.directive:
             acted_feedback_text = hint.reason
+        # A directive against a preserved protected commit is told to reset to the
+        # published PR head, not revert on top (#1200). Only a grant covering EVERY
+        # blocked path keeps that commit; a partial grant still leaves an ungranted
+        # change the push leak guard re-blocks, so it keeps the reset guidance
+        # (PRRT_kwDOSJAM6s61o81S).
+        reset_guidance_head_sha = (
+            preserved_head_sha
+            if hint.directive
+            and (
+                not active_grant_specs
+                or not await self._preserved_protected_change_fully_granted(
+                    workspace_id=workspace_id,
+                    grant_specs=active_grant_specs,
+                )
+            )
+            else None
+        )
         prompt = operator_hint_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -267,6 +292,8 @@ async def _run_operator_hint_cycle(
             operation_id=hint.operation_id,
             workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
+            preserved_head_sha=reset_guidance_head_sha,
+            published_head_sha=pr_head_sha,
         )
         verdict: VerdictResult | MonitorVerdictResult
         try:
@@ -327,6 +354,11 @@ async def _run_operator_hint_cycle(
                 remote_branch=remote_branch,
                 state=state,
             )
+        # The directive agent is told to reset a preserved protected commit away,
+        # so it can orphan item records the pre-agent pass above still saw as
+        # ancestors of HEAD. Recheck now that history may be rewritten, before any
+        # verdict path pushes or finishes the resume (PRRT_kwDOSJAM6s61n6zY).
+        await retire_orphaned_item_commit_records(self, workspace_id=workspace_id, state=state)
         # A TERMINAL verdict parks the hint (``needs_human`` / ``agent_failed``) and
         # RETURNS from inside this block, so it never reaches the post-action guard
         # below. Re-read PR state here too: a resume whose CLI outlived its PR would
