@@ -168,3 +168,51 @@ async def test_registered_diagnostic_replay_survives_subsequent_disk_pressure(di
             original.structuredContent["operation_id"]
         ]
         assert len(list(await session.scalars(select(ResourceReservation.id)))) == 1
+
+
+@pytest.mark.parametrize(
+    "case", ["invalid_selection", "missing_key", "conflict", "readiness", "private_error"]
+)
+async def test_provider_mcp_errors_keep_canonical_codes_and_hide_private_details(monkeypatch, case):
+    from awf.service.workspaces import (
+        WorkspaceCreateIdempotencyConflictError,
+        WorkspaceProviderReadinessBlockedError,
+    )
+
+    create = AsyncMock(
+        side_effect={
+            "conflict": WorkspaceCreateIdempotencyConflictError(),
+            "readiness": WorkspaceProviderReadinessBlockedError(preflight={}),
+            "private_error": ValueError("private provider error"),
+        }.get(case)
+    )
+    monkeypatch.setattr("awf.mcp.provider_tools.create_connection_test", create)
+    mcp = FastMCP("provider-errors")
+    register_provider_tools(
+        mcp=mcp,
+        service=SimpleNamespace(),
+        safe_result=lambda payload, **kwargs: {**payload, **kwargs},
+        settings_value=Settings(_env_file=None),
+        disk_check_provider=None,
+    )
+    arguments = {"agent": "codex", "provider": "ollama"}
+    if case == "invalid_selection":
+        arguments["provider"] = "unsupported"
+        result = await mcp._tool_manager.call_tool("awf_query_provider_models", arguments)
+        expected = "PROVIDER_SELECTION_INVALID"
+    else:
+        arguments.update(
+            model="candidate", idempotency_key=" " if case == "missing_key" else "once"
+        )
+        result = await mcp._tool_manager.call_tool("awf_test_provider_connection", arguments)
+        expected = {
+            "missing_key": "IDEMPOTENCY_KEY_REQUIRED",
+            "conflict": "IDEMPOTENCY_CONFLICT",
+            "readiness": "PROVIDER_READINESS_PRECHECK_FAILED",
+            "private_error": "PROVIDER_SELECTION_INVALID",
+        }[case]
+    assert result["is_error"] is True
+    assert result["error_code"] == expected
+    assert "private provider error" not in repr(result)
+    if case in {"invalid_selection", "missing_key"}:
+        create.assert_not_awaited()

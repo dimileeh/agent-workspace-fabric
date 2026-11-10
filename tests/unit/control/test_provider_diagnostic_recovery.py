@@ -135,3 +135,73 @@ async def test_worker_loss_with_failed_stop_retains_inconclusive_evidence_and_fi
             == "CLEANUP_PARTIAL"
         )
     assert worker._runtime_cleaner.cleanup.call_args.kwargs["remove_worktree"] is False
+
+
+async def test_interruption_without_runtime_cleaner_retains_fixture_and_durable_fence(
+    engine, tmp_path
+):
+    from awf.control.worker.provider_diagnostics import interrupt_diagnostic
+    from awf.db.repositories import WorkspaceRepository
+    from tests.unit.control.test_provider_diagnostic_execution import prepared
+
+    factory, response, _executor = await prepared(engine, tmp_path)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(response.workspace_id)
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="test")
+        epoch = ws.execution_claim_epoch or 0
+        await session.commit()
+    worker = SimpleNamespace(_session_factory=factory, _runtime_cleaner=None)
+    candidate = _ActiveExecutionCandidate(
+        response.workspace_id, WorkspaceStatus.running, None, task_policy=ws.task_policy
+    )
+    assert await interrupt_diagnostic(worker, candidate)
+    async with factory() as session:
+        current = await WorkspaceRepository(session).get(response.workspace_id)
+        assert current.status == "running"
+        assert current.execution_claim_epoch == epoch + 1
+        assert current.task_policy["provider_diagnostic"]["state"] == "interrupted"
+        assert current.task_policy["provider_diagnostic"]["result"]["cleanup_reason"] == "pending"
+
+
+async def test_interruption_does_not_settle_a_replaced_execution_claim(engine, tmp_path):
+    from awf.control.worker.provider_diagnostics import interrupt_diagnostic
+    from awf.db.repositories import WorkspaceRepository
+    from awf.node.cleanup import WorkspaceCleanupResult
+    from tests.unit.control.test_provider_diagnostic_execution import prepared
+
+    factory, response, _executor = await prepared(engine, tmp_path)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(response.workspace_id)
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="test")
+        await session.commit()
+
+    async def cleanup(**_kwargs):
+        async with factory() as session:
+            current = await WorkspaceRepository(session).get(response.workspace_id)
+            current.execution_claim_epoch += 1
+            current.execution_claimed_by = "new-owner"
+            await session.commit()
+        return WorkspaceCleanupResult.skipped()
+
+    cleaner = SimpleNamespace(cleanup=AsyncMock(side_effect=cleanup))
+    worker = SimpleNamespace(_session_factory=factory, _runtime_cleaner=cleaner)
+    candidate = _ActiveExecutionCandidate(
+        response.workspace_id, WorkspaceStatus.running, None, task_policy=ws.task_policy
+    )
+    assert await interrupt_diagnostic(worker, candidate)
+    async with factory() as session:
+        current = await WorkspaceRepository(session).get(response.workspace_id)
+        assert current.status == "running"
+        assert current.execution_claimed_by == "new-owner"
+        assert current.task_policy["provider_diagnostic"]["state"] == "interrupted"
+    # The stale candidate is now fenced out before another cleanup.
+    from datetime import UTC, datetime, timedelta
+
+    async with factory() as session:
+        current = await WorkspaceRepository(session).get(response.workspace_id)
+        current.execution_claim_expires_at = datetime.now(UTC) + timedelta(seconds=60)
+        await session.commit()
+    assert await interrupt_diagnostic(worker, candidate)
+    cleaner.cleanup.assert_awaited_once()

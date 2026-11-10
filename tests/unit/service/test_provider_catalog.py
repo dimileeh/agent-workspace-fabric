@@ -326,3 +326,117 @@ async def test_cancelling_a_leader_releases_followers_without_replay():
         assert not result.cached
         assert not catalog.cache_keys
         assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [[], {}, {"models": [None]}, {"models": [{"name": ""}]}])
+async def test_invalid_catalog_shapes_fail_closed_without_caching(body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    ) as client:
+        catalog = ProviderCatalog(client=client)
+        result = await catalog.query(selection(), environ={})
+        assert result.status == "unavailable"
+        assert result.models == []
+        assert not catalog.cache_keys
+
+
+@pytest.mark.asyncio
+async def test_missing_credential_never_contacts_the_provider():
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await ProviderCatalog(client=client).query(selection("openrouter"), environ={})
+        assert result.status == "unavailable"
+        assert not calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["id", "digest", "pricing"])
+async def test_provider_cannot_echo_credentials_in_catalog_claims(field):
+    item = {"id": "candidate", field: "synthetic-private-value"}
+    if field == "pricing":
+        item[field] = {"prompt": "synthetic-private-value"}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"data": [item]}))
+    ) as client:
+        catalog = ProviderCatalog(client=client)
+        result = await catalog.query(
+            selection("openrouter"), environ={"KEY_A": "synthetic-private-value"}
+        )
+        assert result.status == "unavailable"
+        assert "synthetic-private-value" not in result.model_dump_json()
+        assert not catalog.cache_keys
+
+
+@pytest.mark.asyncio
+async def test_catalog_normalizes_optional_claims_and_isolates_cached_values():
+    items = [
+        {
+            "id": "candidate",
+            "digest": "x" * 500,
+            "context_length": True,
+            "capabilities": ["completion"],
+            "pricing": {"prompt": "1" * 101, "completion": 2, "ignored": "drop"},
+        },
+        {"id": "minimal", "context_length": -1},
+    ]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"data": items}))
+    ) as client:
+        catalog = ProviderCatalog(client=client)
+        first = await catalog.query(selection("openrouter"), environ={"KEY_A": "private"})
+        assert first.models[0].version is None
+        assert first.models[0].context_length is None
+        assert first.models[0].tools is False
+        assert first.models[0].pricing == {"prompt": "1" * 100, "completion": "2"}
+        assert first.models[1].tools is None
+        first.models.clear()
+        hit = await catalog.query(selection("openrouter"), environ={"KEY_A": "private"})
+        assert hit.cached and len(hit.models) == 2
+        hit.models.clear()
+        assert len((await catalog.query(selection("openrouter"), environ={})).models) == 2
+
+
+@pytest.mark.asyncio
+async def test_catalog_evicts_the_least_recently_used_key(monkeypatch):
+    import awf.service.provider_catalog as module
+
+    monkeypatch.setattr(module, "MAX_CACHE_ENTRIES", 2)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"models": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        for context in ["a", "b", "a", "c"]:
+            await catalog.query(selection(), environ={}, context=context)
+        assert [key[-1] for key in catalog.cache_keys] == ["a", "c"]
+        assert len(calls) == 3
+        assert not (await catalog.query(selection(), environ={}, context="b")).cached
+        assert len(calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_catalog_owned_client_disables_proxy_environment_and_redirects(monkeypatch):
+    import awf.service.provider_catalog as module
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"models": []}))
+    )
+    options = []
+
+    def make_client(**kwargs):
+        options.append(kwargs)
+        return client
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", make_client)
+    assert (await ProviderCatalog().query(selection(), environ={})).status == "available"
+    assert options == [{"timeout": 10, "follow_redirects": False, "trust_env": False}]
+    assert client.is_closed

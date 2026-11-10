@@ -107,3 +107,55 @@ def test_native_diagnostic_copies_only_selected_auth_file(tmp_path):
     remove_diagnostic_auth(tmp_path / "state", "ws_diag")
     assert not Path(mounts[0].source).exists()
     assert (home / ".codex" / "auth.json").exists()
+
+
+def test_diagnostic_mount_filter_keeps_credentials_and_tool_leases_only(tmp_path):
+    from types import SimpleNamespace
+
+    import pytest
+
+    from awf.node.provider_diagnostics import diagnostic_auth_mounts
+
+    for agent, directory, credential in [
+        ("codex", ".codex", "auth.json"),
+        ("claude_code", ".claude", ".credentials.json"),
+    ]:
+        source = tmp_path / directory
+        source.mkdir()
+        (source / credential).write_text("synthetic-credential")
+        mounts = [
+            SimpleNamespace(source=str(source), target="/home/agent/" + directory),
+            SimpleNamespace(source="lease", target="lease"),
+            SimpleNamespace(source="auth", target="/home/agent/" + directory + "/" + credential),
+            SimpleNamespace(source="tool", target="/run/tool-secret"),
+            SimpleNamespace(source="forge", target="/home/agent/.config/gh"),
+            SimpleNamespace(source="config", target="/opt/awf/selected-provider-source.json"),
+        ]
+        assert diagnostic_auth_mounts(mounts, agent) == mounts[:4]
+        (source / "competing-config").write_text("tool configuration")
+        with pytest.raises(ValueError, match="PROFILE_UNSUPPORTED"):
+            diagnostic_auth_mounts(mounts, agent)
+
+
+def test_diagnostic_auth_cleanup_refuses_invalid_ids_and_symlinks(tmp_path):
+    import pytest
+
+    from awf.node.provider_diagnostics import remove_diagnostic_auth
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep"
+    marker.write_text("preserve")
+    with pytest.raises(ValueError, match="FIXTURE_FAILED"):
+        remove_diagnostic_auth(tmp_path, "../outside")
+    root = tmp_path / "auth" / "ws_diag"
+    root.parent.mkdir()
+    root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="FIXTURE_FAILED"):
+        remove_diagnostic_auth(tmp_path, "ws_diag")
+    root.unlink()
+    root.mkdir()
+    (root / "diagnostic").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="FIXTURE_FAILED"):
+        remove_diagnostic_auth(tmp_path, "ws_diag")
+    assert marker.read_text() == "preserve"

@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from awf.adapters.run_results import AgentRunResult
 from awf.api.schemas_providers import ProviderConnectionTestRequest
 from awf.common.commands import CommandResult
@@ -48,7 +50,10 @@ async def prepared(engine, tmp_path, *, provider="ollama"):
     return factory, response, executor
 
 
-async def test_one_invocation_durable_start_and_independent_verifier(engine, tmp_path, monkeypatch):
+@pytest.mark.parametrize("verified", [True, False])
+async def test_one_invocation_durable_start_and_independent_verifier(
+    engine, tmp_path, monkeypatch, verified
+):
     factory, response, executor = await prepared(engine, tmp_path)
 
     async def run(**kwargs):
@@ -57,6 +62,7 @@ async def test_one_invocation_durable_start_and_independent_verifier(engine, tmp
             assert ws.task_policy["provider_diagnostic"]["invocation_started_at"]
         return AgentRunResult(0, transcript(codex_events()), "")
 
+    executor._runner.run.return_value = CommandResult(0 if verified else 1, "", "")
     adapter = SimpleNamespace(run=AsyncMock(side_effect=run))
     monkeypatch.setattr(
         "awf.control.executor.provider_diagnostics.get_adapter", lambda *_args, **_kwargs: adapter
@@ -77,18 +83,24 @@ async def test_one_invocation_durable_start_and_independent_verifier(engine, tmp
     assert adapter.diagnostic_events
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(response.workspace_id)
-        assert ws.status == "completed"
-        assert ws.task_policy["provider_diagnostic"]["result"]["outcome"] == "passed"
+        assert ws.status == ("completed" if verified else "failed")
+        result = ws.task_policy["provider_diagnostic"]["result"]
+        assert result["outcome"] == ("passed" if verified else "failed")
+        assert result["fixture_verification"] is verified
+        assert result["reason_code"] == (
+            "PROVIDER_DIAGNOSTIC_PASSED" if verified else "PROVIDER_DIAGNOSTIC_FIXTURE_FAILED"
+        )
         assert ws.pr_url is None
     await executor.execute(response.workspace_id)
     adapter.run.assert_awaited_once()
 
 
-async def test_missing_protocol_never_passes_and_cancel_wins(engine, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "output", ['{"type":"result","result":"passed"}', transcript(codex_events()[:-1])]
+)
+async def test_missing_protocol_never_passes_and_cancel_wins(engine, tmp_path, monkeypatch, output):
     factory, response, executor = await prepared(engine, tmp_path)
-    adapter = SimpleNamespace(
-        run=AsyncMock(return_value=AgentRunResult(0, '{"type":"result","result":"passed"}', ""))
-    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=AgentRunResult(0, output, "")))
     monkeypatch.setattr(
         "awf.control.executor.provider_diagnostics.get_adapter", lambda *_a, **_k: adapter
     )
@@ -101,6 +113,7 @@ async def test_missing_protocol_never_passes_and_cancel_wins(engine, tmp_path, m
         ws = await WorkspaceRepository(session).get(response.workspace_id)
         assert ws.status == "failed"
         assert ws.task_policy["provider_diagnostic"]["result"]["outcome"] == "inconclusive"
+    executor._runner.run.assert_not_awaited()
 
 
 async def test_late_success_cannot_overwrite_cancellation(engine, tmp_path, monkeypatch):
@@ -247,3 +260,72 @@ async def test_native_diagnostic_freezes_configured_defaults_before_invocation(
         ws = await WorkspaceRepository(session).get(response.workspace_id)
         assert ws.status == "completed"
         assert ws.task_policy["agent_execution"]["effort"] == "medium"
+
+
+@pytest.mark.parametrize(
+    "provider,stage,code,output,reason",
+    [
+        ("openai", None, 0, "", None),
+        ("ollama", None, 0, "", None),
+        ("ollama", "capability", 1, "coding-cycle-v1", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "capability", 0, "wrong-fixture", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "version", 1, "cli", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "container", 0, "", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "image", 1, "sha256:actual", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "image", 0, "tag-only", "RUNTIME_UNSUPPORTED"),
+        ("ollama", "probe", 0, "broken-json", "RESPONSE_INVALID"),
+        ("ollama", "probe", 0, "[]", "ENDPOINT_UNREACHABLE"),
+        ("ollama", "probe", 1, '{"ok":true}', "ENDPOINT_UNREACHABLE"),
+        ("ollama", "probe", 0, '{"ok":1}', "ENDPOINT_UNREACHABLE"),
+    ],
+)
+async def test_runtime_identity_requires_immutable_fixture_image_and_selected_health(
+    tmp_path, provider, stage, code, output, reason
+):
+    from awf.common.agent_execution import resolve_execution
+    from awf.control.executor.provider_diagnostics import runtime_identity
+
+    selected = resolve_execution(
+        agent="codex", provider=provider, model="candidate", allow_unverified=True
+    )
+    calls = []
+
+    async def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "--capability":
+            current, text = "capability", "coding-cycle-v1"
+            assert argv[-4:-2] == ["-I", "-S"]
+        elif argv[-1] == "--version":
+            current, text = "version", "codex 0.162.0"
+        elif "ps" in argv:
+            current, text = "container", "container-id"
+        elif "inspect" in argv:
+            current, text = "image", "sha256:actual"
+        else:
+            current, text = "probe", '{"ok":true,"model_version":"revision"}'
+            assert argv[-1] == "--probe-json"
+            assert selected.endpoint in argv[-2]
+        return CommandResult(code, output, "") if current == stage else CommandResult(0, text, "")
+
+    ws = SimpleNamespace(
+        id="ws_diag",
+        agent="codex",
+        compose_project_name=None,
+        task_policy={"agent_execution": selected.model_dump(mode="json")},
+    )
+    if reason:
+        with pytest.raises(ValueError, match=reason):
+            await runtime_identity(
+                SimpleNamespace(_runner=SimpleNamespace(run=run)), ws, tmp_path / "compose.yml"
+            )
+    else:
+        result = await runtime_identity(
+            SimpleNamespace(_runner=SimpleNamespace(run=run)), ws, tmp_path / "compose.yml"
+        )
+        assert result["runtime_image"] == "sha256:actual"
+        assert result["cli_version"] == "codex 0.162.0"
+        assert result["endpoint_health"] == (
+            "reachable" if provider == "ollama" else "not_probed_native"
+        )
+        assert result["model_version"] == ("revision" if provider == "ollama" else None)
+        assert len(calls) == (5 if provider == "ollama" else 4)

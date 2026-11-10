@@ -48,3 +48,30 @@ def test_provider_commands(monkeypatch):
     assert calls[-1][1] == "/v1/providers/connection-tests"
     assert calls[-1][2]["json"]["deadline_seconds"] == 240
     assert calls[-1][2]["headers"]["Idempotency-Key"] == "once"
+
+
+def test_provider_cli_reads_wrapped_profile_for_catalog_request(monkeypatch, tmp_path):
+    profile = tmp_path / "profile.yml"
+    profile.write_text("awf:\n  name: selected-profile\n")
+    calls = []
+
+    def call(method, path, **kwargs):
+        calls.append(kwargs["json"])
+        return httpx.Response(200, json={}, request=httpx.Request(method, "http://api" + path))
+
+    monkeypatch.setattr("awf.cli.provider_commands._call", call)
+    result = CliRunner().invoke(
+        app,
+        [
+            "provider",
+            "models",
+            "--agent",
+            "codex",
+            "--provider",
+            "ollama",
+            "--profile",
+            str(profile),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0]["profile"]["name"] == "selected-profile"

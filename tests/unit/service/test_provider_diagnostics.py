@@ -147,3 +147,84 @@ def test_native_declared_credentials_keep_only_selected_references():
     assert profile["runtime"]["environment"] == {"OPENAI_API_KEY": "${NATIVE_ALIAS}"}
     assert "private-native-value" not in repr(spec) and "private-forge-value" not in repr(spec)
     assert "GH_TOKEN" not in repr(profile)
+
+
+def test_diagnostic_reproduces_only_the_selected_self_contained_sidecar():
+    spec, profile, selected = diagnostic_material(
+        request(
+            profile={
+                "name": "project",
+                "runtime": {"environment": {"AWF_OLLAMA_BASE_URL": "http://ollama:11434"}},
+                "services": [
+                    {"name": "ollama", "image": "ollama/ollama"},
+                    {"name": "postgres", "image": "postgres:16"},
+                ],
+            }
+        ),
+        environ={},
+    )
+    assert selected.network_service == "ollama"
+    assert [service["name"] for service in profile["services"]] == ["ollama"]
+    assert spec["profile"] == profile
+
+
+def test_native_diagnostic_rejects_non_environment_credential_references():
+    with pytest.raises(ValueError, match="PROFILE_UNSUPPORTED"):
+        diagnostic_material(
+            ProviderConnectionTestRequest(
+                agent="codex",
+                provider="openai",
+                model="native",
+                profile={
+                    "name": "native",
+                    "secrets": [
+                        {
+                            "name": "native",
+                            "kind": "env",
+                            "provider": "env",
+                            "ref": "env/invalid-name",
+                            "target": "OPENAI_API_KEY",
+                        }
+                    ],
+                },
+            ),
+            environ={},
+        )
+
+
+@pytest.mark.parametrize("deadline", [1, 900, True, 0, 901])
+def test_frozen_diagnostic_deadline_requires_an_integer_within_bounds(deadline):
+    from types import SimpleNamespace
+
+    from awf.service.provider_diagnostics import require_diagnostic_contract
+
+    spec, _, selected = diagnostic_material(request(), environ={})
+    spec["deadline_seconds"] = deadline
+    workspace = SimpleNamespace(
+        task_kind="provider_connection_test",
+        task_policy={
+            "provider_diagnostic": {"request": spec},
+            "agent_execution": selected.model_dump(mode="json"),
+        },
+    )
+    if type(deadline) is int and 1 <= deadline <= 900:
+        require_diagnostic_contract(workspace)
+    else:
+        with pytest.raises(ValueError, match="CONTRACT_UNSUPPORTED"):
+            require_diagnostic_contract(workspace)
+
+
+async def test_hosted_diagnostic_rejection_precedes_resource_creation():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from awf.service.provider_diagnostics import create_connection_test
+
+    factory = Mock(side_effect=AssertionError("hosted diagnostic allocated resources"))
+    service = SimpleNamespace(
+        _settings=SimpleNamespace(agent_runtime_image="pinned", hosted_node=object()),
+        _factory=factory,
+    )
+    with pytest.raises(ValueError, match="HOSTED_UNSUPPORTED"):
+        await create_connection_test(service, request(), idempotency_key="hosted")
+    factory.assert_not_called()

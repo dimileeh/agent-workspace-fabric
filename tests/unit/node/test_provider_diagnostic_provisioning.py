@@ -188,3 +188,34 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
             ).status
             == "cancelled"
         )
+
+
+@pytest.mark.parametrize("error", ["cancelled", "timeout", "already_exited", "kill_race"])
+async def test_fixture_git_drains_process_on_interruption(monkeypatch, error):
+    import asyncio
+    from unittest.mock import Mock
+
+    from awf.node.provider_diagnostics import _git
+
+    failure = TimeoutError() if error == "timeout" else asyncio.CancelledError()
+    process = SimpleNamespace(
+        returncode=1 if error == "already_exited" else None,
+        communicate=AsyncMock(side_effect=failure),
+        kill=Mock(side_effect=ProcessLookupError() if error == "kill_race" else None),
+        wait=AsyncMock(return_value=-9),
+    )
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(type(failure)):
+        await _git("status")
+    process.wait.assert_awaited_once()
+    assert process.kill.call_count == (0 if error == "already_exited" else 1)
+    assert spawn.call_args.kwargs["env"]["HOME"] == "/nonexistent"
+    assert spawn.call_args.kwargs["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
+async def test_fixture_git_failure_does_not_expose_process_output():
+    from awf.node.provider_diagnostics import _git
+
+    with pytest.raises(ValueError, match="^PROVIDER_DIAGNOSTIC_FIXTURE_FAILED$"):
+        await _git("not-a-git-command")

@@ -180,3 +180,72 @@ def test_declared_fallback_retains_its_exact_proof_during_typed_promotion():
         FallbackTarget(selected.agent, selected.provider, selected.model, selected).to_payload(),
     )
     assert promoted["coding_compatibility_evidence"] == evidence
+
+
+async def test_compatibility_lookup_skips_native_but_never_borrows_sidecar_proof():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from awf.service.provider_compatibility import attach_compatibility
+
+    session = SimpleNamespace(scalars=AsyncMock(side_effect=AssertionError("unexpected lookup")))
+    opted_in = {"require_compatibility_evidence": False}
+    assert await attach_compatibility(session, opted_in) is opted_in
+    native = {
+        "require_compatibility_evidence": True,
+        "agent_execution": resolve_execution(agent="codex").model_dump(mode="json"),
+    }
+    assert await attach_compatibility(session, native) == native
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="candidate", allow_unverified=True
+    )
+    sidecar = selected.model_copy(update={"network_service": "ollama"})
+    with pytest.raises(ValueError, match="MODEL_UNVERIFIED"):
+        await attach_compatibility(
+            session,
+            {
+                "require_compatibility_evidence": True,
+                "agent_execution": sidecar.model_dump(mode="json"),
+            },
+        )
+    session.scalars.assert_not_awaited()
+
+
+async def test_runtime_guard_rejects_malformed_or_unhealthy_provider_probes(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from awf.common.commands import CommandResult
+    from awf.service.provider_compatibility import guard_runtime_compatibility
+
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="candidate", allow_unverified=True
+    )
+    runner = SimpleNamespace(run=AsyncMock())
+    adapter = SimpleNamespace(
+        require_compatibility_evidence=True,
+        diagnostic_events=False,
+        execution=selected,
+        compatibility_evidence={},
+        _runner=runner,
+    )
+    monkeypatch.setattr(
+        "awf.control.executor.provider_diagnostics.runtime_identity", AsyncMock(return_value={})
+    )
+    for code, stdout, reason in [
+        (0, "broken-json", "RESPONSE_INVALID"),
+        (1, '{"ok":true}', "ENDPOINT_UNREACHABLE"),
+        (0, '{"ok":false}', "ENDPOINT_UNREACHABLE"),
+    ]:
+        runner.run.return_value = CommandResult(code, stdout, "private detail")
+        with pytest.raises(ValueError, match=reason):
+            await guard_runtime_compatibility(
+                adapter,
+                compose_project="awf_ws",
+                compose_file=tmp_path / "compose.yml",
+                workspace_id="ws",
+            )

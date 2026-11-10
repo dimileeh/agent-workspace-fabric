@@ -108,3 +108,28 @@ def test_command_dispatch_and_capability_are_independent_of_candidate(
     seed_fixture(tmp_path)
     assert fixture.main(["verify", str(tmp_path), "a" * 32]) == 1
     assert fixture.main(["bad"]) == 64
+
+
+def test_verifier_rejects_missing_and_oversized_candidates(tmp_path):
+    assert not verify_fixture(tmp_path, "a" * 32)
+    (tmp_path / "solution.py").write_text("x" * 65_537)
+    assert not verify_fixture(tmp_path, "a" * 32)
+
+
+def test_verifier_process_errors_cannot_forge_a_pass(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import awf.runtime.provider_diagnostic_fixture as fixture
+
+    seed_fixture(tmp_path)
+    for error in [OSError("failed to spawn"), subprocess.TimeoutExpired("verifier", 5)]:
+        with monkeypatch.context() as patch:
+            patch.setattr(fixture.subprocess, "run", Mock(side_effect=error))
+            assert not verify_fixture(tmp_path, "a" * 32)
+
+
+def test_oracle_stat_failure_is_not_immutable(tmp_path, monkeypatch):
+    from awf.runtime.provider_diagnostic_fixture import runtime_is_immutable
+
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    assert not runtime_is_immutable(path=tmp_path / "missing-oracle.py")

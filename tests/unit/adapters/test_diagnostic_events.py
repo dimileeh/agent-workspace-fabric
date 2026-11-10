@@ -249,3 +249,89 @@ def test_codex_error_before_success_is_inconclusive():
     events = codex_events()
     events.insert(-1, {"type": "error", "message": "stream failed"})
     assert coding_witness("codex", transcript(events), prompt="fixed").status == "inconclusive"
+
+
+@pytest.mark.parametrize("limit", ["MAX_WITNESS_BYTES", "MAX_LINE_BYTES", "MAX_EVENTS"])
+def test_protocol_limits_accept_the_boundary_and_reject_overflow(monkeypatch, limit):
+    import awf.adapters.diagnostic_events as module
+
+    output = transcript(codex_events())
+    bounds = {
+        "MAX_WITNESS_BYTES": len(output.encode()),
+        "MAX_LINE_BYTES": max(len(line.encode()) for line in output.splitlines()),
+        "MAX_EVENTS": len(output.splitlines()),
+    }
+    monkeypatch.setattr(module, limit, bounds[limit])
+    assert coding_witness("codex", output, prompt="fixed").status == "passed"
+    monkeypatch.setattr(module, limit, bounds[limit] - 1)
+    assert coding_witness("codex", output, prompt="fixed").status == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "top_level_array",
+        "empty_type",
+        "bad_id",
+        "bad_text",
+        "duplicate_start",
+        "duplicate_result",
+        "orphan_result",
+        "tool_failed",
+        "repeated_challenge",
+        "bad_shell",
+    ],
+)
+def test_malformed_tool_protocol_cannot_establish_a_witness(case):
+    events = codex_events()
+    if case == "top_level_array":
+        events.insert(0, [])
+    elif case == "empty_type":
+        events.insert(0, {"type": ""})
+    elif case == "bad_id":
+        events[0]["item"]["id"] = None
+    elif case == "bad_text":
+        events[1]["item"]["aggregated_output"] = []
+    elif case == "duplicate_start":
+        events.insert(1, events[0])
+    elif case == "duplicate_result":
+        events.insert(2, events[1])
+    elif case == "orphan_result":
+        events.pop(0)
+    elif case == "tool_failed":
+        events[3]["item"]["exit_code"] = 1
+    elif case == "repeated_challenge":
+        repeated = codex_events()[:2]
+        for event in repeated:
+            event["item"]["id"] = "another-challenge"
+        events[-1:-1] = repeated
+    else:
+        events[0]["item"]["command"] = "'unterminated"
+    assert coding_witness("codex", transcript(events), prompt="fixed").status == "inconclusive"
+
+
+def test_claude_structured_results_allow_text_but_reject_malformed_content():
+    events = claude_events()
+    events[2]["message"]["content"][0]["content"] = [
+        {"type": "text", "text": f"AWF_NONCE={NONCE}"},
+        {"type": "image"},
+        "ignored non-block",
+    ]
+    output = "\n\n" + transcript(events) + "\n\n"
+    assert coding_witness("claude_code", output, prompt="fixed").status == "passed"
+    events[1]["message"]["content"].insert(0, "ignored non-block")
+    assert coding_witness("claude_code", transcript(events), prompt="fixed").status == "passed"
+    events[1]["message"]["content"] = "not a block list"
+    assert (
+        coding_witness("claude_code", transcript(events), prompt="fixed").status == "inconclusive"
+    )
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code", "unsupported-cli"])
+def test_unrecognized_envelopes_cannot_supply_tool_evidence(agent):
+    events = claude_events() if agent == "claude_code" else codex_events()
+    if agent == "codex":
+        events[0]["type"] = "item.updated"
+    elif agent == "claude_code":
+        events[1]["message"]["content"][0]["type"] = "text"
+    assert coding_witness(agent, transcript(events), prompt="fixed").status == "inconclusive"
