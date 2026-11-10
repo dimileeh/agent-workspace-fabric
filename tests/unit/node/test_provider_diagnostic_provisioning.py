@@ -17,7 +17,11 @@ from awf.service.workspaces import WorkspaceService
 from tests.unit.api.test_provider_connection_tests import capable
 
 
-async def test_early_provisioning_and_managed_fixture(engine, tmp_path):
+@pytest.mark.parametrize("mirror_state", ["absent", "empty", "bare"])
+async def test_early_provisioning_and_managed_fixture(engine, tmp_path, mirror_state):
+    from awf.node.provider_diagnostics import _git
+    from awf.service.provider_diagnostics import INTERNAL_REPO
+
     await capable(engine)
     factory = make_session_factory(engine)
     response = await create_connection_test(
@@ -34,6 +38,11 @@ async def test_early_provisioning_and_managed_fixture(engine, tmp_path):
         stack_launcher=launcher,
         before_provision=before,
     )
+    mirror = provisioner._git._mirror_path(INTERNAL_REPO)
+    if mirror_state == "empty":
+        mirror.mkdir(parents=True)
+    elif mirror_state == "bare":
+        await _git("init", "--bare", str(mirror))
     await provisioner.provision(response.workspace_id)
     before.assert_not_awaited()
     request = launcher.launch.call_args.args[0]
@@ -45,12 +54,76 @@ async def test_early_provisioning_and_managed_fixture(engine, tmp_path):
         ws = await WorkspaceRepository(session).get(response.workspace_id)
         assert ws.status == WorkspaceStatus.ready.value
         assert ws.pr_url is None
-    from awf.service.provider_diagnostics import INTERNAL_REPO
-
     await provisioner._git.remove_worktree(
         workspace_id=response.workspace_id, repo_url=INTERNAL_REPO
     )
     assert not request.layout.worktree_path.exists()
+
+
+@pytest.mark.parametrize("missing_fixture_ref", [False, True])
+async def test_fixture_mirror_repair_preserves_other_workspaces(
+    tmp_path, monkeypatch, missing_fixture_ref
+):
+    import asyncio
+
+    import awf.node.provider_diagnostics as diagnostics
+
+    manager = GitManager(tmp_path)
+    existing = await diagnostics.fixture_worktree(manager, "ws_existing")
+    solution = existing.worktree_path / "solution.py"
+    solution.write_text("independent workspace edits\n")
+    mirror = existing.mirror_path
+    git_args = ("--git-dir", str(mirror))
+    tree = await diagnostics._git(*git_args, "mktree", input_data=b"")
+    original = await diagnostics._git(
+        *git_args, "commit-tree", tree, input_data=b"preserve healthy fixture ref\n"
+    )
+    await diagnostics._git(*git_args, "update-ref", "refs/heads/fixture", original)
+    await diagnostics._git(*git_args, "pack-refs", "--all")
+    existing_head = await diagnostics._git("-C", str(existing.worktree_path), "rev-parse", "HEAD")
+    if missing_fixture_ref:
+        await diagnostics._git(*git_args, "update-ref", "-d", "refs/heads/fixture")
+
+    independent = await diagnostics.fixture_worktree(GitManager(tmp_path / "other"), "ws_other")
+    other_refs = await diagnostics._git("--git-dir", str(independent.mirror_path), "show-ref")
+    other_git = (independent.worktree_path / ".git").read_bytes()
+    real_git = diagnostics._git
+    calls = []
+    lock = manager._lock_for_mirror(mirror)
+
+    async def locked_git(*args, **kwargs):
+        assert lock.locked()
+        calls.append(args)
+        return await real_git(*args, **kwargs)
+
+    monkeypatch.setattr(diagnostics, "_git", locked_git)
+    async with lock:
+        tasks = [
+            asyncio.create_task(diagnostics.fixture_worktree(GitManager(tmp_path), workspace_id))
+            for workspace_id in ("ws_new_one", "ws_new_two")
+        ]
+        # Both callers must wait for the already-owned mirror lock before any Git mutation.
+        await asyncio.sleep(0)
+        assert calls == []
+    layouts = await asyncio.gather(*tasks, return_exceptions=True)
+    assert not [layout for layout in layouts if isinstance(layout, BaseException)]
+    assert sum("commit-tree" in call for call in calls) == int(missing_fixture_ref)
+    fixture_head = await real_git(*git_args, "rev-parse", "refs/heads/fixture")
+    if not missing_fixture_ref:
+        assert fixture_head == original
+    for layout in layouts:
+        assert layout.mirror_path == mirror
+        assert await real_git("-C", str(layout.worktree_path), "rev-parse", "HEAD") == fixture_head
+        assert (layout.worktree_path / "solution.py").is_file()
+    assert solution.read_text() == "independent workspace edits\n"
+    assert await real_git("-C", str(existing.worktree_path), "rev-parse", "HEAD") == existing_head
+    assert (
+        await real_git(*git_args, "rev-parse", "refs/heads/" + existing.branch_name)
+        == existing_head
+    )
+    assert await real_git("--git-dir", str(independent.mirror_path), "show-ref") == other_refs
+    assert (independent.worktree_path / ".git").read_bytes() == other_git
+    assert (independent.worktree_path / "solution.py").is_file()
 
 
 async def test_missing_runtime_settles_bootstrap_operation(engine, tmp_path):

@@ -206,6 +206,9 @@ fixture worktree. Selected model sidecars may be reproduced only without builds,
 project binds, volumes, fixed ports, privilege, dependencies or secret env.
 Unsupported profiles fail explicitly; no replacement host endpoint is chosen.
 The internal mirror is mounted read-only; no diagnostic commits are needed.
+Before creating a new fixture worktree, bootstrap repairs an empty internal
+mirror or a missing fixture ref under the mirror lock. Existing refs and
+workspaces are preserved; this repair never replays a diagnostic invocation.
 Forge/SSH/git auth and unrelated model settings are omitted. Native diagnostics
 receive only selected native credential references and isolated credential-only
 writable homes for CLI state/refresh, without inherited model/tool config; third-party

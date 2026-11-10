@@ -58,8 +58,14 @@ async def fixture_worktree(manager: Any, workspace_id: str) -> WorktreeLayout:
     worktree.parent.mkdir(parents=True, exist_ok=True)
     branch = "awf-diagnostic/" + workspace_id
     async with manager._lock_for_mirror(mirror):
-        if not mirror.exists():
+        # Initialization may have stopped after mkdir or before the fixture ref.
+        # Repair in place so registered worktrees and their branches survive.
+        if not (mirror / "HEAD").exists():
             await _git("init", "--bare", str(mirror))
+        refs = await _git(
+            "--git-dir", str(mirror), "for-each-ref", "--format=%(refname)", "refs/heads/fixture"
+        )
+        if "refs/heads/fixture" not in refs.splitlines():
             tree = await _git("--git-dir", str(mirror), "mktree", input_data=b"")
             commit = await _git(
                 "--git-dir",
