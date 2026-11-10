@@ -6,6 +6,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from awf.common.agent_execution import EXECUTION_POLICY_KEY, resolve_execution
 from awf.db.models import ProviderManagedKey, WorkspaceEvent
 from awf.db.repositories import ProviderManagedKeyRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.controls import WorkspaceControlService
 from awf.service.openrouter_management import OpenRouterManagementClient
 from awf.service.provider_managed_keys import (
     PROVIDER_PARK_REASON_CODES,
@@ -496,6 +498,87 @@ async def test_confirmed_delete_after_activation_failure_releases_the_intent(mon
         await _broker(factory, fake).acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
         assert fake.calls[-1][2]["name"] == f"awf-{ws}-2"
         assert fake.calls[-1][2]["limit"] == 10.0
+
+
+def _change_budget_while_minting(monkeypatch, broker: ManagedKeyBroker, change) -> None:
+    client = broker._client
+    create_key = client.create_key
+
+    async def _create_key(name, limit):
+        minted = await create_key(name, limit)
+        await change()
+        return minted
+
+    monkeypatch.setattr(client, "create_key", _create_key)
+
+
+@pytest.mark.parametrize("new_budget", [2, 25])
+async def test_budget_set_while_a_key_is_minting_is_applied_before_activation(
+    monkeypatch, new_budget
+):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+
+        async def _operator_sets_budget():
+            async with factory() as session:
+                service = WorkspaceControlService(
+                    session, project_stopper=SimpleNamespace(), cleaner_factory=SimpleNamespace()
+                )
+                await service.set_provider_budget(
+                    ws, usd=new_budget, management_client=fake.client()
+                )
+                await session.commit()
+
+        _change_budget_while_minting(monkeypatch, broker, _operator_sets_budget)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+
+        assert fake.keys[lease.key_hash]["limit"] == float(new_budget)
+        assert fake.calls[-1] == ("PATCH", "/keys/hash1", {"limit": float(new_budget)})
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.limit_usd) == ("active", Decimal(new_budget))
+
+
+@pytest.mark.parametrize(
+    ("limit_usd", "patch_status", "reason_code", "row_reason_code"),
+    [
+        (2.0, 500, "PROVIDER_MANAGED_KEY_UNAVAILABLE", "PROVIDER_MANAGEMENT_API_UNAVAILABLE"),
+        (0.005, None, "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_BUDGET_EXHAUSTED"),
+        (None, None, "PROVIDER_BUDGET_INVALID", "PROVIDER_BUDGET_INVALID"),
+    ],
+)
+async def test_a_key_the_changed_budget_cannot_fund_is_deleted_before_activation(
+    monkeypatch, limit_usd, patch_status, reason_code, row_reason_code
+):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        if patch_status is not None:
+            fake.fail[("PATCH", "key")] = patch_status
+
+        async def _change_policy():
+            async with factory() as session:
+                row = await WorkspaceRepository(session).get(ws)
+                budget = {**row.task_policy["provider_budget"], "limit_usd": limit_usd}
+                row.task_policy = {**row.task_policy, "provider_budget": budget}
+                await session.commit()
+
+        _change_budget_while_minting(monkeypatch, broker, _change_policy)
+        with pytest.raises(ProviderCredentialError) as raised:
+            await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+
+        assert raised.value.reason_code == reason_code
+        assert fake.keys == {} and fake.calls[-1][:2] == ("DELETE", "/keys/hash1")
+        (intent,) = await _rows(factory, ws)
+        assert (intent.status, intent.key_hash, intent.last_reason_code) == (
+            "deleted",
+            None,
+            row_reason_code,
+        )
 
 
 async def test_heartbeats_after_release_or_on_unhealthy_rows_change_nothing():

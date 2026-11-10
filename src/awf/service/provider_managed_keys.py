@@ -47,7 +47,6 @@ from awf.db.repositories import (
 from awf.service.openrouter_management import (
     MANAGED_KEY_NOT_FOUND,
     KeyInfo,
-    MintedKey,
     OpenRouterManagementClient,
     OpenRouterManagementError,
     usd,
@@ -246,24 +245,20 @@ class ManagedKeyBroker:
                 details={"management_reason_code": error.reason_code},
             ) from None
         try:
-            await self._activate(row_id, workspace_id=workspace_id, minted=minted)
-        except SQLAlchemyError:
-            # An unrecorded live key must not outlive this failed acquire; if the
-            # delete fails too, the reconciler deletes the unbound ``awf-*`` key.
-            deleted = False
-            with suppress(OpenRouterManagementError):
-                await client.delete_key(minted.info.hash)
-                deleted = True
-            if deleted:
-                # The key never served a call: release the intent's reservation
-                # (the reconciler releases it if the database is still down).
-                await self._update(
-                    row_id,
-                    status=KeyStatus.deleted.value,
-                    last_reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
-                    lease_expires_at=None,
-                    deleted_at=self._now(),
+            info = minted.info
+            while True:
+                budget, allowed = await self._activate(
+                    row_id, workspace_id=workspace_id, info=info, limit=limit
                 )
+                if allowed == limit:
+                    break
+                # The operator changed the budget while the key was minting.
+                info = await client.update_key_limit(minted.info.hash, allowed)
+                limit = allowed
+        except SQLAlchemyError:
+            await self._discard_unactivated(
+                row_id, minted.info.hash, PROVIDER_MANAGED_KEY_PERSIST_FAILED
+            )
             _log.warning(
                 "provider.managed_key.persist_failed",
                 workspace_id=workspace_id,
@@ -274,6 +269,23 @@ class ManagedKeyBroker:
                 PROVIDER_MANAGED_KEY_UNAVAILABLE,
                 details={"management_reason_code": PROVIDER_MANAGED_KEY_PERSIST_FAILED},
             ) from None
+        except OpenRouterManagementError as error:
+            await self._discard_unactivated(row_id, minted.info.hash, error.reason_code)
+            _log.warning(
+                "provider.managed_key.limit_update_failed",
+                workspace_id=workspace_id,
+                key_name=key_name,
+                reason_code=PROVIDER_MANAGED_KEY_UNAVAILABLE,
+                management_reason_code=error.reason_code,
+                http_status=error.http_status,
+            )
+            raise ProviderCredentialError(
+                PROVIDER_MANAGED_KEY_UNAVAILABLE,
+                details={"management_reason_code": error.reason_code},
+            ) from None
+        except ProviderCredentialError as error:
+            await self._discard_unactivated(row_id, minted.info.hash, error.reason_code)
+            raise
         self._live.add(row_id)
         _log.info(
             "provider.managed_key.minted",
@@ -379,23 +391,67 @@ class ManagedKeyBroker:
             await session.commit()
             return row.id, row.key_name, remaining, budget
 
-    async def _activate(self, row_id: str, *, workspace_id: str, minted: MintedKey) -> None:
+    async def _activate(
+        self, row_id: str, *, workspace_id: str, info: KeyInfo, limit: Decimal
+    ) -> tuple[Decimal, Decimal]:
+        """Return the budget and the limit it allows; activate only if that is ``limit``.
+
+        The workspace row lock orders this with the budget control: a budget set
+        while the key was minting is caught here, before the agent gets the key,
+        and one set afterwards finds the key active and patches it.
+        """
         now = self._now()
         async with self._session_factory() as session:
-            row = await ProviderManagedKeyRepository(session).get(row_id)
+            workspaces = WorkspaceRepository(session)
+            workspace = await workspaces.get_for_update(workspace_id)
+            assert workspace is not None  # the key row's FK cascades with its workspace
+            budget = budget_from_policy(workspace.task_policy)
+            if budget is None:
+                raise ProviderCredentialError(PROVIDER_BUDGET_INVALID)
+            keys = ProviderManagedKeyRepository(session)
+            others = [row for row in await keys.for_workspace(workspace_id) if row.id != row_id]
+            allowed = remaining_budget(budget, others)
+            if allowed < MINIMUM_MINT_USD:
+                raise ProviderCredentialError(
+                    PROVIDER_BUDGET_EXHAUSTED,
+                    details={"provider_budget": budget_details(budget, others)},
+                )
+            if allowed != limit:
+                return budget, allowed
+            row = await keys.get(row_id)
             assert row is not None  # the committed intent row is never deleted here
-            row.key_hash = minted.info.hash
+            row.key_hash = info.hash
             row.status = KeyStatus.active.value
-            row.limit_usd = usd(minted.info.limit) if minted.info.limit else row.limit_usd
+            row.limit_usd = usd(info.limit) if info.limit else limit
             row.lease_expires_at = now + self._lease_ttl
             row.updated_at = now
-            workspaces = WorkspaceRepository(session)
-            workspace = await workspaces.get(workspace_id)
-            assert workspace is not None  # the key row's FK cascades with its workspace
             await workspaces.add_event(
                 workspace, event_type="provider.managed_key.minted", payload=_key_payload(row)
             )
             await session.commit()
+        return budget, allowed
+
+    async def _discard_unactivated(self, row_id: str, key_hash: str, reason_code: str) -> None:
+        """Delete a minted key that no lease will hold and release its reservation.
+
+        An unrecorded live key must not outlive a failed acquire; if the delete
+        fails too, the reconciler deletes the unbound ``awf-*`` key.
+        """
+        assert self._client is not None  # only acquire mints, and it has a client
+        deleted = False
+        with suppress(OpenRouterManagementError):
+            await self._client.delete_key(key_hash)
+            deleted = True
+        if deleted:
+            # The key never served a call: release the intent's reservation
+            # (the reconciler releases it if the database is still down).
+            await self._update(
+                row_id,
+                status=KeyStatus.deleted.value,
+                last_reason_code=reason_code,
+                lease_expires_at=None,
+                deleted_at=self._now(),
+            )
 
     async def _heartbeat(self, lease: ManagedKeyLease) -> None:
         """Persist a usage read and extend the lease; never raises into the run."""
