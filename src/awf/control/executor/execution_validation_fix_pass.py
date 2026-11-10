@@ -267,14 +267,7 @@ async def run_validation_fix_pass(
                 expected=WorkspaceStatus.validating,
                 action="validation_fix_provider_park",
                 owner_id=execution_owner_id,
-            ):
-                deposit_planning_artifacts_if_required()
-                return ExecutionValidationResult(
-                    stop=True,
-                    successful_validation_run_id=successful_validation_run_id,
-                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                )
-            await self._finish_pending_validate_operations(
+            ) or not await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,
                 validation_run_id=validation_run_id,
@@ -285,7 +278,15 @@ async def run_validation_fix_pass(
                     baseline_coverage=baseline_coverage,
                 ),
                 error_message=message,
-            )
+                # Re-fenced under the row lock: the claim may move after the recheck.
+                execution_owner_id=execution_owner_id,
+            ):
+                deposit_planning_artifacts_if_required()
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
             await mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,

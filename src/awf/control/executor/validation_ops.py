@@ -145,9 +145,20 @@ async def _finish_pending_validate_operations(
     reason_code: str | None,
     error_message: str | None = None,
     coverage: dict[str, object] | None = None,
-) -> None:
-    """Finish pending/running validate operations for a workspace in one session."""
+    execution_owner_id: str | None = None,
+) -> bool:
+    """Finish pending/running validate operations for a workspace in one session.
+
+    ``execution_owner_id`` fences the finish on ``execution_claimed_by`` under the
+    workspace row lock, so a superseded executor cannot fail a replacement
+    claimant's validate operations; returns ``False`` without finishing them when
+    the claim has moved (PRRT_kwDOSJAM6s616TNZ).
+    """
     async with self._session_factory() as session:
+        if execution_owner_id is not None:
+            ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+            if ws is None or ws.execution_claimed_by != execution_owner_id:
+                return False
         await self._finish_pending_validate_operations_in_session(
             session,
             workspace_id=workspace_id,
@@ -159,6 +170,7 @@ async def _finish_pending_validate_operations(
             coverage=coverage,
         )
         await session.commit()
+    return True
 
 
 async def _finish_pending_validate_operations_in_session(

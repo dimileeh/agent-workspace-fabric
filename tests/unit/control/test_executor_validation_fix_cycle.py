@@ -25,6 +25,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -1524,6 +1525,77 @@ class TestFixPassProviderPark:
             assert ws.status == WorkspaceStatus.validating.value
             assert ws.execution_claimed_by == "new-worker"
             op = await s.get(Operation, "op_new_claim_validate")
+            assert op is not None
+            assert op.status == OperationStatus.pending.value
+            assert op.error_code is None
+
+    @pytest.mark.unit
+    async def test_fix_pass_park_claim_lost_after_recheck_leaves_validate_ops_pending(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """The validate-op finish re-checks the execution owner under the row lock,
+        so a claim that moves after the park's status recheck still leaves the
+        replacement claimant's validate operations pending (PRRT_kwDOSJAM6s616TNZ)."""
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=3)
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.execution_claimed_by = "old-worker"
+            await s.commit()
+
+        original_recheck = executor._recheck_status
+
+        async def _recheck_then_lose_claim(workspace_id: str, **kwargs: Any) -> bool:
+            ok = await original_recheck(workspace_id, **kwargs)
+            if kwargs.get("action") == "validation_fix_provider_park":
+                async with factory() as s:
+                    ws = await WorkspaceRepository(s).get(workspace_id)
+                    assert ws is not None
+                    ws.execution_claimed_by = "new-worker"
+                    s.add(
+                        Operation(
+                            id="op_post_recheck_validate",
+                            workspace_id=workspace_id,
+                            type=OperationType.validate.value,
+                            status=OperationStatus.pending.value,
+                            payload={},
+                        )
+                    )
+                    await s.commit()
+            return ok
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_then_lose_claim)
+
+        async def _budget_exhausted(*_args: object, **_kwargs: object) -> tuple[bool, object]:
+            raise AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False},
+            )
+
+        monkeypatch.setattr(
+            execution_validation_fix_pass_mod,
+            "_run_agent_callable_with_service_recovery",
+            _budget_exhausted,
+        )
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # validation fails
+
+        await executor.execute(ws_id, execution_owner_id="old-worker")
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.validating.value
+            assert ws.execution_claimed_by == "new-worker"
+            assert ws.block_type is None
+            op = await s.get(Operation, "op_post_recheck_validate")
             assert op is not None
             assert op.status == OperationStatus.pending.value
             assert op.error_code is None
