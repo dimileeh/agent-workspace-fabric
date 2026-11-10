@@ -309,8 +309,11 @@ async def _mark(
     deleted_at: datetime | None = None,
 ) -> None:
     async with session_factory() as session:
-        row = await ProviderManagedKeyRepository(session).get(row_id)
+        # Locked like the broker's writes: a key it finalized mid-delete stays finalized.
+        row = await ProviderManagedKeyRepository(session).get(row_id, for_update=True)
         assert row is not None  # recorded just before by ``_record_usage``
+        if row.status in FINALIZED_KEY_STATUSES:
+            return
         row.status = status
         row.last_reason_code = reason.reason_code if reason is not None else None
         if deleted_at is not None:

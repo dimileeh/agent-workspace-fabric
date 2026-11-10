@@ -307,6 +307,46 @@ async def test_a_heartbeat_after_the_usage_is_recorded_cannot_renew_a_deleting_k
         assert (row.status, row.lease_expires_at) == ("orphan_deleted", None)
 
 
+@pytest.mark.parametrize("reconciler_delete_status", [503, None])
+async def test_a_broker_finalize_during_the_orphan_delete_is_never_clobbered(
+    reconciler_delete_status,
+):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        client = fake.client()
+        delete_key = client.delete_key
+
+        async def finalize_then_delete(key_hash):
+            # The usage row is committed; the broker finalizes the key first.
+            await broker.finalize_workspace_keys(ws)
+            if reconciler_delete_status is not None:
+                fake.fail[("DELETE", "key")] = reconciler_delete_status
+            return await delete_key(key_hash)  # 404 when nothing is injected
+
+        client.delete_key = finalize_then_delete  # type: ignore[method-assign]
+        await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=client,
+            now=lambda: datetime.now(UTC) + timedelta(hours=1),
+        )
+
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.last_reason_code) == ("deleted", None)
+        async with factory() as session:
+            orphan_events = (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.event_type == "provider.managed_key.orphan_deleted"
+                    )
+                )
+            ).all()
+        assert orphan_events == []
+
+
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
     fake = FakeOpenRouterManagement()
     now = datetime.now(UTC)
