@@ -491,13 +491,51 @@ async def test_persistence_failures_are_logged_and_never_raise_into_the_run(monk
 
         assert outcome.exhausted is False
         assert "budget_usd" not in outcome.details
-        assert outcome.details["deleted"] is True
+        # Without a committed final usage the key is kept for a later finalize.
+        assert outcome.details["deleted"] is False
+        assert outcome.details["management_reason_code"] == "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
+        assert "hash1" in fake.keys
         reasons = [
             log.get("reason_code")
             for log in logs
             if log["event"] == "provider.managed_key.persist_failed"
         ]
-        assert reasons == ["PROVIDER_MANAGED_KEY_PERSIST_FAILED"] * 3
+        assert reasons == ["PROVIDER_MANAGED_KEY_PERSIST_FAILED"] * 4
+
+
+@pytest.mark.parametrize("outage_starts", ["before_delete", "after_delete"])
+async def test_final_usage_is_committed_before_the_key_is_deleted(monkeypatch, outage_starts):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage("hash1", 6.0)
+        get = ProviderManagedKeyRepository.get
+
+        async def _outage(self, key_id):
+            deleted = ("DELETE", "/keys/hash1") in [(m, p) for m, p, _ in fake.calls]
+            if outage_starts == "before_delete" or deleted:
+                raise _db_error()
+            return await get(self, key_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ProviderManagedKeyRepository, "get", _outage)
+            outcome = await lease.release(failed=False)
+
+        assert outcome.details["deleted"] is (outage_starts == "after_delete")
+        assert ("hash1" in fake.keys) is (outage_starts == "before_delete")
+        # Once the database recovers, finalize keeps the real spend (even on a 404).
+        assert await broker.finalize_workspace_keys(ws) == {"finalized": 1, "failed": 0}
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.final_usage_read, row.usage_usd) == (
+            "deleted",
+            True,
+            Decimal("6"),
+        )
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        assert fake.calls[-1][2]["limit"] == 4.0
 
 
 async def test_release_without_a_budget_reports_no_budget_figures():

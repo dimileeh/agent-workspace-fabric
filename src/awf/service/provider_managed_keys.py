@@ -439,7 +439,7 @@ class ManagedKeyBroker:
     async def _finalize_key(
         self, row_id: str, key_hash: str, *, final_status: str = KeyStatus.deleted.value
     ) -> tuple[KeyInfo | None, bool, str | None]:
-        """Final usage read, then delete only after a successful read (or 404)."""
+        """Final usage read, committed before the delete (a 404 needs no delete)."""
         assert self._client is not None
         info: KeyInfo | None = None
         reason: str | None = None
@@ -449,22 +449,24 @@ class ManagedKeyBroker:
         except OpenRouterManagementError as error:
             reason = error.reason_code
             deleted = error.reason_code == MANAGED_KEY_NOT_FOUND
-        if info is not None:
+        now = self._now()
+        usage = {**_usage_updates(info, now), "final_usage_read": True} if info is not None else {}
+        # The key is the only record of its usage: a delete before the usage is
+        # durable would let a later 404 finalize stale counters and over-mint.
+        if info is not None and not await self._update(row_id, **usage):
+            reason = PROVIDER_MANAGED_KEY_PERSIST_FAILED
+        elif info is not None:
             try:
                 await self._client.delete_key(key_hash)
                 deleted = True
             except OpenRouterManagementError as error:
                 reason = error.reason_code
-        now = self._now()
         updates: dict[str, Any] = {
+            **usage,
             "status": final_status if deleted else KeyStatus.delete_failed.value,
             "last_reason_code": reason,
             "lease_expires_at": None,
-            "final_usage_read": info is not None,
         }
-        if info is not None:
-            updates.update(_usage_updates(info, now))
-            updates["last_reason_code"] = reason
         if deleted:
             updates["deleted_at"] = now
         if reason is not None:
@@ -484,14 +486,15 @@ class ManagedKeyBroker:
         only_status: str | None = None,
         event_type: str | None = None,
         **updates: Any,
-    ) -> None:
+    ) -> bool:
+        """Apply ``updates`` to an unfinalized row; ``False`` only if persisting failed."""
         try:
             async with self._session_factory() as session:
                 row = await ProviderManagedKeyRepository(session).get(row_id)
                 if row is None or row.status in _FINALIZED_STATUSES:
-                    return
+                    return True
                 if only_status is not None and row.status != only_status:
-                    return
+                    return True
                 for name, value in updates.items():
                     setattr(row, name, value)
                 row.updated_at = self._now()
@@ -512,6 +515,8 @@ class ManagedKeyBroker:
                 key_id=row_id,
                 reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
             )
+            return False
+        return True
 
 
 def _is_stale(row: ProviderManagedKey, now: datetime) -> bool:
