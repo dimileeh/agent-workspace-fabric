@@ -73,12 +73,26 @@ def test_selected_sidecar_project_dependencies_are_explicitly_unsupported():
 @pytest.mark.parametrize(
     "reference", ["${GITHUB_TOKEN}", "$GITHUB_TOKEN", "${MISSING:-${GITHUB_TOKEN}}"]
 )
-def test_diagnostic_sidecar_rejects_worker_environment_interpolation(field, template, reference):
+async def test_diagnostic_sidecar_rejects_worker_environment_interpolation(
+    field, template, reference, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from awf.service.provider_diagnostics import create_connection_test
+
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-worker-secret")
+    factory = Mock(side_effect=AssertionError("unsafe diagnostic opened a database session"))
+    owner = SimpleNamespace(
+        _settings=SimpleNamespace(agent_runtime_image="pinned", hosted_node=None),
+        _factory=factory,
+    )
     service = {"name": "ollama", "image": "ollama/ollama"}
     value = template.format(reference=reference)
     service[field] = {"MODEL_CONFIG": value} if field == "environment" else value
     with pytest.raises(ValueError, match="PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED"):
-        diagnostic_material(
+        await create_connection_test(
+            owner,
             request(
                 profile={
                     "name": "project",
@@ -86,8 +100,9 @@ def test_diagnostic_sidecar_rejects_worker_environment_interpolation(field, temp
                     "services": [service],
                 }
             ),
-            environ={"GITHUB_TOKEN": "synthetic-worker-secret"},
+            idempotency_key="unsafe-sidecar",
         )
+    factory.assert_not_called()
 
 
 @pytest.mark.parametrize(
