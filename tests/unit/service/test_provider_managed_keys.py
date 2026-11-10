@@ -12,7 +12,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from awf.adapters.managed_credentials import ProviderCredentialError
+from awf.adapters.managed_credentials import ProviderCredentialError, ProviderCredentialRelease
 from awf.common.agent_execution import EXECUTION_POLICY_KEY, resolve_execution
 from awf.db.models import ProviderManagedKey, WorkspaceEvent
 from awf.db.repositories import ProviderManagedKeyRepository, WorkspaceRepository
@@ -648,6 +648,48 @@ async def test_heartbeat_waits_out_an_in_flight_budget_raise_instead_of_revertin
         assert fake.keys[lease.key_hash]["limit"] == 100.0
         (row,) = await _rows(factory, ws)
         assert row.limit_usd == Decimal(100)
+
+
+async def test_release_waits_out_an_in_flight_budget_raise_instead_of_deadlocking(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        client = fake.client()
+        update_key_limit = client.update_key_limit
+        releases: list[asyncio.Future[ProviderCredentialRelease]] = []
+
+        async def _patch_then_release(key_hash, limit):
+            info = await update_key_limit(key_hash, limit)
+            # A release lands between the raise's PATCH and its key-row write.
+            releases.append(asyncio.ensure_future(lease.release(failed=False)))
+            await asyncio.wait(releases, timeout=0.5)
+            return info
+
+        monkeypatch.setattr(client, "update_key_limit", _patch_then_release)
+        async with factory() as session:
+            await _control_service(session).set_provider_budget(
+                ws, usd=100, management_client=client
+            )
+            assert not releases[0].done()
+            await session.commit()
+        outcome = await releases[0]
+
+        assert outcome.details["deleted"] is True
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.limit_usd) == ("deleted", Decimal(100))
+        async with factory() as session:
+            released = (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == ws,
+                        WorkspaceEvent.event_type == "provider.managed_key.released",
+                    )
+                )
+            ).scalars()
+            assert [event.payload["status"] for event in released] == ["deleted"]
 
 
 async def test_a_limit_restore_never_reverts_a_budget_raise_committed_during_it(monkeypatch):

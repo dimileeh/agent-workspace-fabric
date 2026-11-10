@@ -692,6 +692,16 @@ class ManagedKeyBroker:
         """Apply ``updates`` to an unfinalized row; ``False`` only if persisting failed."""
         try:
             async with self._session_factory() as session:
+                workspaces = WorkspaceRepository(session)
+                if event_type is not None:
+                    # The event writes the workspace row: lock it before the key row,
+                    # in the budget control's order, so the two never deadlock.
+                    await session.execute(
+                        select(Workspace.id)
+                        .join(ProviderManagedKey, ProviderManagedKey.workspace_id == Workspace.id)
+                        .where(ProviderManagedKey.id == row_id)
+                        .with_for_update(of=Workspace)
+                    )
                 # Locked like the reconciler's usage write, so neither overwrites the other.
                 row = await ProviderManagedKeyRepository(session).get(row_id, for_update=True)
                 if row is None or row.status in FINALIZED_KEY_STATUSES:
@@ -705,7 +715,6 @@ class ManagedKeyBroker:
                     setattr(row, name, value)
                 row.updated_at = self._now()
                 if event_type is not None:
-                    workspaces = WorkspaceRepository(session)
                     workspace = await workspaces.get(row.workspace_id)
                     assert workspace is not None  # the key row's FK cascades with it
                     await workspaces.add_event(
