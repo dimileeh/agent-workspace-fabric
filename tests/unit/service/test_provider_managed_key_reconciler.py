@@ -388,3 +388,36 @@ async def test_an_account_without_awf_keys_is_a_quiet_no_op():
         "truncated": False,
     }
     assert set(fake.keys) == {"hash1"}
+
+
+@pytest.mark.parametrize("failing", ["_record_usage", "_mark"])
+async def test_a_database_error_on_one_key_never_aborts_the_sweep(monkeypatch, failing):
+    from sqlalchemy.exc import IntegrityError
+
+    from awf.service import provider_managed_key_reconciler as reconciler
+
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        first = fake.add_key(f"awf-{ws}-1")
+        second = fake.add_key(f"awf-{ws}-2")
+        original = getattr(reconciler, failing)
+        calls: list[object] = []
+
+        async def _fails_once(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise IntegrityError("INSERT", None, Exception("duplicate key"))
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(reconciler, failing, _fails_once)
+        report = await reconcile_openrouter_keys(session_factory=factory, client=fake.client())
+
+        assert report["failed"] == 1
+        assert second not in fake.keys
+        # Usage is recorded before a delete: an unrecorded key is never deleted.
+        assert (first in fake.keys) is (failing == "_record_usage")
+        assert any(
+            r.key_hash == second and r.status == "orphan_deleted" for r in await _rows(factory, ws)
+        )

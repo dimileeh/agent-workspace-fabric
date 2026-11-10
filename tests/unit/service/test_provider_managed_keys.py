@@ -865,3 +865,27 @@ async def test_an_in_flight_mint_of_this_broker_is_never_released(monkeypatch):
         assert lease.seq == 1
         (row,) = await _rows(factory, ws)
         assert (row.status, row.limit_usd) == ("active", Decimal("10"))
+
+
+@pytest.mark.parametrize("failing", ["unfinalized_for_workspace", "for_workspace"])
+async def test_database_errors_before_minting_carry_a_reason_code(monkeypatch, failing):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+
+        async def _fail(*_args, **_kwargs):
+            raise _db_error()
+
+        # The stale-key lookup, then the reservation, cannot read the database.
+        monkeypatch.setattr(ProviderManagedKeyRepository, failing, _fail)
+        with pytest.raises(ProviderCredentialError) as raised:
+            await _broker(factory, fake).acquire(
+                workspace_id=ws, selection=_SELECTION, purpose="agent"
+            )
+
+        assert raised.value.reason_code == "PROVIDER_MANAGED_KEY_UNAVAILABLE"
+        assert raised.value.details == {
+            "management_reason_code": "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
+        }
+        assert fake.calls == []

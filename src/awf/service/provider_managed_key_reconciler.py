@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.ids import new_provider_managed_key_id
@@ -32,7 +33,11 @@ from awf.service.openrouter_management import (
     OpenRouterManagementError,
     usd,
 )
-from awf.service.provider_managed_keys import FINALIZED_KEY_STATUSES, MANAGED_KEY_NAME_RE
+from awf.service.provider_managed_keys import (
+    FINALIZED_KEY_STATUSES,
+    MANAGED_KEY_NAME_RE,
+    PROVIDER_MANAGED_KEY_PERSIST_FAILED,
+)
 
 PROVIDER_MANAGED_KEY_ORPHAN_DELETED = "PROVIDER_MANAGED_KEY_ORPHAN_DELETED"
 PROVIDER_MANAGED_KEY_RECONCILE_FAILED = "PROVIDER_MANAGED_KEY_RECONCILE_FAILED"
@@ -80,25 +85,38 @@ async def reconcile_openrouter_keys(
         if report["deleted"] >= max_deletions:
             report["truncated"] = True
             break
-        row_id = await _record_usage(session_factory, row, info, workspace_id, seq, current)
-        if row_id is None:
-            continue
         try:
-            await client.delete_key(info.hash)
-        except OpenRouterManagementError as error:
+            row_id = await _record_usage(session_factory, row, info, workspace_id, seq, current)
+            if row_id is None:
+                continue
+            try:
+                await client.delete_key(info.hash)
+            except OpenRouterManagementError as error:
+                report["failed"] += 1
+                await _mark(
+                    session_factory, row_id, status=KeyStatus.delete_failed.value, reason=error
+                )
+                _log.warning(
+                    "provider.managed_key.orphan_delete_failed",
+                    workspace_id=workspace_id,
+                    key_name=info.name,
+                    reason_code=error.reason_code,
+                )
+                continue
+            report["deleted"] += 1
+            await _mark(
+                session_factory, row_id, status=KeyStatus.orphan_deleted.value, deleted_at=clock()
+            )
+        except SQLAlchemyError:
+            # One key's database error (e.g. a racing insert) never aborts the
+            # sweep; an unrecorded key is not deleted and the next sweep retries.
             report["failed"] += 1
-            await _mark(session_factory, row_id, status=KeyStatus.delete_failed.value, reason=error)
             _log.warning(
-                "provider.managed_key.orphan_delete_failed",
+                "provider.managed_key.orphan_persist_failed",
                 workspace_id=workspace_id,
                 key_name=info.name,
-                reason_code=error.reason_code,
+                reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
             )
-            continue
-        report["deleted"] += 1
-        await _mark(
-            session_factory, row_id, status=KeyStatus.orphan_deleted.value, deleted_at=clock()
-        )
     if not listing.truncated:
         # Only a complete listing proves an old hashless intent's key absent.
         await _release_absent_intents(

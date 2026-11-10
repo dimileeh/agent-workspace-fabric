@@ -234,10 +234,21 @@ class ManagedKeyBroker:
         # their spend is recorded and their headroom returns to the budget. The
         # workspace claim admits one worker, so a key this broker does not hold
         # is dead even while its lease (which can outlive the claim) is unexpired.
-        await self.finalize_workspace_keys(workspace_id, stale_only=True)
-        row_id, key_name, limit, budget = await self._reserve(
-            workspace_id, provider=selection.provider, purpose=purpose
-        )
+        try:
+            await self.finalize_workspace_keys(workspace_id, stale_only=True)
+            row_id, key_name, limit, budget = await self._reserve(
+                workspace_id, provider=selection.provider, purpose=purpose
+            )
+        except SQLAlchemyError:
+            _log.warning(
+                "provider.managed_key.persist_failed",
+                workspace_id=workspace_id,
+                reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
+            )
+            raise ProviderCredentialError(
+                PROVIDER_MANAGED_KEY_UNAVAILABLE,
+                details={"management_reason_code": PROVIDER_MANAGED_KEY_PERSIST_FAILED},
+            ) from None
         try:
             return await self._mint(
                 client,
