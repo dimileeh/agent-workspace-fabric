@@ -18,7 +18,7 @@ from __future__ import annotations
 import posixpath
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.constants import (
@@ -32,8 +32,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    mark_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -48,6 +52,7 @@ from awf.runtime.validation_worktree_constants import (
 )
 
 if TYPE_CHECKING:
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
         ValidationWorktreeCleanup,
@@ -863,6 +868,22 @@ async def _try_finalize_pre_push_dirty_repair_state(
             "monitor.pre_push_dirty_finalize_provider_recovery_fallback",
             workspace_id=workspace_id,
             paths=list(check.paths),
+        )
+        raise
+    except ProviderManagedKeyParkedError:
+        # A managed-key park blocks the workspace until a human raises the budget,
+        # and that resume continues from this worktree. The auth rollback below
+        # would discard the repair output this finalize was committing, so keep it
+        # and mark the state: the resumed hint cycle commits it before its
+        # pre-existing-dirty guard runs (``provider_park_stranded_edits``,
+        # PRRT_kwDOSJAM6s618qEs).
+        preserved_head = await self._rev_parse_head(worktree_path)
+        mark_provider_park_stranded_edits(cast("MonitorState", state), preserved_head)
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_park_preserved",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+            preserved_head=preserved_head,
         )
         raise
     except ProviderRecoveryAuthError:

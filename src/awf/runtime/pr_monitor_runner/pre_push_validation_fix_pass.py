@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
@@ -100,6 +100,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _commit_range_changes_callee_definition as _commit_range_changes_callee_definition,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    mark_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
     _open_merge_candidate_head_sha,
@@ -107,6 +110,7 @@ from awf.runtime.pr_monitor_runner.remote_repair import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -120,6 +124,7 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
 if TYPE_CHECKING:
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner.pre_push_validation import _PrePushValidationResult
 
 _log = get_logger(__name__)
@@ -891,6 +896,23 @@ async def _run_pre_push_validation_fix_pass_impl(
                 operation_start_head=fix_pass_baseline_head,
             )
         )
+    except ProviderManagedKeyParkedError:
+        # A managed-key park in the in-sink protected-scope repair blocks the
+        # workspace until a human raises the budget, and that resume continues
+        # from this worktree. The auth rollback below would discard the fix
+        # pass's uncommitted edits first, so keep them and mark the state: the
+        # resumed hint cycle commits them before its pre-existing-dirty guard
+        # runs (``provider_park_stranded_edits``, PRRT_kwDOSJAM6s618qEs).
+        _raise_unproven_timeout_cleanup()
+        preserved_head = await self._rev_parse_head(worktree_path)
+        mark_provider_park_stranded_edits(cast("MonitorState | None", state), preserved_head)
+        _log.warning(
+            "monitor.pre_push_validation_fix_pass_provider_park_preserved",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            preserved_head=preserved_head,
+        )
+        raise
     except (
         ProviderRecoveryAuthError,
         ProviderRecoveryFallbackError,
