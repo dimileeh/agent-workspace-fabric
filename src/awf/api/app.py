@@ -79,6 +79,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     health.reset_egress_audit_summary_counts_task(app.state)
     settings: Settings = get_settings()
     validate_production_settings(settings)
+    from awf.service.openrouter_management import scrub_openrouter_management_environ
+
+    scrub_openrouter_management_environ()
     engine = make_engine(settings.database_url)
 
     factory = make_session_factory(engine)

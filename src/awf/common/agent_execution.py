@@ -19,6 +19,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 EXECUTION_CONTRACT_VERSION = 1
 EXECUTION_POLICY_KEY = "agent_execution"
 LEGACY_CONNECTION_SCOPE = "legacy"
+# Managed OpenRouter keys are minted per invocation. Every managed selection
+# shares this fixed reference, so connection and cooldown scopes never fragment
+# per workspace and no key value or hash enters the snapshot.
+MANAGED_OPENROUTER_CREDENTIAL_REF = "managed/openrouter"
+PROVIDER_BUDGET_POLICY_KEY = "provider_budget"
 CircuitKey = tuple[str, str] | tuple[str, str, str]
 _NATIVE = {
     "codex": "openai",
@@ -50,6 +55,10 @@ class ExecutionSelection(BaseModel):
     @property
     def third_party(self) -> bool:
         return self.agent in {"codex", "claude_code"} and self.provider != _NATIVE[self.agent]
+
+    @property
+    def managed_key(self) -> bool:
+        return self.credential_ref == MANAGED_OPENROUTER_CREDENTIAL_REF
 
     def connection_scope(self, workspace_id: str | None = None) -> str:
         if not self.third_party:
@@ -118,6 +127,7 @@ def resolve_execution(
     allow_unverified: bool = False,
     profile: Mapping[str, Any] | None = None,
     environ: Mapping[str, str] | None = None,
+    managed_openrouter: bool = False,
 ) -> ExecutionSelection:
     """Resolve once, before persistence; no mutable global provider selection."""
     from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS
@@ -186,7 +196,10 @@ def resolve_execution(
             and not _ENV_REF.fullmatch(value)
         ):
             raise ValueError("PROVIDER_CREDENTIAL_REFERENCE_REQUIRED")
-    if provider == "openrouter":
+    if provider == "openrouter" and managed_openrouter:
+        credential_ref = MANAGED_OPENROUTER_CREDENTIAL_REF
+        endpoint = "https://openrouter.ai/api"
+    elif provider == "openrouter":
         raw_key = env.get("OPENROUTER_API_KEY")
         if raw_key is not None:
             match = _ENV_REF.fullmatch(raw_key)
@@ -294,13 +307,22 @@ def execution_from_policy(policy: object) -> ExecutionSelection | None:
             and selection.endpoint != "https://openrouter.ai/api"
         ):
             raise ValueError
-        if selection.credential_ref and not re.fullmatch(
+        if selection.managed_key:
+            if not (selection.third_party and selection.provider == "openrouter"):
+                raise ValueError
+        elif selection.credential_ref and not re.fullmatch(
             r"env/[A-Za-z_][A-Za-z0-9_]*", selection.credential_ref
         ):
             raise ValueError
         return selection
     except (ValidationError, ValueError):
         raise ValueError("EXECUTION_CONTRACT_UNSUPPORTED") from None
+
+
+def managed_openrouter_frozen(policy: object) -> bool:
+    """Return the creation-time managed-key decision frozen beside the selection."""
+    budget = policy.get(PROVIDER_BUDGET_POLICY_KEY) if isinstance(policy, Mapping) else None
+    return isinstance(budget, Mapping) and budget.get("managed") is True
 
 
 def require_execution_admission(selection: ExecutionSelection, *, enabled: bool) -> None:
@@ -401,6 +423,7 @@ def bind_execution_profile(
             ),
             profile=profile,
             environ=environ,
+            managed_openrouter=managed_openrouter_frozen(updated),
         )
         target[EXECUTION_POLICY_KEY] = selected.model_dump(mode="json")
     return updated

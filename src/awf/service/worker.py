@@ -1109,7 +1109,10 @@ async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
 
     if get_settings().hosted_node is not None:
         raise ValueError("HOSTED_RUNTIME_INTEGRATION_REQUIRED")
+    from awf.service.openrouter_management import scrub_openrouter_management_environ
 
+    # Settings already hold the key; compose/git/agent subprocesses must not.
+    scrub_openrouter_management_environ()
     runtime = build_worker_runtime(settings)
     try:
         await verify_database_schema_not_ahead(runtime.engine)
