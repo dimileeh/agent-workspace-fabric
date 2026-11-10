@@ -273,7 +273,7 @@ def build_worker_runtime(
         template_path=template,
         **compose_options,
     )
-    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
+    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose, auth_work_dir=work_dir)
     runner = (
         HostedCommandRunner(hosted, AsyncioSubprocessRunner())
         if hosted is not None

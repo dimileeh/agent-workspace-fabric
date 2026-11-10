@@ -143,9 +143,17 @@ class WorkspaceCleanupResult:
 class WorkspaceCleaner:
     """Teardown coordinator. Holds the git + compose managers as dependencies."""
 
-    def __init__(self, *, git: GitManager, compose: ComposeManager) -> None:
+    def __init__(
+        self,
+        *,
+        git: GitManager,
+        compose: ComposeManager,
+        auth_work_dir: Path | None = None,
+    ) -> None:
         self._git = git
         self._compose = compose
+        # ServiceAuthMountResolver's root is independent of the git storage root.
+        self._auth_work_dir = auth_work_dir
 
     async def cleanup(
         self,
@@ -405,11 +413,12 @@ class WorkspaceCleaner:
             repo_url == "awf-internal://provider-diagnostic/v1"
             and remove_worktree
             and all(step.ok for step in steps)
+            and self._auth_work_dir is not None
         ):
             from awf.node.provider_diagnostics import remove_diagnostic_auth
 
             try:
-                remove_diagnostic_auth(self._git.work_dir, workspace_id)
+                remove_diagnostic_auth(self._auth_work_dir, workspace_id)
             except (ValueError, OSError):
                 steps.append(
                     WorkspaceCleanupStepResult(

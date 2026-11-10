@@ -184,8 +184,12 @@ async def dispose_if_terminal(provisioner: Any, workspace_id: str, *, launched: 
     cleanup_reason = "PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED"
     try:
         compose = getattr(provisioner._stack_launcher, "_compose", None)
+        auth_resolver = getattr(provisioner._stack_launcher, "_auth_mount_resolver", None)
+        auth_work_dir = getattr(auth_resolver, "work_dir", None)
         if compose is not None:
-            result = await WorkspaceCleaner(git=provisioner._git, compose=compose).cleanup(
+            result = await WorkspaceCleaner(
+                git=provisioner._git, compose=compose, auth_work_dir=auth_work_dir
+            ).cleanup(
                 workspace_id=workspace_id,
                 repo_url=INTERNAL_REPO,
                 compose_project_name=ws.compose_project_name,
@@ -201,7 +205,8 @@ async def dispose_if_terminal(provisioner: Any, workspace_id: str, *, launched: 
             await provisioner._git.remove_worktree(
                 workspace_id=workspace_id, repo_url=INTERNAL_REPO
             )
-            remove_diagnostic_auth(provisioner._git.work_dir, workspace_id)
+            if auth_work_dir is not None:
+                remove_diagnostic_auth(auth_work_dir, workspace_id)
             ok = True
             cleanup_reason = "CLEANUP_SUCCEEDED"
     except (OSError, ValueError, GitOperationError) as error:

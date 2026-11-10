@@ -100,7 +100,13 @@ async def test_cancel_while_fixture_is_created_removes_late_fixture_without_laun
         return layout
 
     monkeypatch.setattr(diagnostics, "fixture_worktree", cancelled_fixture)
-    launcher = SimpleNamespace(launch=AsyncMock())
+    auth_root = tmp_path / "state"
+    auth = auth_root / "auth" / response.workspace_id / "diagnostic" / "codex"
+    auth.mkdir(parents=True)
+    (auth / "auth.json").write_text("synthetic-native-credential")
+    launcher = SimpleNamespace(
+        launch=AsyncMock(), _auth_mount_resolver=SimpleNamespace(work_dir=auth_root)
+    )
     provisioner = Provisioner(
         session_factory=factory,
         git=GitManager(tmp_path),
@@ -126,6 +132,7 @@ async def test_cancel_while_fixture_is_created_removes_late_fixture_without_laun
     await provisioner.provision(response.workspace_id)
     launcher.launch.assert_not_awaited()
     assert (tmp_path / "worktrees" / response.workspace_id).exists() is not remove_allowed
+    assert auth.exists() is not remove_allowed
     if not remove_allowed:
         from sqlalchemy import select
 
@@ -143,7 +150,10 @@ async def test_cancel_while_fixture_is_created_removes_late_fixture_without_laun
             assert event.payload["cleanup_reason"] == "GIT_WORKTREE_UNOWNED"
 
 
-async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(engine, tmp_path):
+@pytest.mark.parametrize("native_auth", [False, True])
+async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
+    engine, tmp_path, native_auth
+):
     from awf.db.repositories import OperationRepository
 
     await capable(engine)
@@ -157,6 +167,7 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
 
     async def down(*_args, **kwargs):
         assert fixture.exists()
+        assert auth.exists() is native_auth
         assert kwargs["remove_volumes"]
         return True
 
@@ -170,7 +181,16 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
             await session.commit()
         return
 
-    launcher = SimpleNamespace(launch=launch, _compose=compose)
+    auth_root = tmp_path / "state"
+    auth = auth_root / "auth" / response.workspace_id / "diagnostic" / "codex"
+    if native_auth:
+        auth.mkdir(parents=True)
+        (auth / "auth.json").write_text("synthetic-native-credential")
+    launcher = SimpleNamespace(
+        launch=launch,
+        _compose=compose,
+        _auth_mount_resolver=SimpleNamespace(work_dir=auth_root) if native_auth else None,
+    )
     provisioner = Provisioner(
         session_factory=factory,
         git=GitManager(tmp_path),
@@ -180,6 +200,7 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
     await provisioner.provision(response.workspace_id)
     compose.down.assert_awaited_once()
     assert not fixture.exists()
+    assert not auth.exists()
     async with factory() as session:
         ops = await OperationRepository(session).list_for_workspace(response.workspace_id)
         assert (
