@@ -2,10 +2,12 @@
 
 This release adds T4–T6 catalog and diagnostic workspaces to the merged T1–T3 foundation,
 plus live monitor repair/restart identity preservation. Third-party
-Codex/Claude admission defaults to disabled through
+Codex/Claude admission defaults to disabled for new deployments through
 `AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED=false`. This foundation is deployable
-before provider compatibility is established; it does not release third-party
-coding compatibility. No console interface is added.
+before provider compatibility is established. Measured acceptance covers the
+exact six tested selections below plus ordinary monitor repair/restart identity,
+subject to the proof/opt-in gates documented here; it does not release general
+third-party coding compatibility. No console interface is added.
 
 ## Selection contract
 
@@ -255,8 +257,8 @@ flowchart LR
 
 ## Remaining release gates and preliminary evidence
 
-Deployed-AWF coding compatibility is now measured for exactly the six catalog
-paths below plus monitor repair/restart identity: all six deployed diagnostics
+Deployed-AWF coding compatibility is now measured for exactly the six tested
+selections below plus monitor repair/restart identity: all six deployed diagnostics
 in the pinned runtime
 (`sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d`)
 passed with reason `PROVIDER_DIAGNOSTIC_PASSED`, verified fixture
