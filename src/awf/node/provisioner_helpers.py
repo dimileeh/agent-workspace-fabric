@@ -637,6 +637,7 @@ def _validate_bound_execution_profile(ws: Workspace, profile: WorkspaceProfile) 
                 model=selected.model,
                 allow_unverified=True,
                 profile=snapshot,
+                managed_openrouter=selected.managed_key,
             )
             if rebound.credential_ref != selected.credential_ref:
                 raise ValueError

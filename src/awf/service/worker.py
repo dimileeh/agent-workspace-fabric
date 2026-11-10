@@ -280,6 +280,15 @@ def build_worker_runtime(
         else AsyncioSubprocessRunner()
     )
     usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
+    from awf.service.provider_managed_keys import build_managed_key_broker
+
+    # Always built: a frozen managed selection on a worker without a management
+    # key must park with PROVIDER_MANAGEMENT_KEY_MISSING, never use a static key.
+    managed_key_broker = build_managed_key_broker(
+        session_factory=session_factory,
+        management_key=settings.openrouter_management_key,
+        usage_poll_interval_seconds=settings.openrouter_usage_poll_interval_seconds,
+    )
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
@@ -605,6 +614,7 @@ def build_worker_runtime(
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,
+        credential_broker=managed_key_broker,
         # Cloud-neutral hosted execution seam. None in Core: local AWF keeps
         # the exact tracked docker compose exec path. A hosted AWF Cloud
         # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)

@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
@@ -33,6 +34,10 @@ MANAGEMENT_API_UNAVAILABLE = "PROVIDER_MANAGEMENT_API_UNAVAILABLE"
 MANAGEMENT_API_REJECTED = "PROVIDER_MANAGEMENT_API_REJECTED"
 MANAGEMENT_API_RESPONSE_INVALID = "PROVIDER_MANAGEMENT_API_RESPONSE_INVALID"
 MANAGED_KEY_NOT_FOUND = "PROVIDER_MANAGED_KEY_NOT_FOUND"
+PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN = "PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN"
+_MANAGEMENT_REFERENCE_RE = re.compile(
+    r"\$\{?" + OPENROUTER_MANAGEMENT_KEY_ENV + r"(?![A-Za-z0-9_])"
+)
 
 
 def scrub_openrouter_management_environ() -> None:
@@ -42,6 +47,22 @@ def scrub_openrouter_management_environ() -> None:
     removing the variable keeps them from interpolating or inheriting it.
     """
     os.environ.pop(OPENROUTER_MANAGEMENT_KEY_ENV, None)
+
+
+def references_management_key(value: str | None) -> bool:
+    """Whether a profile value or env-secret source names the management key."""
+    if not value:
+        return False
+    stripped = value.strip().removeprefix("env/")
+    return stripped == OPENROUTER_MANAGEMENT_KEY_ENV or bool(_MANAGEMENT_REFERENCE_RE.search(value))
+
+
+def reject_management_credential_references(
+    *, values: Iterable[str | None], sources: Iterable[str | None] = ()
+) -> None:
+    """Refuse workspace material that would interpolate or lease the management key."""
+    if any(references_management_key(value) for value in (*values, *sources)):
+        raise ValueError(PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN)
 
 
 def usd(value: Decimal | float | int | str) -> Decimal:

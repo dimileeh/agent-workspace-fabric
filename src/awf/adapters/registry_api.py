@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from awf.adapters.base import AgentAdapter, AgentDefaults
+    from awf.adapters.managed_credentials import ProviderCredentialBroker
     from awf.adapters.runtime_executor import AgentRuntimeExecutor
     from awf.adapters.usage import UsageSampler
     from awf.common.commands import AsyncCommandRunner
@@ -44,6 +45,7 @@ def get_adapter(
     runtime_executor: AgentRuntimeExecutor | None = None,
     trusted_git_roots: tuple[Path, Path] | None = None,
     execution: ExecutionSelection | None = None,
+    credential_broker: ProviderCredentialBroker | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime."""
     if isinstance(runtime, str) and not isinstance(runtime, AgentRuntime):
@@ -93,5 +95,6 @@ def get_adapter(
             require_compatibility_evidence=defaults.require_compatibility_evidence
             if defaults
             else False,
+            credential_broker=credential_broker,
         ),
     )

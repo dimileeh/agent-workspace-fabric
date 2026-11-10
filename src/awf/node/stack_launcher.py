@@ -251,6 +251,20 @@ class ComposeStackLauncher:
         layout = request.layout
         profile = request.profile
         selected = request.execution
+        from awf.service.openrouter_management import reject_management_credential_references
+
+        reject_management_credential_references(
+            values=[
+                *profile.runtime.environment.values(),
+                *(value for service in profile.services for value in service.environment.values()),
+                *(
+                    value
+                    for companion in request.companions
+                    for _, value in companion.spec.environment
+                ),
+            ],
+            sources=[secret.ref for secret in profile.secrets],
+        )
         third_party = selected is not None and selected.third_party
         selected_agent = selected.agent if selected is not None else None
         isolated = selected_agent in {"codex", "claude_code"}
@@ -286,9 +300,14 @@ class ComposeStackLauncher:
                 else {"/home/agent/.claude", "/home/agent/.claude.json"}
             )
         if isolated:
+            # A managed key is minted per invocation and passed at exec time only,
+            # so its stack carries no OpenRouter credential at all.
             selected_credential = (
                 selected.credential_ref
-                if third_party and selected is not None and selected.provider == "openrouter"
+                if third_party
+                and selected is not None
+                and selected.provider == "openrouter"
+                and not selected.managed_key
                 else None
             )
             profile = profile.model_copy(deep=True)

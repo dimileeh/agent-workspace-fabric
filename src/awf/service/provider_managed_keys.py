@@ -60,6 +60,20 @@ _FINALIZED_STATUSES = frozenset({KeyStatus.deleted.value, KeyStatus.orphan_delet
 _log = get_logger(__name__)
 
 
+def build_managed_key_broker(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    management_key: str | None,
+    usage_poll_interval_seconds: float,
+) -> ManagedKeyBroker:
+    """The worker's broker; without a management key every acquire fails closed."""
+    return ManagedKeyBroker(
+        session_factory=session_factory,
+        client=OpenRouterManagementClient(management_key) if management_key else None,
+        usage_poll_interval_seconds=usage_poll_interval_seconds,
+    )
+
+
 def managed_key_name(workspace_id: str, seq: int) -> str:
     return f"awf-{workspace_id}-{seq}"
 

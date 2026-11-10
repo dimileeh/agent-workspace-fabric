@@ -325,3 +325,24 @@ def _normalize_optional(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+_BUDGET_EXHAUSTED_MARKERS = (
+    "provider_http_402",
+    "payment required",
+    "insufficient credits",
+    "key limit exceeded",
+)
+_HTTP_402_RE = re.compile(r"\b(?:http|status|error|code)\b\W{0,3}402\b|\b402\W{0,3}payment\b")
+
+
+def is_budget_exhausted_output(output: str | None) -> bool:
+    """Whether CLI output reports an exhausted managed key (HTTP 402 / limit reached).
+
+    Used only for managed-key selections, whose key limit is the workspace budget;
+    the authoritative key read confirms other statuses (e.g. a limit-layer 403).
+    """
+    normalized = (output or "").lower()
+    return any(marker in normalized for marker in _BUDGET_EXHAUSTED_MARKERS) or bool(
+        _HTTP_402_RE.search(normalized)
+    )

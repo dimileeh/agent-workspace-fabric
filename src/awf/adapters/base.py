@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,11 @@ from awf.adapters.base_hosted_identity import (
 from awf.adapters.failure_reasons import (
     _failure_reason_for_result,
     masked_agent_timeout_reason_code,
+)
+from awf.adapters.managed_credentials import (
+    ProviderCredentialBroker,
+    ProviderCredentialLease,
+    managed_credential_scope,
 )
 from awf.adapters.prompt_preamble import _AWF_PROMPT_PREAMBLE
 from awf.adapters.provider_failures import classify_provider_failure
@@ -190,6 +196,7 @@ class AgentAdapter(ABC):
         execution: ExecutionSelection | None = None,
         compatibility_evidence: dict[str, Any] | None = None,
         require_compatibility_evidence: bool = False,
+        credential_broker: ProviderCredentialBroker | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
@@ -208,6 +215,7 @@ class AgentAdapter(ABC):
         self._usage_sampler = usage_sampler
         self._runtime_executor = runtime_executor
         self._trusted_git_roots = trusted_git_roots
+        self._credential_broker = credential_broker
 
     @property
     @abstractmethod
@@ -314,6 +322,7 @@ class AgentAdapter(ABC):
         worktree_path: Path | None = None,
         workdir: str = DEFAULT_AGENT_WORKDIR,
         work_slot: WorkSlot | None = None,
+        credential_lease: ProviderCredentialLease | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -334,7 +343,12 @@ class AgentAdapter(ABC):
         empty. Preamble + post-agent branch-drift recovery in
         ``control/executor.py`` form a belt-and-braces defence.
         """
-        async with hold_work_slot(work_slot, "agent") as work_slot_invocation_id:
+        async with (
+            hold_work_slot(work_slot, "agent") as work_slot_invocation_id,
+            managed_credential_scope(
+                self, workspace_id=workspace_id, purpose=log_source, lease=credential_lease
+            ) as lease,
+        ):
             return await self._run_holding_work_slot(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -348,6 +362,7 @@ class AgentAdapter(ABC):
                 worktree_path=worktree_path,
                 workdir=workdir,
                 work_slot_invocation_id=work_slot_invocation_id,
+                credential_env=dict(lease.env) if lease is not None else None,
             )
 
     async def _run_holding_work_slot(
@@ -365,6 +380,7 @@ class AgentAdapter(ABC):
         worktree_path: Path | None,
         workdir: str,
         work_slot_invocation_id: str | None,
+        credential_env: dict[str, str] | None = None,
     ) -> AgentRunResult:
         """Run the agent once the caller's work slot (if any) is held."""
         from awf.service.provider_compatibility import guard_runtime_compatibility
@@ -374,6 +390,7 @@ class AgentAdapter(ABC):
             compose_project=compose_project,
             compose_file=compose_file,
             workspace_id=workspace_id,
+            env=credential_env,
         )
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
@@ -434,6 +451,9 @@ class AgentAdapter(ABC):
             )
         if self.diagnostic_events:
             env_passthrough = ()
+        if credential_env is not None:
+            # A minted managed key is the only selected credential, by name.
+            env_passthrough = tuple(credential_env)
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         masked_reason_code: str | None = None
@@ -477,6 +497,7 @@ class AgentAdapter(ABC):
                 log_source=log_source,
                 compose_project=compose_project,
                 worktree_path=worktree_path,
+                env=credential_env,
             )
             final_status = "success"
             return result
@@ -1170,6 +1191,7 @@ class AgentAdapter(ABC):
         log_source: str,
         compose_project: str,
         worktree_path: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> AgentRunResult:
         """Run an agent CLI with streamed logs and tracked cancellation cleanup."""
         sinks = await self._open_command_streams(
@@ -1197,6 +1219,8 @@ class AgentAdapter(ABC):
             probe_kwargs: dict[str, Any] = (
                 {"activity_probe": activity_probe} if activity_probe is not None else {}
             )
+            # Only a managed key needs an exec env; other runs keep the old call.
+            env_kwargs: dict[str, Any] = {"env": {**os.environ, **env}} if env is not None else {}
             try:
                 if run_streaming is not None:
                     result = await run_streaming(
@@ -1207,6 +1231,7 @@ class AgentAdapter(ABC):
                         wall_timeout_seconds=self._agent_wall_timeout_seconds,
                         idle_timeout_seconds=self._agent_idle_timeout_seconds,
                         **probe_kwargs,
+                        **env_kwargs,
                     )
                 else:
                     _log.warning(
@@ -1216,7 +1241,7 @@ class AgentAdapter(ABC):
                         workspace_id=workspace_id,
                         reason="runner does not support run_streaming",
                     )
-                    result = await self._runner.run(args, input_bytes=prompt_input)
+                    result = await self._runner.run(args, input_bytes=prompt_input, **env_kwargs)
                     if sinks is not None:
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)

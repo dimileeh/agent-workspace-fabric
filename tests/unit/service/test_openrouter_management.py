@@ -271,3 +271,32 @@ async def test_unsafe_key_hashes_never_reach_a_request_path():
 
     with pytest.raises(ValueError, match="PROVIDER_MANAGED_KEY_HASH_INVALID"):
         await _client(handler).get_key("../keys")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("${OPENROUTER_MANAGEMENT_KEY}", True),
+        ("${OPENROUTER_MANAGEMENT_KEY:-fallback}", True),
+        ("prefix-$OPENROUTER_MANAGEMENT_KEY", True),
+        ("env/OPENROUTER_MANAGEMENT_KEY", True),
+        ("OPENROUTER_MANAGEMENT_KEY", True),
+        ("${OPENROUTER_MANAGEMENT_KEY_SUFFIX}", False),
+        ("${OPENROUTER_API_KEY}", False),
+        ("plain", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_management_key_references_are_detected(value, expected):
+    from awf.service.openrouter_management import (
+        references_management_key,
+        reject_management_credential_references,
+    )
+
+    assert references_management_key(value) is expected
+    if expected:
+        with pytest.raises(ValueError, match="PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN"):
+            reject_management_credential_references(values=[value])
+    else:
+        reject_management_credential_references(values=[value], sources=[value])
