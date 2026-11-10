@@ -203,6 +203,7 @@ class ManagedKeyBroker:
         self._poll_interval = usage_poll_interval_seconds
         self._lease_ttl = timedelta(seconds=lease_ttl_seconds or usage_poll_interval_seconds * 3)
         self._now = now or (lambda: datetime.now(UTC))
+        self._live: set[str] = set()
 
     @property
     def heartbeat_interval_seconds(self) -> float:
@@ -215,7 +216,9 @@ class ManagedKeyBroker:
         if client is None:
             raise ProviderCredentialError(PROVIDER_MANAGEMENT_KEY_MISSING)
         # Keys left by a crashed or restarted invocation are finalized first so
-        # their spend is recorded and their headroom returns to the budget.
+        # their spend is recorded and their headroom returns to the budget. The
+        # workspace claim admits one worker, so a key this broker does not hold
+        # is dead even while its lease (which can outlive the claim) is unexpired.
         await self.finalize_workspace_keys(workspace_id, stale_only=True)
         row_id, key_name, limit, budget = await self._reserve(
             workspace_id, provider=selection.provider, purpose=purpose
@@ -270,6 +273,7 @@ class ManagedKeyBroker:
                 PROVIDER_MANAGED_KEY_UNAVAILABLE,
                 details={"management_reason_code": PROVIDER_MANAGED_KEY_PERSIST_FAILED},
             ) from None
+        self._live.add(row_id)
         _log.info(
             "provider.managed_key.minted",
             workspace_id=workspace_id,
@@ -293,6 +297,7 @@ class ManagedKeyBroker:
     ) -> dict[str, int]:
         """Final-read and delete a workspace's keys (only stale ones if asked).
 
+        A key is stale unless this broker holds its live, unexpired lease.
         Minting intents without a recorded hash are left to the reconciler,
         which resolves them by name.
         """
@@ -307,7 +312,8 @@ class ManagedKeyBroker:
             targets = [
                 (row.id, row.key_hash)
                 for row in rows
-                if row.key_hash is not None and (not stale_only or _is_stale(row, now))
+                if row.key_hash is not None
+                and (not stale_only or row.id not in self._live or _is_stale(row, now))
             ]
         for row_id, key_hash in targets:
             _info, deleted, _reason = await self._finalize_key(row_id, str(key_hash))
@@ -415,7 +421,10 @@ class ManagedKeyBroker:
         await self._update(lease.row_id, only_status=KeyStatus.active.value, **updates)
 
     async def _release(self, lease: ManagedKeyLease, *, failed: bool) -> ProviderCredentialRelease:
-        info, deleted, reason = await self._finalize_key(lease.row_id, lease.key_hash)
+        try:
+            info, deleted, reason = await self._finalize_key(lease.row_id, lease.key_hash)
+        finally:
+            self._live.discard(lease.row_id)
         details: dict[str, Any] = {
             "key_name": lease.key_name,
             "final_usage_read": info is not None,

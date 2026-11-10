@@ -154,6 +154,29 @@ async def test_restart_finalizes_an_expired_stale_key_before_minting_a_new_one()
         ]
 
 
+async def test_restart_finalizes_a_dead_invocations_unexpired_key_instead_of_parking():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        await _broker(factory, fake).acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage("hash1", 4.0)
+        # The workspace claim can be retaken before the dead key's lease expires.
+        restarted = _broker(factory, fake)
+
+        await restarted.acquire(workspace_id=ws, selection=_SELECTION, purpose="monitor")
+
+        methods = [(m, p) for m, p, _ in fake.calls]
+        assert methods[1:4] == [
+            ("GET", "/keys/hash1"),
+            ("DELETE", "/keys/hash1"),
+            ("POST", "/keys"),
+        ]
+        assert fake.calls[3][2]["limit"] == 6.0
+        rows = await _rows(factory, ws)
+        assert [(r.seq, r.status) for r in rows] == [(1, "deleted"), (2, "active")]
+
+
 async def test_live_concurrent_lease_reserves_its_headroom_instead_of_being_deleted():
     fake = FakeOpenRouterManagement()
     async with postgres_test_engine() as engine:
