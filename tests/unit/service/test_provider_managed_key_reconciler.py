@@ -277,6 +277,47 @@ async def test_a_lease_renewed_after_the_bindings_load_keeps_its_key(monkeypatch
         assert row.lease_expires_at is not None and row.lease_expires_at > sweep_at
 
 
+async def test_a_gone_key_is_finalized_even_if_a_heartbeat_renewed_its_lease(monkeypatch):
+    from awf.service import provider_managed_key_reconciler as reconciler
+
+    fake = FakeOpenRouterManagement()
+    clock = [datetime.now(UTC)]
+    sweep_at = clock[0] + timedelta(hours=1)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(
+            session_factory=factory, client=fake.client(), now=lambda: clock[0]
+        )
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage(lease.key_hash, 0.4)
+        load_bindings = reconciler._load_bindings
+
+        async def load_then_vanish_then_heartbeat(*args):
+            loaded = await load_bindings(*args)
+            # The key vanishes after the listing; a delayed heartbeat (whose read
+            # 404s too) still renews the expired lease after the snapshot.
+            del fake.keys[lease.key_hash]
+            clock[0] = sweep_at
+            await lease.heartbeat()
+            return loaded
+
+        monkeypatch.setattr(reconciler, "_load_bindings", load_then_vanish_then_heartbeat)
+        report = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: sweep_at
+        )
+
+        assert (report["deleted"], report["failed"]) == (1, 0)
+        (row,) = await _rows(factory, ws)
+        # Later listings omit the gone key: this sweep is its only finalize.
+        assert (row.status, row.usage_usd, row.final_usage_read, row.lease_expires_at) == (
+            "orphan_deleted",
+            Decimal("0.4"),
+            True,
+            None,
+        )
+
+
 async def test_a_heartbeat_after_the_usage_is_recorded_cannot_renew_a_deleting_key():
     fake = FakeOpenRouterManagement()
     clock = [datetime.now(UTC)]

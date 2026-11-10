@@ -82,6 +82,7 @@ async def reconcile_openrouter_keys(
         if report["deleted"] >= max_deletions:
             report["truncated"] = True
             break
+        gone = False
         try:
             # The listing may be pages old: the key is read again right before its
             # delete, so spend no heartbeat recorded is never lost with the key.
@@ -97,6 +98,7 @@ async def reconcile_openrouter_keys(
                 )
                 continue
             final = info  # Already gone: the listing is its last readable usage.
+            gone = True
         try:
             row_id = await _record_usage(
                 session_factory,
@@ -107,6 +109,7 @@ async def reconcile_openrouter_keys(
                 current,
                 status=status,
                 claimed=workspace_id in claimed,
+                gone=gone,
             )
             if row_id is None:
                 continue
@@ -224,12 +227,15 @@ async def _record_usage(
     *,
     status: str,
     claimed: bool,
+    gone: bool,
 ) -> str | None:
     """Persist the final usage read before deleting (inserting an orphan row if needed).
 
     ``None`` means the key is not deleted: the broker finalized it after the
     listing (its final read is newer), or a heartbeat renewed its lease after
-    the bindings were loaded. Either way the row is left as it is.
+    the bindings were loaded. Either way the row is left as it is. A ``gone``
+    key (its read 404'd) serves no invocation and no later listing shows it,
+    so a renewed lease never keeps its row (and reservation) active.
     """
     async with session_factory() as session:
         keys = ProviderManagedKeyRepository(session)
@@ -237,7 +243,7 @@ async def _record_usage(
         current = await keys.get(row.id, for_update=True) if row is not None else None
         if current is not None and (
             current.status in FINALIZED_KEY_STATUSES
-            or _is_live_binding(current, info, status, now, claimed=claimed)
+            or (not gone and _is_live_binding(current, info, status, now, claimed=claimed))
         ):
             return None
         if current is None:
