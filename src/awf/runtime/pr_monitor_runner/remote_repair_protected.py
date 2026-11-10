@@ -401,6 +401,7 @@ async def _pause_monitor_for_protected_scope_block(
         state=state,
         violations=violations,
         block_epoch=block_epoch or 0,
+        preserved_head_sha=preserved_head_sha,
     )
     details: dict[str, object] = {
         "phase": "pre_push_committed_diff",
@@ -438,8 +439,13 @@ async def _post_protected_block_notification(
     state: MonitorState | None,
     violations: Sequence[QualityGateViolation],
     block_epoch: int,
+    preserved_head_sha: str | None = None,
 ) -> None:
     """Post the protected-scope pause notification as a PR comment (best-effort).
+
+    Names the preserved commit, when one was recorded, and says to reset rather
+    than revert it: a revert on top keeps it in the push range and re-blocks
+    (#1200).
 
     Deduped on the block epoch + violation content (the same key builder
     ``_post_human_notification_once`` accepts) so a second/different violation
@@ -476,6 +482,14 @@ async def _post_protected_block_notification(
         "a protected quality-gate file was changed and AWF paused the workspace "
         f"for an operator decision: {quality_gate_violation_message(list(violations))}"
     )
+    if preserved_head_sha:
+        # Plain text: the comment renderer escapes Markdown and folds newlines.
+        blocker_reason += (
+            f". Preserved commit {preserved_head_sha} is not pushed. To discard it: "
+            "reset, don't revert — move the branch back to the published PR head "
+            f"{pr_head_sha} so the preserved commit is not an ancestor of HEAD; a "
+            "revert-on-top commit keeps it in the push range and AWF blocks again"
+        )
     try:
         await self._deps.gh.post_comment(
             repo=repo,

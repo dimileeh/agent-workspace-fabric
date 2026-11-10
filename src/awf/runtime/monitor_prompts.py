@@ -331,13 +331,21 @@ def operator_hint_prompt(
     operation_id: str | None = None,
     workspace_runtime_context: str = "",
     task_tag: str | None = None,
+    preserved_head_sha: str | None = None,
+    published_head_sha: str | None = None,
 ) -> str:
     """Prompt the CLI to process an operator remonitor/guide hint.
 
     ``directive`` is the first-class operator instruction from the ``guide``
     control (issue #447); when present it is the text the agent acts on. The
     ``remonitor`` control passes only ``reason`` and the prompt falls back to
-    it, so existing behavior is unchanged."""
+    it, so existing behavior is unchanged.
+
+    ``preserved_head_sha`` is set when the hint resumes a protected-scope block
+    that preserved an unpushed commit. The prompt then says how to discard it:
+    move the branch back to the published PR head (``published_head_sha``) rather
+    than adding a revert on top, which keeps the commit in the push range and
+    re-blocks (#1200)."""
     effective = directive or reason
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
@@ -359,6 +367,7 @@ def operator_hint_prompt(
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy()}\n"
+        f"{_preserved_protected_commit_section(preserved_head_sha, published_head_sha)}"
         "Address what the hint says, commit any code changes locally, and only then "
         "consider this PR ready to merge.\n"
         "Do not reply to or resolve review threads yourself: AWF posts the disposition "
@@ -368,6 +377,27 @@ def operator_hint_prompt(
         "If you cannot safely complete the operator hint, leave the branch unchanged "
         "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
         f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
+    )
+
+
+def _preserved_protected_commit_section(
+    preserved_head_sha: str | None, published_head_sha: str | None
+) -> str:
+    """Reset-don't-revert guidance for a preserved protected-scope commit (#1200)."""
+    if not preserved_head_sha:
+        return ""
+    published = f" `{published_head_sha}`" if published_head_sha else ""
+    return (
+        "Protected-scope block: AWF preserved the unpushed commit "
+        f"`{preserved_head_sha}` because it changed a protected file. To discard that "
+        f"change, move the branch back to the published PR head{published} (for "
+        "example `git reset --hard <published head>`, or `git rebase --onto` it), "
+        "dropping the unpushed protected commit(s), then re-apply only the "
+        "non-protected work as new commits. Do not add a revert commit on top: a "
+        "revert keeps the preserved commit in the push range, and AWF blocks again.\n"
+        "Before finishing, verify that `git merge-base --is-ancestor "
+        f"{preserved_head_sha} HEAD` exits non-zero, which means the preserved commit "
+        "is not an ancestor of HEAD.\n"
     )
 
 

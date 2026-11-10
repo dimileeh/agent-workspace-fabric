@@ -48,6 +48,12 @@ COMMENT_REPAIR_ITEM_COMMIT_RECORDED = "COMMENT_REPAIR_ITEM_COMMIT_RECORDED"
 COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_RECORD_FAILED"
 COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED = "COMMENT_REPAIR_ITEM_PROVENANCE_CLEAR_FAILED"
 ITEM_COMMIT_RECORDED_EVENT = "monitor.comment_repair_item_commit_recorded"
+# A recorded item commit that is no longer an ancestor of HEAD — the branch was
+# rewritten (for example to drop a rejected protected-scope commit) — is retired
+# from the chain with this audit event, never dropped silently (#1200).
+COMMENT_REPAIR_ITEM_COMMIT_ORPHANED = "COMMENT_REPAIR_ITEM_COMMIT_ORPHANED"
+COMMENT_REPAIR_ITEM_COMMIT_RETIRE_FAILED = "COMMENT_REPAIR_ITEM_COMMIT_RETIRE_FAILED"
+ITEM_COMMIT_RETIRED_EVENT = "monitor.comment_repair_item_commit_retired"
 
 # One batch's items, generously. A successful push clears the chain and a moved head
 # restarts it, so growth is normally bounded by the unpushed batch; this cap keeps the
@@ -281,20 +287,24 @@ async def recorded_item_commit(
     the in-state chain. The event outlives what the chain does not keep — a fold
     past ``_MAX_CHAIN_RECORDS``, a restart onto a new chain — so a FIXED reply can
     still cite the commit this cycle recorded for the item (#1018). Scoped to one
-    operation: another cycle's commit is not this item's evidence. Best-effort:
-    a DB fault reads as "no record", and the caller fails closed.
+    operation: another cycle's commit is not this item's evidence. A record whose
+    commit a later ``ITEM_COMMIT_RETIRED_EVENT`` retired (the branch dropped it)
+    is not evidence either (#1200). Best-effort: a DB fault reads as "no record",
+    and the caller fails closed.
     """
     try:
         async with runner._deps.session_factory() as session:
             rows = await session.execute(
-                select(WorkspaceEvent.payload)
+                select(WorkspaceEvent.event_type, WorkspaceEvent.payload)
                 .where(
                     WorkspaceEvent.workspace_id == workspace_id,
-                    WorkspaceEvent.event_type == ITEM_COMMIT_RECORDED_EVENT,
+                    WorkspaceEvent.event_type.in_(
+                        (ITEM_COMMIT_RECORDED_EVENT, ITEM_COMMIT_RETIRED_EVENT)
+                    ),
                 )
                 .order_by(WorkspaceEvent.event_order.desc())
             )
-            payloads = list(rows.scalars())
+            events = list(rows.tuples())
     except (SQLAlchemyError, OSError) as exc:
         _log.warning(
             "monitor.comment_repair_item_commit_lookup_failed",
@@ -303,9 +313,19 @@ async def recorded_item_commit(
             error=repr(exc)[:400],
         )
         return None
-    for payload in payloads:
+    # Newest first, so a retirement is seen before the records it retired.
+    retired_heads: set[str] = set()
+    for event_type, payload in events:
+        if event_type == ITEM_COMMIT_RETIRED_EVENT:
+            for entry in payload.get("retired") or ():
+                retired_record = _record_from_mapping(entry)
+                if retired_record is not None:
+                    retired_heads.add(retired_record.head_sha.lower())
+            continue
         record = _record_from_mapping(payload)
-        if record is not None and (record.item_id, record.operation_id) == (
+        if record is None or record.head_sha.lower() in retired_heads:
+            continue
+        if (record.item_id, record.operation_id) == (
             item_id,
             operation_id,
         ):

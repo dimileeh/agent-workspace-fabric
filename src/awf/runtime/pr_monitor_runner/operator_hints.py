@@ -25,6 +25,9 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     OperatorHint,
 )
+from awf.runtime.pr_monitor_runner.comment_repair_provenance_retirement import (
+    retire_orphaned_item_commit_records,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictExecutionError,
     AgentVerdictProtocolError,
@@ -121,6 +124,11 @@ async def _run_operator_hint_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # A directive that dropped a rejected protected-scope commit from local history
+    # orphans the item records citing it; retire them with an audit event so they
+    # stop standing in as FIXED evidence for a commit the branch no longer has
+    # (#1200).
+    await retire_orphaned_item_commit_records(self, workspace_id=workspace_id, state=state)
 
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
@@ -267,6 +275,10 @@ async def _run_operator_hint_cycle(
             operation_id=hint.operation_id,
             workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
+            # A directive against a preserved protected commit is told to reset to
+            # the published PR head, not revert on top (#1200).
+            preserved_head_sha=preserved_head_sha if hint.directive else None,
+            published_head_sha=pr_head_sha,
         )
         verdict: VerdictResult | MonitorVerdictResult
         try:

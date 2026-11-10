@@ -10620,6 +10620,28 @@
             ],
             "title": "Blocked At"
           },
+          "preserved_head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preserved Head Sha"
+          },
+          "resolution_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Hint"
+          },
           "violations": {
             "items": {
               "$ref": "#/components/schemas/WorkspaceBlockViolationResponse"
