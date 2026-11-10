@@ -88,7 +88,27 @@ def test_parallel_workspace_config_and_credentials_are_isolated(tmp_path, agent)
             config = tomllib.loads(content) if agent == "codex" else json.loads(content)
             assert "native-secret" not in content and "selected-secret" not in content
             assert "apiKeyHelper" not in config and "agent" not in config
-            assert "effort" not in content.lower()
+            # Native effortLevel is never copied; only AWF's overrides are.
+            assert "effortlevel" not in content.lower() and "high" not in content
+            assert config.get("env", {}) == (
+                {}
+                if agent == "codex"
+                else {
+                    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+                    **dict.fromkeys(
+                        (
+                            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                            "CLAUDE_CODE_SUBAGENT_MODEL",
+                        ),
+                        model,
+                    ),
+                    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+                    "CLAUDE_CODE_EFFORT_LEVEL": "auto",
+                }
+            )
             assert env.get("OPENAI_API_KEY") is None
             assert env.get("CLAUDE_CODE_USE_BEDROCK") is None
             assert env["GH_TOKEN"] == "forge-secret"
@@ -562,7 +582,7 @@ def test_standalone_runtime_negotiates_version_before_configuration(
     assert (captured.out, captured.err) == (stdout, stderr)
 
 
-@pytest.mark.parametrize("blocked_by", ["project_agents", "probe"])
+@pytest.mark.parametrize("blocked_by", ["managed_settings", "probe"])
 def test_standalone_runtime_refuses_unsafe_or_unready_execution(
     tmp_path, monkeypatch, capsys, blocked_by
 ):
@@ -580,12 +600,24 @@ def test_standalone_runtime_refuses_unsafe_or_unready_execution(
     monkeypatch.setattr(sys, "argv", ["provider_config.py", json.dumps(selected.model_dump())])
     probe = Mock(return_value={"ok": False, "reason_code": "PROVIDER_MODEL_UNAVAILABLE"})
     monkeypatch.setattr(runtime, "probe_connection", probe)
-    if blocked_by == "project_agents":
-        (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    managed = tmp_path / "managed-settings.json"
+    if blocked_by == "managed_settings":
+        managed.write_text("{}")
+    # Redirect only the image-owned managed-settings path; the file is real.
+    monkeypatch.setattr(
+        runtime,
+        "Path",
+        Mock(
+            wraps=Path,
+            side_effect=lambda *parts: (
+                managed if parts == ("/etc/claude-code/managed-settings.json",) else Path(*parts)
+            ),
+        ),
+    )
     assert runtime.main() == 78
     captured = capsys.readouterr()
     assert captured.out == ""
-    if blocked_by == "project_agents":
+    if blocked_by == "managed_settings":
         assert captured.err == "EXECUTION_PROJECT_CONFIGURATION_UNSUPPORTED\n"
         probe.assert_not_called()
     else:
