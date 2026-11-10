@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,10 @@ import pytest
 import awf.adapters.provider_config as runner
 from awf.common.agent_execution import resolve_execution
 
-PINNED_CLAUDE_VERSION = "2.1.295"
+_AGENT_DOCKERFILE = Path(__file__).parents[3] / "docker" / "agent-runtime.Dockerfile"
+_VERSION_ARG = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", _AGENT_DOCKERFILE.read_text(), re.M)
+assert _VERSION_ARG is not None, "agent-runtime.Dockerfile must pin CLAUDE_CODE_VERSION"
+PINNED_CLAUDE_VERSION = _VERSION_ARG.group(1)
 MODEL = "vendor/selected-model"
 SENTINEL = "selected-sentinel-credential"
 PROMPT = "AWF_CONTRACT_PROMPT run the scripted steps"
@@ -45,8 +49,14 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.slow,
     pytest.mark.timeout(180),
+    # CI has no pinned claude binary yet; enforcing this there needs a workflow
+    # change tracked as a follow-up, so a missing/mismatched CLI skips loudly.
     pytest.mark.skipif(
-        _pinned_claude() is None, reason=f"requires claude CLI {PINNED_CLAUDE_VERSION}"
+        _pinned_claude() is None,
+        reason=(
+            f"pinned claude CLI {PINNED_CLAUDE_VERSION} (docker/agent-runtime.Dockerfile "
+            "CLAUDE_CODE_VERSION) is not on PATH"
+        ),
     ),
 ]
 
