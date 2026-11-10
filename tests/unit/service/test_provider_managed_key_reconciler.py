@@ -1,0 +1,241 @@
+"""The periodic reconciler deletes orphaned ``awf-*`` keys and keeps live ones."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import httpx
+import pytest
+from sqlalchemy import select
+
+from awf.common.agent_execution import EXECUTION_POLICY_KEY, resolve_execution
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import WorkspaceEvent
+from awf.db.repositories import ProviderManagedKeyRepository, WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.service.openrouter_management import OpenRouterManagementError
+from awf.service.provider_managed_key_reconciler import reconcile_openrouter_keys
+from awf.service.provider_managed_keys import ManagedKeyBroker
+from tests.postgres import postgres_test_engine
+from tests.shared.openrouter_management import FakeOpenRouterManagement
+
+pytestmark = pytest.mark.unit
+
+_SELECTION = resolve_execution(
+    agent="codex",
+    provider="openrouter",
+    model="m/x",
+    allow_unverified=True,
+    managed_openrouter=True,
+)
+
+
+async def _workspace(factory, *, status: WorkspaceStatus = WorkspaceStatus.running) -> str:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@example.com:repo.git",
+            branch_base="main",
+            task_title="managed",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        ws.task_policy = {
+            EXECUTION_POLICY_KEY: _SELECTION.model_dump(mode="json"),
+            "provider_budget": {"managed": True, "limit_usd": 10.0},
+        }
+        steps = {
+            WorkspaceStatus.running: ("provisioning", "ready", "running"),
+            WorkspaceStatus.cancelled: ("cancelled",),
+        }[status]
+        for step in steps:
+            await repo.transition(ws, to=WorkspaceStatus(step), reason_code="test")
+        await session.commit()
+        return ws.id
+
+
+async def _rows(factory, workspace_id: str):
+    async with factory() as session:
+        return await ProviderManagedKeyRepository(session).for_workspace(workspace_id)
+
+
+async def test_orphans_are_usage_recorded_then_deleted_while_live_keys_stay():
+    fake = FakeOpenRouterManagement()
+    now = datetime.now(UTC)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        live_ws = await _workspace(factory)
+        dead_ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        live = await broker.acquire(workspace_id=live_ws, selection=_SELECTION, purpose="agent")
+        await broker.acquire(workspace_id=dead_ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage("hash2", 0.4)
+        # A crash between mint and hash persist leaves an unbound named key.
+        unbound = fake.add_key(f"awf-{live_ws}-7", usage=0.1)
+        # Another control plane's key and an unrelated key are never touched.
+        foreign = fake.add_key("awf-ws_0123456789abcdef01234567-1")
+        unrelated = fake.add_key("team-production")
+
+        report = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: now
+        )
+
+        assert report == {
+            "listed": 5,
+            "live": 1,
+            "deleted": 2,
+            "foreign_skipped": 1,
+            "failed": 0,
+            "truncated": False,
+        }
+        assert set(fake.keys) == {live.key_hash, foreign, unrelated}
+        (dead_row,) = await _rows(factory, dead_ws)
+        assert dead_row.status == "orphan_deleted"
+        assert dead_row.usage_usd == Decimal("0.4") and dead_row.final_usage_read
+        orphan = next(r for r in await _rows(factory, live_ws) if r.seq == 7)
+        assert (orphan.status, orphan.key_hash, orphan.usage_usd) == (
+            "orphan_deleted",
+            unbound,
+            Decimal("0.1"),
+        )
+        async with factory() as session:
+            events = (
+                (
+                    await session.execute(
+                        select(WorkspaceEvent).where(
+                            WorkspaceEvent.event_type == "provider.managed_key.orphan_deleted"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert {e.workspace_id for e in events} == {live_ws, dead_ws}
+        assert {e.reason_code for e in events} == {"PROVIDER_MANAGED_KEY_ORPHAN_DELETED"}
+
+
+async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
+    fake = FakeOpenRouterManagement()
+    now = datetime.now(UTC)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        # A minting intent committed moments ago: its POST may still be in flight.
+        async with factory() as session:
+            row = (await ProviderManagedKeyRepository(session).for_workspace(ws))[0]
+            row.status = "minting"
+            row.key_hash = None
+            await session.commit()
+
+        young = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: now
+        )
+        old = await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=fake.client(),
+            now=lambda: now + timedelta(minutes=30),
+        )
+
+        assert (young["live"], young["deleted"]) == (1, 0)
+        assert (old["live"], old["deleted"]) == (0, 1)
+        assert fake.keys == {}
+
+
+async def test_pagination_bounds_and_per_key_failure_isolation():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        for seq in range(1, 131):
+            fake.add_key(f"awf-{ws}-{seq}")
+        original = fake.handler
+
+        def flaky(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE" and request.url.path.endswith("/hash3"):
+                return httpx.Response(503)
+            return original(request)
+
+        fake.handler = flaky  # type: ignore[method-assign]
+        report = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), max_deletions=5
+        )
+
+        assert report["listed"] == 130
+        assert report["failed"] == 1
+        assert report["deleted"] == 5
+        assert report["truncated"] is True
+        assert len(fake.keys) == 125
+        rows = await _rows(factory, ws)
+        failed = next(r for r in rows if r.key_hash == "hash3")
+        assert failed.status == "delete_failed"
+        assert failed.last_reason_code == "PROVIDER_MANAGEMENT_API_UNAVAILABLE"
+
+
+async def test_listing_failures_and_page_truncation_are_reported():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        for seq in range(1, 101):
+            fake.add_key(f"awf-{ws}-{seq}")
+
+        truncated = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), max_pages=1, max_deletions=0
+        )
+        assert truncated["truncated"] is True and truncated["deleted"] == 0
+
+        fake.fail[("GET", "collection")] = 401
+        with pytest.raises(OpenRouterManagementError) as raised:
+            await reconcile_openrouter_keys(session_factory=factory, client=fake.client())
+        assert raised.value.reason_code == "PROVIDER_MANAGEMENT_API_UNAUTHORIZED"
+
+
+async def test_worker_maintenance_is_wired_only_with_a_management_key(monkeypatch):
+    from awf.service import provider_managed_keys
+    from awf.service.provider_managed_keys import provider_key_maintenance
+
+    fake = FakeOpenRouterManagement()
+    monkeypatch.setattr(
+        provider_managed_keys, "OpenRouterManagementClient", lambda _key: fake.client()
+    )
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        assert (
+            provider_key_maintenance(session_factory=factory, broker=broker, management_key=None)
+            == {}
+        )
+        ws = await _workspace(factory, status=WorkspaceStatus.cancelled)
+        fake.add_key(f"awf-{ws}-1")
+
+        hooks = provider_key_maintenance(
+            session_factory=factory, broker=broker, management_key="sk-or-mgmt-x"
+        )
+        report = await hooks["provider_key_reconciler"]()
+
+        assert report["deleted"] == 1
+        assert report["terminal_workspaces_finalized"] == 0
+        assert hooks["provider_key_finalizer"] == broker.finalize_workspace_keys
+
+
+async def test_an_account_without_awf_keys_is_a_quiet_no_op():
+    fake = FakeOpenRouterManagement()
+    fake.add_key("team-production")
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+
+        report = await reconcile_openrouter_keys(session_factory=factory, client=fake.client())
+
+    assert report == {
+        "listed": 1,
+        "live": 0,
+        "deleted": 0,
+        "foreign_skipped": 0,
+        "failed": 0,
+        "truncated": False,
+    }
+    assert set(fake.keys) == {"hash1"}

@@ -535,3 +535,30 @@ async def test_next_acquire_retries_deleting_a_key_whose_delete_failed():
         assert "hash1" not in fake.keys
         assert fake.calls[-1][2]["limit"] == 9.0
         assert [r.status for r in await _rows(factory, ws)] == ["deleted", "active"]
+
+
+async def test_terminal_workspaces_with_leftover_keys_are_finalized_in_bounded_batches():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        live = await _workspace(factory)
+        done = await _workspace(factory)
+        broker = _broker(factory, fake)
+        await broker.acquire(workspace_id=live, selection=_SELECTION, purpose="agent")
+        await broker.acquire(workspace_id=done, selection=_SELECTION, purpose="agent")
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(done)
+            ws.status = "cancelled"
+            await session.commit()
+
+        assert await broker.finalize_terminal_workspaces(limit=10) == 1
+        assert (
+            await ManagedKeyBroker(
+                session_factory=factory, client=None
+            ).finalize_terminal_workspaces()
+            == 0
+        )
+
+        assert [r.status for r in await _rows(factory, done)] == ["deleted"]
+        assert [r.status for r in await _rows(factory, live)] == ["active"]
+        assert set(fake.keys) == {"hash1"}

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -34,8 +35,10 @@ from awf.adapters.managed_credentials import (
 from awf.common.agent_execution import PROVIDER_BUDGET_POLICY_KEY, ExecutionSelection
 from awf.common.ids import new_provider_managed_key_id
 from awf.common.logging import get_logger
+from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import ProviderManagedKeyStatus as KeyStatus
-from awf.db.models import ProviderManagedKey
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import ProviderManagedKey, Workspace
 from awf.db.repositories import (
     UNFINALIZED_KEY_STATUSES,
     ProviderManagedKeyRepository,
@@ -71,6 +74,30 @@ def build_managed_key_broker(
         client=OpenRouterManagementClient(management_key) if management_key else None,
         usage_poll_interval_seconds=usage_poll_interval_seconds,
     )
+
+
+def provider_key_maintenance(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    broker: ManagedKeyBroker,
+    management_key: str | None,
+) -> dict[str, Any]:
+    """The worker's reconcile/finalize callbacks; none without a management key."""
+    if not management_key:
+        return {}
+    client = OpenRouterManagementClient(management_key)
+
+    async def reconcile() -> dict[str, object]:
+        from awf.service.provider_managed_key_reconciler import reconcile_openrouter_keys
+
+        report = await reconcile_openrouter_keys(session_factory=session_factory, client=client)
+        report["terminal_workspaces_finalized"] = await broker.finalize_terminal_workspaces()
+        return report
+
+    return {
+        "provider_key_reconciler": reconcile,
+        "provider_key_finalizer": broker.finalize_workspace_keys,
+    }
 
 
 def managed_key_name(workspace_id: str, seq: int) -> str:
@@ -274,6 +301,26 @@ class ManagedKeyBroker:
             _info, deleted, _reason = await self._finalize_key(row_id, str(key_hash))
             report["finalized" if deleted else "failed"] += 1
         return report
+
+    async def finalize_terminal_workspaces(self, *, limit: int = 50) -> int:
+        """Finalize leftover keys of terminal workspaces the terminal hook missed."""
+        if self._client is None:
+            return 0
+        async with self._session_factory() as session:
+            workspace_ids = await ProviderManagedKeyRepository(
+                session
+            ).workspace_ids_with_unfinalized_keys(limit=limit)
+            rows = await session.execute(
+                select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
+            )
+            terminal = [
+                str(workspace_id)
+                for workspace_id, status in rows.all()
+                if WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(status))
+            ]
+        for workspace_id in terminal:
+            await self.finalize_workspace_keys(workspace_id)
+        return len(terminal)
 
     async def _reserve(
         self, workspace_id: str, *, provider: str, purpose: str

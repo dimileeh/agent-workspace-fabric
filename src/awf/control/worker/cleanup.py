@@ -1025,6 +1025,8 @@ async def _release_terminal_runtime_for_candidate(
         # in the API container) ever tries to remove the auth dir. A failure does
         # not block port reclaim; GC's loud-failure net covers any residual.
         auth_overlay_unmounted = await _teardown_terminal_auth_overlay(self, candidate)
+        # No agent can use a managed key once the stack is down: final read, delete.
+        await self._finalize_terminal_provider_keys(candidate.workspace_id)
         await self._record_terminal_runtime_released(
             candidate, cleanup, auth_overlay_unmounted=auth_overlay_unmounted
         )

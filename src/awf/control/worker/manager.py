@@ -105,6 +105,8 @@ class ControlWorker(WorkerDelegatesMixin):
         classified_orphan_reaper: Callable[..., Awaitable[OrphanReapResult]] | None = None,
         claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
         terminal_gc_reaper: Callable[..., Awaitable[dict[str, object]]] | None = None,
+        provider_key_reconciler: Callable[[], Awaitable[dict[str, object]]] | None = None,
+        provider_key_finalizer: Callable[[str], Awaitable[dict[str, int]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         admission_check: Callable[[], Awaitable[bool]] | None = None,
         workspace_scope: WorkspaceScope | None = None,
@@ -133,6 +135,11 @@ class ControlWorker(WorkerDelegatesMixin):
         # ``/v1/service/gc`` path skips every auth dir; this closure (built in
         # ``service/worker.py``) drives the real per-workspace reclaim.
         self._terminal_gc_reaper = terminal_gc_reaper
+        # Managed OpenRouter keys (wired only when a management key is configured):
+        # a bounded periodic reconcile of ``awf-*`` keys and terminal finalization.
+        self._provider_key_reconciler = provider_key_reconciler
+        self._provider_key_finalizer = provider_key_finalizer
+        self._next_provider_key_reconcile_at = 0.0
         # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
         # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
         # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
@@ -247,6 +254,7 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_reap_superseded_claude_bases()
         await self._maybe_reap_terminal_workspace_gc()
         await self._maybe_reconcile_work_slot_leases()
+        await self._maybe_reconcile_openrouter_keys()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

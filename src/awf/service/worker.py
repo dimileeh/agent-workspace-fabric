@@ -280,7 +280,10 @@ def build_worker_runtime(
         else AsyncioSubprocessRunner()
     )
     usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
-    from awf.service.provider_managed_keys import build_managed_key_broker
+    from awf.service.provider_managed_keys import (
+        build_managed_key_broker,
+        provider_key_maintenance,
+    )
 
     # Always built: a frozen managed selection on a worker without a management
     # key must park with PROVIDER_MANAGEMENT_KEY_MISSING, never use a static key.
@@ -872,6 +875,11 @@ def build_worker_runtime(
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,
         terminal_gc_reaper=_reap_terminal_workspace_gc,
+        **provider_key_maintenance(
+            session_factory=session_factory,
+            broker=managed_key_broker,
+            management_key=settings.openrouter_management_key,
+        ),
         # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
         # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
         # workspace's overlay on terminal-runtime-release before GC removes the dir.
@@ -888,6 +896,9 @@ def build_worker_runtime(
             max_concurrent_executions=settings.worker_max_concurrent_executions,
             orphan_reconcile_scan_interval_seconds=(
                 settings.orphan_reconcile_scan_interval_seconds
+            ),
+            provider_key_reconcile_interval_seconds=(
+                settings.openrouter_key_reconcile_interval_seconds
             ),
             classified_orphan_reap_scan_interval_seconds=(
                 settings.classified_orphan_reap_scan_interval_seconds
