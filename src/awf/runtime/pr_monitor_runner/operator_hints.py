@@ -339,6 +339,11 @@ async def _run_operator_hint_cycle(
                 remote_branch=remote_branch,
                 state=state,
             )
+        # The directive agent is told to reset a preserved protected commit away,
+        # so it can orphan item records the pre-agent pass above still saw as
+        # ancestors of HEAD. Recheck now that history may be rewritten, before any
+        # verdict path pushes or finishes the resume (PRRT_kwDOSJAM6s61n6zY).
+        await retire_orphaned_item_commit_records(self, workspace_id=workspace_id, state=state)
         # A TERMINAL verdict parks the hint (``needs_human`` / ``agent_failed``) and
         # RETURNS from inside this block, so it never reaches the post-action guard
         # below. Re-read PR state here too: a resume whose CLI outlived its PR would

@@ -382,3 +382,45 @@ async def test_revert_on_top_keeps_protected_commit_in_push_range_and_reblocks(
     # X is still an ancestor of HEAD, so its item record is not retired.
     assert [record.head_sha for record in chain_from_state(state)] == [protected]
     assert await _events(factory, workspace_id, ITEM_COMMIT_RETIRED_EVENT) == []
+
+
+async def test_reset_inside_directive_agent_retires_orphaned_record_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a) variant: the directive agent itself resets ``X`` away mid-cycle.
+
+    The pre-agent retirement still sees ``X`` as an ancestor of HEAD, so the
+    record must be rechecked after the agent rewrites history (PRRT_kwDOSJAM6s61n6zY).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_protected_block(factory, workspace_id)
+    repo = _Repo(tmp_path, workspace_id)
+    protected = repo.commit_protected_change()
+    state = _state(published=repo.published, protected=protected)
+    pushes: list[str] = []
+    runner = _runner(factory, tmp_path, monkeypatch, repo=repo, pushes=pushes, prompts=[])
+    clean_heads: list[str] = []
+
+    async def _agent_resets_protected_commit(**_kwargs: object) -> VerdictResult:
+        # The pre-agent retirement already ran and kept the record.
+        assert [record.head_sha for record in chain_from_state(state)] == [protected]
+        _git(repo.worktree, "reset", "-q", "--hard", repo.published)
+        clean_heads.append(repo.commit_clean_change())
+        return VerdictResult(verdict="fixed")
+
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_resets_protected_commit)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, repo=repo, state=state, tmp_path=tmp_path
+    )
+
+    assert result.pushed is True
+    assert result.paused_into_blocked is False
+    assert pushes == clean_heads
+    assert state.pending_operator_hint is None
+    await _assert_not_reblocked(factory, workspace_id)
+    await _assert_orphaned_record_retired(
+        factory, workspace_id, state=state, protected=protected, head=clean_heads[0]
+    )
