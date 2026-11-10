@@ -222,18 +222,17 @@ def probe_connection(selection: Mapping[str, Any], environ: Mapping[str, str]) -
             if selection["provider"] == "ollama"
             else {m.get("id") for m in data["data"]}
         )
-        if selection["model"] not in names and selection["model"] + ":latest" not in names:
+        model = selection["model"]
+        if model not in names:
+            model += ":latest"
+        if model not in names:
             return {"ok": False, "reason_code": "PROVIDER_MODEL_UNAVAILABLE"}
         return {
             "ok": True,
             "reason_code": "PROVIDER_ENDPOINT_READY",
             "evidence": "runtime_network_readiness_only",
             "model_version": next(
-                (
-                    m.get("digest")
-                    for m in entries
-                    if m.get("name", m.get("id")) == selection["model"]
-                ),
+                (m.get("digest") for m in entries if m.get("name", m.get("id")) == model),
                 None,
             ),
         }

@@ -156,6 +156,74 @@ async def test_runtime_guard_checks_actual_image_cli_and_model(monkeypatch, tmp_
         )
 
 
+async def test_runtime_guard_invalidates_evidence_when_latest_alias_digest_changes(
+    monkeypatch, tmp_path
+):
+    import io
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    import pytest
+
+    from awf.adapters.provider_config import probe_connection
+    from awf.common.commands import CommandResult
+    from awf.service.provider_compatibility import guard_runtime_compatibility
+
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="coder", allow_unverified=True
+    )
+    opener = Mock()
+    opener.open.side_effect = [
+        io.BytesIO(json.dumps({"models": [{"name": "coder:latest", "digest": digest}]}).encode())
+        for digest in ("sha256:before", "sha256:before", "sha256:after")
+    ]
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_args: opener)
+    diagnostic_probe = probe_connection(selected.model_dump(), {})
+    identity = {
+        "runtime_image": "sha256:actual",
+        "cli_version": "codex 0.162.0",
+        "fixture_version": "coding-cycle-v1",
+    }
+    evidence = {
+        "outcome": "passed",
+        "selection": selected.model_dump(mode="json"),
+        "connection_scope": selected.connection_scope(),
+        "protocol_evidence": "passed",
+        "fixture_verification": True,
+        **identity,
+        "model_version": diagnostic_probe["model_version"],
+    }
+    runner = AsyncMock()
+    adapter = SimpleNamespace(
+        require_compatibility_evidence=True,
+        diagnostic_events=False,
+        execution=selected,
+        compatibility_evidence=evidence,
+        _runner=SimpleNamespace(run=runner),
+    )
+    monkeypatch.setattr(
+        "awf.control.executor.provider_diagnostics.runtime_identity",
+        AsyncMock(side_effect=lambda *_args: dict(identity)),
+    )
+    runner.return_value = CommandResult(
+        0, json.dumps(probe_connection(selected.model_dump(), {})), ""
+    )
+    await guard_runtime_compatibility(
+        adapter, compose_project="awf_ws", compose_file=tmp_path / "compose.yml", workspace_id="ws"
+    )
+    runner.return_value = CommandResult(
+        0, json.dumps(probe_connection(selected.model_dump(), {})), ""
+    )
+    with pytest.raises(ValueError, match="AGENT_PROVIDER_MODEL_UNVERIFIED"):
+        await guard_runtime_compatibility(
+            adapter,
+            compose_project="awf_ws",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws",
+        )
+
+
 def test_declared_fallback_retains_its_exact_proof_during_typed_promotion():
     from awf.common.agent_execution import promote_execution
     from awf.service.provider_recovery import FallbackTarget

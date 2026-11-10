@@ -37,6 +37,46 @@ def test_daemon_local_and_cloud_probe_same_runtime_endpoint(monkeypatch, model):
 
 
 @pytest.mark.parametrize(
+    "model,entries,expected_digest",
+    [
+        ("coder", [{"name": "coder:latest", "digest": "sha256:latest"}], "sha256:latest"),
+        ("coder", [{"name": "coder:latest"}], None),
+        (
+            "coder",
+            [
+                {"name": "coder:latest", "digest": "sha256:latest"},
+                {"name": "coder", "digest": "sha256:exact"},
+            ],
+            "sha256:exact",
+        ),
+        (
+            "coder",
+            [
+                {"name": "coder", "digest": "sha256:exact"},
+                {"name": "coder:latest", "digest": "sha256:latest"},
+            ],
+            "sha256:exact",
+        ),
+        ("coder:cloud", [{"name": "coder:cloud", "digest": "sha256:cloud"}], "sha256:cloud"),
+    ],
+)
+def test_ollama_probe_records_digest_for_resolved_model(
+    monkeypatch, model, entries, expected_digest
+):
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model=model, allow_unverified=True
+    )
+    opener = Mock()
+    opener.open.return_value = io.BytesIO(json.dumps({"models": entries}).encode())
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_args: opener)
+
+    result = probe_connection(selected.model_dump(), {})
+
+    assert result["ok"] is True
+    assert result["model_version"] == expected_digest
+
+
+@pytest.mark.parametrize(
     "response,expected",
     [
         (b"bad-json", "PROVIDER_RESPONSE_INVALID"),
