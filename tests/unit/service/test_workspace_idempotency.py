@@ -1442,7 +1442,8 @@ async def test_create_delegates_row_creation_to_shared_helper(
     inline persistence path: such a regression would silently diverge the service
     create path from the route path without this service-layer wiring assertion.
     """
-    created_row = object()
+    # ``create`` scopes the response's provider spend by the created row's id.
+    created_row = SimpleNamespace(id="ws_shared_helper")
     sentinel_response = object()
     helper = AsyncMock(return_value=created_row)
     monkeypatch.setattr(workspaces, "create_workspace_row_checked", helper)
