@@ -159,3 +159,40 @@ def test_diagnostic_auth_cleanup_refuses_invalid_ids_and_symlinks(tmp_path):
     with pytest.raises(ValueError, match="FIXTURE_FAILED"):
         remove_diagnostic_auth(tmp_path, "ws_diag")
     assert marker.read_text() == "preserve"
+
+
+def test_native_diagnostic_auth_requires_selected_credentials_and_safe_workspace_id(tmp_path):
+    import pytest
+
+    home = tmp_path / "host"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text('model="competing"')
+    (home / ".claude").mkdir()
+    (home / ".claude" / "settings.json").write_text('{"mcpServers":{"forge":{}}}')
+    work = tmp_path / "state"
+    resolver = ServiceAuthMountResolver(host_home=home, work_dir=work)
+
+    for agent in ("codex", "claude_code"):
+        assert resolver.resolve_diagnostic_auth(workspace_id="ws_diag", agent=agent) == ()
+        with pytest.raises(ValueError, match="^PROVIDER_DIAGNOSTIC_FIXTURE_FAILED$"):
+            resolver.resolve_diagnostic_auth(workspace_id="../escape", agent=agent)
+    assert not work.exists()
+    assert not (tmp_path / "escape").exists()
+
+
+def test_diagnostic_auth_cleanup_is_idempotent_and_preserves_other_workspace_auth(tmp_path):
+    from awf.node.provider_diagnostics import remove_diagnostic_auth
+
+    root = tmp_path / "auth" / "ws_diag"
+    diagnostic = root / "diagnostic"
+    diagnostic.mkdir(parents=True)
+    (diagnostic / "auth.json").write_text("synthetic-selected")
+    sibling = root / "selected-provider-source.json"
+    sibling.write_text("preserve workspace configuration")
+
+    remove_diagnostic_auth(tmp_path, "ws_diag")
+    remove_diagnostic_auth(tmp_path, "ws_diag")
+    remove_diagnostic_auth(tmp_path, "ws_absent")
+
+    assert not diagnostic.exists()
+    assert sibling.read_text() == "preserve workspace configuration"

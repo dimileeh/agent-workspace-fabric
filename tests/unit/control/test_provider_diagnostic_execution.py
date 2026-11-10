@@ -231,6 +231,103 @@ async def test_cancel_during_runtime_inspection_prevents_model_invocation(
     adapter.run.assert_not_awaited()
 
 
+async def test_cancelled_invocation_propagates_without_settlement_or_replay(
+    engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from awf.db.repositories import OperationRepository
+
+    factory, response, executor = await prepared(engine, tmp_path)
+    adapter = SimpleNamespace(run=AsyncMock(side_effect=asyncio.CancelledError()))
+    identity = {"cli_version": "codex 0.162.0", "runtime_image": "sha256:actual"}
+    inspect = AsyncMock(return_value=identity)
+    monkeypatch.setattr("awf.control.executor.provider_diagnostics.runtime_identity", inspect)
+    monkeypatch.setattr(
+        "awf.control.executor.provider_diagnostics.get_adapter", lambda *_a, **_k: adapter
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.execute(response.workspace_id)
+    await executor.execute(response.workspace_id)
+
+    adapter.run.assert_awaited_once()
+    inspect.assert_awaited_once()
+    executor._runner.run.assert_not_awaited()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(response.workspace_id)
+        diagnostic = ws.task_policy["provider_diagnostic"]
+        assert ws.status == "running"
+        assert diagnostic["invocation_started_at"]
+        assert diagnostic["runtime_identity"] == identity
+        assert "result" not in diagnostic
+        operation = await OperationRepository(session).get(response.operation_id)
+        assert operation.status == "running"
+        assert operation.result is None
+
+
+@pytest.mark.parametrize("stage", ["dispatch", "inspection", "invocation"])
+@pytest.mark.parametrize("claim_field", ["execution_claimed_by", "execution_claim_epoch"])
+async def test_diagnostic_claim_takeover_fences_identity_and_late_results(
+    engine, tmp_path, monkeypatch, stage, claim_field
+):
+    from awf.db.repositories import OperationRepository
+
+    factory, response, executor = await prepared(engine, tmp_path)
+    identity = {"cli_version": "codex 0.162.0", "runtime_image": "sha256:actual"}
+    replacement = {}
+
+    async def take_over():
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get_for_update(response.workspace_id)
+            value = (
+                "replacement-worker"
+                if claim_field == "execution_claimed_by"
+                else (ws.execution_claim_epoch + 1)
+            )
+            setattr(ws, claim_field, value)
+            replacement.update(value=value, policy=ws.task_policy)
+            await session.commit()
+
+    async def inspect(*_args):
+        if stage == "inspection":
+            await take_over()
+        return identity
+
+    async def run(**_kwargs):
+        await take_over()
+        return AgentRunResult(0, transcript(codex_events()), "")
+
+    adapter = SimpleNamespace(run=AsyncMock(side_effect=run))
+    monkeypatch.setattr("awf.control.executor.provider_diagnostics.runtime_identity", inspect)
+    monkeypatch.setattr(
+        "awf.control.executor.provider_diagnostics.get_adapter", lambda *_a, **_k: adapter
+    )
+    if stage == "dispatch":
+        from awf.control.executor.provider_diagnostics import execute_diagnostic
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(response.workspace_id)
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="test")
+            await session.commit()
+        await take_over()
+        await execute_diagnostic(executor, ws, compose_file=tmp_path / "compose.yml")
+    else:
+        await executor.execute(response.workspace_id)
+
+    assert adapter.run.await_count == int(stage == "invocation")
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(response.workspace_id)
+        assert ws.status == "running"
+        assert getattr(ws, claim_field) == replacement["value"]
+        assert ws.task_policy == replacement["policy"]
+        assert "result" not in ws.task_policy["provider_diagnostic"]
+        operation = await OperationRepository(session).get(response.operation_id)
+        assert operation.status == ("pending" if stage == "dispatch" else "running")
+        assert operation.result is None
+
+
 async def test_native_diagnostic_freezes_configured_defaults_before_invocation(
     engine, tmp_path, monkeypatch
 ):

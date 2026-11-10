@@ -43,6 +43,43 @@ def test_enabled_selection_reaches_runtime_network_probe():
     require_execution_admission(selected, enabled=True)
 
 
+async def test_compatibility_lookup_skips_newer_invalid_proof_before_accepting_exact_evidence():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from awf.service.provider_compatibility import attach_compatibility
+
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="candidate", allow_unverified=True
+    )
+    evidence = {
+        "outcome": "passed",
+        "selection": selected.model_dump(mode="json"),
+        "connection_scope": selected.connection_scope(),
+        "protocol_evidence": "passed",
+        "fixture_verification": True,
+        "runtime_image": "sha256:actual",
+        "cli_version": "codex 0.162.0",
+        "fixture_version": "coding-cycle-v1",
+        "model_version": "sha256:model",
+    }
+    rows = [
+        {"provider_diagnostic": {"result": {**evidence, "fixture_verification": False}}},
+        {"provider_diagnostic": {"result": evidence}},
+    ]
+    session = SimpleNamespace(scalars=AsyncMock(return_value=Mock(all=lambda: rows)))
+    policy = {
+        "require_compatibility_evidence": True,
+        "agent_execution": selected.model_dump(mode="json"),
+    }
+
+    attached = await attach_compatibility(session, policy)
+
+    assert attached["coding_compatibility_evidence"] == evidence
+    assert "coding_compatibility_evidence" not in policy
+    session.scalars.assert_awaited_once()
+
+
 async def test_successful_exact_diagnostic_admits_ordinary_work_and_changed_endpoint_does_not(
     engine, tmp_path
 ):
