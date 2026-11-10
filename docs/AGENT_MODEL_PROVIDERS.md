@@ -182,8 +182,11 @@ values reach the CLI.
 generated `--settings` file (selected model plus safe permission/language keys),
 which outranks project settings. Host-managed provider mode makes the CLI drop
 settings-sourced endpoint, auth, model, role-model and subagent-model env, so a
-project `.claude/settings.json` cannot redirect the run. The selected auth also
-wins over a project `apiKeyHelper`.
+project `.claude/settings.json` cannot redirect the run. The generated file's
+`env` also repeats the non-secret forced values (host-managed mode, role and
+subagent models, subagent forcing, `CLAUDE_CODE_EFFORT_LEVEL=auto`), so project
+settings env cannot disable forcing or re-add effort either. The selected auth
+also wins over a project `apiKeyHelper`.
 
 **Codex retries.** The generated `config.toml` sets `request_max_retries = 4`
 and `stream_max_retries = 5`, which are Codex's own defaults. With zero retries,

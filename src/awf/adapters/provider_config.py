@@ -49,6 +49,18 @@ _PROVIDER_PREFIXES = (
 # Each retry is a CLI notice in the redacted log stream, never an AWF replay.
 CODEX_REQUEST_MAX_RETRIES = 4
 CODEX_STREAM_MAX_RETRIES = 5
+# Non-secret Claude overrides repeated in the --settings flag env. Project
+# settings env is applied over process env, but flag settings outrank it.
+_CLAUDE_FORCED_SETTINGS_ENV = (
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+)
 
 
 def runtime_failure_reason(stderr: str) -> str | None:
@@ -121,8 +133,8 @@ def provider_environment(
             CLAUDE_CODE_SUBAGENT_MODEL=model,
             CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1",
             # Third-party effort stays absent on the wire, even when project
-            # settings declare effortLevel (flag settings repeat this and the
-            # forcing flag over project settings env).
+            # settings declare effortLevel (flag settings repeat the forced
+            # vars over project settings env).
             CLAUDE_CODE_EFFORT_LEVEL="auto",
         )
     else:
@@ -204,12 +216,9 @@ def isolated_provider_config(
                 k: source_config[k] for k in ("permissions", "language") if k in source_config
             }
             config["model"] = selection["model"]
-            # Project settings env is applied over process env; flag settings
-            # env outranks it, so a project can neither turn subagent forcing
-            # off nor put effort back on the wire.
-            config["env"] = {
-                k: env[k] for k in ("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_EFFORT_LEVEL")
-            }
+            # A project can neither redirect role/subagent models, turn
+            # forcing or host management off, nor put effort back on the wire.
+            config["env"] = {k: env[k] for k in _CLAUDE_FORCED_SETTINGS_ENV}
             path = directory / "settings.json"
             path.write_text(json.dumps(config))
             env["CLAUDE_CONFIG_DIR"] = str(directory)

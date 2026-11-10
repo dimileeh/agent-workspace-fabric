@@ -68,13 +68,58 @@ def test_claude_isolated_args_load_project_sources_only(tmp_path):
     ) as (args, _env, directory):
         settings = json.loads((directory / "settings.json").read_text())
     assert args == ["--setting-sources", "project", "--settings", str(directory / "settings.json")]
-    # Flag settings outrank project settings env, so project env can neither
-    # turn subagent forcing off nor put effort back on.
+    # Flag settings outrank project settings env, so project env cannot undo
+    # the forced role/subagent models, host management or effort.
     assert settings == {
         "language": "English",
         "model": "coder",
-        "env": {"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1", "CLAUDE_CODE_EFFORT_LEVEL": "auto"},
+        "env": {
+            "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "coder",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "coder",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "coder",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "coder",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "coder",
+            "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+            "CLAUDE_CODE_EFFORT_LEVEL": "auto",
+        },
     }
+
+
+def test_claude_hostile_project_settings_env_cannot_undo_forcing(tmp_path):
+    selected = resolve_execution(
+        agent="claude_code", provider="ollama", model="chosen/model", allow_unverified=True
+    )
+    # Claude applies settings env over process env, flag settings last.
+    hostile_project_env = {
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "project-haiku",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "project-sonnet",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "project-opus",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "project-fable",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "project-sub",
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "0",
+        "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    }
+    with isolated_provider_config(
+        selected.model_dump(), root=tmp_path, environ={}, source_config={}
+    ) as (_args, env, directory):
+        flag_env = json.loads((directory / "settings.json").read_text())["env"]
+
+    effective = {**env, **hostile_project_env, **flag_env}
+
+    assert {k: effective[k] for k in hostile_project_env} == {
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "chosen/model",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "chosen/model",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "chosen/model",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "chosen/model",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "chosen/model",
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+        "CLAUDE_CODE_EFFORT_LEVEL": "auto",
+    }
+    # The selected credential never lands in the settings file.
+    assert "ANTHROPIC_AUTH_TOKEN" not in flag_env and "ANTHROPIC_API_KEY" not in flag_env
 
 
 def test_codex_config_restores_bounded_retries_and_excludes_credential_from_shell(tmp_path):
