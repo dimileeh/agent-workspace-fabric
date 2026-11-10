@@ -153,6 +153,42 @@ async def test_a_final_read_newer_than_the_listing_is_never_lowered(release_dele
         assert fake.keys == {}
 
 
+async def test_a_heartbeat_read_older_than_the_listing_never_lowers_recorded_usage():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker_client = fake.client()
+        broker = ManagedKeyBroker(session_factory=factory, client=broker_client)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage(lease.key_hash, 0.2)
+        stale = await broker_client.get_key(lease.key_hash)
+        fake.set_usage(lease.key_hash, 0.7)
+
+        async def stale_read(key_hash):
+            return stale
+
+        broker_client.get_key = stale_read  # type: ignore[method-assign]
+        client = fake.client()
+        delete_key = client.delete_key
+
+        async def heartbeat_then_delete(key_hash):
+            # A heartbeat read before the listing lands after its usage is recorded.
+            await lease.heartbeat()
+            await delete_key(key_hash)
+
+        client.delete_key = heartbeat_then_delete  # type: ignore[method-assign]
+        await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=client,
+            now=lambda: datetime.now(UTC) + timedelta(hours=1),
+        )
+
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.usage_usd) == ("orphan_deleted", Decimal("0.7"))
+        assert fake.keys == {}
+
+
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
     fake = FakeOpenRouterManagement()
     now = datetime.now(UTC)

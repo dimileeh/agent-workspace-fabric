@@ -59,6 +59,7 @@ PROVIDER_MANAGED_KEY_PERSIST_FAILED = "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
 MINIMUM_MINT_USD = Decimal("0.01")
 MANAGED_KEY_NAME_RE = re.compile(r"^awf-(ws_[0-9a-f]{24})-(\d+)$")
 FINALIZED_KEY_STATUSES = frozenset({KeyStatus.deleted.value, KeyStatus.orphan_deleted.value})
+_USAGE_COUNTERS = frozenset({"usage_usd", "byok_usage_usd"})
 _log = get_logger(__name__)
 
 
@@ -511,12 +512,16 @@ class ManagedKeyBroker:
         """Apply ``updates`` to an unfinalized row; ``False`` only if persisting failed."""
         try:
             async with self._session_factory() as session:
-                row = await ProviderManagedKeyRepository(session).get(row_id)
+                # Locked like the reconciler's usage write, so neither overwrites the other.
+                row = await ProviderManagedKeyRepository(session).get(row_id, for_update=True)
                 if row is None or row.status in FINALIZED_KEY_STATUSES:
                     return True
                 if only_status is not None and row.status != only_status:
                     return True
                 for name, value in updates.items():
+                    if name in _USAGE_COUNTERS:
+                        # Usage only grows: a read older than a recorded one never lowers it.
+                        value = max(usd(getattr(row, name)), value)
                     setattr(row, name, value)
                 row.updated_at = self._now()
                 if event_type is not None:

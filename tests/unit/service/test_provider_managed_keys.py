@@ -563,11 +563,11 @@ async def test_final_usage_is_committed_before_the_key_is_deleted(monkeypatch, o
         fake.set_usage("hash1", 6.0)
         get = ProviderManagedKeyRepository.get
 
-        async def _outage(self, key_id):
+        async def _outage(self, key_id, **kwargs):
             deleted = ("DELETE", "/keys/hash1") in [(m, p) for m, p, _ in fake.calls]
             if outage_starts == "before_delete" or deleted:
                 raise _db_error()
-            return await get(self, key_id)
+            return await get(self, key_id, **kwargs)
 
         with monkeypatch.context() as patch:
             patch.setattr(ProviderManagedKeyRepository, "get", _outage)
