@@ -122,7 +122,9 @@ async def set_provider_budget(
             detail={"usd": usd_text(new_budget), "spend_usd": usd_text(spend)},
         )
     # Patch the live key before any DB write: a failed call leaves no state change.
-    # A key still minting rechecks the budget under this row lock before activation.
+    # A key still minting rechecks the budget under this row lock before activation;
+    # if this transaction never commits, the key's next heartbeat (which waits on
+    # this row lock) re-applies the committed limit.
     live = [row for row in rows if row.status == KeyStatus.active.value and row.key_hash]
     patched: dict[str, str] = {}
     for row in live:

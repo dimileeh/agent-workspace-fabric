@@ -584,6 +584,101 @@ async def test_a_key_the_changed_budget_cannot_fund_is_deleted_before_activation
         )
 
 
+def _control_service(session) -> WorkspaceControlService:
+    return WorkspaceControlService(
+        session, project_stopper=SimpleNamespace(), cleaner_factory=SimpleNamespace()
+    )
+
+
+async def test_heartbeat_restores_a_live_key_limit_whose_budget_never_committed():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        async with factory() as session:
+            await _control_service(session).set_provider_budget(
+                ws, usd=100, management_client=fake.client()
+            )
+            await session.rollback()  # The PATCH landed; the raise never committed.
+        assert fake.keys[lease.key_hash]["limit"] == 100.0
+
+        await lease.heartbeat()
+        await lease.heartbeat()
+
+        assert fake.keys[lease.key_hash]["limit"] == 10.0
+        (row,) = await _rows(factory, ws)
+        assert row.limit_usd == Decimal(10)
+        assert [call for call in fake.calls if call[0] == "PATCH"] == [
+            ("PATCH", "/keys/hash1", {"limit": 100.0}),
+            ("PATCH", "/keys/hash1", {"limit": 10.0}),
+        ]
+
+
+async def test_heartbeat_waits_out_an_in_flight_budget_raise_instead_of_reverting_it(
+    monkeypatch,
+):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        client = fake.client()
+        update_key_limit = client.update_key_limit
+        heartbeats: list[asyncio.Future[None]] = []
+
+        async def _patch_then_heartbeat(key_hash, limit):
+            info = await update_key_limit(key_hash, limit)
+            # A heartbeat lands between the raise's PATCH and its commit.
+            heartbeats.append(asyncio.ensure_future(lease.heartbeat()))
+            await asyncio.wait(heartbeats, timeout=0.5)
+            return info
+
+        monkeypatch.setattr(client, "update_key_limit", _patch_then_heartbeat)
+        async with factory() as session:
+            await _control_service(session).set_provider_budget(
+                ws, usd=100, management_client=client
+            )
+            assert not heartbeats[0].done()
+            await session.commit()
+        await heartbeats[0]
+
+        assert fake.keys[lease.key_hash]["limit"] == 100.0
+        (row,) = await _rows(factory, ws)
+        assert row.limit_usd == Decimal(100)
+
+
+async def test_a_failed_limit_restore_is_logged_and_never_raises_into_the_run(monkeypatch):
+    import structlog
+
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.keys[lease.key_hash]["limit"] = 100.0
+        fake.fail[("PATCH", "key")] = 500
+
+        async def _broken(*_args, **_kwargs):
+            raise _db_error()
+
+        with structlog.testing.capture_logs() as logs:
+            await lease.heartbeat()
+            monkeypatch.setattr(WorkspaceRepository, "get_for_update", _broken)
+            await lease.heartbeat()
+
+        assert fake.keys[lease.key_hash]["limit"] == 100.0
+        assert [
+            (log["event"], log.get("reason_code")) for log in logs if log["log_level"] == "warning"
+        ] == [
+            ("provider.managed_key.limit_restore_failed", "PROVIDER_MANAGEMENT_API_UNAVAILABLE"),
+            ("provider.managed_key.persist_failed", "PROVIDER_MANAGED_KEY_PERSIST_FAILED"),
+        ]
+
+
 async def test_heartbeats_after_release_or_on_unhealthy_rows_change_nothing():
     fake = FakeOpenRouterManagement()
     async with postgres_test_engine() as engine:

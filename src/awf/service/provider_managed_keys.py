@@ -551,7 +551,55 @@ class ManagedKeyBroker:
             updates.update(_usage_updates(info, now))
         else:
             updates["last_reason_code"] = reason
-        await self._update(lease.row_id, only_status=KeyStatus.active.value, **updates)
+        persisted = await self._update(lease.row_id, only_status=KeyStatus.active.value, **updates)
+        if persisted and info is not None:
+            await self._restore_limit(lease, info)
+
+    async def _restore_limit(self, lease: ManagedKeyLease, info: KeyInfo) -> None:
+        """Re-apply the committed limit to a live key whose provider limit differs.
+
+        The budget control PATCHes a live key before its transaction commits, so a
+        failed commit leaves the key with a limit the database never recorded. The
+        workspace row lock waits out an in-flight budget control (it holds the lock
+        across its PATCH), so only a committed limit is ever re-applied.
+        """
+        assert self._client is not None  # a lease exists only with a client
+        try:
+            async with self._session_factory() as session:
+                await WorkspaceRepository(session).get_for_update(lease.workspace_id)
+                row = await ProviderManagedKeyRepository(session).get(lease.row_id)
+                limit = (
+                    usd(row.limit_usd)
+                    if row is not None and row.status == KeyStatus.active.value
+                    else None
+                )
+        except SQLAlchemyError:
+            _log.warning(
+                "provider.managed_key.persist_failed",
+                key_id=lease.row_id,
+                reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
+            )
+            return
+        if limit is None or (info.limit is not None and usd(info.limit) == limit):
+            return
+        try:
+            await self._client.update_key_limit(lease.key_hash, limit)
+        except OpenRouterManagementError as error:
+            _log.warning(
+                "provider.managed_key.limit_restore_failed",
+                workspace_id=lease.workspace_id,
+                key_name=lease.key_name,
+                reason_code=error.reason_code,
+                http_status=error.http_status,
+            )
+            return
+        _log.warning(
+            "provider.managed_key.limit_restored",
+            workspace_id=lease.workspace_id,
+            key_name=lease.key_name,
+            limit_usd=usd_text(limit),
+            provider_limit_usd=usd_text(info.limit) if info.limit is not None else None,
+        )
 
     async def _release(self, lease: ManagedKeyLease, *, failed: bool) -> ProviderCredentialRelease:
         try:
