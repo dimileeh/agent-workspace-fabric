@@ -117,6 +117,42 @@ async def test_orphans_are_usage_recorded_then_deleted_while_live_keys_stay():
         assert {e.reason_code for e in events} == {"PROVIDER_MANAGED_KEY_ORPHAN_DELETED"}
 
 
+@pytest.mark.parametrize(
+    ("release_delete_fails", "status"), [(False, "deleted"), (True, "orphan_deleted")]
+)
+async def test_a_final_read_newer_than_the_listing_is_never_lowered(release_delete_fails, status):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage(lease.key_hash, 0.2)
+        client = fake.client()
+        list_keys = client.list_keys
+
+        async def list_then_release(**kwargs):
+            listing = await list_keys(**kwargs)
+            # The invocation finishes after the listing: its final read is newer.
+            fake.set_usage(lease.key_hash, 0.7)
+            if release_delete_fails:
+                fake.fail[("DELETE", "key")] = 503
+            await lease.release(failed=False)
+            fake.fail.clear()
+            return listing
+
+        client.list_keys = list_then_release  # type: ignore[method-assign]
+        await reconcile_openrouter_keys(session_factory=factory, client=client)
+
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.usage_usd, row.final_usage_read) == (
+            status,
+            Decimal("0.7"),
+            True,
+        )
+        assert fake.keys == {}
+
+
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
     fake = FakeOpenRouterManagement()
     now = datetime.now(UTC)

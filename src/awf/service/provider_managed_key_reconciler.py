@@ -32,7 +32,7 @@ from awf.service.openrouter_management import (
     OpenRouterManagementError,
     usd,
 )
-from awf.service.provider_managed_keys import MANAGED_KEY_NAME_RE
+from awf.service.provider_managed_keys import FINALIZED_KEY_STATUSES, MANAGED_KEY_NAME_RE
 
 PROVIDER_MANAGED_KEY_ORPHAN_DELETED = "PROVIDER_MANAGED_KEY_ORPHAN_DELETED"
 PROVIDER_MANAGED_KEY_RECONCILE_FAILED = "PROVIDER_MANAGED_KEY_RECONCILE_FAILED"
@@ -81,6 +81,8 @@ async def reconcile_openrouter_keys(
             report["truncated"] = True
             break
         row_id = await _record_usage(session_factory, row, info, workspace_id, seq, current)
+        if row_id is None:
+            continue
         try:
             await client.delete_key(info.hash)
         except OpenRouterManagementError as error:
@@ -155,11 +157,18 @@ async def _record_usage(
     workspace_id: str,
     seq: int,
     now: datetime,
-) -> str:
-    """Persist the listed usage before deleting (inserting an orphan row if needed)."""
+) -> str | None:
+    """Persist the listed usage before deleting (inserting an orphan row if needed).
+
+    ``None`` means the broker finalized the key after the listing: its final
+    read is newer than the listing, so the row is left as it is.
+    """
     async with session_factory() as session:
         keys = ProviderManagedKeyRepository(session)
-        current = await keys.get(row.id) if row is not None else None
+        # Locked so a concurrent broker finalize is either seen or waits.
+        current = await keys.get(row.id, for_update=True) if row is not None else None
+        if current is not None and current.status in FINALIZED_KEY_STATUSES:
+            return None
         if current is None:
             current = await keys.add(
                 ProviderManagedKey(
@@ -176,8 +185,9 @@ async def _record_usage(
                 )
             )
         current.key_hash = info.hash
-        current.usage_usd = usd(info.usage)
-        current.byok_usage_usd = usd(info.byok_usage)
+        # Usage only grows: a listing older than a recorded read never lowers it.
+        current.usage_usd = max(usd(current.usage_usd), usd(info.usage))
+        current.byok_usage_usd = max(usd(current.byok_usage_usd), usd(info.byok_usage))
         current.usage_read_at = now
         current.final_usage_read = True
         current.lease_expires_at = None

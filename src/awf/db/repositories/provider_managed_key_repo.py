@@ -44,8 +44,8 @@ class ProviderManagedKeyRepository:
         await self._session.flush()
         return row
 
-    async def get(self, key_id: str) -> ProviderManagedKey | None:
-        return await self._session.get(ProviderManagedKey, key_id)
+    async def get(self, key_id: str, *, for_update: bool = False) -> ProviderManagedKey | None:
+        return await self._session.get(ProviderManagedKey, key_id, with_for_update=for_update)
 
     async def for_workspace(self, workspace_id: str) -> list[ProviderManagedKey]:
         stmt = (
