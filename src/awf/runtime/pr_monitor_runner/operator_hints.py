@@ -276,8 +276,11 @@ async def _run_operator_hint_cycle(
             workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
             # A directive against a preserved protected commit is told to reset to
-            # the published PR head, not revert on top (#1200).
-            preserved_head_sha=preserved_head_sha if hint.directive else None,
+            # the published PR head, not revert on top (#1200). An approve-and-keep
+            # grant keeps that commit, so it gets no reset guidance.
+            preserved_head_sha=(
+                preserved_head_sha if hint.directive and not active_grant_specs else None
+            ),
             published_head_sha=pr_head_sha,
         )
         verdict: VerdictResult | MonitorVerdictResult

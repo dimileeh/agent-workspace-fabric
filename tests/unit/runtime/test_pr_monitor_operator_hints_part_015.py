@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import RepoRef
+from awf.control.quality_gates import GrantSpec
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -424,3 +425,35 @@ async def test_reset_inside_directive_agent_retires_orphaned_record_before_push(
     await _assert_orphaned_record_retired(
         factory, workspace_id, state=state, protected=protected, head=clean_heads[0]
     )
+
+
+async def test_directive_with_approve_and_keep_grant_omits_reset_guidance(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``--directive`` + ``--grant`` resume keeps the preserved commit.
+
+    The operator approved the protected change, so the directive prompt must not
+    tell the agent to reset it away before the grant-aware push
+    (PRRT_kwDOSJAM6s61n9xW).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_protected_block(factory, workspace_id)
+    repo = _Repo(tmp_path, workspace_id)
+    protected = repo.commit_protected_change()
+    state = _state(published=repo.published, protected=protected)
+    prompts: list[str] = []
+    runner = _runner(factory, tmp_path, monkeypatch, repo=repo, pushes=[], prompts=prompts)
+
+    async def _active_grant(_workspace_id: str) -> list[GrantSpec]:
+        return [GrantSpec(path=_CI_YML)]
+
+    monkeypatch.setattr(runner, "_active_operator_grant_specs", _active_grant)
+
+    await _run_cycle(runner, workspace_id=workspace_id, repo=repo, state=state, tmp_path=tmp_path)
+
+    assert len(prompts) == 1
+    assert "Protected-scope block" not in prompts[0]
+    assert "Do not add a revert commit on top" not in prompts[0]
+    assert repo.head() == protected
