@@ -254,6 +254,10 @@ def _project(root: Path, decoy: str) -> None:
                     "ANTHROPIC_MODEL": "project-model",
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "project-haiku",
                     "CLAUDE_CODE_SUBAGENT_MODEL": "project-sub",
+                    # Settings env must not undo the runner's forcing/effort env.
+                    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
+                    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+                    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "0",
                 },
             }
         )

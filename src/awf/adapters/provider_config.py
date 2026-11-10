@@ -121,7 +121,8 @@ def provider_environment(
             CLAUDE_CODE_SUBAGENT_MODEL=model,
             CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1",
             # Third-party effort stays absent on the wire, even when project
-            # settings declare effortLevel.
+            # settings declare effortLevel (flag settings repeat it over
+            # project settings env).
             CLAUDE_CODE_EFFORT_LEVEL="auto",
         )
     else:
@@ -203,6 +204,9 @@ def isolated_provider_config(
                 k: source_config[k] for k in ("permissions", "language") if k in source_config
             }
             config["model"] = selection["model"]
+            # Project settings env is applied over process env; flag settings
+            # env outranks it, so a project cannot put effort back on the wire.
+            config["env"] = {"CLAUDE_CODE_EFFORT_LEVEL": env["CLAUDE_CODE_EFFORT_LEVEL"]}
             path = directory / "settings.json"
             path.write_text(json.dumps(config))
             env["CLAUDE_CONFIG_DIR"] = str(directory)

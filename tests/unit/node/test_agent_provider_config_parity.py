@@ -68,7 +68,12 @@ def test_claude_isolated_args_load_project_sources_only(tmp_path):
     ) as (args, _env, directory):
         settings = json.loads((directory / "settings.json").read_text())
     assert args == ["--setting-sources", "project", "--settings", str(directory / "settings.json")]
-    assert settings == {"language": "English", "model": "coder"}
+    # Flag settings outrank project settings env, so project effort stays off.
+    assert settings == {
+        "language": "English",
+        "model": "coder",
+        "env": {"CLAUDE_CODE_EFFORT_LEVEL": "auto"},
+    }
 
 
 def test_codex_config_restores_bounded_retries_and_excludes_credential_from_shell(tmp_path):
