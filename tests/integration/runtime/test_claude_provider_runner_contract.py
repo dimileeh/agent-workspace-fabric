@@ -45,19 +45,21 @@ def _pinned_claude() -> str | None:
     return executable if version.split(" ", 1)[0] == PINNED_CLAUDE_VERSION else None
 
 
+_MISSING_PINNED_CLAUDE = (
+    f"pinned claude CLI {PINNED_CLAUDE_VERSION} (docker/agent-runtime.Dockerfile "
+    "CLAUDE_CODE_VERSION) is not on PATH"
+)
+# The dedicated CI job sets this so a missing/mismatched CLI fails instead of skipping.
+_REQUIRE_PINNED_CLAUDE = os.environ.get("AWF_REQUIRE_PINNED_CLAUDE_CLI") == "1"
+_PINNED_CLAUDE_MISSING = _pinned_claude() is None
+if _REQUIRE_PINNED_CLAUDE and _PINNED_CLAUDE_MISSING:
+    pytest.fail(_MISSING_PINNED_CLAUDE, pytrace=False)
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.slow,
     pytest.mark.timeout(180),
-    # CI has no pinned claude binary yet; enforcing this there needs a workflow
-    # change tracked as a follow-up, so a missing/mismatched CLI skips loudly.
-    pytest.mark.skipif(
-        _pinned_claude() is None,
-        reason=(
-            f"pinned claude CLI {PINNED_CLAUDE_VERSION} (docker/agent-runtime.Dockerfile "
-            "CLAUDE_CODE_VERSION) is not on PATH"
-        ),
-    ),
+    pytest.mark.skipif(_PINNED_CLAUDE_MISSING, reason=_MISSING_PINNED_CLAUDE),
 ]
 
 

@@ -279,6 +279,49 @@ jobs:
       - name: Browser smoke
         run: npm --prefix apps/console run test:browser
 
+  claude-cli-contract:
+    # Runs the real-CLI provider-runner contract against the Claude Code version
+    # pinned in docker/agent-runtime.Dockerfile. Coverage shards lack the CLI and
+    # skip it, so this job installs the pin and fails (not skips) if it is absent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.5.31"
+          github-token: ""
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6
+        with:
+          node-version: "24"
+
+      - name: Install pinned Claude Code CLI
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' docker/agent-runtime.Dockerfile)"
+          test -n "${version}"
+          npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${version}"
+          claude --version
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev
+
+      - name: Run Claude CLI contract
+        env:
+          AWF_REQUIRE_PINNED_CLAUDE_CLI: "1"
+        run: |
+          uv run --python 3.12 pytest -q \
+            tests/integration/runtime/test_claude_provider_runner_contract.py
+
   release-artifacts:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -388,6 +431,7 @@ jobs:
       - lint-and-type
       - python-full-coverage
       - console
+      - claude-cli-contract
       - release-artifacts
     if: ${{ always() }}
     timeout-minutes: 5
@@ -397,12 +441,14 @@ jobs:
           LINT_AND_TYPE_RESULT: ${{ needs['lint-and-type'].result }}
           PYTHON_FULL_COVERAGE_RESULT: ${{ needs['python-full-coverage'].result }}
           CONSOLE_RESULT: ${{ needs.console.result }}
+          CLAUDE_CLI_CONTRACT_RESULT: ${{ needs['claude-cli-contract'].result }}
           RELEASE_ARTIFACTS_RESULT: ${{ needs['release-artifacts'].result }}
         run: |
           for result in \
             "$LINT_AND_TYPE_RESULT" \
             "$PYTHON_FULL_COVERAGE_RESULT" \
             "$CONSOLE_RESULT" \
+            "$CLAUDE_CLI_CONTRACT_RESULT" \
             "$RELEASE_ARTIFACTS_RESULT"
           do
             if [ "$result" != "success" ]; then
@@ -410,6 +456,7 @@ jobs:
               echo "lint-and-type: $LINT_AND_TYPE_RESULT"
               echo "python-full-coverage: $PYTHON_FULL_COVERAGE_RESULT"
               echo "console: $CONSOLE_RESULT"
+              echo "claude-cli-contract: $CLAUDE_CLI_CONTRACT_RESULT"
               echo "release-artifacts: $RELEASE_ARTIFACTS_RESULT"
               exit 1
             fi
