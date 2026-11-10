@@ -40,7 +40,9 @@ worktree its pre-existing-dirty guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE``
 ``REPAIR_DIRTY_COMMIT_FAILED`` instead, exactly as the CI-repair commit sink
 already does, and still without a rollback (PRRT_kwDOSJAM6s6fwr71,
 PRRT_kwDOSJAM6s6fxp82). A managed-key park still parks, carrying that sink
-failure as details, so raising the budget can resume it (PRRT_kwDOSJAM6s618cN-).
+failure as details, so raising the budget can resume it (PRRT_kwDOSJAM6s618cN-);
+the resumed hint cycle commits the stranded edits before its dirty guard runs
+(``provider_park_stranded_edits``, PRRT_kwDOSJAM6s618pY4).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working. The
@@ -106,6 +108,9 @@ from awf.runtime.pr_monitor_runner.constants import (
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
+)
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    mark_provider_park_stranded_edits,
 )
 from awf.runtime.pr_monitor_runner.types import SINK_INFRASTRUCTURE_ERRORS
 
@@ -713,7 +718,9 @@ async def _raise_stranded_timeout_sink_failure(
     workspace instead, so raising the budget could no longer resume the repair. The
     park propagates with the sink failure attached as ``dirty_commit_error``
     details, so the stranded edits are still attributable when it resumes
-    (PRRT_kwDOSJAM6s618cN-).
+    (PRRT_kwDOSJAM6s618cN-). It also marks the monitor state, so the resumed hint
+    cycle finishes this sink before its pre-existing-dirty guard can reject the
+    edits and wedge the resume (PRRT_kwDOSJAM6s618pY4).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
     from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
@@ -748,6 +755,7 @@ async def _raise_stranded_timeout_sink_failure(
         ),
     )
     if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
+        mark_provider_park_stranded_edits(state, preserved_head)
         _attach_provider_recovery_details(
             provider_recovery_exc,
             {

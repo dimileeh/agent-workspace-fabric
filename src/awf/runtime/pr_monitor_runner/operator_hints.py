@@ -55,6 +55,9 @@ from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import (
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    commit_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -109,6 +112,49 @@ async def _run_operator_hint_cycle(
 ) -> _GitPushResult:
     """Run one repair pass for an operator hint and push committed work."""
     worktree_path = self._worktrees_root / workspace_id
+    # A managed-key park whose preserving sink failed left the repair's edits
+    # uncommitted; finish that sink before the guard below rejects them as
+    # pre-existing dirt, or the budget-raise resume could never continue the repair
+    # (PRRT_kwDOSJAM6s618pY4). Its sink errors end the resume like the agent's own.
+    try:
+        stranded_result = await commit_provider_park_stranded_edits(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            state=state,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            operation_type="operator_hint_repair",
+        )
+    except (
+        ProtectedScopeDiffError,
+        _MonitorPolicyBlockedError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ) as exc:
+        terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context="operator_hint_agent_error",
+            operation_id=_operation_id,
+            operation_type=_operation_type,
+            repo=repo,
+            worktree_path=worktree_path,
+        )
+        if terminal_moot_result is not None:
+            return cast(_GitPushResult, terminal_moot_result)
+        return await _operator_hint_agent_error_result(
+            self,
+            exc=exc,
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+            state=state,
+        )
+    if stranded_result is not None:
+        return stranded_result
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,

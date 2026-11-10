@@ -26,6 +26,9 @@ from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+)
 from awf.runtime.pr_monitor_runner.types import ProviderManagedKeyParkedError
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
@@ -97,6 +100,8 @@ async def test_managed_key_park_preserves_the_repair_work_for_resume(
     assert "agent timeout" not in message
     # The resume re-attempt anchors its evidence range at the original item start.
     assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    # The sink committed everything, so the resume has no stranded edits to finish.
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -164,6 +169,9 @@ async def test_a_stranded_park_sink_still_parks_and_carries_the_commit_failure(
     assert runner.reset_targets == []
     assert runner.current_head == _PRESERVED_HEAD
     assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    # The resumed hint cycle finishes this sink before its dirty guard
+    # (PRRT_kwDOSJAM6s618pY4).
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
     stranded = [
         entry
         for entry in captured
