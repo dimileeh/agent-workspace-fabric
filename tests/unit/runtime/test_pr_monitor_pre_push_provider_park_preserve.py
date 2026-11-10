@@ -6,7 +6,9 @@ to enter the pre-push fix-pass and dirty-finalize auth handlers, which roll the
 uncommitted repair output back before re-raising. Raising the budget then
 resumed from a tree without that work (PRRT_kwDOSJAM6s618qEs). The park now
 skips the rollback and marks the monitor state, so the resumed hint cycle
-commits the stranded edits before its pre-existing-dirty guard runs.
+commits the stranded edits before its pre-existing-dirty guard runs. A park
+raised by the fix-pass agent's own run marks the state the same way before it
+unwinds past the commit sink (PRRT_kwDOSJAM6s619JuS).
 """
 
 from __future__ import annotations
@@ -18,7 +20,9 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
@@ -47,6 +51,7 @@ from tests.unit.runtime._pre_push_validation_helpers import (
 
 _START_HEAD = "6" * 40
 _IN_SINK_HEAD = "a" * 40
+_POST_AGENT_HEAD = "b" * 40
 
 
 @pytest.fixture
@@ -120,6 +125,85 @@ async def test_fix_pass_sink_park_keeps_edits_and_marks_the_resume(
 
     rollback.assert_not_awaited()
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _IN_SINK_HEAD
+
+
+@pytest.mark.unit
+async def test_fix_pass_agent_park_marks_the_resume_before_unwinding(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A park raised by the fix-pass agent's own run leaves its edits marked for the resume."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    _mark_git_worktree(tmp_path / "worktrees" / workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    head = {"sha": _START_HEAD}
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return head["sha"]
+
+    async def _run_agent_with_recovery(**_kwargs: object) -> None:
+        # The agent commits part of its fix, edits more, then hits the budget.
+        head["sha"] = _POST_AGENT_HEAD
+        raise AgentRunError(
+            agent="codex",
+            result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+            reason_code="PROVIDER_BUDGET_EXHAUSTED",
+            details={"retryable": False},
+        )
+
+    commit_dirty_worktree = AsyncMock(return_value=True)
+    rollback = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_agent_with_recovery
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(
+        pre_push_validation_module, "_rollback_failed_pre_push_validation_fix_pass", rollback
+    )
+    state = MonitorState()
+
+    with pytest.raises(ProviderManagedKeyParkedError):
+        await pre_push_validation_module._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=state,
+            validation_result=pre_push_validation_module._PrePushValidationResult(
+                passed=False,
+                validation_run_id="vr_failed",
+                workspace_head_sha=_START_HEAD,
+                reason_code="PRE_PUSH_VALIDATION_FAILED",
+                message="PR monitor pre-push validation failed: COMMAND_FAILED",
+                validation_reason_code="COMMAND_FAILED",
+                result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+            ),
+            pass_number=1,
+            total_passes=3,
+            validation_commands=("pytest -q",),
+        )
+
+    commit_dirty_worktree.assert_not_awaited()
+    rollback.assert_not_awaited()
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _POST_AGENT_HEAD
+    # The provider handler persists the marked state before it raises the park.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.monitor_threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+        _POST_AGENT_HEAD
+    )
 
 
 @pytest.mark.unit

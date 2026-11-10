@@ -658,6 +658,13 @@ async def _run_pre_push_validation_fix_pass_impl(
         if exc.reason_code in PROVIDER_PARK_REASON_CODES:
             # Later passes could only fail to mint, then fail as a validation
             # failure: unwind so the monitor's terminal sink parks for a human.
+            # The unwind skips the commit sink and the budget-raise resume
+            # continues from this worktree, so mark the agent's uncommitted edits
+            # first (the handler persists the state): the resumed hint cycle
+            # commits them before its pre-existing-dirty guard runs
+            # (``provider_park_stranded_edits``, PRRT_kwDOSJAM6s619JuS).
+            preserved_head = await self._rev_parse_head(worktree_path)
+            mark_provider_park_stranded_edits(cast("MonitorState | None", state), preserved_head)
             await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
         _log.warning(
             "monitor.pre_push_validation_fix_agent_nonzero",
