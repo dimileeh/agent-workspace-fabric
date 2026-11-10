@@ -38,15 +38,22 @@ Required rollout order:
    `/opt/awf/provider_diagnostic_fixture.py` (`coding-cycle-v1`) and
    `awf-provider-challenge`. Mixed capability-1 workers are rejected for expanded
    admission; stop old processes rather than trusting metadata alone.
-4. Through deployed diagnostic workspaces, prove Codex/Claude against Ollama cloud
-   through the configured daemon and OpenRouter (four paths), both native
-   baselines, and real monitor repair/restart identity dogfood. Local Ollama live
-   tests are excluded by operator instruction and remain not live-verified.
+4. With ordinary admission still disabled, run six deployed diagnostic workspaces:
+   Codex/Claude against Ollama cloud through the configured daemon and OpenRouter
+   (four paths), plus both native baselines. Local Ollama live tests are excluded
+   by operator instruction and remain not live-verified.
    [Evidence and limitations](AGENT_MODEL_PROVIDERS.md#remaining-release-gates-and-preliminary-evidence)
    must distinguish auth health/preliminary transcripts from deployed AWF passes.
-5. Only after all live gates pass may the supervisor explicitly enable ordinary
-   admission. Exact coding proof or explicit unverified opt-in is then required;
-   runtime network verification and isolation apply before every invocation.
+5. After all six diagnostics pass, the supervisor must temporarily enable ordinary
+   admission for a controlled ordinary workspace canary proving real PR monitor
+   repair and restart with the frozen provider identity. Limit ordinary intake to
+   this canary during the proof. Diagnostic workspaces skip the PR lifecycle, so
+   they cannot establish monitor/restart proof while ordinary admission is disabled.
+   Disable ordinary admission again if the canary fails or its proof is incomplete.
+6. Only after the diagnostics and canary proof pass may the supervisor enable
+   general ordinary admission. Exact coding proof or explicit unverified opt-in is
+   required for the canary and subsequent work; runtime network verification and
+   isolation apply before every invocation.
 
 The repaired foundation is the schema/execution-v1 rollback floor. It cannot
 resume or settle diagnostic semantics. Once diagnostic rows exist, the oldest
