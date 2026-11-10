@@ -226,3 +226,19 @@ must read operation rows from `items` and handle the pagination fields:
   "cursor": null
 }
 ```
+
+## Provider tools
+
+- `awf_query_provider_models(agent, provider, profile_ref?, profile?)` queries
+  only the selected provider's bounded catalog. Results label capabilities as
+  provider claims and retain manual entry on discovery failure.
+- `awf_test_provider_connection(agent, provider, model, idempotency_key,
+  deadline_seconds=180, effort?, profile_ref?, profile?)` creates the same
+  isolated diagnostic workspace as REST. The deadline cannot exceed 900 seconds.
+
+The diagnostic response contains workspace/operation IDs and
+`label=provider_connection_test`. Existing workspace, log, event, operation and
+cancel/stop/destroy tools manage its lifecycle. A request itself authorizes a
+candidate-model test; ordinary third-party admission remains separately gated.
+No user prompt/repository/phase/PR parameters are accepted. Worker loss marks a
+test inconclusive without paid replay. [Evidence and limitations](AGENT_MODEL_PROVIDERS.md).

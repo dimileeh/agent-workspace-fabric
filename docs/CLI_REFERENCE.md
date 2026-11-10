@@ -378,3 +378,18 @@ Preview profile resolution:
 ```bash
 uv run --python 3.12 --extra dev awf profile preview ~/Projects/example-repo --profile auto
 ```
+
+## Provider commands
+
+```bash
+awf provider models --agent codex --provider openrouter
+awf provider test --agent claude_code --provider ollama --model kimi-k2.7-code:cloud --deadline-seconds 180 --idempotency-key connection-1
+```
+
+Both commands support `--profile-ref`, `--profile` (a profile YAML file),
+`--base-url`, and `--format json|pretty`. Tests also support `--effort` under the
+selected provider's compatibility rules. The CLI only calls AWF REST; it does
+not invoke a local model. Inspect returned workspace/operation IDs through
+existing workspace show, logs, events and operation commands. Catalog claims
+are separate from coding proof; ordinary third-party admission stays disabled
+until supervisor release gates pass. [Provider contract](AGENT_MODEL_PROVIDERS.md).

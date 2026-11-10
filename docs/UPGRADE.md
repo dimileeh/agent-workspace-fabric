@@ -15,7 +15,7 @@ manifest, checksums, and release artifacts are published and verified.
 ## Provider foundation compatibility floor
 
 The oldest compatible rollback build for provider connection schema and
-execution contract v1 is implementation commit **`09793d89fcd27cac2cdbcf2aa6777c703a8c4570`**.
+execution contract v1 is merged repaired foundation **`8322f8c33eec252d86a1ee5e95f5f313111abd9f`** (PR #1199).
 It includes migration **85ce3f9b2a61**, worker capability enforcement, isolated
 runtime support and complete snapshot recovery. Package version `0.1.0` is not
 a unique rollback floor; baseline `3aae1ac6e` predates this contract and is not
@@ -31,20 +31,30 @@ Required rollout order:
    Build/deploy the corresponding agent runtime image containing
    `/opt/awf/provider_config.py`; CLI version pins alone do not prove that this
    image enforces the contract.
-3. Verify native behavior, fresh worker heartbeats with
-   `execution_contract_version=1`, and runtime `python /opt/awf/provider_config.py --contract-version`
-   reporting `1`. Mixed/unknown live queue consumers must
-   not admit expanded work. Preserve the schema-ahead startup guard.
-4. Complete T4–T6: catalog/diagnostic interfaces, actual agent-network admission,
-   two dependent tool turns with typed evidence, all six third-party paths plus
-   native baselines, and real monitor repair/restart identity dogfood. The
-   [foundation evidence](AGENT_MODEL_PROVIDERS.md#remaining-release-gates-and-preliminary-evidence)
-   contains failures/inconclusive paths and the missing OpenRouter key, not
-   release passes. Keep admission disabled while any required gate is open.
-5. Only then explicitly enable third-party admission on the compatible fleet.
-   In this foundation, enabling the flag alone still returns an explicit
-   unsupported network verification result; readiness overrides cannot bypass
-   that check.
+3. Deploy this diagnostic-capable release and its matching runtime image before
+   creating diagnostics or enabling expanded admission. Workers advertise
+   `execution_contract_version=2`; frozen selections and provider runtime isolation
+   stay at contract v1. Diagnostics additionally require immutable
+   `/opt/awf/provider_diagnostic_fixture.py` (`coding-cycle-v1`) and
+   `awf-provider-challenge`. Mixed capability-1 workers are rejected for expanded
+   admission; stop old processes rather than trusting metadata alone.
+4. Through deployed diagnostic workspaces, prove Codex/Claude against Ollama cloud
+   through the configured daemon and OpenRouter (four paths), both native
+   baselines, and real monitor repair/restart identity dogfood. Local Ollama live
+   tests are excluded by operator instruction and remain not live-verified.
+   [Evidence and limitations](AGENT_MODEL_PROVIDERS.md#remaining-release-gates-and-preliminary-evidence)
+   must distinguish auth health/preliminary transcripts from deployed AWF passes.
+5. Only after all live gates pass may the supervisor explicitly enable ordinary
+   admission. Exact coding proof or explicit unverified opt-in is then required;
+   runtime network verification and isolation apply before every invocation.
+
+The repaired foundation is the schema/execution-v1 rollback floor. It cannot
+resume or settle diagnostic semantics. Once diagnostic rows exist, the oldest
+compatible operational rollback is **`cbc8b529b1510481cc16774857f4ae424944bd27`**
+(T4–T6, worker capability 2, fixture v1) or a later compatible build. Preserve that
+code until all diagnostic work is terminal and disposed; do not deploy the
+foundation alone over live diagnostic rows. No additional schema migration is
+introduced by this release.
 
 Immediate rollback starts by disabling admission, including new third-party
 fallback promotions. Drain or park already-selected workspaces on compatible

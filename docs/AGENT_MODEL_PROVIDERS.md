@@ -1,6 +1,6 @@
-# Independent agent and model-provider selection: foundation
+# Independent agent and model-provider selection
 
-This release implements T1–T3 of the approved provider plan. Third-party
+This release adds T4–T6 catalog and diagnostic workspaces to the merged T1–T3 foundation. Third-party
 Codex/Claude admission defaults to disabled through
 `AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED=false`. This foundation is deployable
 before provider compatibility is established; it does not release third-party
@@ -116,13 +116,16 @@ and Ollama/OpenRouter changes across both supported agents. Fallback credentials
 are not preloaded. Companion services, database values and Compose interpolation
 remain intact; materialization failures stop the resume with a durable reason.
 
-The runtime performs bounded (10-second), redirect-disabled checks of the
-selected endpoint/model from its own network. Readiness is not coding
-compatibility. Foundation creation cannot certify the actual future agent
-network and explicitly returns `EXECUTION_NETWORK_PROBE_UNSUPPORTED`, including
-for sidecar-only endpoints. Readiness overrides cannot bypass this rejection.
-Consequently enabling the feature flag alone does not open these paths in this
-foundation. T4–T6 must complete admission-network verification and release gates.
+The runtime probes the selected endpoint/model from its own network before each
+invocation. Readiness is separate from coding compatibility. Creation records
+`EXECUTION_NETWORK_PROBE_PENDING` and defers that network observation; a host
+request never certifies a future sidecar. Enabled ordinary admission requires
+exact successful diagnostic evidence or `preflight.allow_unverified_model=true`.
+Auto-profile evidence lookup waits for atomic connection binding. The exact
+image ID, CLI version, model revision when available, selection, connection scope
+and fixture version are checked again before each proof-authorized invocation,
+including monitor repairs. Explicit experimental opt-in still requires runtime
+isolation and endpoint readiness. Admission remains disabled by default.
 
 Unknown runtime images fail with `EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED` before
 a coding CLI launches. Managed provider configuration and project Claude agent
@@ -150,88 +153,133 @@ monitor repair, clearing incompatible effort and Cursor Auto selection. An
 approved planning-scope model fallback also updates the frozen selection used by
 executor helpers and adapter reconstruction, preserving provider, endpoint,
 credential reference and native effort. OpenCode model promotion recomputes its
-provider and honors an explicit provider constraint. The foundation blocks
-third-party primaries, declared fallbacks, and every promotion even when the
-feature flag is enabled; actual-network verification and T4–T6 remain required.
-A native primary with a third-party fallback is intentionally rejected, including
-while auto-profile binding is pending. An uncontracted third-party fallback is
+provider and honors an explicit provider constraint. New third-party primaries and declared fallbacks remain blocked while admission
+is disabled. Enabled selections reach the actual runtime-network probe. An uncontracted third-party fallback is
 rejected. Cross-choice native fallback is never inferred for a third-party
 selection. Disabling admission blocks new
 third-party fallback promotions as well as creation; already selected work
 retains its identity while draining or parked.
 
-Oldest compatible rollback code: **`09793d89fcd27cac2cdbcf2aa6777c703a8c4570`**.
+Schema/execution-v1 rollback floor: **`8322f8c33eec252d86a1ee5e95f5f313111abd9f`**
+(merged repaired foundation, PR #1199). Once diagnostic rows exist, the operational
+rollback floor is **`cbc8b529b1510481cc16774857f4ae424944bd27`** (T4–T6, worker
+capability 2, fixture v1). The foundation alone cannot resume live diagnostics.
 
-Worker heartbeats advertise execution contract **1**; legacy rows backfill to
+Workers in this release advertise capability **2** (execution selection remains v1). Expanded admissions require every live queue consumer at capability 2; legacy rows backfill to
 **0**, meaning unsupported. Admission requires every live queue consumer to be
 compatible, and dispatch rechecks capability. This metadata cannot make an
 already-running old binary safe. Follow the mandatory [upgrade and rollback
 sequence](UPGRADE.md#provider-foundation-compatibility-floor).
 
+## Discovery and connection tests
+
+| Intent | REST | CLI | MCP |
+| --- | --- | --- | --- |
+| Catalog claims | `POST /v1/providers/models/query` | `awf provider models` | `awf_query_provider_models` |
+| Coding diagnostic | `POST /v1/providers/connection-tests` | `awf provider test` | `awf_test_provider_connection` |
+
+Both accept `agent`, `provider`, optional `profile_ref` or inline `profile`.
+Diagnostics additionally require `model`; `effort` follows normal compatibility
+rules. Native catalog discovery is explicitly unsupported. Ollama uses only the
+configured daemon's `/api/tags`; OpenRouter uses its official `/api/v1/models`.
+Discovery never pulls models or invokes an agent. HTTP is bounded to 10 seconds,
+2 MB and 5,000 items, with redirects refused. A bounded 128-entry, five-minute
+cache uses connection/credential-reference and agent/profile context. No token
+values or token hashes identify cache entries. Model capabilities/pricing are
+provider claims, nullable when absent. Discovery failure retains manual entry;
+it supplies no coding-compatibility proof. Sidecar catalog discovery explicitly
+returns `PROVIDER_DISCOVERY_NETWORK_UNSUPPORTED` because no disposable discovery
+network transport is available.
+
+Connection tests require `Idempotency-Key` (MCP/CLI `idempotency_key`). Identical
+requests return the same workspace/operation; changed diagnostic identity,
+profile, deadline or configured runtime returns `IDEMPOTENCY_CONFLICT`. Deadlines
+default to 180 seconds, maximum 900. A test request authorizes its candidate
+model while ordinary admission is disabled; no second experimental flag is needed.
+Known incompatible agent/model/effort combinations still fail.
+
+Diagnostics use normal queue capacity, claims, operations, logs and cleanup.
+They branch before project checkout/hooks, forge access, planning, phases,
+validation commands and PR lifecycle. The repository identity
+`awf-internal://provider-diagnostic/v1` is solely an internal managed linked
+fixture worktree. Selected model sidecars may be reproduced only without builds,
+project binds, volumes, fixed ports, privilege, dependencies or secret env.
+Unsupported profiles fail explicitly; no replacement host endpoint is chosen.
+The internal mirror is mounted read-only; no diagnostic commits are needed.
+Forge/SSH/git auth and unrelated model settings are omitted. Native diagnostics
+receive only selected native credential references and isolated credential-only
+writable homes for CLI state/refresh, without inherited model/tool config; third-party
+invocation homes remain outside OS temporary directories.
+
+The `coding-cycle-v1` fixture asks for one pure function using a fresh challenge
+nonce. The immutable challenge/verifier live under `/opt/awf`, outside writable
+files. Runtime admission requires a nonroot CLI user and root-owned, unwritable
+oracle/interpreter paths. Python wrappers use the pinned absolute interpreter
+with isolated startup, so user-site code cannot replace the verifier. The verifier permits literal constants, a pure `answer(value)` function,
+concatenation/f-strings and reverse slicing; imports, calls and executable module
+statements fail. This keeps candidate code from replacing the oracle or forging
+its output. A pass requires ordered, completed top-level typed CLI events with
+distinct call IDs: challenge result first, then a tool input containing its exact
+nonce. Nested JSON in tool output, prose, exit zero, a combined challenge/edit
+command, missing/truncated output, or edited tests cannot establish a pass.
+AWF independently verifies the fixture after CLI termination.
+
+Read the workspace's `task_policy.provider_diagnostic`, operation result, events
+and existing log surfaces. Results distinguish endpoint health, protocol witness,
+fixture verification, a bounded four-event ordered witness with call IDs and nonce-dependent input excerpt, exact selection/model revision, CLI version and actual
+runtime image ID. Unknown upstream revisions remain null. Results survive
+fixture disposal. Cancel/stop/destroy terminate the runtime before disposal,
+including cancel with `stop_stack=false`; teardown failure retains the fixture.
+Ordinary retry/refresh/validate/rebase/remonitor/guide controls are rejected.
+The durable invocation-start marker prevents paid replay after worker loss:
+recovery fences the old owner, stops its runtime and records inconclusive.
+AWF never retries diagnostic invocations, falls back, pushes or opens PRs.
+
+```mermaid
+flowchart LR
+  Q[Selected connection query] --> C[Bounded catalog claims]
+  T[Idempotent connection test] --> W[Isolated diagnostic workspace]
+  W --> N[Fresh challenge tool result]
+  N --> D[Later tool input depends on nonce]
+  D --> V[Trusted fixture verification after CLI exit]
+  V --> E[Exact runtime and connection evidence]
+  E --> A[Ordinary admission remains gated]
+  W --> L[Worker loss: stop and mark inconclusive]
+  V --> X[Retain result and dispose owned resources]
+```
+
 ## Remaining release gates and preliminary evidence
 
-R6 (catalog REST/CLI/MCP query and bounded cache) is pending T4. R7–R8 (diagnostic
-workspaces, two dependent tool turns, typed evidence, cancellation/idempotency,
-worker-loss/no-paid-replay and lifecycle cleanup) are pending T5. R9 (full pinned
-matrix and real repair/restart monitor dogfood) is pending T6. No model discovery
-or connection-test API/CLI/MCP surface is claimed by this foundation.
+No deployed-AWF coding compatibility pass is claimed by this implementation.
+The supervisor must run four third-party paths and two native baselines in the
+pinned deployed runtime, plus real monitor repair/restart identity dogfood.
+Local Ollama is implemented and covered deterministically, **not live-verified**,
+and excluded from the live release gate by explicit operator instruction. Do
+not invoke local inference or change the unrelated host llama-server.
 
-The bounded preliminary check on 2026-11-09 observed installed **Codex 0.162.0**
-and **Claude Code 2.1.295**, matching source image pins. The first probe appended
-daemon paths to the configured protocol URL, retaining `/v1`, and received HTTP
-errors. Correcting that probe to the normalized origin returned **Ollama
-0.33.3** and its model tags from the actual AWF agent container. The secret-free
-endpoint fingerprint was
-`9d1b16df9590a408ee23ac4a310c9a0caab3b2990c7ab894fea107b1cdf2c344`.
-Docker's server/image digest was unavailable. Host provider auth/config was not
-changed or inspected for keys. Each CLI attempt used a disposable fixture,
-isolated home/config, no forge/native credentials, and a 12-second deadline.
-
-The historical local tag `qwen3.8:latest` had digest
-`22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643`.
-Cloud-through-daemon tag `kimi-k2.7-code:cloud` had local descriptor digest
-`eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`;
-this descriptor does not establish an immutable upstream cloud model version.
-An initial evidence parser failed on a string-valued CLI `message`; those
-attempts are inconclusive and cloud calls were not replayed. Corrected local
-parsing retained ordered event types only, without raw model output.
-
-| Release path | Preliminary disposition | Coding-cycle/tool evidence |
+| Path | Preliminary CLI-only observation | Deployed AWF acceptance |
 | --- | --- | --- |
-| Codex → Ollama local (`qwen3.8:latest`) | Historical exit 1; further live tests skipped | `thread.started`, `item.completed(error)`, `turn.started`, `error`, `turn.failed`; no tool events or verified fixture |
-| Codex → Ollama cloud through daemon (`kimi-k2.7-code:cloud`) | Attempted; evidence parser failed | Inconclusive; no retained tool evidence or pass |
-| Claude → Ollama local (`qwen3.8:latest`) | Historical deadline/TERM exit 143; further live tests skipped | Five `system` events; no tool events or verified fixture |
-| Claude → Ollama cloud through daemon (`kimi-k2.7-code:cloud`) | Attempted; evidence parser failed | Inconclusive; no retained tool evidence or pass |
-| Codex → OpenRouter | Operator reports key configured for planned service restart | None; live validation pending |
-| Claude → OpenRouter | Operator reports key configured for planned service restart | None; live validation pending |
-| Codex native baseline | Installed CLI version recorded; deterministic native regression tests | Live baseline pending |
-| Claude native baseline | Installed CLI version recorded; deterministic native regression tests | Live baseline pending |
+| Codex / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed; return-code metadata missing | Pending |
+| Claude / Ollama cloud daemon / `kimi-k2.7-code:cloud` | Dependent tools and fixture observed | Pending |
+| Codex / OpenRouter / `moonshotai/kimi-k2.7-code` | Dependent tools and fixture observed | Pending |
+| Claude / OpenRouter / `minimax/minimax-m2.7` | Dependent tools and fixture observed | Pending |
+| Codex native | CLI 0.162.0 observed | Pending |
+| Claude native | CLI 2.1.295 observed | Pending |
+| Monitor repair/restart identity | Deterministic regressions only | Pending live dogfood |
 
-Per the operator update, skip local Ollama live tests entirely. The required
-follow-up live matrix covers daemon-mediated cloud and OpenRouter for both CLIs,
-plus their native baselines. The OpenRouter credential is reported configured;
-service restart and subsequent live validation remain AWF/operator-managed.
-This repair cycle performs no live provider calls or service restart and claims
-no new compatibility passes. Third-party admission remains disabled.
+The Codex/OpenRouter Minimax preliminary attempt regenerated its nonce and failed
+the fixture. Its transcript remains a negative regression. Source runtime pins
+and locally observed versions are Codex **0.162.0**, Claude **2.1.295**; these do
+not identify a deployed image. Sanitized preliminary envelopes are deterministic
+parser fixtures, never live AWF passes. The supervisor-provided preliminary image
+was `sha256:c7d73ed4150e2e1c274e9b90b3b128e6f35a90537ada7033d62a3f07cbc5f39e`,
+with wrapper commit `526823f0842009f1abadbc8965ddb0dfcf1939a8`; this is not a
+deployed diagnostic-runtime identity. OpenRouter credentials are configured
+and `/api/v1/key` was reported authenticated (HTTP 200); this is auth health only.
+Cloud descriptor/catalog IDs cannot establish immutable upstream model weights.
 
-Focused tests exercise real rendered files, synthetic credential redaction,
-standalone CLI protocol fixtures, runtime cancellation, HTTP failures/redirects,
-Postgres migration/concurrency, persisted recovery, registry defaults and
-scheduler/capacity parity. They are not live coding-compatibility passes. AWF
-and GitHub own the full suite and authoritative **99%** coverage gate; this
-workspace does not run or lower that gate.
-
-The follow-up regressions cover atomic repository-profile binding before launch,
-configured native defaults through create/execute/restart, full loopback
-normalization, provider homes outside `/tmp`, actual Compose auth/env promotion,
-and fail-closed local/hosted monitor resume. They also cover OpenCode provider
-consistency and explicit constraints, initial sync-to-restart identity, binding
-rollback/worker loss, changed profile/key aliases, and concurrent resolver/port
-admission fencing. Existing selected OpenRouter-key
-isolation and approved planning-retry model/connection regressions are retained.
-These deterministic checks do not supply a live provider compatibility pass;
-cloud-through-daemon/OpenRouter/native live evidence and the release gates above
-remain pending, and third-party admission stays disabled.
+AWF/GitHub own broad validation and the authoritative 99% coverage gate. Focused
+checks and unmet release evidence are recorded in ignored local validation plans.
 
 Provider configuration references: [Codex advanced configuration](https://developers.openai.com/codex/config-advanced/),
 [Ollama Claude integration](https://docs.ollama.com/integrations/claude-code),
@@ -268,5 +316,4 @@ locked admission transaction. Port-free profiles retain early atomic binding
 for worker-replacement safety.
 
 Focused regressions cover these repairs. Full validation, coverage, review
-replies, push and merge remain owned by AWF/GitHub. T4–T6 and the live compatibility
-matrix remain pending; no additional live compatibility pass is claimed.
+replies, push and merge remain owned by AWF/GitHub. The live compatibility matrix remains pending; no additional live compatibility pass is claimed.
