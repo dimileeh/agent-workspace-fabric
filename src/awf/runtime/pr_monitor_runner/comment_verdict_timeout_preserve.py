@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
@@ -134,6 +135,16 @@ _TIMEOUT_BASELINE_UNSET = _TimeoutBaselineUnset()
 
 AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 """Reason codes that mean "the watchdog fired", not "the agent's work is junk"."""
+
+_WORK_PRESERVING_REASON_CODES = AGENT_TIMEOUT_REASON_CODES | PROVIDER_PARK_REASON_CODES
+"""Run errors that cut a repair short rather than judge it: preserve, never roll back.
+
+A managed-key park stops the agent mid-repair exactly as the watchdog does, and
+the monitor resumes the same item once a human raises the budget. Rolling back
+first would make that resume restart the repair from scratch, so the park takes
+the timeout's preserve path and its error unwinds from the provider-recovery
+record at the end of it (PRRT_kwDOSJAM6s61592n).
+"""
 
 
 class TimeoutSinkOutcome(Enum):
@@ -215,6 +226,8 @@ async def handle_agent_run_error(
 ) -> NoReturn:
     """Classify an ``AgentRunError``: roll back a provider failure, preserve a timeout.
 
+    A managed-key park is preserved like a timeout (``_WORK_PRESERVING_REASON_CODES``).
+
     ``item_start_head`` is the item's evidence anchor (restored to the original
     start on a re-attempt after a preserved timeout) and stays the sink anchor and
     the value remembered for the next attempt, bound to ``item_body_hash`` so an
@@ -252,7 +265,7 @@ async def handle_agent_run_error(
         AgentVerdictProtocolError,
     )
 
-    if exc.reason_code not in AGENT_TIMEOUT_REASON_CODES:
+    if exc.reason_code not in _WORK_PRESERVING_REASON_CODES:
         rollback_ok = await _rollback_or_classify_failure(
             runner,
             workspace_id=workspace_id,
@@ -545,6 +558,13 @@ async def _finish_timeout_preservation[PreserveOutcomeT](
     raise cancelled
 
 
+def _preserved_commit_note(reason_code: str) -> str:
+    """Name what stopped the agent in the preserving sink commit's message."""
+    if reason_code in PROVIDER_PARK_REASON_CODES:
+        return "preserved after managed provider key park"
+    return "preserved after agent timeout"
+
+
 async def _sink_timeout_dirty_changes(
     runner: PullRequestMonitorRunner,
     *,
@@ -565,7 +585,7 @@ async def _sink_timeout_dirty_changes(
     try:
         committed = await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
-            message=f"{commit_message} (preserved after agent timeout)",
+            message=f"{commit_message} ({_preserved_commit_note(reason_code)})",
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
