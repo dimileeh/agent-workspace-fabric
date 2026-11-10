@@ -104,7 +104,7 @@ async def guard_runtime_compatibility(
             json.dumps(adapter.execution.model_dump(mode="json")),
             "--probe-json",
         ],
-        timeout=12,
+        timeout_seconds=12,
     )
     try:
         probe = json.loads(health.stdout)

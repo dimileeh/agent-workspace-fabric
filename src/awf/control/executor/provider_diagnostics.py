@@ -45,19 +45,20 @@ async def runtime_identity(executor: Any, ws: Any, compose_file: Path) -> dict[s
             RUNTIME_FIXTURE_PATH,
             "--capability",
         ],
-        timeout=10,
+        timeout_seconds=10,
     )
     if capability.returncode or capability.stdout.strip() != FIXTURE_VERSION:
         raise ValueError("PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED")
     cli = "codex" if ws.agent == "codex" else "claude"
     version = await executor._runner.run(
-        [*prefix, "exec", "-T", "agent", cli, "--version"], timeout=10
+        [*prefix, "exec", "-T", "agent", cli, "--version"], timeout_seconds=10
     )
-    container = await executor._runner.run([*prefix, "ps", "-q", "agent"], timeout=10)
+    container = await executor._runner.run([*prefix, "ps", "-q", "agent"], timeout_seconds=10)
     if version.returncode or container.returncode or not container.stdout.strip():
         raise ValueError("PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED")
     image = await executor._runner.run(
-        ["docker", "inspect", "--format", "{{.Image}}", container.stdout.strip()], timeout=10
+        ["docker", "inspect", "--format", "{{.Image}}", container.stdout.strip()],
+        timeout_seconds=10,
     )
     if image.returncode or not image.stdout.strip().startswith("sha256:"):
         raise ValueError("PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED")
@@ -79,7 +80,7 @@ async def runtime_identity(executor: Any, ws: Any, compose_file: Path) -> dict[s
                 json.dumps(selected.model_dump(mode="json")),
                 "--probe-json",
             ],
-            timeout=12,
+            timeout_seconds=12,
         )
         try:
             probe = json.loads(health.stdout)
@@ -256,7 +257,7 @@ async def execute_diagnostic(executor: Any, ws: Any, *, compose_file: Path) -> N
                         "/workspace",
                         proof.nonce,
                     ],
-                    timeout=10,
+                    timeout_seconds=10,
                 )
                 result["fixture_verification"] = verified.returncode == 0
                 result["outcome"] = "passed" if verified.returncode == 0 else "failed"

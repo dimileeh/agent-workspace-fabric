@@ -1,13 +1,13 @@
 """Diagnostics use the real executor dispatch, one invocation, no forge path."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
 from awf.adapters.run_results import AgentRunResult
 from awf.api.schemas_providers import ProviderConnectionTestRequest
-from awf.common.commands import CommandResult
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.config import Settings
 from awf.control.executor import WorkspaceExecutor
 from awf.control.executor.config import ExecutorConfig
@@ -35,7 +35,10 @@ async def prepared(engine, tmp_path, *, provider="ollama"):
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="test")
         await session.commit()
     runner = SimpleNamespace(
-        run=AsyncMock(return_value=CommandResult(returncode=0, stdout="coding-cycle-v1", stderr=""))
+        run=create_autospec(
+            AsyncioSubprocessRunner().run,
+            return_value=CommandResult(returncode=0, stdout="coding-cycle-v1", stderr=""),
+        )
     )
     executor = WorkspaceExecutor(
         session_factory=factory,
@@ -80,6 +83,7 @@ async def test_one_invocation_durable_start_and_independent_verifier(
     )
     await executor.execute(response.workspace_id)
     adapter.run.assert_awaited_once()
+    assert executor._runner.run.await_args.kwargs == {"timeout_seconds": 10}
     assert adapter.diagnostic_events
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(response.workspace_id)
@@ -291,6 +295,7 @@ async def test_runtime_identity_requires_immutable_fixture_image_and_selected_he
     calls = []
 
     async def run(argv, **kwargs):
+        assert kwargs["timeout_seconds"] == (12 if argv[-1] == "--probe-json" else 10)
         calls.append(argv)
         if argv[-1] == "--capability":
             current, text = "capability", "coding-cycle-v1"
@@ -307,6 +312,7 @@ async def test_runtime_identity_requires_immutable_fixture_image_and_selected_he
             assert selected.endpoint in argv[-2]
         return CommandResult(code, output, "") if current == stage else CommandResult(0, text, "")
 
+    runner = SimpleNamespace(run=create_autospec(AsyncioSubprocessRunner().run, side_effect=run))
     ws = SimpleNamespace(
         id="ws_diag",
         agent="codex",
@@ -315,12 +321,10 @@ async def test_runtime_identity_requires_immutable_fixture_image_and_selected_he
     )
     if reason:
         with pytest.raises(ValueError, match=reason):
-            await runtime_identity(
-                SimpleNamespace(_runner=SimpleNamespace(run=run)), ws, tmp_path / "compose.yml"
-            )
+            await runtime_identity(SimpleNamespace(_runner=runner), ws, tmp_path / "compose.yml")
     else:
         result = await runtime_identity(
-            SimpleNamespace(_runner=SimpleNamespace(run=run)), ws, tmp_path / "compose.yml"
+            SimpleNamespace(_runner=runner), ws, tmp_path / "compose.yml"
         )
         assert result["runtime_image"] == "sha256:actual"
         assert result["cli_version"] == "codex 0.162.0"

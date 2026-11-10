@@ -108,11 +108,11 @@ async def test_successful_exact_diagnostic_admits_ordinary_work_and_changed_endp
 
 async def test_runtime_guard_checks_actual_image_cli_and_model(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, create_autospec
 
     import pytest
 
-    from awf.common.commands import CommandResult
+    from awf.common.commands import AsyncioSubprocessRunner, CommandResult
     from awf.service.provider_compatibility import guard_runtime_compatibility
 
     selected = resolve_execution(
@@ -138,7 +138,10 @@ async def test_runtime_guard_checks_actual_image_cli_and_model(monkeypatch, tmp_
         execution=selected,
         compatibility_evidence=evidence,
         _runner=SimpleNamespace(
-            run=AsyncMock(return_value=CommandResult(returncode=0, stdout='{"ok":true}', stderr=""))
+            run=create_autospec(
+                AsyncioSubprocessRunner().run,
+                return_value=CommandResult(returncode=0, stdout='{"ok":true}', stderr=""),
+            )
         ),
     )
     runtime = AsyncMock(return_value=identity)
@@ -146,6 +149,7 @@ async def test_runtime_guard_checks_actual_image_cli_and_model(monkeypatch, tmp_
     await guard_runtime_compatibility(
         adapter, compose_project="awf_ws", compose_file=tmp_path / "compose.yml", workspace_id="ws"
     )
+    assert adapter._runner.run.await_args.kwargs == {"timeout_seconds": 12}
     runtime.return_value = {**identity, "runtime_image": "sha256:changed"}
     with pytest.raises(ValueError, match="MODEL_UNVERIFIED"):
         await guard_runtime_compatibility(
