@@ -383,6 +383,34 @@ that experimental opt-in does not imply general catalog support.
 | Claude native | CLI 2.1.295 observed | **Passed** — Claude Code 2.1.295 / `claude-opus-5-5`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_c45f6f1c738e4cb59fb1349c`, legacy scope |
 | Monitor repair/restart identity | Live supervisor dogfood | **Passed** — worker restarted while monitor idled on `WaitForCI` (iter 0, head `1922c8634dcbf2fb05ac9761dd25a725e60f91dc`), no active CLI confirmed (`True`); workspace `ws_b8779b060a6d4e2da857074b` identity unchanged (`True`) and connection scope `c24e8d23…7fa3` preserved. Repair invocation at `2026-11-10T03:07:44.986923+00:00` re-selected Codex/OpenRouter/`moonshotai/kimi-k2.7-code` with `effort=null`, endpoint `https://openrouter.ai/api`, credential ref `env/OPENROUTER_API_KEY`, runtime `sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d` |
 
+### Re-verification after the PR #1204 runner change (2026-11-10)
+
+- **Why the old evidence no longer counts.** PR #1204 changed the third-party runner
+  (Claude role/subagent model forcing, project instructions loaded under host-managed
+  provider mode, Codex transport retries, credential withheld from tool subprocesses).
+  As documented, evidence from the earlier runtime image therefore does not carry
+  forward.
+
+- **What was re-run.** After the runtime image was rebuilt with #1204, six deployed
+  diagnostics were run on a local AWF Core control plane (development `a0d7a2f9`). All
+  of them passed with `PROVIDER_DIAGNOSTIC_PASSED` on fixture `coding-cycle-v1`:
+
+| Agent | Provider | Model | Evidence workspace | Result | CLI |
+| --- | --- | --- | --- | --- | --- |
+| claude_code | openrouter | `moonshotai/kimi-k2.7-code` | `ws_39dd1f76affd4c4e8c2df35e` | PROVIDER_DIAGNOSTIC_PASSED | 2.1.295 (Claude Code) |
+| claude_code | openrouter | `z-ai/glm-5.3` | `ws_81a1142a3b9541018808803d` | PROVIDER_DIAGNOSTIC_PASSED | 2.1.295 (Claude Code) |
+| claude_code | ollama | `kimi-k2.7-code:cloud` | `ws_aaf37c484eeb4a70ac511831` | PROVIDER_DIAGNOSTIC_PASSED | 2.1.295 (Claude Code) |
+| claude_code | ollama | `glm-5.3:cloud` | `ws_168cc073fa33410cb08169c3` | PROVIDER_DIAGNOSTIC_PASSED | 2.1.295 (Claude Code) |
+| codex | openrouter | `moonshotai/kimi-k2.7-code` | `ws_b4b7a623fdbd42928939e197` | PROVIDER_DIAGNOSTIC_PASSED | codex-cli 0.162.0 |
+| codex | ollama | `kimi-k2.7-code:cloud` | `ws_c2d409984d68421d9f6d1f45` | PROVIDER_DIAGNOSTIC_PASSED | codex-cli 0.162.0 |
+
+- **What this does and does not establish.** These passes cover only the exact
+  selections listed. `z-ai/glm-5.3` and `glm-5.3:cloud` are newly verified selections.
+  Local Ollama models (non-`:cloud`) remain not live-verified.
+
+- **Admission.** Ordinary third-party admission was then enabled on that control plane
+  for a controlled canary workspace (this change was itself produced by the canary).
+
 The Codex/OpenRouter Minimax preliminary attempt regenerated its nonce and failed
 the fixture. Its transcript remains a negative regression; like every
 preliminary observation above, it is a non-deployed CLI-only record, distinct
