@@ -14,6 +14,7 @@ from awf.control.provider_budget_park import (
     MONITOR_PROVIDER_BUDGET_RESUME_PHASE,
     PROVIDER_BUDGET_BLOCK_TYPE,
     PROVIDER_BUDGET_RESUME_PHASE,
+    park_payload,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ProviderModelCircuitBreaker, WorkspaceEvent
@@ -239,6 +240,25 @@ def test_park_codes_never_produce_provider_recovery_metadata(reason):
         )
         is None
     )
+
+
+def test_park_payload_keeps_a_stranded_dirty_commit_failure():
+    """A park whose preserving sink stranded edits must still say so (PRRT_kwDOSJAM6s618cN-)."""
+    dirty_commit_error = {
+        "reason_code": "REPAIR_DIRTY_COMMIT_FAILED",
+        "sink_outcome": "no_commit",
+        "preserved_head": "b" * 40,
+        "message": "stranded in the repair worktree",
+    }
+
+    payload = park_payload(
+        "PROVIDER_BUDGET_EXHAUSTED",
+        "monitor: managed provider key unavailable",
+        {"dirty_commit_error": dirty_commit_error, "unrelated": "dropped"},
+    )
+
+    assert payload["dirty_commit_error"] == dirty_commit_error
+    assert "unrelated" not in payload
 
 
 async def test_recovering_divert_treats_park_codes_as_terminal(tmp_path):

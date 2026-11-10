@@ -39,7 +39,8 @@ worktree its pre-existing-dirty guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE``
 — the sink failure masked and the preserved work stranded. That case escalates as
 ``REPAIR_DIRTY_COMMIT_FAILED`` instead, exactly as the CI-repair commit sink
 already does, and still without a rollback (PRRT_kwDOSJAM6s6fwr71,
-PRRT_kwDOSJAM6s6fxp82).
+PRRT_kwDOSJAM6s6fxp82). A managed-key park still parks, carrying that sink
+failure as details, so raising the budget can resume it (PRRT_kwDOSJAM6s618cN-).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working. The
@@ -705,9 +706,21 @@ async def _raise_stranded_timeout_sink_failure(
     answered "nothing to commit" or one whose exception was swallowed to keep the
     timeout's reason code — so the escalation stays attributable to the sink's own
     logged failure (PRRT_kwDOSJAM6s6fxp82).
+
+    A managed-key park is the one recovery exception that is *not* suppressed. It
+    sends no next pass anywhere — it blocks the workspace until a human raises the
+    budget — and replacing it with ``REPAIR_DIRTY_COMMIT_FAILED`` would fail the
+    workspace instead, so raising the budget could no longer resume the repair. The
+    park propagates with the sink failure attached as ``dirty_commit_error``
+    details, so the stranded edits are still attributable when it resumes
+    (PRRT_kwDOSJAM6s618cN-).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
+    from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
+        _attach_provider_recovery_details,
+    )
     from awf.runtime.pr_monitor_runner.types import (
+        ProviderManagedKeyParkedError,
         ProviderRecoveryAuthError,
         ProviderRecoveryFallbackError,
         ProviderRecoveryRetryError,
@@ -734,6 +747,23 @@ async def _raise_stranded_timeout_sink_failure(
             type(provider_recovery_exc).__name__ if provider_recovery_exc is not None else None
         ),
     )
+    if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
+        _attach_provider_recovery_details(
+            provider_recovery_exc,
+            {
+                "dirty_commit_error": {
+                    "reason_code": _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                    "sink_outcome": sink_outcome.value,
+                    "preserved_head": preserved_head,
+                    "message": (
+                        f"Managed provider key parked the repair ({exc.reason_code}) and the "
+                        "dirty-worktree sink could not commit the edits it left behind; they "
+                        "are stranded in the repair worktree."
+                    ),
+                },
+            },
+        )
+        raise provider_recovery_exc
     raise AgentVerdictProtocolError(
         reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
         message=(

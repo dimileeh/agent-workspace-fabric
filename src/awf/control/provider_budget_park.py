@@ -150,7 +150,14 @@ def park_payload(
         "reason_code": reason_code,
         "message": redact_audit_text(message, limit=2000),
     }
-    for key in ("provider_budget", "management_reason_code", "source_reason_code"):
+    # ``dirty_commit_error``: the monitor's preserving sink stranded edits before
+    # this park, kept so the resume can attribute them (PRRT_kwDOSJAM6s618cN-).
+    for key in (
+        "provider_budget",
+        "management_reason_code",
+        "source_reason_code",
+        "dirty_commit_error",
+    ):
         if details.get(key) is not None:
             payload[key] = redact_audit_value(details[key])
     return payload
