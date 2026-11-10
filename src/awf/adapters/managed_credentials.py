@@ -35,6 +35,7 @@ PROVIDER_PARK_REASON_CODES = frozenset(
 """Managed-key failures that park a workspace for a human: never failed, retried
 blindly, counted against the shared circuit, or sent to a fallback provider."""
 _WATCHDOG_TIMEOUT_REASON_CODES = frozenset({"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"})
+_BUDGET_TEXT_TAIL_CHARS = 2000
 
 
 def exec_environment(credential_env: Mapping[str, str]) -> dict[str, str]:
@@ -164,9 +165,8 @@ async def managed_credential_scope(
         yield owned
     except AgentRunError as error:
         release = await _finish(owned, heartbeat, failed=True, original=error)
-        output = f"{error.result.stderr}\n{error.result.stdout}"
-        if error.reason_code not in _WATCHDOG_TIMEOUT_REASON_CODES and (
-            release.exhausted or is_budget_exhausted_output(output)
+        if error.reason_code not in _WATCHDOG_TIMEOUT_REASON_CODES and _exhausted_by_key(
+            release, error
         ):
             raise budget_exhausted_error(adapter, error, release, secrets=owned.secrets) from None
         raise
@@ -175,6 +175,19 @@ async def managed_credential_scope(
         raise
     else:
         await _finish(owned, heartbeat, failed=False, original=None)
+
+
+def _exhausted_by_key(release: ProviderCredentialRelease, error: AgentRunError) -> bool:
+    """The final key read decides; only when it failed does the stderr tail count.
+
+    The transcript is never scanned: a task editing payment code (or AWF's own
+    "payment required" text) must not be relabelled as an exhausted budget.
+    """
+    if release.exhausted:
+        return True
+    if release.details.get("final_usage_read") is True:
+        return False
+    return is_budget_exhausted_output(error.result.stderr[-_BUDGET_TEXT_TAIL_CHARS:])
 
 
 async def _heartbeat(lease: ProviderCredentialLease, interval_seconds: float) -> None:

@@ -114,7 +114,14 @@ async def test_secrets_never_reach_stacks_argv_logs_or_rows(client, engine, monk
 
         # One managed invocation that exhausts its key, then the park.
         broker = ManagedKeyBroker(session_factory=factory, client=fake.client(_MANAGEMENT))
-        runner = FakeCommandRunner()
+
+        class _SpendingRunner(FakeCommandRunner):
+            async def run(self, args, **kwargs):
+                for key in fake.keys.values():
+                    key["usage"] = key["limit"]
+                return await super().run(args, **kwargs)
+
+        runner = _SpendingRunner()
         runner.queue_result(returncode=1, stderr="402 Payment Required")
         adapter = get_adapter("codex", runner=runner, execution=selection, credential_broker=broker)
         with pytest.raises(AgentRunError) as raised:

@@ -343,8 +343,9 @@ For managed runs `llm_usage` reports that exact spend with source
 `openrouter_key_usage`, labelled **Exact provider spend** in the CLI and console,
 instead of `unknown`.
 
-**Budget exhaustion.** An HTTP 402 / limit-reached failure, or a final key read
-with no remaining limit, becomes `PROVIDER_BUDGET_EXHAUSTED`. The workspace is
+**Budget exhaustion.** A failed run whose final key read shows no remaining limit
+becomes `PROVIDER_BUDGET_EXHAUSTED`. Only when that read fails does an HTTP 402 /
+limit-reached message in the tail of stderr count; the transcript never does. The workspace is
 parked (`blocked`, block type `provider_budget`) at both failure sinks (executor
 and PR monitor):
 

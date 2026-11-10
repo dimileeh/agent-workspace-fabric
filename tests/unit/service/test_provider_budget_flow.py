@@ -83,8 +83,15 @@ async def test_managed_budget_flow(client, engine, monkeypatch, tmp_path):
     await lease.heartbeat()
     await lease.release(failed=False)
 
-    # 4-5. The next invocation hits HTTP 402 and the executor sink parks the workspace.
-    runner = FakeCommandRunner()
+    # 4-5. The next invocation spends its key's whole limit and hits HTTP 402; the
+    # authoritative key read confirms it and the executor sink parks the workspace.
+    class _SpendingRunner(FakeCommandRunner):
+        async def run(self, args, **kwargs):
+            for key in fake.keys.values():
+                key["usage"] = key["limit"]
+            return await super().run(args, **kwargs)
+
+    runner = _SpendingRunner()
     runner.queue_result(returncode=1, stderr="PROVIDER_HTTP_402")
     adapter = get_adapter("codex", runner=runner, execution=selection, credential_broker=broker)
     with pytest.raises(AgentRunError) as raised:
@@ -126,9 +133,9 @@ async def test_managed_budget_flow(client, engine, monkeypatch, tmp_path):
     async with factory() as session:
         assert ws_id in await WorkspaceRepository(session).list_resumable_blocked_ids(limit=5)
 
-    # 8. The next acquire mints the new remaining budget (5 - 1.2 spent).
+    # 8. The next acquire mints the new remaining budget (5 - 2.0 spent).
     resumed = await broker.acquire(workspace_id=ws_id, selection=selection, purpose="agent")
-    assert fake.calls[-1][2]["limit"] == 3.8
+    assert fake.calls[-1][2]["limit"] == 3.0
     fake.set_usage(resumed.key_hash, 0.3)
 
     # 9. Terminal finalize: final read, persist, delete.
@@ -144,7 +151,7 @@ async def test_managed_budget_flow(client, engine, monkeypatch, tmp_path):
     overview = (await client.get("/v1/workspaces/overview")).json()["items"][0]
     get_settings.cache_clear()
     for item in (show, listed, overview):
-        assert item["provider_spend"]["spend_usd"] == float(Decimal("1.5"))
+        assert item["provider_spend"]["spend_usd"] == float(Decimal("2.3"))
         assert item["provider_spend"]["budget_usd"] == 5.0
-        assert item["provider_spend"]["remaining_usd"] == 3.5
+        assert item["provider_spend"]["remaining_usd"] == 2.7
         assert item["llm_usage"]["source"] == "openrouter_key_usage"
