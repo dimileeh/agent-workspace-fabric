@@ -128,3 +128,39 @@ def test_claim_rejects_workers_missing_execution_contract_before_mutation():
     worker.execution_contract_version = 2
     _apply_execution_claim(worker, ws, owner_id="new")
     assert ws.execution_claimed_by == "new"
+
+
+def test_claim_rejects_managed_key_rows_on_workers_below_capability_three():
+    import pytest
+
+    from awf.common.agent_execution import MANAGED_PROVIDER_KEY_WORKER_VERSION
+    from awf.control.worker.claims import _apply_execution_claim
+    from awf.control.worker.manager import ControlWorker
+
+    selected = resolve_execution(
+        agent="codex",
+        provider="openrouter",
+        model="m/x",
+        allow_unverified=True,
+        managed_openrouter=True,
+    )
+    ws = Workspace(
+        id="ws",
+        agent="codex",
+        task_policy={
+            "agent_execution": selected.model_dump(),
+            "provider_budget": {"managed": True, "limit_usd": 10.0},
+        },
+    )
+    worker = SimpleNamespace(
+        _execution_claim_expires_at=lambda: datetime.now(UTC),
+        _config=SimpleNamespace(node_id=None),
+        execution_contract_version=2,
+    )
+    with pytest.raises(ValueError, match="EXECUTION_WORKER_CONTRACT_UNSUPPORTED"):
+        _apply_execution_claim(worker, ws, owner_id="old")
+    assert ws.execution_claimed_by is None
+    worker.execution_contract_version = MANAGED_PROVIDER_KEY_WORKER_VERSION
+    _apply_execution_claim(worker, ws, owner_id="new")
+    assert ws.execution_claimed_by == "new"
+    assert ControlWorker.execution_contract_version == MANAGED_PROVIDER_KEY_WORKER_VERSION == 3

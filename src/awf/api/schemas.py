@@ -19,6 +19,7 @@ from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.cursor_auto import CursorAutoModeResponseMixin, CursorAutoModeSelectionMixin
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.api.schemas_providers import ProviderBudgetUsd
 from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
@@ -238,6 +239,7 @@ class WorkspaceTask(CursorAutoModeSelectionMixin):
         le=86400,
     )
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
+    provider_budget_usd: ProviderBudgetUsd = None
 
     @field_validator("task_tag")
     @classmethod

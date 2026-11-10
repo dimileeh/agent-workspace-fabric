@@ -22,8 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.managed_credentials import (
     MANAGED_CREDENTIAL_ENV,
+    PROVIDER_BUDGET_EXHAUSTED,
+    PROVIDER_MANAGED_KEY_UNAVAILABLE,
+    PROVIDER_MANAGEMENT_KEY_MISSING,
     ProviderCredentialError,
     ProviderCredentialRelease,
+)
+from awf.adapters.managed_credentials import (
+    PROVIDER_PARK_REASON_CODES as PROVIDER_PARK_REASON_CODES,
 )
 from awf.common.agent_execution import PROVIDER_BUDGET_POLICY_KEY, ExecutionSelection
 from awf.common.ids import new_provider_managed_key_id
@@ -44,15 +50,8 @@ from awf.service.openrouter_management import (
     usd,
 )
 
-PROVIDER_BUDGET_EXHAUSTED = "PROVIDER_BUDGET_EXHAUSTED"
 PROVIDER_BUDGET_INVALID = "PROVIDER_BUDGET_INVALID"
-PROVIDER_MANAGED_KEY_UNAVAILABLE = "PROVIDER_MANAGED_KEY_UNAVAILABLE"
-PROVIDER_MANAGEMENT_KEY_MISSING = "PROVIDER_MANAGEMENT_KEY_MISSING"
 PROVIDER_MANAGED_KEY_PERSIST_FAILED = "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
-PROVIDER_PARK_REASON_CODES = frozenset(
-    {PROVIDER_BUDGET_EXHAUSTED, PROVIDER_MANAGED_KEY_UNAVAILABLE, PROVIDER_MANAGEMENT_KEY_MISSING}
-)
-"""Managed-key failures that park a workspace for a human instead of failing it."""
 
 MINIMUM_MINT_USD = Decimal("0.01")
 MANAGED_KEY_NAME_RE = re.compile(r"^awf-(ws_[0-9a-f]{24})-(\d+)$")

@@ -113,6 +113,11 @@ def workspace_create(
     agent: str = typer.Option("codex", "--agent"),
     provider: str | None = typer.Option(None, "--provider"),
     allow_unverified_model: bool = typer.Option(False, "--allow-unverified-model"),
+    provider_budget_usd: float | None = typer.Option(
+        None,
+        "--provider-budget-usd",
+        help="USD budget for managed OpenRouter keys (default AWF_OPENROUTER_WORKSPACE_LIMIT_USD).",
+    ),
     model: str | None = typer.Option(None, "--model"),
     effort: str | None = typer.Option(
         None,
@@ -245,6 +250,9 @@ def workspace_create(
         body["task"]["provider"] = provider
     if _option_default(allow_unverified_model):
         body["preflight"]["allow_unverified_model"] = True
+    provider_budget_usd = _option_default(provider_budget_usd)
+    if provider_budget_usd is not None:
+        body["task"]["provider_budget_usd"] = provider_budget_usd
     if model is not None:
         body["task"]["model"] = model
     if effort is not None:

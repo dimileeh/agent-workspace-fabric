@@ -8,6 +8,7 @@ from typing import Any
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.auto_merge import AUTO_MERGE_INTENT_POLICY_KEY
 from awf.common.companions import COMPANION_POLICY_KEY
+from awf.common.config import DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
     DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
@@ -88,9 +89,21 @@ def freeze_execution_policy(
     profile: Mapping[str, Any] | None,
     enabled: bool,
     environ: Mapping[str, str],
+    managed_openrouter: bool = False,
+    default_budget_usd: float = DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD,
+    hosted: bool = False,
 ) -> dict[str, Any]:
-    """Freeze the primary and every declared fallback using one resolved profile."""
-    from awf.common.agent_execution import resolve_execution
+    """Freeze the primary and every declared fallback using one resolved profile.
+
+    With managed OpenRouter keys configured, every OpenRouter target uses the
+    fixed managed credential reference and the workspace budget is frozen once,
+    beside the selections, in ``provider_budget``.
+    """
+    from awf.common.agent_execution import (
+        PROVIDER_BUDGET_POLICY_KEY,
+        provider_budget_policy,
+        resolve_execution,
+    )
 
     policy = workspace_create_task_policy_snapshot(payload)
     from awf.common.workspace_policy import cursor_auto_model_selector
@@ -122,7 +135,20 @@ def freeze_execution_policy(
                 allow_unverified=True,
                 profile=profile,
                 environ=environ if profile is not None else {},
+                managed_openrouter=managed_openrouter,
             )
+        )
+    managed = any(s.managed_key for s in snapshots)
+    if managed and hosted:
+        raise ValueError("PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED")
+    requested_budget = payload.task.provider_budget_usd
+    if requested_budget is not None and not managed:
+        raise ValueError("PROVIDER_BUDGET_UNSUPPORTED")
+    if managed:
+        policy[PROVIDER_BUDGET_POLICY_KEY] = provider_budget_policy(
+            limit_usd=requested_budget if requested_budget is not None else default_budget_usd,
+            source="task" if requested_budget is not None else "default",
+            requested_usd=requested_budget,
         )
     if not payload.preflight.allow_unverified_model and any(s.third_party for s in snapshots):
         policy["require_compatibility_evidence"] = True

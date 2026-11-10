@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
 
 from awf.db.enums import AgentRuntime
+
+ProviderBudgetUsd = Annotated[
+    StrictFloat | StrictInt | None,
+    Field(
+        default=None,
+        gt=0,
+        lt=1_000_000,
+        description=(
+            "USD budget for managed OpenRouter keys; defaults to "
+            "AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection."
+        ),
+    ),
+]
 
 
 class ProviderQueryRequest(BaseModel):

@@ -244,6 +244,13 @@ def register_workspace_tools(
         allow_unverified_model: bool = Field(
             default=False, description="Allow experimental unverified models."
         ),
+        provider_budget_usd: float | None = Field(
+            default=None,
+            description=(
+                "USD budget for managed OpenRouter keys; defaults to "
+                "AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection."
+            ),
+        ),
         model: str | None = Field(
             default=None,
             min_length=1,
@@ -449,6 +456,7 @@ def register_workspace_tools(
                         "kind": task_kind,
                         "agent": agent,
                         "provider": provider,
+                        "provider_budget_usd": provider_budget_usd,
                         "model": model,
                         "effort": effort,
                         "cursor_auto_mode": cursor_auto_mode,

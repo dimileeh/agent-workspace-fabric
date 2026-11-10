@@ -24,6 +24,9 @@ LEGACY_CONNECTION_SCOPE = "legacy"
 # per workspace and no key value or hash enters the snapshot.
 MANAGED_OPENROUTER_CREDENTIAL_REF = "managed/openrouter"
 PROVIDER_BUDGET_POLICY_KEY = "provider_budget"
+# Workers at or above this capability mint, meter and finalize managed keys.
+MANAGED_PROVIDER_KEY_WORKER_VERSION = 3
+DIAGNOSTIC_PROVIDER_BUDGET_USD = 1.0
 CircuitKey = tuple[str, str] | tuple[str, str, str]
 _NATIVE = {
     "codex": "openai",
@@ -323,6 +326,20 @@ def managed_openrouter_frozen(policy: object) -> bool:
     """Return the creation-time managed-key decision frozen beside the selection."""
     budget = policy.get(PROVIDER_BUDGET_POLICY_KEY) if isinstance(policy, Mapping) else None
     return isinstance(budget, Mapping) and budget.get("managed") is True
+
+
+def provider_budget_policy(
+    *, limit_usd: float, source: str, requested_usd: float | None = None
+) -> dict[str, Any]:
+    """The budget frozen beside (never inside) a managed selection."""
+    return {
+        "version": 1,
+        "provider": "openrouter",
+        "managed": True,
+        "limit_usd": float(limit_usd),
+        "requested_usd": requested_usd,
+        "source": source,
+    }
 
 
 def require_execution_admission(selection: ExecutionSelection, *, enabled: bool) -> None:

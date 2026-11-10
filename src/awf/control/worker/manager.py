@@ -90,7 +90,7 @@ _WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS = 60 * 60
 class ControlWorker(WorkerDelegatesMixin):
     """Reads pending work from the DB and dispatches it to runtime handlers."""
 
-    execution_contract_version = 2
+    execution_contract_version = 3  # MANAGED_PROVIDER_KEY_WORKER_VERSION
 
     def __init__(
         self: Any,

@@ -12,7 +12,11 @@ from awf.api.schemas_providers import (
     ProviderConnectionTestResponse,
     ProviderQueryRequest,
 )
-from awf.common.agent_execution import ExecutionSelection, resolve_execution
+from awf.common.agent_execution import (
+    MANAGED_PROVIDER_KEY_WORKER_VERSION,
+    ExecutionSelection,
+    resolve_execution,
+)
 from awf.common.config import Settings
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
@@ -36,7 +40,7 @@ def is_diagnostic(policy: object) -> bool:
 
 
 def query_material(
-    request: ProviderQueryRequest, *, environ: Mapping[str, str]
+    request: ProviderQueryRequest, *, environ: Mapping[str, str], managed_openrouter: bool = False
 ) -> tuple[WorkspaceProfile, ExecutionSelection]:
     profile = resolve_workspace_profile(
         worktree_path=None, inline_profile=request.profile, profile_ref=request.profile_ref
@@ -51,14 +55,20 @@ def query_material(
         allow_unverified=True,
         profile=profile.model_dump(mode="json"),
         environ=environ,
+        managed_openrouter=managed_openrouter,
     )
     return profile, selection
 
 
 def diagnostic_material(
-    request: ProviderConnectionTestRequest, *, environ: Mapping[str, str]
+    request: ProviderConnectionTestRequest,
+    *,
+    environ: Mapping[str, str],
+    managed_openrouter: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], ExecutionSelection]:
-    profile, selected = query_material(request, environ=environ)
+    profile, selected = query_material(
+        request, environ=environ, managed_openrouter=managed_openrouter
+    )
     # Project services/volumes cannot be borrowed. Self-contained model sidecars
     # can be reproduced; dependencies, mounts, ports, builds and auth cannot.
     from awf.service.provider_readiness import is_secret_env_key
@@ -89,7 +99,8 @@ def diagnostic_material(
             raise ValueError("PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED")
         services.append(service.model_dump(mode="json"))
     environment = {}
-    if selected.third_party and selected.provider == "openrouter":
+    # A managed key is minted per invocation and passed at exec time only.
+    if selected.third_party and selected.provider == "openrouter" and not selected.managed_key:
         environment["OPENROUTER_API_KEY"] = (
             "${" + str(selected.credential_ref).removeprefix("env/") + "}"
         )
@@ -180,8 +191,12 @@ async def create_connection_test(
     from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError
     from awf.service.workspaces_create import create_workspace_row_checked
 
-    spec, safe, selected = diagnostic_material(request, environ=os.environ)
     settings: Settings = service._settings or get_settings()
+    spec, safe, selected = diagnostic_material(
+        request,
+        environ=os.environ,
+        managed_openrouter=settings.openrouter_management_key is not None,
+    )
     spec["runtime_image"] = settings.agent_runtime_image
     if settings.hosted_node is not None:
         raise ValueError("PROVIDER_DIAGNOSTIC_HOSTED_UNSUPPORTED")
@@ -221,7 +236,10 @@ async def create_connection_test(
 
             raise WorkspaceCreateInsufficientDiskError(disk_check)
         if not await WorkerHeartbeatRepository(session).supports_execution_contract(
-            now=datetime.now(UTC), minimum_version=DIAGNOSTIC_WORKER_VERSION
+            now=datetime.now(UTC),
+            minimum_version=MANAGED_PROVIDER_KEY_WORKER_VERSION
+            if selected.managed_key
+            else DIAGNOSTIC_WORKER_VERSION,
         ):
             raise ValueError("PROVIDER_DIAGNOSTIC_WORKER_UNSUPPORTED")
         ws = await create_workspace_row_checked(

@@ -15227,6 +15227,27 @@
             ],
             "title": "Provider"
           },
+          "provider_budget_usd": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "gt": 0,
+                "lt": 1000000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "USD budget for managed OpenRouter keys; defaults to AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection.",
+            "title": "Provider Budget Usd"
+          },
           "provider_recovery": {
             "anyOf": [
               {

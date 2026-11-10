@@ -939,3 +939,28 @@ def test_workspace_create_forwards_separate_provider_and_experimental_flag(monke
     assert captured["json"]["task"]["provider"] == "ollama"
     assert captured["json"]["task"]["model"] == "coder"
     assert captured["json"]["preflight"]["allow_unverified_model"] is True
+
+
+def test_workspace_create_forwards_the_managed_provider_budget(monkeypatch):
+    captured = {}
+
+    def call(_method, _path, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(202, json={})
+
+    monkeypatch.setattr(workspace_commands, "_call", call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+    from typer.testing import CliRunner
+
+    base = ["create", "--repo", "https://github.com/example/project", "--title", "t"]
+    result = CliRunner().invoke(
+        workspace_commands.workspace_app,
+        [*base, "--prompt", "fix", "--provider", "openrouter", "--model", "m/x"]
+        + ["--provider-budget-usd", "2.5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["task"]["provider_budget_usd"] == 2.5
+    captured.clear()
+    result = CliRunner().invoke(workspace_commands.workspace_app, [*base, "--prompt", "fix"])
+    assert result.exit_code == 0, result.output
+    assert "provider_budget_usd" not in captured["json"]["task"]
