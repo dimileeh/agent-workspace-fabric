@@ -115,3 +115,72 @@ async def test_semantic_repair_park_code_parks_before_commit_retry(
     assert len([call for call in fake.calls if "commit" in call.args]) == 1
     assert not [call for call in fake.calls if "push" in call.args]
     assert [phases for phases in validation.calls if phases != ("setup", "pre_agent")] == []
+
+
+async def test_semantic_repair_park_code_from_superseded_executor_leaves_new_claim_running(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded executor's managed-key stop during repair cannot park (or
+    fail) the replacement claimant's ``running`` row (PRRT_kwDOSJAM6s615vfG)."""
+
+    class _ClaimLostThenBudgetExhaustedOnRepairAdapter(adapter_base.AgentAdapter):
+        runtime = AgentRuntime.codex
+
+        @property
+        def name(self) -> AgentRuntime:
+            return AgentRuntime.codex
+
+        def get_provider(self, model: str | None) -> str:
+            return "openrouter"
+
+        def _cli_args(self, *, model: str | None) -> list[str]:
+            return []
+
+        async def run(self, *, prompt: str, **kwargs: Any) -> adapter_base.AgentRunResult:
+            del prompt
+            if kwargs.get("log_source") != "post_agent_precommit_repair":
+                return adapter_base.AgentRunResult(returncode=0, stdout="adapter ok", stderr="")
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.execution_claimed_by = "new-worker"
+                await s.commit()
+            raise adapter_base.AgentRunError(
+                agent=self.name,
+                result=CommandResult(returncode=1, stdout="", stderr="402 insufficient credits"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False},
+            )
+
+    monkeypatch.setitem(
+        adapter_base._REGISTRY, AgentRuntime.codex, _ClaimLostThenBudgetExhaustedOnRepairAdapter
+    )
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure -> agent repair
+    ws_id = await _seed_ready(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.execution_claimed_by = "old-worker"
+        await s.commit()
+
+    await _make_executor(fake, factory, tmp_path, validation=_RecordingValidation()).execute(
+        ws_id, execution_owner_id="old-worker"
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.running.value
+    assert ws.execution_claimed_by == "new-worker"
+    assert ws.block_type is None
+    assert ws.failure_reason is None

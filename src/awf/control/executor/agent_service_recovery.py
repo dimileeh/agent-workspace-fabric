@@ -247,6 +247,7 @@ async def _run_agent_task_with_service_recovery(
             message=f"agent run stopped by the managed provider key ({exc.reason_code})",
             reason_code=exc.reason_code,
             details=exc.details,
+            execution_owner_id=execution_owner_id,
         )
         return False, None
 

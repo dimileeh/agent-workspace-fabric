@@ -107,3 +107,64 @@ async def test_initial_agent_park_code_parks_before_salvage_validation_and_push(
     assert not [call for call in fake.calls if "commit" in call.args]
     assert not [call for call in fake.calls if "push" in call.args]
     assert [phases for phases in validation.calls if phases != ("setup", "pre_agent")] == []
+
+
+async def test_initial_agent_park_code_from_superseded_executor_leaves_new_claim_running(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded executor's managed-key stop cannot park (or fail) the
+    replacement claimant's ``running`` row: the park CAS is fenced on
+    ``execution_claimed_by`` (PRRT_kwDOSJAM6s615vfG)."""
+
+    class _ClaimLostThenBudgetExhaustedAdapter(adapter_base.AgentAdapter):
+        runtime = AgentRuntime.codex
+
+        @property
+        def name(self) -> AgentRuntime:
+            return AgentRuntime.codex
+
+        def get_provider(self, model: str | None) -> str:
+            return "openrouter"
+
+        def _cli_args(self, *, model: str | None) -> list[str]:
+            return []
+
+        async def run(self, *, prompt: str, **kwargs: Any) -> adapter_base.AgentRunResult:
+            del prompt, kwargs
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.execution_claimed_by = "new-worker"
+                await s.commit()
+            raise adapter_base.AgentRunError(
+                agent=self.name,
+                result=CommandResult(returncode=1, stdout="", stderr="402 insufficient credits"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False},
+            )
+
+    monkeypatch.setitem(
+        adapter_base._REGISTRY, AgentRuntime.codex, _ClaimLostThenBudgetExhaustedAdapter
+    )
+    fake = FakeCommandRunner()
+    answer_validation_git_probes(fake)
+    ws_id = await _seed_ready(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.execution_claimed_by = "old-worker"
+        await s.commit()
+
+    await _make_executor(fake, factory, tmp_path, validation=_RecordingValidation()).execute(
+        ws_id, execution_owner_id="old-worker"
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.running.value
+    assert ws.execution_claimed_by == "new-worker"
+    assert ws.block_type is None
+    assert ws.failure_reason is None

@@ -64,6 +64,7 @@ async def park_for_provider_key(
     message: str,
     details: Mapping[str, Any] | None,
     monitor_owner_id: str | None = None,
+    execution_owner_id: str | None = None,
 ) -> bool:
     """Divert an executor failure into the provider-budget block; ``False`` = not parked."""
     payload = park_payload(reason_code, message, details)
@@ -89,6 +90,7 @@ async def park_for_provider_key(
             from_status=from_status,
             violations=(),
             resume_phase=PROVIDER_BUDGET_RESUME_PHASE,
+            execution_owner_id=execution_owner_id,
             block_type=PROVIDER_BUDGET_BLOCK_TYPE,
             block_reason_code=reason_code,
             transition_reason_code=reason_code,

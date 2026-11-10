@@ -208,6 +208,7 @@ async def _run_post_agent_semantic_precommit_repair(
                 ),
                 reason_code=exc.reason_code,
                 details=exc.details,
+                execution_owner_id=execution_owner_id,
             )
             return False
     if repair_error is not None and getattr(adapter, "is_hosted", False):

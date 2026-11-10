@@ -537,13 +537,17 @@ async def _mark_failed(
     details: Mapping[str, Any] | None = None,
     salvage: Mapping[str, Any] | None = None,
     monitor_owner_id: str | None = None,
+    execution_owner_id: str | None = None,
 ) -> None:
     """Mark the workspace failed when still in ``from_status``.
 
     ``monitor_owner_id`` optionally fences the transition on
     ``monitor_claimed_by`` so a superseded PR-monitor recovery cannot fail the
     row underneath a replacement claimant that kept ``monitoring_pr``
-    (PRRT_kwDOSJAM6s6dNBTV).
+    (PRRT_kwDOSJAM6s6dNBTV). ``execution_owner_id`` likewise fences both the
+    provider-key park and the failure CAS on ``execution_claimed_by`` so a
+    superseded executor cannot park or fail a replacement claimant's row
+    (PRRT_kwDOSJAM6s615vfG).
     """
     # A workspace's own managed-key budget/key failure parks for a human; it never
     # fails, retries blindly or falls back (every agent call site funnels here).
@@ -555,6 +559,7 @@ async def _mark_failed(
         message=message,
         details=details,
         monitor_owner_id=monitor_owner_id,
+        execution_owner_id=execution_owner_id,
     ):
         return
     async with self._session_factory() as session:
@@ -576,6 +581,8 @@ async def _mark_failed(
         extra_conditions: tuple[Any, ...] = ()
         if monitor_owner_id is not None:
             extra_conditions = (Workspace.monitor_claimed_by == monitor_owner_id,)
+        if execution_owner_id is not None:
+            extra_conditions += (Workspace.execution_claimed_by == execution_owner_id,)
         ws = await repo.transition_if_current(
             workspace_id,
             from_status=from_status,
