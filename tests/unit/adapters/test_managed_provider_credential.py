@@ -10,6 +10,7 @@ import pytest
 from awf.adapters import registry  # noqa: F401
 from awf.adapters.base import AgentRunError
 from awf.adapters.managed_credentials import (
+    PROVIDER_PARK_REASON_CODES,
     ProviderCredentialError,
     ProviderCredentialRelease,
 )
@@ -21,6 +22,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 _MINTED = "sk-or-v1-minted-adapter-sentinel-77"
 _MANAGEMENT = "sk-or-mgmt-adapter-sentinel-88"
 _BUDGET = {"budget_usd": "1.000000", "spend_usd": "1.000000", "remaining_usd": "0.000000"}
+_HEADROOM = {"budget_usd": "5.000000", "spend_usd": "1.000000", "remaining_usd": "4.000000"}
 
 
 def _selection(agent: str = "codex", *, managed: bool = True):
@@ -34,11 +36,17 @@ def _selection(agent: str = "codex", *, managed: bool = True):
 
 
 class _Lease:
-    def __init__(self, *, exhausted: bool = False, final_usage_read: bool | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        exhausted: bool = False,
+        final_usage_read: bool | None = None,
+        budget: dict[str, str] | None = None,
+    ) -> None:
         self.released: list[bool] = []
         self.heartbeats = 0
         self._exhausted = exhausted
-        self._details = dict(_BUDGET)
+        self._details = dict(budget or _BUDGET)
         if final_usage_read is not None:
             self._details["final_usage_read"] = final_usage_read
 
@@ -184,15 +192,14 @@ async def test_budget_exhaustion_maps_to_a_non_retryable_park_code(tmp_path, std
     assert _MINTED not in str(error)
 
 
+@pytest.mark.parametrize("final_usage_read", [True, False])
 @pytest.mark.parametrize(
-    ("stdout", "stderr", "final_usage_read"),
+    ("stdout", "stderr"),
     [
-        # The authoritative key read says the key still has budget.
-        ("", "HTTP 402 Payment Required", True),
-        # Without a key read, the transcript (e.g. payment code under edit) is ignored.
-        ("diff: raise PaymentRequired('402 payment required')", "tests failed", False),
+        # The transcript or tool output (e.g. payment code under edit) is never scanned.
+        ("diff: raise PaymentRequired('402 payment required')", "tests failed"),
         # Only the tail of stderr is trusted, not an early unrelated mention.
-        ("", "fixture: 402 Payment Required\n" + "test output line\n" * 400, False),
+        ("", "fixture: 402 Payment Required\n" + "test output line\n" * 400),
     ],
 )
 async def test_payment_text_alone_never_relabels_an_unrelated_failure(
@@ -200,13 +207,47 @@ async def test_payment_text_alone_never_relabels_an_unrelated_failure(
 ):
     runner = FakeCommandRunner()
     runner.queue_result(returncode=1, stdout=stdout, stderr=stderr)
-    broker = _Broker(_Lease(exhausted=False, final_usage_read=final_usage_read))
+    broker = _Broker(_Lease(exhausted=False, final_usage_read=final_usage_read, budget=_HEADROOM))
 
     with pytest.raises(AgentRunError) as raised:
         await _run(_adapter(runner, broker), tmp_path)
 
-    assert raised.value.reason_code != "PROVIDER_BUDGET_EXHAUSTED"
+    assert raised.value.reason_code not in PROVIDER_PARK_REASON_CODES
     assert broker.lease.released == [True]
+
+
+async def test_a_provider_402_with_key_headroom_parks_as_account_credits(tmp_path):
+    # The authoritative key read says the key still has budget, so the CLI's own
+    # 402 is the OpenRouter account balance, not the workspace budget.
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1, stderr="test output line\n" * 400 + "HTTP 402 Payment Required"
+    )
+    broker = _Broker(_Lease(exhausted=False, final_usage_read=True, budget=_HEADROOM))
+
+    with pytest.raises(AgentRunError) as raised:
+        await _run(_adapter(runner, broker), tmp_path)
+
+    error = raised.value
+    assert error.reason_code == "PROVIDER_ACCOUNT_CREDITS_EXHAUSTED"
+    assert error.reason_code in PROVIDER_PARK_REASON_CODES
+    assert error.details["retryable"] is False
+    assert error.details["source_reason_code"] == "AGENT_CLI_FAILED"
+    assert error.details["provider_budget"] == {**_HEADROOM, "final_usage_read": True}
+    assert "provider_recovery" not in error.details
+    assert _MINTED not in str(error)
+    assert broker.lease.released == [True]
+
+
+async def test_a_key_read_showing_exhaustion_stays_the_workspace_budget(tmp_path):
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="HTTP 402 Payment Required")
+    broker = _Broker(_Lease(exhausted=True, final_usage_read=True))
+
+    with pytest.raises(AgentRunError) as raised:
+        await _run(_adapter(runner, broker), tmp_path)
+
+    assert raised.value.reason_code == "PROVIDER_BUDGET_EXHAUSTED"
 
 
 async def test_a_failed_key_read_falls_back_to_the_stderr_tail(tmp_path):

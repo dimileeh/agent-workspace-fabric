@@ -1,13 +1,14 @@
 """Park managed-key provider failures in ``blocked`` instead of failing them.
 
-``PROVIDER_BUDGET_EXHAUSTED``, ``PROVIDER_MANAGED_KEY_UNAVAILABLE`` and
-``PROVIDER_MANAGEMENT_KEY_MISSING`` come from one workspace's managed OpenRouter
-key. Failing would discard the spent work; retrying or falling back to another
-provider would spend outside the operator's budget. Both failure sinks (the
-executor's ``_mark_failed`` and the PR monitor's ``_terminate_failed``) divert
-them here: the workspace keeps its worktree, warm stack and claim, and resumes
-through the existing blocked-resume machinery once an operator raises the
-budget (``awf workspace provider-budget``) or restores the key.
+``PROVIDER_BUDGET_EXHAUSTED``, ``PROVIDER_ACCOUNT_CREDITS_EXHAUSTED``,
+``PROVIDER_MANAGED_KEY_UNAVAILABLE`` and ``PROVIDER_MANAGEMENT_KEY_MISSING`` come
+from one workspace's managed OpenRouter key. Failing would discard the spent
+work; retrying or falling back to another provider would spend outside the
+operator's budget. Both failure sinks (the executor's ``_mark_failed`` and the
+PR monitor's ``_terminate_failed``) divert them here: the workspace keeps its
+worktree, warm stack and claim, and resumes through the existing blocked-resume
+machinery once an operator raises the budget (``awf workspace provider-budget``),
+tops up the account or restores the key.
 """
 
 from __future__ import annotations
@@ -15,7 +16,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
-from awf.adapters.managed_credentials import PROVIDER_BUDGET_EXHAUSTED, PROVIDER_PARK_REASON_CODES
+from awf.adapters.managed_credentials import (
+    PROVIDER_ACCOUNT_CREDITS_EXHAUSTED,
+    PROVIDER_BUDGET_EXHAUSTED,
+    PROVIDER_PARK_REASON_CODES,
+)
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.logging import get_logger
 from awf.control.blocked_transition import enter_blocked_for_protected_violation_in_session
@@ -29,7 +34,17 @@ MONITOR_PROVIDER_BUDGET_RESUME_PHASE: Final[str] = (
     f"{MONITOR_BLOCK_RESUME_PHASE_PREFIX}provider_budget"
 )
 PROVIDER_BUDGET_EXHAUSTED_EVENT_TYPE: Final[str] = "provider.budget.exhausted"
+PROVIDER_ACCOUNT_CREDITS_EXHAUSTED_EVENT_TYPE: Final[str] = "provider.account.credits_exhausted"
 PROVIDER_MANAGED_KEY_UNAVAILABLE_EVENT_TYPE: Final[str] = "provider.managed_key.unavailable"
+_PARK_EVENT_TYPES: Final[dict[str, str]] = {
+    PROVIDER_BUDGET_EXHAUSTED: PROVIDER_BUDGET_EXHAUSTED_EVENT_TYPE,
+    PROVIDER_ACCOUNT_CREDITS_EXHAUSTED: PROVIDER_ACCOUNT_CREDITS_EXHAUSTED_EVENT_TYPE,
+}
+_ACCOUNT_CREDITS_MESSAGE: Final[str] = (
+    "The OpenRouter account balance is out of credits, not the workspace budget: the "
+    "managed key still has headroom. Top up the OpenRouter account, then re-set the "
+    "budget to resume."
+)
 _PRE_PR_PARKABLE = frozenset(
     {WorkspaceStatus.running, WorkspaceStatus.validating, WorkspaceStatus.pushing}
 )
@@ -127,6 +142,8 @@ def park_payload(
 ) -> dict[str, Any]:
     """Non-secret park evidence: reason, redacted message and budget figures."""
     details = details or {}
+    if reason_code == PROVIDER_ACCOUNT_CREDITS_EXHAUSTED:
+        message = f"{_ACCOUNT_CREDITS_MESSAGE} {message}"
     payload: dict[str, Any] = {
         "reason_code": reason_code,
         "message": redact_audit_text(message, limit=2000),
@@ -142,9 +159,7 @@ async def _record_park_event(
 ) -> None:
     await repo.add_event(
         ws,
-        event_type=PROVIDER_BUDGET_EXHAUSTED_EVENT_TYPE
-        if reason_code == PROVIDER_BUDGET_EXHAUSTED
-        else PROVIDER_MANAGED_KEY_UNAVAILABLE_EVENT_TYPE,
+        event_type=_PARK_EVENT_TYPES.get(reason_code, PROVIDER_MANAGED_KEY_UNAVAILABLE_EVENT_TYPE),
         reason_code=reason_code,
         payload=dict(payload),
     )

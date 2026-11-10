@@ -942,6 +942,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
 
+### PROVIDER_ACCOUNT_CREDITS_EXHAUSTED
+**Problem:** The OpenRouter account balance ran out of credits while the workspace's managed key still had budget; the workspace is parked (blocked) for a human instead of failing.
+**Likely Cause:** The agent CLI's own error (the tail of its stderr) reported HTTP 402 / insufficient credits while the authoritative key read still showed remaining limit.
+**Operator Fix:** Top up the OpenRouter account (this is the account balance, not the workspace budget), then re-set the provider budget to resume where it stopped. AWF never retries blindly or falls back to another provider for this reason.
+**Related Command:** `awf workspace provider-budget <workspace_id> --usd <amount>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_account_credits_exhausted](#provider_account_credits_exhausted)
+
 ### PROVIDER_AUTH_FAILED
 **Problem:** A workspace agent or PR monitor could not run because the selected LLM provider authentication failed.
 **Likely Cause:** The provider token is expired, reused, missing inside the workspace runtime, or rejected by the provider CLI/API.

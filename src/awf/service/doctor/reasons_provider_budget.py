@@ -28,6 +28,16 @@ _ENTRIES: dict[str, tuple[str, str, str, str]] = {
         "key read showed no remaining limit.",
         _RAISE,
     ),
+    "PROVIDER_ACCOUNT_CREDITS_EXHAUSTED": (
+        "The OpenRouter account balance ran out of credits while the workspace's managed key "
+        "still had budget; the workspace is parked (blocked) for a human instead of failing.",
+        "Top up the OpenRouter account (this is the account balance, not the workspace "
+        "budget), then re-set the provider budget to resume where it stopped. AWF never "
+        "retries blindly or falls back to another provider for this reason.",
+        "The agent CLI's own error (the tail of its stderr) reported HTTP 402 / insufficient "
+        "credits while the authoritative key read still showed remaining limit.",
+        _RAISE,
+    ),
     "PROVIDER_BUDGET_RAISED": (
         "An operator set a new managed provider budget for the workspace.",
         "No action is needed; a provider-budget block resumes automatically.",

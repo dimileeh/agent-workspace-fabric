@@ -98,6 +98,7 @@ async def _events(factory, workspace_id: str) -> list[WorkspaceEvent]:
     ("reason", "event"),
     [
         ("PROVIDER_BUDGET_EXHAUSTED", "provider.budget.exhausted"),
+        ("PROVIDER_ACCOUNT_CREDITS_EXHAUSTED", "provider.account.credits_exhausted"),
         ("PROVIDER_MANAGED_KEY_UNAVAILABLE", "provider.managed_key.unavailable"),
         ("PROVIDER_MANAGEMENT_KEY_MISSING", "provider.managed_key.unavailable"),
     ],
@@ -143,6 +144,31 @@ async def test_executor_failure_sink_parks_managed_key_failures(
         parked = next(e for e in events if e.event_type == event)
         assert parked.reason_code == reason
         assert parked.payload["provider_budget"] == _BUDGET
+
+
+@pytest.mark.parametrize(
+    "status", [WorkspaceStatus.running, WorkspaceStatus.monitoring_pr], ids=["executor", "monitor"]
+)
+async def test_account_credit_park_names_the_account_balance_not_the_budget(tmp_path, status):
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        workspace_id = await _workspace(factory, status)
+
+        await _executor(factory, tmp_path)._mark_failed(
+            workspace_id=workspace_id,
+            from_status=status,
+            failure_reason=FailureReason.agent_failure,
+            message="codex exited 1 (PROVIDER_ACCOUNT_CREDITS_EXHAUSTED): 402 Payment Required",
+            reason_code="PROVIDER_ACCOUNT_CREDITS_EXHAUSTED",
+            details={"retryable": False, "provider_budget": _BUDGET},
+        )
+
+        events = await _events(factory, workspace_id)
+        parked = next(e for e in events if e.event_type == "provider.account.credits_exhausted")
+        message = parked.payload["message"]
+        assert "OpenRouter account" in message
+        assert "not the workspace budget" in message
+        assert message.endswith("402 Payment Required")
 
 
 async def test_other_failures_and_unparkable_statuses_still_fail_normally(tmp_path):

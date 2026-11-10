@@ -27,12 +27,18 @@ if TYPE_CHECKING:
 
 MANAGED_CREDENTIAL_ENV = "OPENROUTER_API_KEY"
 PROVIDER_BUDGET_EXHAUSTED = "PROVIDER_BUDGET_EXHAUSTED"
+PROVIDER_ACCOUNT_CREDITS_EXHAUSTED = "PROVIDER_ACCOUNT_CREDITS_EXHAUSTED"
 PROVIDER_MANAGEMENT_KEY_MISSING = "PROVIDER_MANAGEMENT_KEY_MISSING"
 PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED = "PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED"
 PROVIDER_MANAGED_KEY_UNAVAILABLE = "PROVIDER_MANAGED_KEY_UNAVAILABLE"
 PROVIDER_MANAGED_KEY_PERSIST_FAILED = "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
 PROVIDER_PARK_REASON_CODES = frozenset(
-    {PROVIDER_BUDGET_EXHAUSTED, PROVIDER_MANAGED_KEY_UNAVAILABLE, PROVIDER_MANAGEMENT_KEY_MISSING}
+    {
+        PROVIDER_BUDGET_EXHAUSTED,
+        PROVIDER_ACCOUNT_CREDITS_EXHAUSTED,
+        PROVIDER_MANAGED_KEY_UNAVAILABLE,
+        PROVIDER_MANAGEMENT_KEY_MISSING,
+    }
 )
 """Managed-key failures that park a workspace for a human: never failed, retried
 blindly, counted against the shared circuit, or sent to a fallback provider."""
@@ -105,11 +111,13 @@ def budget_exhausted_error(
     release: ProviderCredentialRelease,
     *,
     secrets: tuple[str, ...],
+    reason_code: str = PROVIDER_BUDGET_EXHAUSTED,
 ) -> AgentRunError:
-    """Replace a run failure caused by the exhausted key with the park code.
+    """Replace a run failure caused by exhausted credits with the park code.
 
-    The provider-recovery metadata is dropped on purpose: an exhausted budget is
-    never retried blindly and never falls back to another provider.
+    The provider-recovery metadata is dropped on purpose: an exhausted budget (or
+    account balance) is never retried blindly and never falls back to another
+    provider.
     """
     result = CommandResult(
         returncode=error.result.returncode,
@@ -120,7 +128,7 @@ def budget_exhausted_error(
     return AgentRunError(
         agent=error.agent,
         result=result,
-        reason_code=PROVIDER_BUDGET_EXHAUSTED,
+        reason_code=reason_code,
         details={
             **_selection_details(adapter),
             "retryable": False,
@@ -168,10 +176,15 @@ async def managed_credential_scope(
         yield owned
     except AgentRunError as error:
         release = await _finish(owned, heartbeat, failed=True, original=error)
-        if error.reason_code not in _WATCHDOG_TIMEOUT_REASON_CODES and _exhausted_by_key(
-            release, error
-        ):
-            raise budget_exhausted_error(adapter, error, release, secrets=owned.secrets) from None
+        park_code = (
+            None
+            if error.reason_code in _WATCHDOG_TIMEOUT_REASON_CODES
+            else _credits_park_reason(release, error)
+        )
+        if park_code is not None:
+            raise budget_exhausted_error(
+                adapter, error, release, secrets=owned.secrets, reason_code=park_code
+            ) from None
         raise
     except BaseException as error:
         await _finish(owned, heartbeat, failed=True, original=error)
@@ -180,17 +193,22 @@ async def managed_credential_scope(
         await _finish(owned, heartbeat, failed=False, original=None)
 
 
-def _exhausted_by_key(release: ProviderCredentialRelease, error: AgentRunError) -> bool:
-    """The final key read decides; only when it failed does the stderr tail count.
+def _credits_park_reason(release: ProviderCredentialRelease, error: AgentRunError) -> str | None:
+    """The final key read decides whose credits ran out; ``None`` = not a credit failure.
 
-    The transcript is never scanned: a task editing payment code (or AWF's own
-    "payment required" text) must not be relabelled as an exhausted budget.
+    A key read showing no remaining limit is the workspace budget. Otherwise only
+    the CLI's own error (the stderr tail) counts: a 402 there while the key read
+    still shows headroom is the OpenRouter account balance; without a key read it
+    stands for the budget. The transcript is never scanned: a task editing payment
+    code (or AWF's own "payment required" text) must not park the workspace.
     """
     if release.exhausted:
-        return True
+        return PROVIDER_BUDGET_EXHAUSTED
+    if not is_budget_exhausted_output(error.result.stderr[-_BUDGET_TEXT_TAIL_CHARS:]):
+        return None
     if release.details.get("final_usage_read") is True:
-        return False
-    return is_budget_exhausted_output(error.result.stderr[-_BUDGET_TEXT_TAIL_CHARS:])
+        return PROVIDER_ACCOUNT_CREDITS_EXHAUSTED
+    return PROVIDER_BUDGET_EXHAUSTED
 
 
 async def _heartbeat(lease: ProviderCredentialLease, interval_seconds: float) -> None:

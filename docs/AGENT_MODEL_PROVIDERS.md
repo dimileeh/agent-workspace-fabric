@@ -346,8 +346,12 @@ For managed runs `llm_usage` reports that exact spend with source
 instead of `unknown`.
 
 **Budget exhaustion.** A failed run whose final key read shows no remaining limit
-becomes `PROVIDER_BUDGET_EXHAUSTED`. Only when that read fails does an HTTP 402 /
-limit-reached message in the tail of stderr count; the transcript never does. The workspace is
+becomes `PROVIDER_BUDGET_EXHAUSTED`. Otherwise only the CLI's own error counts: an
+HTTP 402 / limit-reached message in the tail of stderr. If the key read still shows
+headroom, that 402 is the OpenRouter account balance, not the workspace budget,
+and becomes `PROVIDER_ACCOUNT_CREDITS_EXHAUSTED` (top up the account, then re-set
+the budget to resume). If the key read failed, it stays `PROVIDER_BUDGET_EXHAUSTED`.
+Payment text in tool output or the transcript never counts. The workspace is
 parked (`blocked`, block type `provider_budget`) at both failure sinks (executor
 and PR monitor):
 
