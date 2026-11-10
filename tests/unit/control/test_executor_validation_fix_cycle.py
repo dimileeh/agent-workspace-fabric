@@ -1411,3 +1411,55 @@ class TestFixPassProviderPark:
             assert ws.block_type == "provider_budget"
             assert ws.block_reason_code == reason_code
         assert len(fix_runs) == 1
+
+    @pytest.mark.unit
+    async def test_fix_pass_park_code_from_superseded_executor_leaves_new_claim_validating(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A superseded executor's managed-key stop during a fix pass cannot park
+        (or fail) the replacement claimant's ``validating`` row
+        (PRRT_kwDOSJAM6s6157hr)."""
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=3)
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.execution_claimed_by = "old-worker"
+            await s.commit()
+
+        async def _claim_lost_then_budget_exhausted(
+            *_args: object, **_kwargs: object
+        ) -> tuple[bool, object]:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.execution_claimed_by = "new-worker"
+                await s.commit()
+            raise AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False},
+            )
+
+        monkeypatch.setattr(
+            execution_validation_fix_pass_mod,
+            "_run_agent_callable_with_service_recovery",
+            _claim_lost_then_budget_exhausted,
+        )
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # validation fails
+
+        await executor.execute(ws_id, execution_owner_id="old-worker")
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.validating.value
+            assert ws.execution_claimed_by == "new-worker"
+            assert ws.block_type is None
+            assert ws.failure_reason is None

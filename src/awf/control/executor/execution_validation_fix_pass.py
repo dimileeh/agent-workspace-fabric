@@ -277,6 +277,7 @@ async def run_validation_fix_pass(
                 message=message,
                 reason_code=exc.reason_code,
                 details=exc.details,
+                execution_owner_id=execution_owner_id,
             )
             return ExecutionValidationResult(
                 stop=True,
