@@ -315,6 +315,15 @@ async def _mark(
     deleted_at: datetime | None = None,
 ) -> None:
     async with session_factory() as session:
+        if deleted_at is not None:
+            # The event writes the workspace row: lock it before the key row, in the
+            # broker's evented-write order, so a racing release never deadlocks.
+            await session.execute(
+                select(Workspace.id)
+                .join(ProviderManagedKey, ProviderManagedKey.workspace_id == Workspace.id)
+                .where(ProviderManagedKey.id == row_id)
+                .with_for_update(of=Workspace)
+            )
         # Locked like the broker's writes: a key it finalized mid-delete stays finalized.
         row = await ProviderManagedKeyRepository(session).get(row_id, for_update=True)
         assert row is not None  # recorded just before by ``_record_usage``

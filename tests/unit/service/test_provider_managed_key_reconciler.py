@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 import pytest
+import structlog
 from sqlalchemy import select
 
 from awf.adapters.managed_credentials import ProviderCredentialError
@@ -15,6 +17,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import ProviderManagedKeyRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service import provider_managed_key_reconciler
 from awf.service.openrouter_management import OpenRouterManagementError
 from awf.service.provider_managed_key_reconciler import reconcile_openrouter_keys
 from awf.service.provider_managed_keys import ManagedKeyBroker
@@ -386,6 +389,57 @@ async def test_a_broker_finalize_during_the_orphan_delete_is_never_clobbered(
                 )
             ).all()
         assert orphan_events == []
+
+
+async def test_a_broker_finalize_during_the_orphan_event_waits_instead_of_deadlocking(
+    monkeypatch,
+):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        finalizes: list[asyncio.Future[dict[str, int]]] = []
+
+        class _FinalizeBeforeEvent(WorkspaceRepository):
+            async def add_event(self, workspace, **kwargs):
+                # A broker finalize lands while the orphan mark holds the key row.
+                finalizes.append(asyncio.ensure_future(broker.finalize_workspace_keys(ws)))
+                await asyncio.wait(finalizes, timeout=0.5)
+                return await super().add_event(workspace, **kwargs)
+
+        monkeypatch.setattr(
+            provider_managed_key_reconciler, "WorkspaceRepository", _FinalizeBeforeEvent
+        )
+        with structlog.testing.capture_logs() as logs:
+            report = await reconcile_openrouter_keys(
+                session_factory=factory,
+                client=fake.client(),
+                now=lambda: datetime.now(UTC) + timedelta(hours=1),
+            )
+            finalized = await finalizes[0]
+
+        assert (report["deleted"], report["failed"]) == (1, 0)
+        assert finalized == {"finalized": 1, "failed": 0}
+        assert [
+            log["event"]
+            for log in logs
+            if log["event"]
+            in {"provider.managed_key.persist_failed", "provider.managed_key.orphan_persist_failed"}
+        ] == []
+        (row,) = await _rows(factory, ws)
+        assert row.status == "orphan_deleted"
+        async with factory() as session:
+            orphan_events = (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == ws,
+                        WorkspaceEvent.event_type == "provider.managed_key.orphan_deleted",
+                    )
+                )
+            ).all()
+        assert len(orphan_events) == 1
 
 
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
