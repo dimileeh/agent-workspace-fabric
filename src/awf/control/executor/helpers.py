@@ -610,9 +610,20 @@ def _agent_defaults_for_workspace(
     selection = execution_from_policy(ws.task_policy)
     if selection is not None:
         return AgentDefaults(
-            model=selection.model or "", effort=selection.effort, execution=selection
+            model=selection.model or "",
+            effort=selection.effort,
+            execution=selection,
+            compatibility_evidence=(ws.task_policy or {}).get("coding_compatibility_evidence"),
+            require_compatibility_evidence=bool(
+                (ws.task_policy or {}).get("require_compatibility_evidence")
+            ),
         )
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    if policy.get("agent_execution_profile_pending") and policy.get("agent_provider") in {
+        "ollama",
+        "openrouter",
+    }:
+        raise ValueError("EXECUTION_PROFILE_BINDING_REQUIRED")
     model = _nonblank_policy_string(policy, "agent_model")
     effort = _nonblank_policy_string(policy, "agent_effort")
     cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)

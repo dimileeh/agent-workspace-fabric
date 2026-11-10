@@ -427,6 +427,17 @@ def effective_agent_identity(
             if selection.effort is not None
             else "unavailable",
         )
+    if (
+        task_policy
+        and task_policy.get("agent_execution_profile_pending")
+        and task_policy.get("agent_provider") in {"ollama", "openrouter"}
+    ):
+        return AgentIdentity(
+            model=_nonblank_policy_string(task_policy, "agent_model"),
+            effort=None,
+            model_source="task_policy",
+            effort_source="unavailable",
+        )
     runtime = _coerce_agent_runtime(agent)
     # Live projections use current defaults; historical fills retired runtimes
     # (e.g. gemini) and must not override live Cursor's no-effort Auto default.
@@ -872,7 +883,8 @@ def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
     return {
         "agent_provider": selection.provider
         if selection
-        else provider_for_agent_model(workspace.agent, identity.model),
+        else (workspace.task_policy or {}).get("agent_provider")
+        or provider_for_agent_model(workspace.agent, identity.model),
         "agent_execution": selection.model_dump(mode="json") if selection else None,
         "agent_connection_scope": selection.connection_scope(workspace.id) if selection else None,
         "agent_model": identity.model,

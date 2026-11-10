@@ -81,6 +81,8 @@ async def test_local_execution_uses_isolated_runtime_wrapper_and_no_native_crede
     assert "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED" in str(command)
     assert "OPENAI_API_KEY" not in str(command)
     assert "xhigh" not in str(command)
+    assert "/usr/local/bin/python3" in str(command)
+    assert "-I" in str(command) and "-S" in str(command)
     assert selected.model in str(command)
 
 

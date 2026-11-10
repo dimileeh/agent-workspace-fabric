@@ -33,6 +33,7 @@ from awf.service.controls_helpers import (
     _finish_stack_stop_failed_operation,
     _normalize_cleanup_result,
 )
+from awf.service.provider_diagnostics import is_diagnostic, record_diagnostic_cancellation
 
 
 def _stack_stop_error_from_cleanup(
@@ -98,7 +99,7 @@ async def _release_runtime_stack(
         ),
         "worktree_host_path": None,
         "remove_volumes": True,
-        "remove_worktree": False,
+        "remove_worktree": is_diagnostic(workspace.task_policy),
     }
     if pr_adoption_is_hosted(workspace.task_policy):
         cleanup_kwargs["skip_compose"] = True
@@ -153,6 +154,8 @@ async def _finalize_service_stack_release(
     response message agrees with the failed ``operation_status`` instead of
     telling callers the stack was stopped when teardown actually failed.
     """
+
+    record_diagnostic_cancellation(workspace)
     if not cleanup_result.ok:
         await _finish_stack_stop_failed_operation(
             self._session,

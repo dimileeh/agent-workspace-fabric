@@ -30,6 +30,7 @@ def test_daemon_local_and_cloud_probe_same_runtime_endpoint(monkeypatch, model):
         "ok": True,
         "reason_code": "PROVIDER_ENDPOINT_READY",
         "evidence": "runtime_network_readiness_only",
+        "model_version": None,
     }
     assert opener.open.call_args.args[0].full_url == "http://daemon:11434/prefix/api/tags"
     assert opener.open.call_args.kwargs["timeout"] == 10
@@ -136,7 +137,7 @@ def test_probe_read_timeout_closes_response_and_redacts_error(monkeypatch):
     assert response.closed
 
 
-def test_foundation_admission_cannot_claim_runtime_network_success_or_override():
+def test_admission_defers_runtime_network_verification_without_override():
     selected = resolve_execution(
         agent="codex", provider="ollama", model="coder", allow_unverified=True
     )
@@ -147,9 +148,9 @@ def test_foundation_admission_cannot_claim_runtime_network_success_or_override()
         override=True,
         environ={},
     )
-    assert result["blocks_launch"] is True
+    assert result["blocks_launch"] is False
     assert result["override_used"] is False
-    assert result["reason_code"] == "EXECUTION_NETWORK_PROBE_UNSUPPORTED"
+    assert result["reason_code"] == "EXECUTION_NETWORK_PROBE_PENDING"
     assert result["provider"] == "ollama"
 
 
@@ -191,7 +192,7 @@ def test_openrouter_runtime_probe_never_follows_credential_redirects():
 
 @pytest.mark.parametrize("pending", [False, True])
 @pytest.mark.parametrize("provider", ["ollama", "openrouter"])
-def test_native_primary_cannot_admit_third_party_fallback(provider, pending):
+def test_primary_and_fallback_defer_network_verification(provider, pending):
     primary = resolve_execution(agent="codex")
     fallback = resolve_execution(
         agent="claude_code", provider=provider, model="coder", allow_unverified=True
@@ -213,7 +214,7 @@ def test_native_primary_cannot_admit_third_party_fallback(provider, pending):
     result = selected_provider_readiness_preflight(
         Mock(), agent="codex", task_policy=policy, override=True, environ={}
     )
-    assert result["blocks_launch"] is True
+    assert result["blocks_launch"] is False
     assert result["override_used"] is False
-    assert result["reason_code"] == "EXECUTION_NETWORK_PROBE_UNSUPPORTED"
+    assert result["reason_code"] == "EXECUTION_NETWORK_PROBE_PENDING"
     assert result["provider"] == provider

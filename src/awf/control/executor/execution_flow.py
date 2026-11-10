@@ -160,6 +160,17 @@ async def execute(
             worktree_path=worktree_path,
         )
 
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if is_diagnostic(ws.task_policy):
+        from awf.control.executor.provider_diagnostics import execute_diagnostic
+        from awf.control.executor.state_ops import _freeze_execution_defaults
+
+        if not await _freeze_execution_defaults(self, ws):
+            return
+        await execute_diagnostic(self, ws, compose_file=compose_file)
+        return
+
     # Recovery paths skip non-feature dispatch, so deprecated/unsupported task
     # kinds must fail fast here instead of silently resuming validation as
     # feature work. Sync task recovery is intentionally allowed through.

@@ -370,3 +370,9 @@ CMD ["sh", "-c", "sleep infinity"]
 
 # Execution contract v1: isolated third-party provider runner (stdlib only).
 COPY src/awf/adapters/provider_config.py /opt/awf/provider_config.py
+
+# Diagnostic contract v1: immutable challenge/oracle outside /workspace.
+COPY src/awf/runtime/provider_diagnostic_fixture.py /opt/awf/provider_diagnostic_fixture.py
+USER root
+RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/python3 -I -S /opt/awf/provider_diagnostic_fixture.py challenge' > /usr/local/bin/awf-provider-challenge && chmod 755 /usr/local/bin/awf-provider-challenge
+USER agent

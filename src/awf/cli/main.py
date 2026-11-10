@@ -39,6 +39,7 @@ from awf.cli.init_ops import (
 )
 from awf.cli.mcp_commands import mcp_app
 from awf.cli.profile_smoke_commands import profile_app, smoke_app
+from awf.cli.provider_commands import provider_app
 from awf.cli.service_commands import service_app
 from awf.cli.setup_commands import setup_command
 from awf.cli.start_commands import start_command
@@ -83,6 +84,8 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+app.add_typer(provider_app, name="provider")
 
 
 def _cli_version() -> str:

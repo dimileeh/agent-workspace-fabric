@@ -961,6 +961,9 @@ async def _release_terminal_runtime_for_candidate(
     """Clean up a single terminal workspace's runtime and record the outcome event."""
     if self._runtime_cleaner is None:
         return
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    disposable = is_diagnostic(candidate.task_policy)
     try:
         cleanup_kwargs: dict[str, Any] = {
             "workspace_id": candidate.workspace_id,
@@ -969,8 +972,8 @@ async def _release_terminal_runtime_for_candidate(
             "compose_file_path": (
                 Path(candidate.compose_file_path) if candidate.compose_file_path else None
             ),
-            "remove_volumes": False,
-            "remove_worktree": False,
+            "remove_volumes": disposable,
+            "remove_worktree": disposable,
         }
         if pr_adoption_is_hosted(candidate.task_policy):
             if candidate.compose_project_name is not None:
@@ -1094,6 +1097,9 @@ async def _record_terminal_runtime_released(
             return False
         if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
             return False
+        from awf.service.provider_diagnostics import settle_quiescent_diagnostic
+
+        await settle_quiescent_diagnostic(session, ws)
         if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
             # The release event already exists — e.g. a ``cancel --stop-stack`` pre-emits
             # ``terminal_runtime_released`` in the service after only a ``docker stop``

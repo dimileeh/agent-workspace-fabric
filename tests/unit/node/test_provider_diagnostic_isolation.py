@@ -1,0 +1,109 @@
+"""Privileged workers cannot inject forge/native competitors into diagnostics."""
+
+from pathlib import Path
+
+from awf.common.agent_execution import resolve_execution
+from awf.node.auth_mounts import ServiceAuthMountResolver
+from awf.node.compose_manager import ComposeManager
+from awf.node.git_manager import WorktreeLayout
+from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.models import WorkspaceProfile
+
+
+async def test_no_ambient_secrets_mounts_or_model_roles(tmp_path, monkeypatch):
+    home = tmp_path / "auth"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text(
+        'model="competing"\n[mcp_servers.forge]\ncommand="gh"\n'
+    )
+    (home / ".config/gh").mkdir(parents=True)
+    (home / ".ssh").mkdir()
+    for key in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "OPENROUTER_API_KEY",
+    ]:
+        monkeypatch.setenv(key, "synthetic-unrelated")
+    monkeypatch.setenv("SELECTED", "selected-key")
+    selected = resolve_execution(
+        agent="codex",
+        provider="openrouter",
+        model="candidate",
+        allow_unverified=True,
+        profile={"runtime": {"environment": {"OPENROUTER_API_KEY": "${SELECTED}"}}},
+    )
+    compose = ComposeManager(
+        work_dir=tmp_path / "work",
+        template_path=Path("docker/compose/workspace.base.yml.j2").resolve(),
+    )
+    launcher = ComposeStackLauncher(
+        compose=compose,
+        agent_runtime_image="pinned",
+        auth_mount_resolver=ServiceAuthMountResolver(host_home=home, work_dir=tmp_path / "state"),
+    )
+    profile = WorkspaceProfile(
+        name="diagnostic",
+        docker={"mode": "none"},
+        runtime={"environment": {"OPENROUTER_API_KEY": "${SELECTED}"}},
+    )
+    spec, _, _ = await launcher._compose_spec(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_diag",
+            layout=WorktreeLayout(
+                mirror_path=tmp_path / "mirror",
+                worktree_path=tmp_path / "fixture",
+                branch_name="fixture",
+            ),
+            profile=profile,
+            execution=selected,
+            diagnostic=True,
+        ),
+        build_companion_images=False,
+    )
+    assert next(m for m in spec.auth_mounts if m.source == m.target).mode == "ro"
+    environment = dict(spec.agent_environment)
+    assert environment["OPENROUTER_API_KEY"] == "${SELECTED}"
+    assert not any(
+        k in environment
+        for k in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ]
+    )
+    assert not any(
+        m.target
+        in {
+            "/home/agent/.config/gh",
+            "/home/agent/.ssh",
+            "/home/agent/.codex",
+            "/opt/awf/selected-provider-source.json",
+        }
+        for m in spec.auth_mounts
+    )
+
+
+def test_native_diagnostic_copies_only_selected_auth_file(tmp_path):
+    from awf.node.provider_diagnostics import remove_diagnostic_auth
+
+    home = tmp_path / "host"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"synthetic-selected"}')
+    (home / ".codex" / "config.toml").write_text('mcp_servers="forge"')
+    resolver = ServiceAuthMountResolver(host_home=home, work_dir=tmp_path / "state")
+    mounts = resolver.resolve_diagnostic_auth(workspace_id="ws_diag", agent="codex")
+    assert len(mounts) == 1
+    assert mounts[0].target == "/home/agent/.codex"
+    assert mounts[0].mode == "rw"
+    assert (Path(mounts[0].source) / "auth.json").read_text() == '{"token":"synthetic-selected"}'
+    assert sorted(p.name for p in Path(mounts[0].source).iterdir()) == ["auth.json"]
+    (Path(mounts[0].source) / "session-state").write_text("CLI state")
+    assert not list((tmp_path / "state").rglob("config.toml"))
+    remove_diagnostic_auth(tmp_path / "state", "ws_diag")
+    assert not Path(mounts[0].source).exists()
+    assert (home / ".codex" / "auth.json").exists()

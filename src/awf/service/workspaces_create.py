@@ -126,6 +126,7 @@ async def create_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
+    diagnostic_spec: dict[str, Any] | None = None,
     requested_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
     resolved_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
 ) -> Workspace:
@@ -178,9 +179,16 @@ async def create_workspace_row(
         base_task_policy = freeze_execution_policy(
             payload,
             profile=resolved_profile,
-            enabled=resolved_settings.third_party_agent_providers_enabled,
+            enabled=diagnostic_spec is not None
+            or resolved_settings.third_party_agent_providers_enabled,
             environ=provider_environ if provider_environ is not None else os.environ,
         )
+        if diagnostic_spec is not None:
+            base_task_policy["agent_execution"] = diagnostic_spec["selection"]
+            base_task_policy["provider_diagnostic"] = {"request": diagnostic_spec}
+        from awf.service.provider_compatibility import attach_compatibility
+
+        base_task_policy = await attach_compatibility(session, base_task_policy)
         from awf.common.agent_execution import execution_from_policy
 
         selections = [execution_from_policy(base_task_policy)]
@@ -194,7 +202,7 @@ async def create_workspace_row(
             from awf.db.repositories import WorkerHeartbeatRepository
 
             if not await WorkerHeartbeatRepository(session).supports_execution_contract(
-                now=datetime.now(UTC)
+                now=datetime.now(UTC), minimum_version=2
             ):
                 raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
     except ValueError as error:
@@ -228,7 +236,7 @@ async def create_workspace_row(
         and not payload.preflight.provider_readiness_override
     )
     preflight: dict[str, Any] | None = None
-    if not defer_cursor_router_preflight:
+    if not defer_cursor_router_preflight and diagnostic_spec is None:
         preflight_environ = (
             dict(provider_environ or {})
             if payload.hosted
@@ -303,7 +311,7 @@ async def create_workspace_row(
         test_commands=payload.validation.commands,
         requires_database=payload.requires_database,
         idempotency_key=idempotency_key,
-        task_kind=payload.task.kind,
+        task_kind="provider_connection_test" if diagnostic_spec is not None else payload.task.kind,
         workspace_id=workspace_id,
     )
     task = await TaskRepository(session).create_or_get(
@@ -375,6 +383,7 @@ async def create_workspace_row_checked(
     disk_check: DiskCheck | None = None,
     node_id: str | None = None,
     excluding_workspace_id: str | None = None,
+    diagnostic_spec: dict[str, Any] | None = None,
 ) -> Workspace:
     """Resolve profile snapshots once, guard host-port conflicts, and persist the row.
 
@@ -406,6 +415,7 @@ async def create_workspace_row_checked(
         disk_check=disk_check,
         requested_profile=requested_profile,
         resolved_profile=resolved_profile,
+        diagnostic_spec=diagnostic_spec,
     )
 
 

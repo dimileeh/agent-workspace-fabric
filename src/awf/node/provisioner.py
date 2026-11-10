@@ -234,6 +234,14 @@ class Provisioner(
         ):
             return
 
+        from awf.service.provider_diagnostics import is_diagnostic
+
+        if is_diagnostic(ws.task_policy):
+            from awf.node.provider_diagnostics import provision_diagnostic
+
+            await provision_diagnostic(self, ws, epoch=execution_claim_epoch)
+            return
+
         # 2. Do the git work outside a DB transaction (it's slow).
         branch_name = _provision_local_branch_name(
             ws,

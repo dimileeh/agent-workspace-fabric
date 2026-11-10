@@ -89,6 +89,8 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["claude", "--dangerously-skip-permissions"]
+        if self.diagnostic_events:
+            args += ["--output-format", "stream-json", "--verbose"]
         selected_model = model or self._default_model
         if selected_model:
             args += ["--model", selected_model]

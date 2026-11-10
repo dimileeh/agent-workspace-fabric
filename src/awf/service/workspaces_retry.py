@@ -414,6 +414,9 @@ async def retry_workspace_row(
     preview = await _load_retry_preview_outside_request_session(session, workspace_id)
     if preview is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    from awf.service.provider_diagnostics import reject_diagnostic_control
+
+    reject_diagnostic_control(preview.task_policy, "retry")
     if hosted_authority is None and (preview.task_policy or {}).get(POLICY_KEY):
         raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
     prefetched_feature_pr: _PrefetchedFeaturePrState | None = None

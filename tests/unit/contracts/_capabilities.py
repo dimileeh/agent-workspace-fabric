@@ -86,6 +86,79 @@ class ContractCapability:
 
 _CAPABILITIES: tuple[ContractCapability, ...] = (
     ContractCapability(
+        name="provider_models",
+        parity_capability="Provider model catalog",
+        rest_method="POST",
+        rest_path="/v1/providers/models/query",
+        mcp_tool="awf_query_provider_models",
+        cli_tokens=("provider", "models"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="ProviderCatalogResponse",
+        rest_body_fields=frozenset({"agent", "provider", "profile_ref", "profile"}),
+        mcp_request_fields=frozenset({"agent", "provider", "profile_ref", "profile"}),
+        mcp_required_fields=frozenset({"agent", "provider"}),
+        cli_options=frozenset({"--agent", "--provider", "--profile-ref", "--profile"}),
+        response_fields=frozenset(
+            {
+                "status",
+                "models",
+                "reason_code",
+                "manual_entry_allowed",
+                "evidence",
+                "coding_compatible",
+            }
+        ),
+        auth_required=True,
+    ),
+    ContractCapability(
+        name="provider_connection_test",
+        parity_capability="Provider connection test",
+        rest_method="POST",
+        rest_path="/v1/providers/connection-tests",
+        mcp_tool="awf_test_provider_connection",
+        cli_tokens=("provider", "test"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=True,
+        requires_idempotency_key=True,
+        supports_if_match=False,
+        rest_response_model="ProviderConnectionTestResponse",
+        rest_header_fields=frozenset({"Idempotency-Key"}),
+        rest_body_fields=frozenset(
+            {"agent", "provider", "model", "effort", "deadline_seconds", "profile_ref", "profile"}
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "agent",
+                "provider",
+                "model",
+                "effort",
+                "deadline_seconds",
+                "profile_ref",
+                "profile",
+                "idempotency_key",
+            }
+        ),
+        mcp_required_fields=frozenset({"agent", "provider", "model", "idempotency_key"}),
+        cli_options=frozenset(
+            {
+                "--agent",
+                "--provider",
+                "--model",
+                "--effort",
+                "--deadline-seconds",
+                "--profile-ref",
+                "--profile",
+                "--idempotency-key",
+            }
+        ),
+        response_fields=frozenset({"workspace_id", "operation_id", "label", "status"}),
+        auth_required=True,
+    ),
+    ContractCapability(
         name="cancel_workspace",
         parity_capability="Cancel workspace",
         rest_method="POST",

@@ -269,7 +269,9 @@ class WorkerHeartbeatRepository:
             return 0
         return int(rowcount)
 
-    async def supports_execution_contract(self, *, now: datetime) -> bool:
+    async def supports_execution_contract(
+        self, *, now: datetime, minimum_version: int = EXECUTION_CONTRACT_VERSION
+    ) -> bool:
         """Every live queue consumer must understand the expanded contract."""
         heartbeats = (await self._session.execute(select(WorkerHeartbeat))).scalars().all()
         live = [
@@ -279,9 +281,7 @@ class WorkerHeartbeatRepository:
                 h.last_heartbeat_at, now=now, poll_interval_seconds=h.poll_interval_seconds
             )
         ]
-        return bool(live) and all(
-            h.execution_contract_version == EXECUTION_CONTRACT_VERSION for h in live
-        )
+        return bool(live) and all(h.execution_contract_version >= minimum_version for h in live)
 
 
 class ProviderModelCircuitBreakerRepository:

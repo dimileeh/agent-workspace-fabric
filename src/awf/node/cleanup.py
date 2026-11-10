@@ -358,7 +358,10 @@ class WorkspaceCleaner:
         )
 
         # Step 2: git worktree remove (idempotent already per GitManager).
-        if remove_worktree:
+        if remove_worktree and not (
+            repo_url == "awf-internal://provider-diagnostic/v1"
+            and any(not step.ok for step in steps)
+        ):
             for worktree_id, worktree_repo_url, step_name in worktree_targets:
                 try:
                     await self._git.remove_worktree(
@@ -398,6 +401,23 @@ class WorkspaceCleaner:
                     )
                 )
 
+        if (
+            repo_url == "awf-internal://provider-diagnostic/v1"
+            and remove_worktree
+            and all(step.ok for step in steps)
+        ):
+            from awf.node.provider_diagnostics import remove_diagnostic_auth
+
+            try:
+                remove_diagnostic_auth(self._git.work_dir, workspace_id)
+            except (ValueError, OSError):
+                steps.append(
+                    WorkspaceCleanupStepResult(
+                        name="diagnostic_auth_remove",
+                        status="failed",
+                        reason_code="PROVIDER_DIAGNOSTIC_CLEANUP_FAILED",
+                    )
+                )
         return WorkspaceCleanupResult.from_steps(steps)
 
 

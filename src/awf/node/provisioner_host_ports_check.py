@@ -226,6 +226,9 @@ async def _check_auto_resolved_profile_host_ports(
                         profile=resolved_profile_dict,
                         environ=os.environ,
                     )
+                    from awf.service.provider_compatibility import attach_compatibility
+
+                    ws.task_policy = await attach_compatibility(session, ws.task_policy)
                     await repo.advance_workspace_version(ws)
                 # Trusted-base resolve may have already succeeded; stamp now so a
                 # later pre-launch/stack failure cannot leave an unstamped freeze

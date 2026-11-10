@@ -119,11 +119,13 @@ def freeze_execution_policy(
                 provider=provider,
                 model=model,
                 effort=effort,
-                allow_unverified=payload.preflight.allow_unverified_model,
+                allow_unverified=True,
                 profile=profile,
                 environ=environ if profile is not None else {},
             )
         )
+    if not payload.preflight.allow_unverified_model and any(s.third_party for s in snapshots):
+        policy["require_compatibility_evidence"] = True
     if any(not s.third_party for s in snapshots):
         policy["agent_execution_defaults_pending"] = True
     if profile is None and any(s.third_party for s in snapshots):

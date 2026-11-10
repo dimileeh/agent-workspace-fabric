@@ -166,10 +166,14 @@ class AgentDefaults:
     model: str
     effort: str | None = None
     execution: ExecutionSelection | None = None
+    compatibility_evidence: dict[str, Any] | None = None
+    require_compatibility_evidence: bool = False
 
 
 class AgentAdapter(ABC):
     """Shared scaffolding for coding-CLI adapters."""
+
+    diagnostic_events: bool = False
 
     def __init__(
         self,
@@ -184,12 +188,16 @@ class AgentAdapter(ABC):
         runtime_executor: AgentRuntimeExecutor | None = None,
         trusted_git_roots: tuple[Path, Path] | None = None,
         execution: ExecutionSelection | None = None,
+        compatibility_evidence: dict[str, Any] | None = None,
+        require_compatibility_evidence: bool = False,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
             raise ValueError("agent_wall_timeout_seconds must be positive")
         if agent_idle_timeout_seconds <= 0:
             raise ValueError("agent_idle_timeout_seconds must be positive")
+        self.compatibility_evidence = compatibility_evidence
+        self.require_compatibility_evidence = require_compatibility_evidence
         self.execution = execution
         self._runner = runner
         self._default_model = default_model
@@ -359,6 +367,14 @@ class AgentAdapter(ABC):
         work_slot_invocation_id: str | None,
     ) -> AgentRunResult:
         """Run the agent once the caller's work slot (if any) is held."""
+        from awf.service.provider_compatibility import guard_runtime_compatibility
+
+        await guard_runtime_compatibility(
+            self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+        )
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
@@ -369,7 +385,7 @@ class AgentAdapter(ABC):
                 and getattr(self._runtime_executor, "execution_contract_version", None) != 1
             ):
                 raise ValueError("EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED")
-            from awf.adapters.provider_config import RUNTIME_CONFIG_PATH
+            from awf.adapters.provider_config import RUNTIME_CONFIG_PATH, RUNTIME_PYTHON_PATH
 
             # An old/custom runtime must fail before the coding CLI starts.
             bootstrap = (
@@ -380,7 +396,9 @@ class AgentAdapter(ABC):
             import json
 
             cli_args = [
-                "python",
+                RUNTIME_PYTHON_PATH,
+                "-I",
+                "-S",
                 "-c",
                 bootstrap,
                 RUNTIME_CONFIG_PATH,
@@ -414,6 +432,8 @@ class AgentAdapter(ABC):
                 and self.execution.credential_ref == "env/OPENROUTER_API_KEY"
                 and name == "OPENROUTER_API_KEY"
             )
+        if self.diagnostic_events:
+            env_passthrough = ()
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         masked_reason_code: str | None = None

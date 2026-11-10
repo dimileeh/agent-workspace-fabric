@@ -966,15 +966,21 @@ def _apply_execution_claim(self: Any, ws: Workspace, *, owner_id: str) -> None:
     concrete value is read back later via ``_read_execution_claim_epoch`` (D2),
     so the SQL-expression placeholder is never read inside the claim txn.
     """
-    from awf.common.agent_execution import EXECUTION_CONTRACT_VERSION, execution_from_policy
+    from awf.common.agent_execution import execution_from_policy
 
     selected = execution_from_policy(ws.task_policy)
     if (
-        selected is not None
-        and selected.third_party
-        and getattr(self, "execution_contract_version", 0) != EXECUTION_CONTRACT_VERSION
-    ):
+        (selected is not None and selected.third_party)
+        or (ws.task_policy or {}).get("agent_execution_profile_pending")
+    ) and getattr(self, "execution_contract_version", 0) < 2:
         raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
+    from awf.service.provider_diagnostics import DIAGNOSTIC_WORKER_VERSION, is_diagnostic
+
+    if (
+        is_diagnostic(ws.task_policy)
+        and getattr(self, "execution_contract_version", 0) < DIAGNOSTIC_WORKER_VERSION
+    ):
+        raise ValueError("PROVIDER_DIAGNOSTIC_WORKER_UNSUPPORTED")
     ws.execution_claimed_by = owner_id
     ws.execution_claim_expires_at = self._execution_claim_expires_at()
     ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
