@@ -267,6 +267,23 @@ async def _run_operator_hint_cycle(
     if hint.directive or not active_grant_specs:
         if not hint.directive:
             acted_feedback_text = hint.reason
+        # A directive against a preserved protected commit is told to reset to the
+        # published PR head, not revert on top (#1200). Only a grant covering EVERY
+        # blocked path keeps that commit; a partial grant still leaves an ungranted
+        # change the push leak guard re-blocks, so it keeps the reset guidance
+        # (PRRT_kwDOSJAM6s61o81S).
+        reset_guidance_head_sha = (
+            preserved_head_sha
+            if hint.directive
+            and (
+                not active_grant_specs
+                or not await self._preserved_protected_change_fully_granted(
+                    workspace_id=workspace_id,
+                    grant_specs=active_grant_specs,
+                )
+            )
+            else None
+        )
         prompt = operator_hint_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -275,12 +292,7 @@ async def _run_operator_hint_cycle(
             operation_id=hint.operation_id,
             workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
-            # A directive against a preserved protected commit is told to reset to
-            # the published PR head, not revert on top (#1200). An approve-and-keep
-            # grant keeps that commit, so it gets no reset guidance.
-            preserved_head_sha=(
-                preserved_head_sha if hint.directive and not active_grant_specs else None
-            ),
+            preserved_head_sha=reset_guidance_head_sha,
             published_head_sha=pr_head_sha,
         )
         verdict: VerdictResult | MonitorVerdictResult

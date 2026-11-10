@@ -121,7 +121,10 @@ class _Repo:
 
 
 async def _seed_protected_block(
-    factory: async_sessionmaker[AsyncSession], workspace_id: str
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    extra_violation_paths: tuple[str, ...] = (),
 ) -> None:
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -132,7 +135,11 @@ async def _seed_protected_block(
                 "protected_pattern": ".github/workflows/",
                 "section": "jobs.contract",
                 "reason": "QUALITY_GATE_POLICY_CHANGED",
-            }
+            },
+            *(
+                {"path": path, "reason": "QUALITY_GATE_POLICY_CHANGED"}
+                for path in extra_violation_paths
+            ),
         ]
         await session.commit()
 
@@ -457,3 +464,35 @@ async def test_directive_with_approve_and_keep_grant_omits_reset_guidance(
     assert "Protected-scope block" not in prompts[0]
     assert "Do not add a revert commit on top" not in prompts[0]
     assert repo.head() == protected
+
+
+async def test_directive_with_partial_grant_keeps_reset_guidance(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant covering only some blocked paths does not approve the preserved commit.
+
+    The push leak guard still re-blocks a revert-on-top while any blocked path is
+    ungranted, so the directive prompt must keep the reset guidance
+    (PRRT_kwDOSJAM6s61o81S).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_protected_block(factory, workspace_id, extra_violation_paths=("pyproject.toml",))
+    repo = _Repo(tmp_path, workspace_id)
+    protected = repo.commit_protected_change()
+    state = _state(published=repo.published, protected=protected)
+    prompts: list[str] = []
+    runner = _runner(factory, tmp_path, monkeypatch, repo=repo, pushes=[], prompts=prompts)
+
+    async def _partial_grant(_workspace_id: str) -> list[GrantSpec]:
+        return [GrantSpec(path="pyproject.toml")]
+
+    monkeypatch.setattr(runner, "_active_operator_grant_specs", _partial_grant)
+
+    await _run_cycle(runner, workspace_id=workspace_id, repo=repo, state=state, tmp_path=tmp_path)
+
+    assert len(prompts) == 1
+    assert "Protected-scope block" in prompts[0]
+    assert f"`{protected}`" in prompts[0]
+    assert "Do not add a revert commit on top" in prompts[0]
