@@ -19,7 +19,7 @@ from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.cursor_auto import CursorAutoModeResponseMixin, CursorAutoModeSelectionMixin
 from awf.api.schemas_companions import WorkspaceCompanionRequest
-from awf.api.schemas_providers import ProviderBudgetUsd
+from awf.api.schemas_providers import ProviderBudgetUsd, ProviderSpendResponse
 from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
@@ -965,6 +965,7 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
@@ -1110,6 +1111,7 @@ class TaskResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     status: WorkspaceStatus
     pr_url: str | None
@@ -1193,6 +1195,7 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)

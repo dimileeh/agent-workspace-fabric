@@ -6722,6 +6722,113 @@
         "title": "ProviderRecoveryStateSummaryResponse",
         "type": "object"
       },
+      "ProviderSpendResponse": {
+        "description": "Exact provider spend of a managed OpenRouter workspace (USD).\n\nSummed from the usage counters of the workspace's AWF-minted keys\n(``usage + byok_usage``); ``unavailable`` when the spend was not loaded.",
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "currency": {
+            "const": "USD",
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "key_count": {
+            "default": 0,
+            "title": "Key Count",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "exact_provider_spend",
+            "default": "exact_provider_spend",
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_read_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Read At"
+          },
+          "live_key_count": {
+            "default": 0,
+            "title": "Live Key Count",
+            "type": "integer"
+          },
+          "provider": {
+            "default": "openrouter",
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "remaining_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usd"
+          },
+          "source": {
+            "const": "openrouter_key_usage",
+            "default": "openrouter_key_usage",
+            "title": "Source",
+            "type": "string"
+          },
+          "spend_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend Usd"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProviderSpendResponse",
+        "type": "object"
+      },
       "PullRequestMonitorAdoptionRequest": {
         "additionalProperties": false,
         "description": "Input for adopting an already-open GitHub PR into AWF monitoring.",
@@ -9227,6 +9334,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WorkspacePricingMetadataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"
@@ -13056,6 +13173,16 @@
               }
             ]
           },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recovery": {
             "anyOf": [
               {
@@ -14508,6 +14635,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ProviderRecoveryStateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"

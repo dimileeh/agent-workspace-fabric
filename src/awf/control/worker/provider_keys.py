@@ -36,7 +36,8 @@ async def _maybe_reconcile_openrouter_keys(self: Any) -> None:
 
 async def _finalize_terminal_provider_keys(self: Any, workspace_id: str) -> None:
     """Final-read and delete a terminal workspace's keys once its runtime is down."""
-    finalizer = self._provider_key_finalizer
+    # Worker doubles without managed keys predate this hook: treat as unwired.
+    finalizer = getattr(self, "_provider_key_finalizer", None)
     if finalizer is None:
         return
     try:

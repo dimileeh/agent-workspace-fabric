@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
 
 from awf.db.enums import AgentRuntime
+
+
+class ProviderSpendResponse(BaseModel):
+    """Exact provider spend of a managed OpenRouter workspace (USD).
+
+    Summed from the usage counters of the workspace's AWF-minted keys
+    (``usage + byok_usage``); ``unavailable`` when the spend was not loaded.
+    """
+
+    kind: Literal["exact_provider_spend"] = "exact_provider_spend"
+    provider: str = "openrouter"
+    status: Literal["available", "unavailable"]
+    spend_usd: float | None = None
+    budget_usd: float | None = None
+    remaining_usd: float | None = None
+    currency: Literal["USD"] = "USD"
+    key_count: int = 0
+    live_key_count: int = 0
+    last_read_at: datetime | None = None
+    source: Literal["openrouter_key_usage"] = "openrouter_key_usage"
+    reason: str | None = None
+
 
 ProviderBudgetUsd = Annotated[
     StrictFloat | StrictInt | None,

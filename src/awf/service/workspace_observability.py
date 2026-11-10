@@ -66,6 +66,11 @@ from awf.service.workspace_observability_types import (
     LifecycleStageStatus as LifecycleStageStatus,
 )
 from awf.service.workspace_observability_types import LlmUsageStatus as LlmUsageStatus
+from awf.service.workspace_provider_spend import (
+    apply_exact_spend,
+    provider_spend_payload,
+    provider_spend_scope,
+)
 
 InvalidWorkspaceOverviewCursorError = _overview_pagination.InvalidWorkspaceOverviewCursorError
 _WorkspaceOverviewCursor = _overview_pagination._WorkspaceOverviewCursor
@@ -163,8 +168,9 @@ async def list_workspace_overview_response(
     page_rows = rows[:limit]
     has_more = len(rows) > limit
     snapshots = await asyncio.to_thread(read_latest_usage_snapshots, [ws.id for ws in page_rows])
-    with prefetched_usage_snapshots(snapshots):
-        items = [_workspace_overview_item(ws) for ws in page_rows]
+    async with provider_spend_scope(session, [ws.id for ws in page_rows]):
+        with prefetched_usage_snapshots(snapshots):
+            items = [_workspace_overview_item(ws) for ws in page_rows]
     return WorkspaceOverviewListResponse(
         items=items,
         next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
@@ -187,8 +193,9 @@ async def batch_workspace_overview_response(
         workspace_id for workspace_id in workspace_ids if workspace_id not in by_id
     ]
     snapshots = await asyncio.to_thread(read_latest_usage_snapshots, found_ids)
-    with prefetched_usage_snapshots(snapshots):
-        items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
+    async with provider_spend_scope(session, found_ids):
+        with prefetched_usage_snapshots(snapshots):
+            items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
     return WorkspaceOverviewBatchResponse(
         items=items,
         missing_workspace_ids=missing_workspace_ids,
@@ -356,6 +363,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
+        provider_spend=observability["provider_spend"],
         pricing=_overview_pricing_metadata(ws),
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
@@ -1088,6 +1096,7 @@ def workspace_observability_payload(
     now: datetime | None = None,
     ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> WorkspaceObservabilityPayload:
+    spend = provider_spend_payload(workspace)
     return {
         **agent_identity_payload(workspace),
         "lifecycle": lifecycle_payload(
@@ -1095,7 +1104,8 @@ def workspace_observability_payload(
             now=now,
             ordered_events=ordered_events,
         ),
-        "llm_usage": usage_payload(workspace),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend),
+        "provider_spend": spend,
         "recovery": recovery_payload(
             workspace,
             ordered_events=ordered_events,
@@ -1104,9 +1114,11 @@ def workspace_observability_payload(
 
 
 def workspace_identity_usage_payload(workspace: Workspace) -> WorkspaceIdentityUsagePayload:
+    spend = provider_spend_payload(workspace)
     return {
         **agent_identity_payload(workspace),
-        "llm_usage": usage_payload(workspace),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend),
+        "provider_spend": spend,
     }
 
 

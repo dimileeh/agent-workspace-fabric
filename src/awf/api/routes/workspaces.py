@@ -103,6 +103,7 @@ from awf.service.workspace_observability import (
     list_workspace_overview_response,
     list_workspace_stale_reasons_response,
 )
+from awf.service.workspace_provider_spend import provider_spend_scope
 from awf.service.workspaces import (
     WorkspaceCreateDuplicateHostPortError,
     WorkspaceCreateHostPortConflictError,
@@ -851,10 +852,8 @@ async def _get_workspace_response(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    return workspace_response(
-        ws,
-        validation_provenance=validation_provenance,
-    )
+    async with provider_spend_scope(session, [ws.id]):
+        return workspace_response(ws, validation_provenance=validation_provenance)
 
 
 def _workspace_response_with_egress_audit(
@@ -953,7 +952,8 @@ async def _list_workspace_responses(
         repo_url=repo_url,
         limit=limit,
     )
-    return [workspace_response(r) for r in rows]
+    async with provider_spend_scope(session, [row.id for row in rows]):
+        return [workspace_response(r) for r in rows]
 
 
 def _accepted(

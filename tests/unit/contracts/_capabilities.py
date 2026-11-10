@@ -318,15 +318,9 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         supports_if_match=True,
         requires_idempotency_key=True,
         error_codes=frozenset(
-            [
-                "NOT_FOUND",
-                "PROVIDER_BUDGET_INVALID",
-                "PROVIDER_BUDGET_UNSUPPORTED",
-                "PROVIDER_MANAGEMENT_KEY_MISSING",
-                "VERSION_CONFLICT",
-                "IDEMPOTENCY_CONFLICT",
-            ]
-        ),
+            {"NOT_FOUND", "PROVIDER_BUDGET_INVALID", "PROVIDER_BUDGET_UNSUPPORTED"}
+        )
+        | {"PROVIDER_MANAGEMENT_KEY_MISSING", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT"},
         rest_response_model="WorkspaceControlResponse",
         rest_path_fields=frozenset({"workspace_id"}),
         rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
@@ -335,9 +329,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "usd", "reason", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "usd", "idempotency_key"}),
-        cli_options=frozenset(
-            ["--usd", "--reason", "--idempotency-key", "--if-match", "--api-token"]
-        ),
+        cli_options=frozenset({"--usd", "--reason", "--idempotency-key", "--if-match"})
+        | {"--api-token"},
         cli_arguments=frozenset({"workspace_id"}),
         response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
         auth_required=True,

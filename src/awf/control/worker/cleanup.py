@@ -32,6 +32,7 @@ from awf.control.executor.planning_ops import (
     _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
+from awf.control.worker import provider_keys as _provider_keys
 from awf.control.worker.cancelled_activity import reconcile_cancelled_activity
 from awf.control.worker.cleanup_auth_overlay import (
     _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
@@ -1026,7 +1027,7 @@ async def _release_terminal_runtime_for_candidate(
         # not block port reclaim; GC's loud-failure net covers any residual.
         auth_overlay_unmounted = await _teardown_terminal_auth_overlay(self, candidate)
         # No agent can use a managed key once the stack is down: final read, delete.
-        await self._finalize_terminal_provider_keys(candidate.workspace_id)
+        await _provider_keys._finalize_terminal_provider_keys(self, candidate.workspace_id)
         await self._record_terminal_runtime_released(
             candidate, cleanup, auth_overlay_unmounted=auth_overlay_unmounted
         )

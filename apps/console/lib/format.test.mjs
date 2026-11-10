@@ -6,6 +6,7 @@ import {
   fallbackLifecycleStages,
   fallbackLlmUsage,
   formatCostWithPricing,
+  formatProviderSpend,
   formatUsageProvenance,
   lifecycleStages,
   normalizeLifecycle,
@@ -703,4 +704,36 @@ test("pickWorkspaceLogStreams preserves an existing valid stream selection", () 
     ),
     ["agent.stdout"],
   );
+});
+
+test("formatUsageProvenance labels managed OpenRouter key usage as exact provider spend", () => {
+  assert.equal(formatUsageProvenance("openrouter_key_usage", null), "Exact provider spend");
+});
+
+test("formatProviderSpend renders exact spend against the budget with a text label", () => {
+  assert.equal(
+    formatProviderSpend({
+      kind: "exact_provider_spend",
+      status: "available",
+      spend_usd: 1.25,
+      budget_usd: 4,
+      remaining_usd: 2.75,
+      currency: "USD",
+      key_count: 2,
+      live_key_count: 0,
+      last_read_at: null,
+      reason: null,
+    }),
+    "Exact provider spend: $1.25 of $4.00 (remaining $2.75)",
+  );
+  assert.equal(
+    formatProviderSpend({ status: "available", spend_usd: 0.5, budget_usd: null, remaining_usd: null }),
+    "Exact provider spend: $0.50",
+  );
+  assert.equal(
+    formatProviderSpend({ status: "unavailable", reason: "provider_spend_not_loaded" }),
+    "Exact provider spend: unavailable (not loaded)",
+  );
+  assert.equal(formatProviderSpend(null), null);
+  assert.equal(formatProviderSpend(undefined), null);
 });

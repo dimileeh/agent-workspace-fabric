@@ -361,6 +361,21 @@ def attention_marker(item: Mapping[str, Any]) -> str:
     return f"⚠ {workspace_id} awaiting human: {reason}"
 
 
+def format_provider_spend_line(payload: Any) -> str | None:
+    """Return the exact-provider-spend line for a managed OpenRouter workspace."""
+    spend = payload.get("provider_spend") if isinstance(payload, Mapping) else None
+    if not isinstance(spend, Mapping):
+        return None
+    if spend.get("status") != "available":
+        return f"Exact provider spend: unavailable ({spend.get('reason') or 'unknown'})"
+    budget = spend.get("budget_usd")
+    line = f"Exact provider spend: ${spend.get('spend_usd', 0):.2f}"
+    if budget is not None:
+        line += f" of ${budget:.2f} (remaining ${spend.get('remaining_usd') or 0:.2f}"
+        line += f", {spend.get('key_count', 0)} keys)"
+    return line
+
+
 def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) -> None:
     """Echo the awaiting-human attention line after a pretty ``workspace show``."""
     if fmt != OutputFormat.pretty or response.status_code >= 400 or not response.content:
@@ -371,9 +386,9 @@ def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) 
         return
     if not isinstance(payload, Mapping):
         return
-    line = format_attention_line(payload)
-    if line is not None:
-        typer.echo(line)
+    for line in (format_attention_line(payload), format_provider_spend_line(payload)):
+        if line is not None:
+            typer.echo(line)
 
 
 def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) -> None:
@@ -398,6 +413,11 @@ def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) 
         marker = attention_marker(item) if isinstance(item, Mapping) else ""
         if marker:
             typer.echo(marker)
+        spend = format_provider_spend_line(item)
+        if spend is not None:
+            typer.echo(
+                f"{item.get('id') or item.get('workspace_id')} {spend[:1].lower()}{spend[1:]}"
+            )
 
 
 @workspace_app.command("show")
