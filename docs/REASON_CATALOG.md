@@ -1175,8 +1175,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### PROVIDER_MANAGED_KEY_UNAVAILABLE
 **Problem:** AWF could not mint a managed OpenRouter key; only this selection is parked.
-**Likely Cause:** The OpenRouter management API rejected or failed the key creation (auth, rate limit, outage) or the key could not be recorded.
-**Operator Fix:** Inspect the management reason code in the park event, fix the OpenRouter account or management key, then raise or re-set the budget to resume.
+**Likely Cause:** The OpenRouter management API rejected or failed the key creation (auth, rate limit, outage), the key could not be recorded, or keys AWF could not finalize yet still hold the budget that spend leaves.
+**Operator Fix:** Inspect the management reason code (or provider_budget.reserved_usd) in the park event, fix the OpenRouter account or management key, then raise or re-set the budget to resume.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_unavailable](#provider_managed_key_unavailable)
 

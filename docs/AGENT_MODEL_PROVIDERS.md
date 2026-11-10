@@ -331,7 +331,9 @@ unchanged. Hosted runtimes reject managed selections
 - **Release.** Afterwards AWF reads the final usage, persists it, and then deletes
   the key. A cancelled caller cannot strand a key.
 - **Replacement.** Container recreation, monitor resume and worker restart always
-  lead to a new key; a stale key is finalized before the next mint.
+  lead to a new key. Under the workspace claim, a key (or hashless minting intent)
+  the worker does not hold is dead: it is finalized (or released) before the next
+  mint, even while its lease is unexpired.
 - **What is stored.** AWF persists only the non-secret identity (name, hash, seq,
   limit, usage, BYOK usage), never a key value. Spend is `usage + byok_usage`,
   summed across all of a workspace's keys.
@@ -355,6 +357,8 @@ and PR monitor):
 - It is never counted against the shared circuit breaker.
 
 A mint failure (`PROVIDER_MANAGED_KEY_UNAVAILABLE`) parks only that selection.
+So does a mint that only headroom still held by keys AWF could not finalize yet
+blocks (spend alone leaves budget); its park event reports `reserved_usd`.
 Raise the budget to resume:
 
 | Intent | REST | CLI | MCP |

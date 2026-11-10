@@ -228,9 +228,10 @@ async def test_old_hashless_intents_without_a_remote_key_release_their_reservati
         # The intent's key was deleted unused (or never minted) while the database
         # was down: no hash is recorded, yet it reserves the whole budget.
         await broker._reserve(ws, provider="openrouter", purpose="agent")
-        with pytest.raises(ProviderCredentialError) as exhausted:
+        with pytest.raises(ProviderCredentialError) as blocked:
             await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
-        assert exhausted.value.reason_code == "PROVIDER_BUDGET_EXHAUSTED"
+        # Nothing was spent: the reservation, not the budget, blocks the mint.
+        assert blocked.value.reason_code == "PROVIDER_MANAGED_KEY_UNAVAILABLE"
 
         # An incomplete listing cannot prove the key absent; a young intent may
         # still have its POST in flight.

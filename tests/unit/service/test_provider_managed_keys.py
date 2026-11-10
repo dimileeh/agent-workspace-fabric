@@ -189,7 +189,10 @@ async def test_live_concurrent_lease_reserves_its_headroom_instead_of_being_dele
         fake.set_usage("hash1", 1.0)
         with pytest.raises(ProviderCredentialError) as raised:
             await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
-        assert raised.value.reason_code == "PROVIDER_BUDGET_EXHAUSTED"
+        # Spend is $1 of $10: the live key's headroom, not the budget, blocks the mint.
+        assert raised.value.reason_code == "PROVIDER_MANAGED_KEY_UNAVAILABLE"
+        assert raised.value.reason_code in PROVIDER_PARK_REASON_CODES
+        assert raised.value.details["provider_budget"]["reserved_usd"] == "10.000000"
         assert "hash1" in fake.keys
 
 
@@ -732,3 +735,133 @@ async def test_terminal_workspaces_with_leftover_keys_are_finalized_in_bounded_b
         assert [r.status for r in await _rows(factory, done)] == ["deleted"]
         assert [r.status for r in await _rows(factory, live)] == ["active"]
         assert set(fake.keys) == {"hash1"}
+
+
+async def test_headroom_held_by_an_undeletable_key_blocks_a_mint_as_unavailable():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        await _broker(factory, fake).acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.set_usage("hash1", 0.4)
+        # After a restart the dead key's final read lands but its delete keeps failing.
+        fake.fail[("DELETE", "key")] = 503
+
+        with pytest.raises(ProviderCredentialError) as raised:
+            await _broker(factory, fake).acquire(
+                workspace_id=ws, selection=_SELECTION, purpose="agent"
+            )
+
+        # Real spend is $0.40 of $10: the budget is not exhausted, a key is unavailable.
+        assert raised.value.reason_code == "PROVIDER_MANAGED_KEY_UNAVAILABLE"
+        figures = raised.value.details["provider_budget"]
+        assert figures["spend_usd"] == "0.400000"
+        assert figures["reserved_usd"] == "9.600000"
+        assert ("POST", "/keys") not in [(m, p) for m, p, _ in fake.calls[1:]]
+
+
+async def _hashless_intent(factory, ws: str, *, seq: int = 1) -> None:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        await ProviderManagedKeyRepository(session).add(
+            ProviderManagedKey(
+                id=f"pmk_dead{seq:020d}",
+                workspace_id=ws,
+                provider="openrouter",
+                purpose="agent",
+                seq=seq,
+                key_name=managed_key_name(ws, seq),
+                status="minting",
+                limit_usd=Decimal("10"),
+                usage_usd=Decimal(0),
+                byok_usage_usd=Decimal(0),
+                lease_expires_at=now + timedelta(minutes=6),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+
+async def test_a_dead_invocations_hashless_intent_is_released_by_the_next_acquire():
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        # A crash while ``create_key`` was in flight left an unexpired intent.
+        await _hashless_intent(factory, ws)
+
+        await _broker(factory, fake).acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+
+        assert fake.calls[-1][2] == {
+            "name": f"awf-{ws}-2",
+            "limit": 10.0,
+            "include_byok_in_limit": True,
+        }
+        dead, live = await _rows(factory, ws)
+        assert (dead.status, dead.last_reason_code, dead.lease_expires_at) == (
+            "mint_failed",
+            "PROVIDER_MANAGED_KEY_UNAVAILABLE",
+            None,
+        )
+        assert live.status == "active"
+
+
+async def test_a_cancelled_mint_releases_its_intent_for_the_next_acquire(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        started = asyncio.Event()
+        create_key = broker._client.create_key
+
+        async def _hang(*_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(broker._client, "create_key", _hang)
+        task = asyncio.create_task(
+            broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        monkeypatch.setattr(broker._client, "create_key", create_key)
+
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+
+        assert fake.calls[-1][2]["limit"] == 10.0
+        assert [r.status for r in await _rows(factory, ws)] == ["mint_failed", "active"]
+
+
+async def test_an_in_flight_mint_of_this_broker_is_never_released(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+        started, proceed = asyncio.Event(), asyncio.Event()
+        create_key = broker._client.create_key
+
+        async def _slow(name, limit):
+            started.set()
+            await proceed.wait()
+            return await create_key(name, limit)
+
+        monkeypatch.setattr(broker._client, "create_key", _slow)
+        first = asyncio.create_task(
+            broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        )
+        await started.wait()
+
+        with pytest.raises(ProviderCredentialError) as raised:
+            await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        proceed.set()
+        lease = await first
+
+        assert raised.value.reason_code == "PROVIDER_MANAGED_KEY_UNAVAILABLE"
+        assert lease.seq == 1
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.limit_usd) == ("active", Decimal("10"))

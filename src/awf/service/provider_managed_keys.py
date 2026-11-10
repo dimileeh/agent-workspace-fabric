@@ -135,11 +135,25 @@ def remaining_budget(budget: Decimal, rows: Iterable[ProviderManagedKey]) -> Dec
 def budget_details(budget: Decimal, rows: Iterable[ProviderManagedKey]) -> dict[str, str]:
     rows = list(rows)
     spend = sum((row.spend_usd for row in rows), Decimal(0))
+    held = sum((reserved_usd(row) - row.spend_usd for row in rows), Decimal(0))
     return {
         "budget_usd": usd_text(budget),
         "spend_usd": usd_text(spend),
         "remaining_usd": usd_text(remaining_budget(budget, rows)),
+        "reserved_usd": usd_text(held),
     }
+
+
+def mint_blocked_error(
+    budget: Decimal, rows: Iterable[ProviderManagedKey]
+) -> ProviderCredentialError:
+    """Spend exhausts the budget; headroom unfinalized keys still hold only blocks a key."""
+    rows = list(rows)
+    details = {"provider_budget": budget_details(budget, rows)}
+    spend = sum((row.spend_usd for row in rows), Decimal(0))
+    if usd(budget - spend) < MINIMUM_MINT_USD:
+        return ProviderCredentialError(PROVIDER_BUDGET_EXHAUSTED, details=details)
+    return ProviderCredentialError(PROVIDER_MANAGED_KEY_UNAVAILABLE, details=details)
 
 
 class ManagedKeyLease:
@@ -204,6 +218,7 @@ class ManagedKeyBroker:
         self._lease_ttl = timedelta(seconds=lease_ttl_seconds or usage_poll_interval_seconds * 3)
         self._now = now or (lambda: datetime.now(UTC))
         self._live: set[str] = set()
+        self._minting: set[str] = set()
 
     @property
     def heartbeat_interval_seconds(self) -> float:
@@ -223,6 +238,31 @@ class ManagedKeyBroker:
         row_id, key_name, limit, budget = await self._reserve(
             workspace_id, provider=selection.provider, purpose=purpose
         )
+        try:
+            return await self._mint(
+                client,
+                row_id=row_id,
+                workspace_id=workspace_id,
+                key_name=key_name,
+                limit=limit,
+                budget=budget,
+            )
+        finally:
+            # Activated keys are in ``_live`` by now; a failed or cancelled mint
+            # leaves a dead intent that the next acquire releases.
+            self._minting.discard(row_id)
+
+    async def _mint(
+        self,
+        client: OpenRouterManagementClient,
+        *,
+        row_id: str,
+        workspace_id: str,
+        key_name: str,
+        limit: Decimal,
+        budget: Decimal,
+    ) -> ManagedKeyLease:
+        """Create the reserved key and activate it; a failure deletes or releases it."""
         try:
             minted = await client.create_key(key_name, limit)
         except OpenRouterManagementError as error:
@@ -310,14 +350,17 @@ class ManagedKeyBroker:
     ) -> dict[str, int]:
         """Final-read and delete a workspace's keys (only stale ones if asked).
 
-        A key is stale unless this broker holds its live, unexpired lease.
-        Minting intents without a recorded hash are left to the reconciler,
-        which resolves them by name.
+        A key is stale unless this broker holds its live, unexpired lease. With
+        ``stale_only`` (an acquire, under the workspace claim) a hashless minting
+        intent this broker is not minting is dead: nobody holds its key value,
+        so its reservation is released (the reconciler deletes, by name, a key
+        its POST may still have created).
         """
         report = {"finalized": 0, "failed": 0}
         if self._client is None:
             return report
         now = self._now()
+        held = self._live | self._minting
         async with self._session_factory() as session:
             rows = await ProviderManagedKeyRepository(session).unfinalized_for_workspace(
                 workspace_id
@@ -326,8 +369,30 @@ class ManagedKeyBroker:
                 (row.id, row.key_hash)
                 for row in rows
                 if row.key_hash is not None
-                and (not stale_only or row.id not in self._live or _is_stale(row, now))
+                and (not stale_only or row.id not in held or _is_stale(row, now))
             ]
+            abandoned = [
+                (row.id, row.key_name)
+                for row in rows
+                if stale_only
+                and row.key_hash is None
+                and row.status == KeyStatus.minting.value
+                and row.id not in self._minting
+            ]
+        for row_id, key_name in abandoned:
+            await self._update(
+                row_id,
+                only_status=KeyStatus.minting.value,
+                status=KeyStatus.mint_failed.value,
+                last_reason_code=PROVIDER_MANAGED_KEY_UNAVAILABLE,
+                lease_expires_at=None,
+            )
+            _log.info(
+                "provider.managed_key.intent_released",
+                workspace_id=workspace_id,
+                key_name=key_name,
+                reason_code=PROVIDER_MANAGED_KEY_UNAVAILABLE,
+            )
         for row_id, key_hash in targets:
             _info, deleted, _reason = await self._finalize_key(row_id, str(key_hash))
             report["finalized" if deleted else "failed"] += 1
@@ -366,10 +431,7 @@ class ManagedKeyBroker:
             rows = await keys.for_workspace(workspace_id)
             remaining = remaining_budget(budget, rows)
             if remaining < MINIMUM_MINT_USD:
-                raise ProviderCredentialError(
-                    PROVIDER_BUDGET_EXHAUSTED,
-                    details={"provider_budget": budget_details(budget, rows)},
-                )
+                raise mint_blocked_error(budget, rows)
             seq = max((row.seq for row in rows), default=0) + 1
             now = self._now()
             row = ProviderManagedKey(
@@ -388,7 +450,13 @@ class ManagedKeyBroker:
                 updated_at=now,
             )
             await keys.add(row)
-            await session.commit()
+            # In flight before it is visible, so no concurrent acquire releases it.
+            self._minting.add(row.id)
+            try:
+                await session.commit()
+            except BaseException:
+                self._minting.discard(row.id)
+                raise
             return row.id, row.key_name, remaining, budget
 
     async def _activate(
@@ -412,10 +480,7 @@ class ManagedKeyBroker:
             others = [row for row in await keys.for_workspace(workspace_id) if row.id != row_id]
             allowed = remaining_budget(budget, others)
             if allowed < MINIMUM_MINT_USD:
-                raise ProviderCredentialError(
-                    PROVIDER_BUDGET_EXHAUSTED,
-                    details={"provider_budget": budget_details(budget, others)},
-                )
+                raise mint_blocked_error(budget, others)
             if allowed != limit:
                 return budget, allowed
             row = await keys.get(row_id)

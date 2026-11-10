@@ -53,10 +53,12 @@ _ENTRIES: dict[str, tuple[str, str, str, str]] = {
     ),
     "PROVIDER_MANAGED_KEY_UNAVAILABLE": (
         "AWF could not mint a managed OpenRouter key; only this selection is parked.",
-        "Inspect the management reason code in the park event, fix the OpenRouter account "
-        "or management key, then raise or re-set the budget to resume.",
+        "Inspect the management reason code (or provider_budget.reserved_usd) in the park "
+        "event, fix the OpenRouter account or management key, then raise or re-set the "
+        "budget to resume.",
         "The OpenRouter management API rejected or failed the key creation (auth, rate "
-        "limit, outage) or the key could not be recorded.",
+        "limit, outage), the key could not be recorded, or keys AWF could not finalize yet "
+        "still hold the budget that spend leaves.",
         _SHOW,
     ),
     "PROVIDER_MANAGEMENT_KEY_MISSING": (
