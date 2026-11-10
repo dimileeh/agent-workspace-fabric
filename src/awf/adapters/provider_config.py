@@ -45,6 +45,10 @@ _PROVIDER_PREFIXES = (
     "AWF_OLLAMA_",
     "AWF_OPENCODE_",
 )
+# Codex's own defaults: one transient 5xx or stream drop must not end a long run.
+# Each retry is a CLI notice in the redacted log stream, never an AWF replay.
+CODEX_REQUEST_MAX_RETRIES = 4
+CODEX_STREAM_MAX_RETRIES = 5
 
 
 def runtime_failure_reason(stderr: str) -> str | None:
@@ -100,11 +104,25 @@ def provider_environment(
     if selection["agent"] == "codex":
         env["AWF_SELECTED_PROVIDER_KEY"] = credential
     elif selection["agent"] == "claude_code":
+        model = selection["model"]
         env.update(
             ANTHROPIC_BASE_URL=selection["endpoint"],
             ANTHROPIC_AUTH_TOKEN=credential,
             ANTHROPIC_API_KEY="",
             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+            # Settings-file endpoint/auth/model env is ignored, and the CLI
+            # withholds the credential from Bash, hook and tool subprocesses.
+            CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST="1",
+            # Role aliases and subagents would otherwise request native ids.
+            ANTHROPIC_DEFAULT_HAIKU_MODEL=model,
+            ANTHROPIC_DEFAULT_SONNET_MODEL=model,
+            ANTHROPIC_DEFAULT_OPUS_MODEL=model,
+            ANTHROPIC_DEFAULT_FABLE_MODEL=model,
+            CLAUDE_CODE_SUBAGENT_MODEL=model,
+            CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1",
+            # Third-party effort stays absent on the wire, even when project
+            # settings declare effortLevel.
+            CLAUDE_CODE_EFFORT_LEVEL="auto",
         )
     else:
         raise ValueError("EXECUTION_AGENT_UNSUPPORTED")
@@ -153,8 +171,10 @@ def isolated_provider_config(
                 'wire_api = "responses"',
                 'env_key = "AWF_SELECTED_PROVIDER_KEY"',
                 "requires_openai_auth = false",
-                "request_max_retries = 0",
-                "stream_max_retries = 0",
+                f"request_max_retries = {CODEX_REQUEST_MAX_RETRIES}",
+                f"stream_max_retries = {CODEX_STREAM_MAX_RETRIES}",
+                "[shell_environment_policy]",
+                'exclude = ["AWF_SELECTED_PROVIDER_KEY"]',
             ]
             for name, server in source_config.get("mcp_servers", {}).items():
                 lines.append(f"[mcp_servers.{json.dumps(name)}]")
@@ -186,7 +206,10 @@ def isolated_provider_config(
             path = directory / "settings.json"
             path.write_text(json.dumps(config))
             env["CLAUDE_CONFIG_DIR"] = str(directory)
-            args = ["--setting-sources", "", "--settings", str(path)]
+            # Project CLAUDE.md, rules, skills, agents and settings load as in
+            # native runs; user/local sources never do. The flag settings
+            # (selected model) outrank project settings.
+            args = ["--setting-sources", "project", "--settings", str(path)]
         path.chmod(0o600)
         yield args, env, directory
 
@@ -271,12 +294,14 @@ def main() -> int:
         )
     if safe_source.is_file():
         source_config = json.loads(safe_source.read_text())
-    # Project agents and managed settings can select independent models/auth.
-    # These configurations require a later runtime contract, never native fallback.
+    # Managed settings outrank every isolation layer and can select independent
+    # models/auth; they require a later runtime contract, never native fallback.
+    # Project Claude agents are safe: subagent models are forced to the selection
+    # and the host-managed provider ignores settings-sourced endpoint/auth.
     unsupported_paths = (
         (Path("/etc/codex/config.toml"),)
         if selection["agent"] == "codex"
-        else (Path("/etc/claude-code/managed-settings.json"), Path.cwd() / ".claude" / "agents")
+        else (Path("/etc/claude-code/managed-settings.json"),)
     )
     if any(path.exists() for path in unsupported_paths):
         print("EXECUTION_PROJECT_CONFIGURATION_UNSUPPORTED", file=sys.stderr)

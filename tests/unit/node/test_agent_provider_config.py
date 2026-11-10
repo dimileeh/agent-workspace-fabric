@@ -562,7 +562,7 @@ def test_standalone_runtime_negotiates_version_before_configuration(
     assert (captured.out, captured.err) == (stdout, stderr)
 
 
-@pytest.mark.parametrize("blocked_by", ["project_agents", "probe"])
+@pytest.mark.parametrize("blocked_by", ["managed_settings", "probe"])
 def test_standalone_runtime_refuses_unsafe_or_unready_execution(
     tmp_path, monkeypatch, capsys, blocked_by
 ):
@@ -580,12 +580,24 @@ def test_standalone_runtime_refuses_unsafe_or_unready_execution(
     monkeypatch.setattr(sys, "argv", ["provider_config.py", json.dumps(selected.model_dump())])
     probe = Mock(return_value={"ok": False, "reason_code": "PROVIDER_MODEL_UNAVAILABLE"})
     monkeypatch.setattr(runtime, "probe_connection", probe)
-    if blocked_by == "project_agents":
-        (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    managed = tmp_path / "managed-settings.json"
+    if blocked_by == "managed_settings":
+        managed.write_text("{}")
+    # Redirect only the image-owned managed-settings path; the file is real.
+    monkeypatch.setattr(
+        runtime,
+        "Path",
+        Mock(
+            wraps=Path,
+            side_effect=lambda *parts: (
+                managed if parts == ("/etc/claude-code/managed-settings.json",) else Path(*parts)
+            ),
+        ),
+    )
     assert runtime.main() == 78
     captured = capsys.readouterr()
     assert captured.out == ""
-    if blocked_by == "project_agents":
+    if blocked_by == "managed_settings":
         assert captured.err == "EXECUTION_PROJECT_CONFIGURATION_UNSUPPORTED\n"
         probe.assert_not_called()
     else:
