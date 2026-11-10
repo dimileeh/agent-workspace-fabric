@@ -258,6 +258,22 @@ async def run_validation_fix_pass(
             # fail to mint and then fail validation, so park now (the failure
             # sink diverts park codes) with the worktree and its work intact.
             message = f"validation fix pass stopped by the managed provider key ({exc.reason_code})"
+            # Fence on the execution owner before finishing operations too: a
+            # superseded executor's park no-ops on the fenced CAS below, so it must
+            # not first fail the replacement claimant's validate ops
+            # (PRRT_kwDOSJAM6s616TNZ).
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_provider_park",
+                owner_id=execution_owner_id,
+            ):
+                deposit_planning_artifacts_if_required()
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,

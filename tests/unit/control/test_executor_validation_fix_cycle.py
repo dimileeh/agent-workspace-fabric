@@ -39,7 +39,8 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import execution_validation_fix_pass as execution_validation_fix_pass_mod
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation
 from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
@@ -1463,3 +1464,66 @@ class TestFixPassProviderPark:
             assert ws.execution_claimed_by == "new-worker"
             assert ws.block_type is None
             assert ws.failure_reason is None
+
+    @pytest.mark.unit
+    async def test_fix_pass_park_code_from_superseded_executor_leaves_validate_ops_pending(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A superseded executor's fix-pass park must not fail the replacement
+        claimant's pending validate operations before its fenced park no-ops
+        (PRRT_kwDOSJAM6s616TNZ)."""
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=3)
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.execution_claimed_by = "old-worker"
+            await s.commit()
+
+        async def _claim_lost_then_budget_exhausted(
+            *_args: object, **_kwargs: object
+        ) -> tuple[bool, object]:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.execution_claimed_by = "new-worker"
+                s.add(
+                    Operation(
+                        id="op_new_claim_validate",
+                        workspace_id=ws_id,
+                        type=OperationType.validate.value,
+                        status=OperationStatus.pending.value,
+                        payload={},
+                    )
+                )
+                await s.commit()
+            raise AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False},
+            )
+
+        monkeypatch.setattr(
+            execution_validation_fix_pass_mod,
+            "_run_agent_callable_with_service_recovery",
+            _claim_lost_then_budget_exhausted,
+        )
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # validation fails
+
+        await executor.execute(ws_id, execution_owner_id="old-worker")
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.validating.value
+            assert ws.execution_claimed_by == "new-worker"
+            op = await s.get(Operation, "op_new_claim_validate")
+            assert op is not None
+            assert op.status == OperationStatus.pending.value
+            assert op.error_code is None
