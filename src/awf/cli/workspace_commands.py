@@ -605,6 +605,49 @@ def workspace_guide(
     )
 
 
+@workspace_app.command("provider-budget")
+def workspace_provider_budget(
+    workspace_id: str = typer.Argument(...),
+    usd: float = typer.Option(
+        ...,
+        "--usd",
+        help="New total managed OpenRouter budget in USD; must exceed recorded spend.",
+    ),
+    reason: str | None = typer.Option(None, "--reason", help="Optional operator audit reason."),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Set a workspace's managed OpenRouter budget and resume a provider-budget block.
+
+    The live managed key's limit is updated to the new remaining headroom; a
+    workspace parked with PROVIDER_BUDGET_EXHAUSTED resumes where it stopped.
+    """
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="provider-budget",
+    )
+    body: dict[str, object] = {"usd": usd}
+    if reason is not None:
+        body["reason"] = reason
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/provider-budget",
+        base_url=_base_url(base_url),
+        json=body,
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
 @workspace_app.command("instruct")
 def workspace_instruct(
     workspace_id: str = typer.Argument(...),

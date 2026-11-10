@@ -84,7 +84,10 @@ from awf.service.scheduler import (
     task_class_priority as scheduler_task_class_priority,
 )
 from awf.service.workspaces_create_policy import (
-    freeze_execution_policy as freeze_execution_policy,
+    freeze_diagnostic_policy,
+    freeze_execution_policy,
+    provider_budget_request_matches,
+    required_worker_contract_version,
 )
 from awf.service.workspaces_create_policy import (
     workspace_create_task_policy_snapshot as workspace_create_task_policy_snapshot,
@@ -146,7 +149,6 @@ async def create_workspace_row(
 
     resolved_settings = settings or get_settings()
     hosted_authority = session.info.get(SESSION_KEY)
-    hosted_admission = isinstance(hosted_authority, WorkspaceAuthority)
     if isinstance(hosted_authority, WorkspaceAuthority):
         material = await hosted_authority.admit(payload)
         # Admission runs Docker before a workspace consumer scope exists. Keep
@@ -183,26 +185,11 @@ async def create_workspace_row(
             enabled=diagnostic_spec is not None
             or resolved_settings.third_party_agent_providers_enabled,
             environ=provider_environ if provider_environ is not None else os.environ,
-            managed_openrouter=resolved_settings.openrouter_management_key is not None,
-            default_budget_usd=resolved_settings.openrouter_workspace_limit_usd,
-            hosted=payload.hosted is not None or hosted_admission,
+            settings=resolved_settings,
+            hosted=payload.hosted is not None or isinstance(hosted_authority, WorkspaceAuthority),
         )
         if diagnostic_spec is not None:
-            from awf.common.agent_execution import (
-                DIAGNOSTIC_PROVIDER_BUDGET_USD,
-                MANAGED_OPENROUTER_CREDENTIAL_REF,
-                PROVIDER_BUDGET_POLICY_KEY,
-                provider_budget_policy,
-            )
-
-            base_task_policy["agent_execution"] = diagnostic_spec["selection"]
-            base_task_policy["provider_diagnostic"] = {"request": diagnostic_spec}
-            base_task_policy.pop(PROVIDER_BUDGET_POLICY_KEY, None)
-            if diagnostic_spec["selection"]["credential_ref"] == MANAGED_OPENROUTER_CREDENTIAL_REF:
-                # Diagnostics run under a small fixed budget, never the task default.
-                base_task_policy[PROVIDER_BUDGET_POLICY_KEY] = provider_budget_policy(
-                    limit_usd=DIAGNOSTIC_PROVIDER_BUDGET_USD, source="diagnostic"
-                )
+            freeze_diagnostic_policy(base_task_policy, diagnostic_spec)
         from awf.service.provider_compatibility import attach_compatibility
 
         base_task_policy = await attach_compatibility(session, base_task_policy)
@@ -216,17 +203,11 @@ async def create_workspace_row(
         if base_task_policy.get("agent_execution_profile_pending") or any(
             selected is not None and selected.third_party for selected in selections
         ):
-            from awf.common.agent_execution import (
-                MANAGED_PROVIDER_KEY_WORKER_VERSION,
-                managed_openrouter_frozen,
-            )
             from awf.db.repositories import WorkerHeartbeatRepository
 
             if not await WorkerHeartbeatRepository(session).supports_execution_contract(
                 now=datetime.now(UTC),
-                minimum_version=MANAGED_PROVIDER_KEY_WORKER_VERSION
-                if managed_openrouter_frozen(base_task_policy)
-                else 2,
+                minimum_version=required_worker_contract_version(base_task_policy),
             ):
                 raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
     except ValueError as error:
@@ -507,8 +488,7 @@ def workspace_create_payload_matches(
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
-        and (_stored_task_policy(existing).get("provider_budget") or {}).get("requested_usd")
-        == payload.task.provider_budget_usd
+        and provider_budget_request_matches(_stored_task_policy(existing), payload)
     )
 
 

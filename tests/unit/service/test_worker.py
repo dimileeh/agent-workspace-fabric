@@ -205,6 +205,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             pr_monitor_factory: object,
             log_store: object,
             usage_sampler: object = None,
+            credential_broker: object = None,
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
@@ -214,6 +215,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             del hosted_validation
             del ensure_hosted_monitor_checkout
             created["executor"] = self
+            created["executor_credential_broker"] = credential_broker
             created["executor_session_factory"] = session_factory
             created["executor_runner"] = runner
             created["executor_compose"] = compose

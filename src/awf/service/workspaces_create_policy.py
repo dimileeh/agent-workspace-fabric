@@ -89,8 +89,7 @@ def freeze_execution_policy(
     profile: Mapping[str, Any] | None,
     enabled: bool,
     environ: Mapping[str, str],
-    managed_openrouter: bool = False,
-    default_budget_usd: float = DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD,
+    settings: object = None,
     hosted: bool = False,
 ) -> dict[str, Any]:
     """Freeze the primary and every declared fallback using one resolved profile.
@@ -103,6 +102,11 @@ def freeze_execution_policy(
         PROVIDER_BUDGET_POLICY_KEY,
         provider_budget_policy,
         resolve_execution,
+    )
+
+    managed_openrouter = getattr(settings, "openrouter_management_key", None) is not None
+    default_budget_usd = getattr(
+        settings, "openrouter_workspace_limit_usd", DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD
     )
 
     policy = workspace_create_task_policy_snapshot(payload)
@@ -168,3 +172,39 @@ def freeze_execution_policy(
         if profile is not None or not snapshot.third_party:
             target["agent_execution"] = snapshot.model_dump(mode="json")
     return policy
+
+
+def freeze_diagnostic_policy(policy: dict[str, Any], diagnostic_spec: Mapping[str, Any]) -> None:
+    """Freeze a diagnostic's selection; a managed one runs under a small fixed budget."""
+    from awf.common.agent_execution import (
+        DIAGNOSTIC_PROVIDER_BUDGET_USD,
+        MANAGED_OPENROUTER_CREDENTIAL_REF,
+        PROVIDER_BUDGET_POLICY_KEY,
+        provider_budget_policy,
+    )
+
+    policy["agent_execution"] = diagnostic_spec["selection"]
+    policy["provider_diagnostic"] = {"request": diagnostic_spec}
+    policy.pop(PROVIDER_BUDGET_POLICY_KEY, None)
+    if diagnostic_spec["selection"]["credential_ref"] == MANAGED_OPENROUTER_CREDENTIAL_REF:
+        policy[PROVIDER_BUDGET_POLICY_KEY] = provider_budget_policy(
+            limit_usd=DIAGNOSTIC_PROVIDER_BUDGET_USD, source="diagnostic"
+        )
+
+
+def required_worker_contract_version(policy: Mapping[str, Any]) -> int:
+    """Live queue consumers must mint managed keys (3) or run expanded work (2)."""
+    from awf.common.agent_execution import (
+        MANAGED_PROVIDER_KEY_WORKER_VERSION,
+        managed_openrouter_frozen,
+    )
+
+    return MANAGED_PROVIDER_KEY_WORKER_VERSION if managed_openrouter_frozen(policy) else 2
+
+
+def provider_budget_request_matches(
+    stored_policy: Mapping[str, Any], payload: WorkspaceCreateRequest
+) -> bool:
+    """Idempotent replays compare the requested budget, not later operator raises."""
+    stored = stored_policy.get("provider_budget") or {}
+    return stored.get("requested_usd") == payload.task.provider_budget_usd

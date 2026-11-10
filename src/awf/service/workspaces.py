@@ -80,6 +80,7 @@ from awf.service.workspace_runtime_health import (
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
 )
+from awf.service.workspaces_provider_budget import _WorkspaceProviderBudgetMixin
 from awf.service.workspaces_retry_errors import (
     WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceRetryError,
@@ -586,7 +587,7 @@ class ResourceReservationPlan:
         }
 
 
-class WorkspaceService:
+class WorkspaceService(_WorkspaceProviderBudgetMixin):
     """Domain operations shared across REST routes and MCP tools."""
 
     def __init__(

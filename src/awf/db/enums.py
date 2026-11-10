@@ -138,6 +138,7 @@ class OperationType(StrEnum):
     monitor_state = "monitor_state"
     adopt_pr = "adopt_pr"
     destroy = "destroy"
+    provider_budget = "provider_budget"
 
 
 class CallbackDeliveryStatus(StrEnum):

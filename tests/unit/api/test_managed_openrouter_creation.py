@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -204,8 +205,9 @@ async def test_hosted_requests_cannot_select_a_managed_key(managed):
             profile=_PROFILE,
             enabled=True,
             environ={},
-            managed_openrouter=True,
-            default_budget_usd=10.0,
+            settings=SimpleNamespace(
+                openrouter_management_key=_MANAGEMENT, openrouter_workspace_limit_usd=10.0
+            ),
             hosted=True,
         )
 

@@ -75,6 +75,7 @@ _CLI_OPTION_VALUES_BY_CAPABILITY = {
         "--model": "candidate:cloud",
         "--idempotency-key": "auth-test",
     },
+    "set_provider_budget": {"--usd": "5"},
     "adopt_pr_monitor": {
         "--repo": "owner/repo",
         "--pr": "1",

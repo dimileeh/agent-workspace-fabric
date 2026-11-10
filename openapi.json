@@ -4336,7 +4336,8 @@
           "human_wait",
           "monitor_state",
           "adopt_pr",
-          "destroy"
+          "destroy",
+          "provider_budget"
         ],
         "title": "OperationType",
         "type": "string"
@@ -13386,6 +13387,43 @@
         "title": "WorkspaceProfileSelection",
         "type": "object"
       },
+      "WorkspaceProviderBudgetRequest": {
+        "additionalProperties": false,
+        "description": "Set a managed OpenRouter workspace budget (USD); resumes a provider-budget block.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "New total workspace budget in USD.",
+            "gt": 0,
+            "lt": 1000000,
+            "title": "Usd"
+          }
+        },
+        "required": [
+          "usd"
+        ],
+        "title": "WorkspaceProviderBudgetRequest",
+        "type": "object"
+      },
       "WorkspaceProviderFallbackTarget": {
         "additionalProperties": false,
         "properties": {
@@ -21232,6 +21270,154 @@
         "summary": "List Workspace Operations",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}/provider-budget": {
+      "post": {
+        "description": "Set the managed OpenRouter budget (USD) of a workspace.\n\nThe live managed key's limit is updated first; the new budget, the audit\nevent and a resume of a provider-budget block follow. ``usd`` must exceed\nthe exact provider spend already recorded.",
+        "operationId": "set_workspace_provider_budget_v1_workspaces__workspace_id__provider_budget_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceProviderBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Management API failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Set Workspace Provider Budget",
+        "tags": [
+          "workspace-controls"
         ]
       }
     },

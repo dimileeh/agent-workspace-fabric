@@ -306,6 +306,43 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         auth_required=True,
     ),
     ContractCapability(
+        name="set_provider_budget",
+        parity_capability="Set workspace provider budget",
+        rest_method="POST",
+        rest_path="/v1/workspaces/{workspace_id}/provider-budget",
+        mcp_tool="awf_set_workspace_provider_budget",
+        cli_tokens=("workspace", "provider-budget"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=True,
+        supports_if_match=True,
+        requires_idempotency_key=True,
+        error_codes=frozenset(
+            [
+                "NOT_FOUND",
+                "PROVIDER_BUDGET_INVALID",
+                "PROVIDER_BUDGET_UNSUPPORTED",
+                "PROVIDER_MANAGEMENT_KEY_MISSING",
+                "VERSION_CONFLICT",
+                "IDEMPOTENCY_CONFLICT",
+            ]
+        ),
+        rest_response_model="WorkspaceControlResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"usd", "reason"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "usd", "reason", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "usd", "idempotency_key"}),
+        cli_options=frozenset(
+            ["--usd", "--reason", "--idempotency-key", "--if-match", "--api-token"]
+        ),
+        cli_arguments=frozenset({"workspace_id"}),
+        response_fields=_WORKSPACE_CONTROL_RESPONSE_FIELDS,
+        auth_required=True,
+    ),
+    ContractCapability(
         name="request_validation",
         parity_capability="Request validation",
         rest_method="POST",

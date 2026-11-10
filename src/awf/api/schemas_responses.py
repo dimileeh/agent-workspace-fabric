@@ -13,7 +13,15 @@ from datetime import datetime
 from typing import Annotated, Any, ClassVar, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from awf.api import schemas_operations as _schemas_operations
 from awf.common.callback_events import is_valid_callback_subscription_event_type
@@ -141,6 +149,15 @@ class WorkspaceReasonWithLegacyRequestedTierRequest(_WorkspaceReasonCompatibilit
 
 class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
+
+
+class WorkspaceProviderBudgetRequest(WorkspaceReasonRequest):
+    """Set a managed OpenRouter workspace budget (USD); resumes a provider-budget block."""
+
+    usd: Annotated[
+        StrictFloat | StrictInt,
+        Field(gt=0, lt=1_000_000, description="New total workspace budget in USD."),
+    ]
 
 
 def _guide_request_schema_extra(schema: dict[str, Any]) -> None:

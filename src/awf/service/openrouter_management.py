@@ -49,6 +49,12 @@ def scrub_openrouter_management_environ() -> None:
     os.environ.pop(OPENROUTER_MANAGEMENT_KEY_ENV, None)
 
 
+def management_client_from_settings(settings: object) -> OpenRouterManagementClient | None:
+    """The API/worker management client, or ``None`` when managed keys are off."""
+    key = getattr(settings, "openrouter_management_key", None)
+    return OpenRouterManagementClient(key) if isinstance(key, str) and key.strip() else None
+
+
 def references_management_key(value: str | None) -> bool:
     """Whether a profile value or env-secret source names the management key."""
     if not value:
