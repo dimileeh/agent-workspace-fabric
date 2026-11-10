@@ -17,8 +17,13 @@ from awf.service.workspaces import WorkspaceService
 from tests.unit.api.test_provider_connection_tests import capable
 
 
-@pytest.mark.parametrize("mirror_state", ["absent", "empty", "bare"])
-async def test_early_provisioning_and_managed_fixture(engine, tmp_path, mirror_state):
+@pytest.mark.parametrize(
+    "mirror_state,publish_paths",
+    [("absent", False), ("empty", False), ("bare", False), ("bare", True)],
+)
+async def test_early_provisioning_and_managed_fixture(
+    engine, tmp_path, mirror_state, publish_paths
+):
     from awf.node.provider_diagnostics import _git
     from awf.service.provider_diagnostics import INTERNAL_REPO
 
@@ -29,7 +34,12 @@ async def test_early_provisioning_and_managed_fixture(engine, tmp_path, mirror_s
         ProviderConnectionTestRequest(agent="codex", provider="ollama", model="candidate:cloud"),
         idempotency_key="provision",
     )
-    launcher = SimpleNamespace(launch=AsyncMock(return_value=None))
+    compose_file = tmp_path / "compose.yml"
+    launcher = SimpleNamespace(
+        launch=AsyncMock(
+            return_value=SimpleNamespace(compose_file=compose_file) if publish_paths else None
+        )
+    )
     before = AsyncMock(side_effect=AssertionError("project preflight"))
     provisioner = Provisioner(
         session_factory=factory,
@@ -53,11 +63,93 @@ async def test_early_provisioning_and_managed_fixture(engine, tmp_path, mirror_s
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(response.workspace_id)
         assert ws.status == WorkspaceStatus.ready.value
+        assert ws.compose_file_path == (str(compose_file) if publish_paths else None)
         assert ws.pr_url is None
     await provisioner._git.remove_worktree(
         workspace_id=response.workspace_id, repo_url=INTERNAL_REPO
     )
     assert not request.layout.worktree_path.exists()
+
+
+@pytest.mark.parametrize("takeover_point", ["fixture", "claim_check", "launch"])
+async def test_replaced_diagnostic_claim_cannot_launch_or_publish_over_new_owner(
+    engine, tmp_path, monkeypatch, takeover_point
+):
+    import awf.node.provider_diagnostics as diagnostics
+
+    factory = await capable(engine)
+    response = await create_connection_test(
+        WorkspaceService(factory, settings=Settings(_env_file=None)),
+        ProviderConnectionTestRequest(agent="codex", provider="ollama", model="candidate:cloud"),
+        idempotency_key="claim-takeover",
+    )
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(response.workspace_id)
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="test")
+        ws.execution_claimed_by = "original-worker"
+        ws.execution_claim_epoch = 1
+        await session.commit()
+
+    fixture = tmp_path / "worktrees" / response.workspace_id
+    replacement_compose = tmp_path / "replacement.yml"
+
+    async def replace_claim():
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get_for_update(response.workspace_id)
+            ws.execution_claimed_by = "replacement-worker"
+            ws.execution_claim_epoch = 2
+            ws.branch_name = "replacement-branch"
+            ws.compose_project_name = "replacement-project"
+            ws.compose_file_path = str(replacement_compose)
+            ws.node_id = "replacement-node"
+            await session.commit()
+        (fixture / "solution.py").write_text("replacement worker edits\n")
+
+    real_fixture = diagnostics.fixture_worktree
+
+    async def fixture_worktree(*args):
+        layout = await real_fixture(*args)
+        if takeover_point == "fixture":
+            await replace_claim()
+        return layout
+
+    async def launch(_request):
+        await replace_claim()
+        return SimpleNamespace(compose_file=tmp_path / "stale.yml")
+
+    launcher = SimpleNamespace(launch=AsyncMock(side_effect=launch))
+    provisioner = Provisioner(
+        session_factory=factory,
+        git=GitManager(tmp_path),
+        config=ProvisionerConfig(node_id="original-node"),
+        stack_launcher=launcher,
+    )
+    real_verify = provisioner._verify_execution_claim_epoch
+
+    async def verify_epoch(*args):
+        current = await real_verify(*args)
+        if takeover_point == "claim_check":
+            assert current
+            await replace_claim()
+        return current
+
+    monkeypatch.setattr(diagnostics, "fixture_worktree", fixture_worktree)
+    monkeypatch.setattr(provisioner, "_verify_execution_claim_epoch", verify_epoch)
+    await provisioner.provision_claimed(response.workspace_id, execution_claim_epoch=1)
+
+    assert launcher.launch.await_count == int(takeover_point == "launch")
+    assert (fixture / "solution.py").read_text() == "replacement worker edits\n"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(response.workspace_id)
+        assert ws.status == "provisioning"
+        assert ws.execution_claimed_by == "replacement-worker"
+        assert ws.execution_claim_epoch == 2
+        assert ws.branch_name == "replacement-branch"
+        assert ws.compose_project_name == "replacement-project"
+        assert ws.compose_file_path == str(replacement_compose)
+        assert ws.node_id == "replacement-node"
+        assert "result" not in ws.task_policy["provider_diagnostic"]
 
 
 @pytest.mark.parametrize("missing_fixture_ref", [False, True])
@@ -224,9 +316,12 @@ async def test_cancel_while_fixture_is_created_removes_late_fixture_without_laun
 
 
 @pytest.mark.parametrize("native_auth", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
 async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
-    engine, tmp_path, native_auth
+    engine, tmp_path, native_auth, interrupted
 ):
+    import asyncio
+
     from awf.db.repositories import OperationRepository
 
     await capable(engine)
@@ -252,6 +347,8 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
             ws = await repo.get(response.workspace_id)
             await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="cancel-in-launch")
             await session.commit()
+        if interrupted:
+            raise asyncio.CancelledError()
         return
 
     auth_root = tmp_path / "state"
@@ -270,7 +367,11 @@ async def test_cancel_during_stack_launch_stops_runtime_before_fixture_disposal(
         config=ProvisionerConfig(node_id="local"),
         stack_launcher=launcher,
     )
-    await provisioner.provision(response.workspace_id)
+    if interrupted:
+        with pytest.raises(asyncio.CancelledError):
+            await provisioner.provision(response.workspace_id)
+    else:
+        await provisioner.provision(response.workspace_id)
     compose.down.assert_awaited_once()
     assert not fixture.exists()
     assert not auth.exists()
