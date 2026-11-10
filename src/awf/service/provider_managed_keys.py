@@ -553,26 +553,30 @@ class ManagedKeyBroker:
             updates["last_reason_code"] = reason
         persisted = await self._update(lease.row_id, only_status=KeyStatus.active.value, **updates)
         if persisted and info is not None:
-            await self._restore_limit(lease, info)
+            await self._restore_limit(lease)
 
-    async def _restore_limit(self, lease: ManagedKeyLease, info: KeyInfo) -> None:
+    async def _restore_limit(self, lease: ManagedKeyLease) -> None:
         """Re-apply the committed limit to a live key whose provider limit differs.
 
         The budget control PATCHes a live key before its transaction commits, so a
         failed commit leaves the key with a limit the database never recorded. The
-        workspace row lock waits out an in-flight budget control (it holds the lock
-        across its PATCH), so only a committed limit is ever re-applied.
+        key is re-read and PATCHed under the workspace row lock, which a budget
+        control holds across its PATCH and commit: an in-flight control is waited
+        out and none lands between the read and the PATCH, so only the latest
+        committed limit is ever re-applied.
         """
         assert self._client is not None  # a lease exists only with a client
         try:
             async with self._session_factory() as session:
                 await WorkspaceRepository(session).get_for_update(lease.workspace_id)
                 row = await ProviderManagedKeyRepository(session).get(lease.row_id)
-                limit = (
-                    usd(row.limit_usd)
-                    if row is not None and row.status == KeyStatus.active.value
-                    else None
-                )
+                if row is None or row.status != KeyStatus.active.value:
+                    return
+                limit = usd(row.limit_usd)
+                info = await self._client.get_key(lease.key_hash)
+                if info.limit is not None and usd(info.limit) == limit:
+                    return
+                await self._client.update_key_limit(lease.key_hash, limit)
         except SQLAlchemyError:
             _log.warning(
                 "provider.managed_key.persist_failed",
@@ -580,10 +584,6 @@ class ManagedKeyBroker:
                 reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
             )
             return
-        if limit is None or (info.limit is not None and usd(info.limit) == limit):
-            return
-        try:
-            await self._client.update_key_limit(lease.key_hash, limit)
         except OpenRouterManagementError as error:
             _log.warning(
                 "provider.managed_key.limit_restore_failed",

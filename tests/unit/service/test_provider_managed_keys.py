@@ -650,6 +650,71 @@ async def test_heartbeat_waits_out_an_in_flight_budget_raise_instead_of_revertin
         assert row.limit_usd == Decimal(100)
 
 
+async def test_a_limit_restore_never_reverts_a_budget_raise_committed_during_it(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        client = fake.client()
+        broker = ManagedKeyBroker(session_factory=factory, client=client)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        fake.keys[lease.key_hash]["limit"] = 100.0  # An uncommitted raise's PATCH.
+        update_key_limit = client.update_key_limit
+        raises: list[asyncio.Future[None]] = []
+
+        async def _raise_budget() -> None:
+            async with factory() as session:
+                await _control_service(session).set_provider_budget(
+                    ws, usd=50, management_client=fake.client()
+                )
+                await session.commit()
+
+        async def _raise_then_restore(key_hash, limit):
+            # A budget raise lands between the restore's committed-limit read and its PATCH.
+            raises.append(asyncio.ensure_future(_raise_budget()))
+            await asyncio.wait(raises, timeout=0.5)
+            return await update_key_limit(key_hash, limit)
+
+        monkeypatch.setattr(client, "update_key_limit", _raise_then_restore)
+        await lease.heartbeat()
+        await raises[0]
+
+        assert fake.keys[lease.key_hash]["limit"] == 50.0
+        (row,) = await _rows(factory, ws)
+        assert row.limit_usd == Decimal(50)
+
+
+async def test_a_limit_restore_rereads_a_key_patched_after_the_heartbeat_read(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        client = fake.client()
+        broker = ManagedKeyBroker(session_factory=factory, client=client)
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        get_key = client.get_key
+        reads = []
+
+        async def _read_then_failed_raise(key_hash):
+            info = await get_key(key_hash)
+            if not reads:
+                # A budget raise PATCHes after the heartbeat read and never commits.
+                async with factory() as session:
+                    await _control_service(session).set_provider_budget(
+                        ws, usd=100, management_client=fake.client()
+                    )
+                    await session.rollback()
+            reads.append(info)
+            return info
+
+        monkeypatch.setattr(client, "get_key", _read_then_failed_raise)
+        await lease.heartbeat()
+
+        assert fake.keys[lease.key_hash]["limit"] == 10.0
+        (row,) = await _rows(factory, ws)
+        assert row.limit_usd == Decimal(10)
+
+
 async def test_a_failed_limit_restore_is_logged_and_never_raises_into_the_run(monkeypatch):
     import structlog
 
