@@ -114,7 +114,11 @@ user's home at `~/.awf/provider-config` (`/home/agent/.awf/provider-config` in t
 standard agent container), outside OS temporary storage. It injects only the
 selected model credential and removes the config after completion, failure or
 TERM cancellation. Codex uses a custom Responses provider and an
-untrusted project-config layer; Claude disables inherited setting sources.
+untrusted project-config layer. Claude loads only the `project` setting source
+(project `CLAUDE.md`, rules, skills, agents and settings) together with
+`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`, so settings-file endpoint, auth, model
+and role-model env are ignored (the CLI logs a warning); `user`/`local` sources
+are never loaded. See [Runner parity](#runner-parity-role-models-retries-project-instructions).
 Safe instructions and allowed tool/permission configuration remain available.
 The runner scrubs the selected credential before forwarding stdout/stderr.
 Hard-killed containers remain subject to AWF's ordinary container cleanup.
@@ -137,13 +141,95 @@ including monitor repairs. Explicit experimental opt-in still requires runtime
 isolation and endpoint readiness. Admission remains disabled by default.
 
 Unknown runtime images fail with `EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED` before
-a coding CLI launches. Managed provider configuration and project Claude agent
-definitions that cannot be isolated are explicitly unsupported. Custom auth
+a coding CLI launches. Managed provider configuration
+(`/etc/claude-code/managed-settings.json`, `/etc/codex/config.toml`) outranks
+every isolation layer and remains explicitly unsupported
+(`EXECUTION_PROJECT_CONFIGURATION_UNSUPPORTED`). Project Claude agent definitions
+(`.claude/agents`) are supported: subagent and role models are forced to the
+frozen selection and their endpoint/auth stays host-managed. Custom auth
 resolvers lacking safe-config preparation fail explicitly. Hosted request
 serialization carries the complete selection; injected executors must advertise
 `execution_contract_version=1` and enforce equivalent isolation. The built-in
 hosted delegate does not advertise that guarantee and rejects expanded work;
 native hosted behavior remains available.
+
+## Runner parity (role models, retries, project instructions)
+
+Third-party runs keep the native CLI behavior that matters for long coding
+tasks, without giving up the selected connection. Native selections never use
+the runner and are unchanged.
+
+**Claude role and subagent models.** Claude Code sends role aliases (background
+work, built-in subagents such as Explore) and subagents to their own model ids.
+Against a third-party endpoint those native ids fail on Ollama, and fail or bill
+a different model on OpenRouter. The runner therefore sets, for the frozen
+selected model:
+
+| Variable | Value |
+| --- | --- |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | selected model |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | selected model |
+| `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` | `1` (agent frontmatter and Agent-tool `model` are ignored) |
+| `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` | `1` |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `auto` (no effort on the wire, even if project settings declare `effortLevel`) |
+
+These are added to `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_API_KEY=""` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Every
+inherited `ANTHROPIC_*`/`CLAUDE_*` value is removed first, so only runner-chosen
+values reach the CLI.
+
+**Project instructions.** Claude runs with `--setting-sources project` and the
+generated `--settings` file (selected model plus safe permission/language keys),
+which outranks project settings. Host-managed provider mode makes the CLI drop
+settings-sourced endpoint, auth, model, role-model and subagent-model env, so a
+project `.claude/settings.json` cannot redirect the run. The generated file's
+`env` also repeats the non-secret forced values (host-managed mode, role and
+subagent models, subagent forcing, `CLAUDE_CODE_EFFORT_LEVEL=auto`), so project
+settings env cannot disable forcing or re-add effort either. The selected auth
+also wins over a project `apiKeyHelper`.
+
+**Codex retries.** The generated `config.toml` sets `request_max_retries = 4`
+and `stream_max_retries = 5`, which are Codex's own defaults. With zero retries,
+one transient 5xx or stream drop ended a multi-hour run. Each retry/reconnect is
+a CLI notice in the redacted AWF log stream; exhausted retries still exit
+non-zero with the existing reason-code mapping. These transport retries happen
+inside one invocation and are not AWF invocation replays, so AWF still never
+retries diagnostic invocations.
+
+**Credential withheld from tool subprocesses.** Host-managed mode makes Claude
+remove `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` from Bash, hook and tool child
+environments; declared tool env (for example `GH_TOKEN`) is kept. Codex's
+generated config adds `[shell_environment_policy] exclude =
+["AWF_SELECTED_PROVIDER_KEY"]`, independent of upstream default excludes.
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is deliberately **not** set: in Claude Code
+2.1.295 it aborts startup unless bubblewrap is installed (the agent image has
+none, and Docker's default seccomp blocks the user namespaces it needs), forces
+the default permission mode even with `--dangerously-skip-permissions`, and
+writes stub files into the worktree. Project MCP server children are assumed to
+use the same child-env builder; that is not separately proven.
+
+**Proof.** `tests/integration/runtime/test_claude_provider_runner_contract.py`
+runs the real standalone runner and the pinned Claude CLI against a localhost
+fake Anthropic endpoint, with a hostile project `.claude/settings.json`
+(decoy endpoint, project token, `apiKeyHelper`, model/role/subagent overrides,
+`effortLevel`) and a project agent pinned to a native model. It asserts that the
+project `CLAUDE.md` and agent prompt reach the endpoint, every request uses the
+selected endpoint, credential and model, the decoy receives nothing, no effort is
+sent, and the Bash tool's environment lacks the credential. It skips unless
+`claude --version` is 2.1.295. Unit tests pin the exact environment, argv and
+Codex config.
+
+**Evidence validity.** The four third-party deployed passes below were measured
+with the previous runner (the two native passes do not use it), all on image
+`sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d`.
+They remain accurate historical evidence for that image. Admission matches
+evidence on the exact `runtime_image`, so a rebuilt image carrying this runner
+does not inherit them: after upgrading, re-run `awf provider test` for each
+selection or use `preflight.allow_unverified_model`. The Claude wire request
+changes (role models, no effort field), which is why fresh evidence is needed.
+The proof contract (fixture, verifier, ordered witness) is unchanged, and the
+diagnostic fixture worktree contains no `CLAUDE.md` or `.claude/`, so the
+fixture stays `coding-cycle-v1`.
 
 ## Recovery and cooldown scope
 
