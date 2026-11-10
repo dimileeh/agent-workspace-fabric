@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapters
+from awf.adapters.run_results import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import (
@@ -1362,3 +1363,51 @@ class TestFixCycleMissingWorktree:
         assert ws.failure_reason == "infrastructure_failure"
         assert "validation_fix_git_commit" in (ws.failure_message or "")
         assert fix_commit_calls == []
+
+
+class TestFixPassProviderPark:
+    """A managed-key park code from a fix-pass agent parks instead of looping."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reason_code", ["PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_MANAGED_KEY_UNAVAILABLE"]
+    )
+    async def test_fix_pass_park_code_parks_the_workspace_without_more_passes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        reason_code: str,
+    ) -> None:
+        """Later passes could only fail to mint, then fail as a validation failure."""
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=3)
+        ws_id = await _seed_ready_workspace(factory)
+        fix_runs: list[object] = []
+
+        async def _budget_exhausted(*_args: object, **_kwargs: object) -> tuple[bool, object]:
+            fix_runs.append(object())
+            raise AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr=reason_code),
+                reason_code=reason_code,
+                details={"provider_budget": {"budget_usd": "1.000000"}, "retryable": False},
+            )
+
+        monkeypatch.setattr(
+            execution_validation_fix_pass_mod,
+            "_run_agent_callable_with_service_recovery",
+            _budget_exhausted,
+        )
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # validation fails
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_type == "provider_budget"
+            assert ws.block_reason_code == reason_code
+        assert len(fix_runs) == 1

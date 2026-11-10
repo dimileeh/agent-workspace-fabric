@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.git_identity import git_identity_config_args
@@ -649,6 +650,10 @@ async def _run_pre_push_validation_fix_pass_impl(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+        if exc.reason_code in PROVIDER_PARK_REASON_CODES:
+            # Later passes could only fail to mint, then fail as a validation
+            # failure: unwind so the monitor's terminal sink parks for a human.
+            await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
         _log.warning(
             "monitor.pre_push_validation_fix_agent_nonzero",
             workspace_id=workspace_id,
