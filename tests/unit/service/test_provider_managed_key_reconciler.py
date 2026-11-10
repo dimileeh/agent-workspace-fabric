@@ -243,6 +243,70 @@ async def test_an_orphan_whose_usage_cannot_be_read_is_kept_for_the_next_sweep()
         assert (row.status, row.usage_usd) == ("orphan_deleted", Decimal("0.3"))
 
 
+async def test_a_lease_renewed_after_the_bindings_load_keeps_its_key(monkeypatch):
+    from awf.service import provider_managed_key_reconciler as reconciler
+
+    fake = FakeOpenRouterManagement()
+    clock = [datetime.now(UTC)]
+    sweep_at = clock[0] + timedelta(hours=1)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(
+            session_factory=factory, client=fake.client(), now=lambda: clock[0]
+        )
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        load_bindings = reconciler._load_bindings
+
+        async def load_then_heartbeat(*args):
+            loaded = await load_bindings(*args)
+            # A delayed heartbeat renews the expired lease after the snapshot.
+            clock[0] = sweep_at
+            await lease.heartbeat()
+            return loaded
+
+        monkeypatch.setattr(reconciler, "_load_bindings", load_then_heartbeat)
+        report = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: sweep_at
+        )
+
+        assert (report["deleted"], report["failed"]) == (0, 0)
+        assert lease.key_hash in fake.keys
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.final_usage_read) == ("active", False)
+        assert row.lease_expires_at is not None and row.lease_expires_at > sweep_at
+
+
+async def test_a_heartbeat_after_the_usage_is_recorded_cannot_renew_a_deleting_key():
+    fake = FakeOpenRouterManagement()
+    clock = [datetime.now(UTC)]
+    sweep_at = clock[0] + timedelta(hours=1)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(
+            session_factory=factory, client=fake.client(), now=lambda: clock[0]
+        )
+        lease = await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        client = fake.client()
+        delete_key = client.delete_key
+
+        async def heartbeat_then_delete(key_hash):
+            # The usage row is committed; the delete is still in flight.
+            clock[0] = sweep_at
+            await lease.heartbeat()
+            return await delete_key(key_hash)
+
+        client.delete_key = heartbeat_then_delete  # type: ignore[method-assign]
+        report = await reconcile_openrouter_keys(
+            session_factory=factory, client=client, now=lambda: sweep_at
+        )
+
+        assert report["deleted"] == 1
+        (row,) = await _rows(factory, ws)
+        assert (row.status, row.lease_expires_at) == ("orphan_deleted", None)
+
+
 async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_not():
     fake = FakeOpenRouterManagement()
     now = datetime.now(UTC)

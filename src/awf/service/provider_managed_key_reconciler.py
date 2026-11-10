@@ -98,7 +98,16 @@ async def reconcile_openrouter_keys(
                 continue
             final = info  # Already gone: the listing is its last readable usage.
         try:
-            row_id = await _record_usage(session_factory, row, final, workspace_id, seq, current)
+            row_id = await _record_usage(
+                session_factory,
+                row,
+                final,
+                workspace_id,
+                seq,
+                current,
+                status=status,
+                claimed=workspace_id in claimed,
+            )
             if row_id is None:
                 continue
             try:
@@ -212,17 +221,24 @@ async def _record_usage(
     workspace_id: str,
     seq: int,
     now: datetime,
+    *,
+    status: str,
+    claimed: bool,
 ) -> str | None:
     """Persist the final usage read before deleting (inserting an orphan row if needed).
 
-    ``None`` means the broker finalized the key after the listing: its final
-    read is newer than the listing, so the row is left as it is.
+    ``None`` means the key is not deleted: the broker finalized it after the
+    listing (its final read is newer), or a heartbeat renewed its lease after
+    the bindings were loaded. Either way the row is left as it is.
     """
     async with session_factory() as session:
         keys = ProviderManagedKeyRepository(session)
-        # Locked so a concurrent broker finalize is either seen or waits.
+        # Locked so a concurrent broker finalize or heartbeat is either seen or waits.
         current = await keys.get(row.id, for_update=True) if row is not None else None
-        if current is not None and current.status in FINALIZED_KEY_STATUSES:
+        if current is not None and (
+            current.status in FINALIZED_KEY_STATUSES
+            or _is_live_binding(current, info, status, now, claimed=claimed)
+        ):
             return None
         if current is None:
             current = await keys.add(
@@ -246,6 +262,9 @@ async def _record_usage(
         current.usage_read_at = now
         current.final_usage_read = True
         current.lease_expires_at = None
+        # Pending delete (like an inserted orphan): a heartbeat renews only an
+        # active key, so a late one can no longer revive the key being deleted.
+        current.status = KeyStatus.delete_failed.value
         current.updated_at = now
         await session.commit()
         return current.id
