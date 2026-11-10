@@ -3,6 +3,8 @@
 import subprocess
 import sys
 
+import pytest
+
 from awf.runtime.provider_diagnostic_fixture import (
     FIXTURE_VERSION,
     PROMPT,
@@ -53,20 +55,35 @@ def test_fixture_cannot_forge_verifier_output_and_exit_zero(tmp_path):
     assert not verify_fixture(tmp_path, nonce)
 
 
-def test_runtime_oracle_requires_nonroot_and_root_owned_immutable_files(monkeypatch):
+@pytest.mark.parametrize(
+    "unsafe_target", ["oracle", "oracle_parent", "interpreter", "interpreter_parent"]
+)
+def test_runtime_oracle_requires_nonroot_and_root_owned_immutable_files(monkeypatch, unsafe_target):
     from types import SimpleNamespace
 
-    from awf.runtime.provider_diagnostic_fixture import runtime_is_immutable
+    import awf.runtime.provider_diagnostic_fixture as fixture
 
-    parent = SimpleNamespace(stat=lambda: SimpleNamespace(st_uid=0))
-    path = SimpleNamespace(stat=lambda: SimpleNamespace(st_uid=0), parent=parent)
+    paths = {
+        name: SimpleNamespace(stat=lambda: SimpleNamespace(st_uid=0))
+        for name in ("oracle", "oracle_parent", "interpreter", "interpreter_parent")
+    }
+    paths["oracle"].parent = paths["oracle_parent"]
+    paths["interpreter"].parent = paths["interpreter_parent"]
+    # Model the pinned runtime, independent of who owns CI's uv interpreter.
+    monkeypatch.setattr(
+        fixture, "Path", lambda *_a: SimpleNamespace(resolve=lambda: paths["interpreter"])
+    )
     monkeypatch.setattr("os.geteuid", lambda: 1000)
     monkeypatch.setattr("os.access", lambda *_a: False)
-    assert runtime_is_immutable(path=path)
-    monkeypatch.setattr("os.access", lambda *_a: True)
-    assert not runtime_is_immutable(path=path)
+    assert fixture.runtime_is_immutable(path=paths["oracle"])
+    with monkeypatch.context() as owner_patch:
+        owner_patch.setattr(paths[unsafe_target], "stat", lambda: SimpleNamespace(st_uid=1000))
+        assert not fixture.runtime_is_immutable(path=paths["oracle"])
+    monkeypatch.setattr("os.access", lambda path, _mode: path is paths[unsafe_target])
+    assert not fixture.runtime_is_immutable(path=paths["oracle"])
+    monkeypatch.setattr("os.access", lambda *_a: False)
     monkeypatch.setattr("os.geteuid", lambda: 0)
-    assert not runtime_is_immutable(path=path)
+    assert not fixture.runtime_is_immutable(path=paths["oracle"])
 
 
 def test_standalone_fixture_command_contract(tmp_path):
