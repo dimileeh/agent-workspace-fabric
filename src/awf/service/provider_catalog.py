@@ -19,6 +19,8 @@ CATALOG_TTL_SECONDS = 300
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_MODELS = 5000
 MAX_CACHE_ENTRIES = 128
+MAX_INFLIGHT_ENTRIES = 128
+CATALOG_TIMEOUT_SECONDS = 10
 
 
 class ProviderCatalog:
@@ -27,7 +29,9 @@ class ProviderCatalog:
         self._cache: OrderedDict[tuple[str, ...], tuple[float, ProviderCatalogResponse]] = (
             OrderedDict()
         )
-        self._lock = asyncio.Lock()
+        # All bookkeeping is synchronous between awaits on this event loop.
+        # Only requests for the same key share an in-flight HTTP operation.
+        self._inflight: dict[tuple[str, ...], asyncio.Future[ProviderCatalogResponse]] = {}
 
     @property
     def cache_keys(self) -> tuple[tuple[str, ...], ...]:
@@ -58,13 +62,28 @@ class ProviderCatalog:
                 status="unsupported", reason_code="PROVIDER_DISCOVERY_NETWORK_UNSUPPORTED", **base
             )
         key = (scope, selection.agent, selection.provider, context)
-        async with self._lock:
-            now = monotonic()
-            cached = self._cache.get(key)
-            if cached and now - cached[0] < CATALOG_TTL_SECONDS:
-                self._cache.move_to_end(key)
-                return cached[1].model_copy(deep=True, update={"cached": True})
-            try:
+        result = ProviderCatalogResponse(
+            status="unavailable", reason_code="PROVIDER_DISCOVERY_UNAVAILABLE", **base
+        )
+        pending: asyncio.Future[ProviderCatalogResponse] | None = None
+        try:
+            # Includes same-key waiting, HTTP, and client setup/teardown.
+            async with asyncio.timeout(CATALOG_TIMEOUT_SECONDS):
+                now = monotonic()
+                cached = self._cache.get(key)
+                if cached and now - cached[0] < CATALOG_TTL_SECONDS:
+                    self._cache.move_to_end(key)
+                    return cached[1].model_copy(deep=True, update={"cached": True})
+                existing = self._inflight.get(key)
+                if existing is not None:
+                    shared = await asyncio.shield(existing)
+                    return shared.model_copy(
+                        deep=True, update={"cached": shared.status == "available"}
+                    )
+                if len(self._inflight) >= MAX_INFLIGHT_ENTRIES:
+                    return result
+                pending = asyncio.get_running_loop().create_future()
+                self._inflight[key] = pending
                 headers = {}
                 if selection.provider == "openrouter":
                     credential = environ.get(str(selection.credential_ref).removeprefix("env/"))
@@ -72,18 +91,13 @@ class ProviderCatalog:
                         raise ValueError("PROVIDER_CREDENTIAL_MISSING")
                     headers["Authorization"] = "Bearer " + credential
                 path = "/api/tags" if selection.provider == "ollama" else "/v1/models"
-                async with asyncio.timeout(10):
-                    if self._client is not None:
-                        data = await self._fetch(
-                            self._client, str(selection.endpoint) + path, headers
-                        )
-                    else:
-                        async with httpx.AsyncClient(
-                            timeout=10, follow_redirects=False, trust_env=False
-                        ) as client:
-                            data = await self._fetch(
-                                client, str(selection.endpoint) + path, headers
-                            )
+                if self._client is not None:
+                    data = await self._fetch(self._client, str(selection.endpoint) + path, headers)
+                else:
+                    async with httpx.AsyncClient(
+                        timeout=10, follow_redirects=False, trust_env=False
+                    ) as client:
+                        data = await self._fetch(client, str(selection.endpoint) + path, headers)
                 raw = data["models" if selection.provider == "ollama" else "data"]
                 if not isinstance(raw, list) or len(raw) > MAX_MODELS:
                     raise ValueError("PROVIDER_DISCOVERY_RESPONSE_INVALID")
@@ -132,22 +146,27 @@ class ProviderCatalog:
                     models=models,
                     **base,
                 )
-                self._cache[key] = (now, result)
+                self._cache[key] = (monotonic(), result.model_copy(deep=True))
                 self._cache.move_to_end(key)
                 while len(self._cache) > MAX_CACHE_ENTRIES:
                     self._cache.popitem(last=False)
                 return result
-            except httpx.HTTPStatusError as error:
-                return ProviderCatalogResponse(
-                    status="unavailable",
-                    reason_code="PROVIDER_DISCOVERY_UNAVAILABLE",
-                    http_status=error.response.status_code,
-                    **base,
-                )
-            except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
-                return ProviderCatalogResponse(
-                    status="unavailable", reason_code="PROVIDER_DISCOVERY_UNAVAILABLE", **base
-                )
+        except httpx.HTTPStatusError as error:
+            result = ProviderCatalogResponse(
+                status="unavailable",
+                reason_code="PROVIDER_DISCOVERY_UNAVAILABLE",
+                http_status=error.response.status_code,
+                **base,
+            )
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
+            pass
+        finally:
+            if pending is not None:
+                self._inflight.pop(key)
+                # Cancellation releases followers with an unavailable result;
+                # neither follower cancellation nor timeout cancels the leader.
+                pending.set_result(result.model_copy(deep=True))
+        return result
 
     @staticmethod
     async def _fetch(

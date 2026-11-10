@@ -1,5 +1,7 @@
 """Selected-provider catalogs are bounded claims, not coding evidence."""
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -147,3 +149,180 @@ async def test_catalog_cancellation_does_not_cache_or_replay():
         with pytest.raises(asyncio.CancelledError):
             await task
         assert not catalog.cache_keys
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_slow_miss_does_not_block_an_independent_key(cached):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        if request.headers["Authorization"] == "Bearer slow":
+            started.set()
+            await release.wait()
+        return httpx.Response(200, json={"data": [{"id": "candidate"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        fast = selection("openrouter", "FAST")
+        if cached:
+            await catalog.query(fast, environ={"FAST": "fast"})
+        slow = asyncio.create_task(
+            catalog.query(selection("openrouter", "SLOW"), environ={"SLOW": "slow"})
+        )
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            result = await asyncio.wait_for(catalog.query(fast, environ={"FAST": "fast"}), 0.3)
+            assert result.status == "available"
+            assert result.cached is cached
+            assert not slow.done()
+        finally:
+            release.set()
+            await slow
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_same_key_wait_obeys_its_total_deadline(monkeypatch):
+    import awf.service.provider_catalog as module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json={"models": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        leader = asyncio.create_task(catalog.query(selection(), environ={}))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            monkeypatch.setattr(module, "CATALOG_TIMEOUT_SECONDS", 0.02, raising=False)
+            follower = await asyncio.wait_for(catalog.query(selection(), environ={}), 0.3)
+            assert follower.status == "unavailable"
+            assert not leader.done()
+            assert not catalog.cache_keys
+        finally:
+            release.set()
+            assert (await leader).status == "available"
+        assert (await catalog.query(selection(), environ={})).cached
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_http_timeout_releases_deduplication_without_caching(monkeypatch):
+    import awf.service.provider_catalog as module
+
+    monkeypatch.setattr(module, "CATALOG_TIMEOUT_SECONDS", 0.02, raising=False)
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            await asyncio.Event().wait()
+        return httpx.Response(200, json={"models": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        result = await asyncio.wait_for(catalog.query(selection(), environ={}), 0.3)
+        assert result.status == "unavailable"
+        assert not catalog.cache_keys
+        assert (await catalog.query(selection(), environ={})).status == "available"
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_key_bookkeeping_is_bounded(monkeypatch):
+    import awf.service.provider_catalog as module
+
+    monkeypatch.setattr(module, "MAX_INFLIGHT_ENTRIES", 1, raising=False)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json={"models": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        leader = asyncio.create_task(catalog.query(selection(), environ={}, context="first"))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            result = await asyncio.wait_for(
+                catalog.query(selection(), environ={}, context="second"), 0.3
+            )
+            assert result.status == "unavailable"
+            assert len(calls) == 1
+        finally:
+            release.set()
+            await leader
+        assert (
+            await catalog.query(selection(), environ={}, context="second")
+        ).status == "available"
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_follower_does_not_cancel_the_shared_request():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json={"models": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        leader = asyncio.create_task(catalog.query(selection(), environ={}))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            follower = asyncio.create_task(catalog.query(selection(), environ={}))
+            await asyncio.sleep(0)
+            follower.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await follower
+            assert not leader.done()
+        finally:
+            release.set()
+            assert (await leader).status == "available"
+        assert (await catalog.query(selection(), environ={})).cached
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_leader_releases_followers_without_replay():
+    started = asyncio.Event()
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        started.set()
+        await asyncio.Event().wait()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        catalog = ProviderCatalog(client=client)
+        leader = asyncio.create_task(catalog.query(selection(), environ={}))
+        await asyncio.wait_for(started.wait(), 1)
+        follower = asyncio.create_task(catalog.query(selection(), environ={}))
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        result = await asyncio.wait_for(follower, 0.3)
+        assert result.status == "unavailable"
+        assert not result.cached
+        assert not catalog.cache_keys
+        assert len(calls) == 1
