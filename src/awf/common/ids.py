@@ -97,6 +97,10 @@ def new_service_gc_request_id() -> str:
     return f"sgc_{uuid4().hex[:24]}"
 
 
+def new_provider_managed_key_id() -> str:
+    return f"pmk_{uuid4().hex[:24]}"
+
+
 def new_work_slot_invocation_id() -> str:
     """Return a work-slot invocation id.
 

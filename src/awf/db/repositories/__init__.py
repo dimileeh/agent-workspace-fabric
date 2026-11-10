@@ -74,6 +74,11 @@ from awf.db.repositories.base import (
     resolve_session_dialect_name,
     validation_command_set_hash,
 )
+from awf.db.repositories.provider_managed_key_repo import (
+    UNFINALIZED_KEY_STATUSES,
+    ProviderManagedKeyRepository,
+    ProviderSpendSummary,
+)
 from awf.db.repositories.quality_repo import (
     MergeCandidateRepository,
     PolicyFindingRepository,
@@ -207,6 +212,9 @@ __all__ = [
     "WorkerHeartbeatRepository",
     "ServiceGCRequestRepository",
     "IN_USE_WORK_SLOT_LEASE_PHASES",
+    "UNFINALIZED_KEY_STATUSES",
+    "ProviderManagedKeyRepository",
+    "ProviderSpendSummary",
     "WorkSlotLeaseDetail",
     "WorkSlotLeaseRepository",
     "WorkSlotSnapshot",
