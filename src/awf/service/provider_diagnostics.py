@@ -74,7 +74,16 @@ def diagnostic_material(
             or service.volumes
             or service.ports
             or service.privileged
-            or any("${" in v for v in service.environment.values())
+            # Compose also expands bare $NAME references in these sidecar values.
+            or any(
+                re.search(r"\$(?:\{|[A-Za-z_])", value or "")
+                for value in (
+                    service.image,
+                    service.command,
+                    service.healthcheck_cmd,
+                    *service.environment.values(),
+                )
+            )
             or any(is_secret_env_key(k) for k in service.environment)
         ):
             raise ValueError("PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED")

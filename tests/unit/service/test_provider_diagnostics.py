@@ -62,6 +62,35 @@ def test_selected_sidecar_project_dependencies_are_explicitly_unsupported():
 
 
 @pytest.mark.parametrize(
+    ("field", "template"),
+    [
+        ("command", 'sh -c "echo {reference}"'),
+        ("image", "ollama/ollama:{reference}"),
+        ("healthcheck_cmd", 'test -n "{reference}"'),
+        ("environment", "config={reference}"),
+    ],
+)
+@pytest.mark.parametrize(
+    "reference", ["${GITHUB_TOKEN}", "$GITHUB_TOKEN", "${MISSING:-${GITHUB_TOKEN}}"]
+)
+def test_diagnostic_sidecar_rejects_worker_environment_interpolation(field, template, reference):
+    service = {"name": "ollama", "image": "ollama/ollama"}
+    value = template.format(reference=reference)
+    service[field] = {"MODEL_CONFIG": value} if field == "environment" else value
+    with pytest.raises(ValueError, match="PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED"):
+        diagnostic_material(
+            request(
+                profile={
+                    "name": "project",
+                    "runtime": {"environment": {"AWF_OLLAMA_BASE_URL": "http://ollama:11434"}},
+                    "services": [service],
+                }
+            ),
+            environ={"GITHUB_TOKEN": "synthetic-worker-secret"},
+        )
+
+
+@pytest.mark.parametrize(
     "extra", [{"deadline_seconds": 901}, {"repo": {}}, {"prompt": "arbitrary"}]
 )
 def test_no_project_payload_and_bounded_deadline(extra):
@@ -156,8 +185,14 @@ def test_diagnostic_reproduces_only_the_selected_self_contained_sidecar():
                 "name": "project",
                 "runtime": {"environment": {"AWF_OLLAMA_BASE_URL": "http://ollama:11434"}},
                 "services": [
-                    {"name": "ollama", "image": "ollama/ollama"},
-                    {"name": "postgres", "image": "postgres:16"},
+                    {
+                        "name": "ollama",
+                        "image": "ollama/ollama",
+                        "command": "serve",
+                        "healthcheck_cmd": "ollama list",
+                        "environment": {"OLLAMA_HOST": "0.0.0.0:11434"},
+                    },
+                    {"name": "postgres", "image": "postgres:${PROJECT_POSTGRES_VERSION}"},
                 ],
             }
         ),
@@ -165,6 +200,10 @@ def test_diagnostic_reproduces_only_the_selected_self_contained_sidecar():
     )
     assert selected.network_service == "ollama"
     assert [service["name"] for service in profile["services"]] == ["ollama"]
+    assert profile["services"][0]["image"] == "ollama/ollama"
+    assert profile["services"][0]["command"] == "serve"
+    assert profile["services"][0]["healthcheck_cmd"] == "ollama list"
+    assert profile["services"][0]["environment"] == {"OLLAMA_HOST": "0.0.0.0:11434"}
     assert spec["profile"] == profile
 
 
