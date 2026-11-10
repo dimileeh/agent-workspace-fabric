@@ -1,6 +1,7 @@
 # Independent agent and model-provider selection
 
-This release adds T4–T6 catalog and diagnostic workspaces to the merged T1–T3 foundation. Third-party
+This release adds T4–T6 catalog and diagnostic workspaces to the merged T1–T3 foundation,
+plus live monitor repair/restart identity preservation. Third-party
 Codex/Claude admission defaults to disabled through
 `AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED=false`. This foundation is deployable
 before provider compatibility is established; it does not release third-party
@@ -254,14 +255,17 @@ flowchart LR
 
 ## Remaining release gates and preliminary evidence
 
-Deployed-AWF coding compatibility is now measured for exactly the six paths
-below: all six deployed diagnostics in the pinned runtime
+Deployed-AWF coding compatibility is now measured for exactly the six catalog
+paths below plus monitor repair/restart identity: all six deployed diagnostics
+in the pinned runtime
 (`sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d`)
 passed with reason `PROVIDER_DIAGNOSTIC_PASSED`, verified fixture
 `coding-cycle-v1` and passed protocol evidence (supervisor evidence captured
-2026-11-10T02:57:05Z). Real monitor repair/restart identity dogfood remains
-the gating step and is still pending; nothing is claimed about frozen-identity
-restart evidence yet. Local Ollama is implemented and covered deterministically,
+2026-11-10T02:57:05Z). Live monitor repair/restart identity dogfood was then
+performed on this PR: the worker was restarted while the monitor was idle, the
+workspace identity and connection scope were preserved, and the subsequent
+repair invocation re-selected the same Codex/OpenRouter/`moonshotai/kimi-k2.7-code`
+contract (supervisor evidence captured 2026-11-10T03:07:44Z). Local Ollama is implemented and covered deterministically,
 **not live-verified**, and excluded from the live release gate by explicit
 operator instruction. Do not invoke local inference or change the unrelated
 host llama-server.
@@ -283,7 +287,7 @@ that experimental opt-in does not imply general catalog support.
 | Claude / OpenRouter / `minimax/minimax-m2.7` | Dependent tools and fixture observed | **Passed** — Claude Code 2.1.295, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_d3b54742506044039b37b9ca`, connection scope `c24e8d23…7fa3` |
 | Codex native | CLI 0.162.0 observed | **Passed** — codex-cli 0.162.0 / `gpt-6.1-sol`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_ef1c0b2d51894d8bb2c81af9`, legacy scope |
 | Claude native | CLI 2.1.295 observed | **Passed** — Claude Code 2.1.295 / `claude-opus-5-5`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_c45f6f1c738e4cb59fb1349c`, legacy scope |
-| Monitor repair/restart identity | Deterministic regressions only | Pending live dogfood (ordinary canary in progress) |
+| Monitor repair/restart identity | Live supervisor dogfood | **Passed** — worker restarted while monitor idled on `WaitForCI` (iter 0, head `1922c8634dcbf2fb05ac9761dd25a725e60f91dc`), no active CLI confirmed (`True`); workspace `ws_b8779b060a6d4e2da857074b` identity unchanged (`True`) and connection scope `c24e8d23…7fa3` preserved. Repair invocation at `2026-11-10T03:07:44.986923+00:00` re-selected Codex/OpenRouter/`moonshotai/kimi-k2.7-code` with `effort=null`, endpoint `https://openrouter.ai/api`, credential ref `env/OPENROUTER_API_KEY`, runtime `sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d` |
 
 The Codex/OpenRouter Minimax preliminary attempt regenerated its nonce and failed
 the fixture. Its transcript remains a negative regression; like every
@@ -336,4 +340,4 @@ locked admission transaction. Port-free profiles retain early atomic binding
 for worker-replacement safety.
 
 Focused regressions cover these repairs. Full validation, coverage, review
-replies, push and merge remain owned by AWF/GitHub. The six deployed compatibility passes are recorded above; the monitor repair/restart identity proof remains pending and no live result is claimed for it in advance.
+replies, push and merge remain owned by AWF/GitHub. The six deployed compatibility passes and the live monitor repair/restart identity proof are recorded above.
