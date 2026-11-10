@@ -19,6 +19,7 @@ from awf.adapters.provider_failures import is_budget_exhausted_output
 from awf.adapters.run_results import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import mark_masked_agent_reason_code
+from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ PROVIDER_BUDGET_EXHAUSTED = "PROVIDER_BUDGET_EXHAUSTED"
 PROVIDER_MANAGEMENT_KEY_MISSING = "PROVIDER_MANAGEMENT_KEY_MISSING"
 PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED = "PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED"
 PROVIDER_MANAGED_KEY_UNAVAILABLE = "PROVIDER_MANAGED_KEY_UNAVAILABLE"
+PROVIDER_MANAGED_KEY_PERSIST_FAILED = "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
 PROVIDER_PARK_REASON_CODES = frozenset(
     {PROVIDER_BUDGET_EXHAUSTED, PROVIDER_MANAGED_KEY_UNAVAILABLE, PROVIDER_MANAGEMENT_KEY_MISSING}
 )
@@ -36,6 +38,7 @@ PROVIDER_PARK_REASON_CODES = frozenset(
 blindly, counted against the shared circuit, or sent to a fallback provider."""
 _WATCHDOG_TIMEOUT_REASON_CODES = frozenset({"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"})
 _BUDGET_TEXT_TAIL_CHARS = 2000
+_log = get_logger(__name__)
 
 
 def exec_environment(credential_env: Mapping[str, str]) -> dict[str, str]:
@@ -193,7 +196,14 @@ def _exhausted_by_key(release: ProviderCredentialRelease, error: AgentRunError) 
 async def _heartbeat(lease: ProviderCredentialLease, interval_seconds: float) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
-        await lease.heartbeat()
+        try:
+            await lease.heartbeat()
+        except Exception as error:  # a dead heartbeat would let a live key's lease lapse
+            _log.warning(
+                "provider.managed_key.heartbeat_failed",
+                reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
+                error_type=type(error).__name__,
+            )
 
 
 async def _finish(

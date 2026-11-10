@@ -421,3 +421,31 @@ async def test_a_database_error_on_one_key_never_aborts_the_sweep(monkeypatch, f
         assert any(
             r.key_hash == second and r.status == "orphan_deleted" for r in await _rows(factory, ws)
         )
+
+
+@pytest.mark.parametrize("claim", ["execution", "monitor"])
+async def test_a_key_is_kept_while_its_workspace_claim_is_live_even_past_its_lease(claim):
+    fake = FakeOpenRouterManagement()
+    now = datetime.now(UTC)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        async with factory() as session:
+            row = await WorkspaceRepository(session).get(ws)
+            setattr(row, f"{claim}_claimed_by", "worker-a")
+            setattr(row, f"{claim}_claim_expires_at", now + timedelta(hours=2))
+            await session.commit()
+
+        # The key's heartbeat died silently, but the worker still holds the claim.
+        claimed = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: now + timedelta(hours=1)
+        )
+        lapsed = await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: now + timedelta(hours=3)
+        )
+
+        assert (claimed["live"], claimed["deleted"]) == (1, 0)
+        assert (lapsed["live"], lapsed["deleted"]) == (0, 1)
+        assert fake.keys == {}

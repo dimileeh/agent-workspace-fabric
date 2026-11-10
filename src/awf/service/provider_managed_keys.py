@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.managed_credentials import (
     MANAGED_CREDENTIAL_ENV,
     PROVIDER_BUDGET_EXHAUSTED,
+    PROVIDER_MANAGED_KEY_PERSIST_FAILED,
     PROVIDER_MANAGED_KEY_UNAVAILABLE,
     PROVIDER_MANAGEMENT_KEY_MISSING,
     ProviderCredentialError,
@@ -53,7 +54,6 @@ from awf.service.openrouter_management import (
 )
 
 PROVIDER_BUDGET_INVALID = "PROVIDER_BUDGET_INVALID"
-PROVIDER_MANAGED_KEY_PERSIST_FAILED = "PROVIDER_MANAGED_KEY_PERSIST_FAILED"
 
 MINIMUM_MINT_USD = Decimal("0.01")
 MANAGED_KEY_NAME_RE = re.compile(r"^awf-(ws_[0-9a-f]{24})-(\d+)$")

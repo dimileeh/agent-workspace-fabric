@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.managed_credentials import PROVIDER_MANAGED_KEY_PERSIST_FAILED
 from awf.common.ids import new_provider_managed_key_id
 from awf.common.logging import get_logger
 from awf.control.state_machine import WorkspaceStateMachine
@@ -33,11 +34,7 @@ from awf.service.openrouter_management import (
     OpenRouterManagementError,
     usd,
 )
-from awf.service.provider_managed_keys import (
-    FINALIZED_KEY_STATUSES,
-    MANAGED_KEY_NAME_RE,
-    PROVIDER_MANAGED_KEY_PERSIST_FAILED,
-)
+from awf.service.provider_managed_keys import FINALIZED_KEY_STATUSES, MANAGED_KEY_NAME_RE
 
 PROVIDER_MANAGED_KEY_ORPHAN_DELETED = "PROVIDER_MANAGED_KEY_ORPHAN_DELETED"
 PROVIDER_MANAGED_KEY_RECONCILE_FAILED = "PROVIDER_MANAGED_KEY_RECONCILE_FAILED"
@@ -70,8 +67,8 @@ async def reconcile_openrouter_keys(
         for info in listing.keys
         if (match := MANAGED_KEY_NAME_RE.fullmatch(info.name))
     ]
-    statuses, by_hash, by_name = await _load_bindings(session_factory, named)
     current = clock()
+    statuses, claimed, by_hash, by_name = await _load_bindings(session_factory, named, current)
     for info, workspace_id, seq in named:
         status = statuses.get(workspace_id)
         if status is None:
@@ -79,7 +76,7 @@ async def reconcile_openrouter_keys(
             report["foreign_skipped"] += 1
             continue
         row = by_hash.get(info.hash) or by_name.get(info.name)
-        if _is_live_binding(row, info, status, current):
+        if _is_live_binding(row, info, status, current, claimed=workspace_id in claimed):
             report["live"] += 1
             continue
         if report["deleted"] >= max_deletions:
@@ -136,35 +133,60 @@ async def reconcile_openrouter_keys(
 async def _load_bindings(
     session_factory: async_sessionmaker[AsyncSession],
     named: Sequence[tuple[KeyInfo, str, int]],
-) -> tuple[dict[str, str], dict[str, ProviderManagedKey], dict[str, ProviderManagedKey]]:
+    now: datetime,
+) -> tuple[dict[str, str], set[str], dict[str, ProviderManagedKey], dict[str, ProviderManagedKey]]:
+    """Workspace statuses, workspaces with a live execution/monitor claim, and key rows."""
     workspace_ids = sorted({workspace_id for _info, workspace_id, _seq in named})
     async with session_factory() as session:
         statuses: dict[str, str] = {}
+        claimed: set[str] = set()
         if workspace_ids:
             rows = await session.execute(
-                select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
+                select(
+                    Workspace.id,
+                    Workspace.status,
+                    Workspace.execution_claimed_by,
+                    Workspace.execution_claim_expires_at,
+                    Workspace.monitor_claimed_by,
+                    Workspace.monitor_claim_expires_at,
+                ).where(Workspace.id.in_(workspace_ids))
             )
-            statuses = {str(ws_id): str(status) for ws_id, status in rows.all()}
+            for ws_id, status, executor, executor_until, monitor, monitor_until in rows.all():
+                statuses[str(ws_id)] = str(status)
+                if _claim_live(executor, executor_until, now) or _claim_live(
+                    monitor, monitor_until, now
+                ):
+                    claimed.add(str(ws_id))
         keys = ProviderManagedKeyRepository(session)
         by_hash = await keys.by_hashes([info.hash for info, _ws, _seq in named])
         by_name = await keys.by_names([info.name for info, _ws, _seq in named])
         session.expunge_all()
-    return statuses, by_hash, by_name
+    return statuses, claimed, by_hash, by_name
+
+
+def _claim_live(owner: str | None, expires_at: datetime | None, now: datetime) -> bool:
+    return owner is not None and expires_at is not None and expires_at > now
 
 
 def _is_live_binding(
-    row: ProviderManagedKey | None, info: KeyInfo, status: str, now: datetime
+    row: ProviderManagedKey | None,
+    info: KeyInfo,
+    status: str,
+    now: datetime,
+    *,
+    claimed: bool,
 ) -> bool:
     if row is None or WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(status)):
         return False
     if row.status == KeyStatus.minting.value:
         # The POST may still be in flight: its hash is not recorded yet.
         return row.created_at > now - MINTING_GRACE
+    # A live claim keeps an active key even if its heartbeat died silently; the
+    # claim holder's next acquire finalizes a key it does not hold.
     return (
         row.status == KeyStatus.active.value
         and row.key_hash == info.hash
-        and row.lease_expires_at is not None
-        and row.lease_expires_at > now
+        and (claimed or (row.lease_expires_at is not None and row.lease_expires_at > now))
     )
 
 

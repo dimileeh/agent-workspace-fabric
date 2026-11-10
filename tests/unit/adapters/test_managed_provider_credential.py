@@ -135,6 +135,30 @@ async def test_release_runs_when_the_run_fails_or_is_cancelled(tmp_path):
     assert broker.lease.heartbeats >= 1
 
 
+async def test_a_failing_heartbeat_keeps_beating_until_release(tmp_path):
+    class _FlakyLease(_Lease):
+        async def heartbeat(self) -> None:
+            self.heartbeats += 1
+            if self.heartbeats == 1:
+                # e.g. asyncpg's OSError while Postgres restarts (not a SQLAlchemy error).
+                raise OSError("connection refused")
+
+    hanging = FakeCommandRunner()
+    hanging.queue_hang()
+    broker = _Broker(_FlakyLease())
+    task = asyncio.create_task(_run(_adapter(hanging, broker), tmp_path))
+    for _ in range(200):
+        if broker.lease.heartbeats >= 3:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert broker.lease.heartbeats >= 3
+    assert broker.lease.released == [True]
+
+
 @pytest.mark.parametrize(
     ("stderr", "exhausted"),
     [

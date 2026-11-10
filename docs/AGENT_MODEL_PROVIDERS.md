@@ -386,8 +386,11 @@ following:
 - It lists `awf-*` keys page by page.
 - After recording their usage, it deletes every key with no live binding:
   orphans from crashes, terminal workspaces, failed deletes and unbound mints
-  older than a 10-minute grace window. Each deletion emits
-  `provider.managed_key.orphan_deleted` (`PROVIDER_MANAGED_KEY_ORPHAN_DELETED`).
+  older than a 10-minute grace window. An active key stays live while its lease
+  is unexpired or its workspace holds a live execution or monitor claim. Each
+  deletion emits `provider.managed_key.orphan_deleted`
+  (`PROVIDER_MANAGED_KEY_ORPHAN_DELETED`); a database error on one key is counted
+  as failed without aborting the sweep.
 - It skips and counts keys of workspaces unknown to this control plane; it never
   deletes them.
 
