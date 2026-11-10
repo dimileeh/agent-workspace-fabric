@@ -28,6 +28,15 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 _git_env = git_env_without_object_lookup_overrides
 
 
+@pytest.fixture
+def tracked_fifo_worktree(tmp_path: Path) -> Path:
+    """Build the git worktree outside the timed call so the budget covers only the probe."""
+    worktree = tmp_path / "ws_tracked_fifo"
+    worktree.mkdir()
+    replace_tracked_file_with_fifo(worktree)
+    return worktree
+
+
 @pytest.mark.unit
 def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_blocking(
     tmp_path: Path,
@@ -55,18 +64,13 @@ def test_nested_git_probe_git_dir_regular_classified_fifo_fails_closed_without_b
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(2)
+@pytest.mark.timeout(2, func_only=True)
 def test_git_worktree_blob_sha_regular_classified_fifo_fails_closed_without_blocking(
-    tmp_path: Path,
+    tracked_fifo_worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PRRT_kwDOSJAM6s6eVygp: hash-object reopen must not block on a swapped FIFO."""
-    worktree = tmp_path / "ws_blob_sha_fifo_toctou"
-    worktree.mkdir()
-    init_git_worktree(worktree)
-    fifo_path = worktree / "src" / "x.py"
-    fifo_path.unlink()
-    os.mkfifo(fifo_path, mode=0o644)
+    worktree = tracked_fifo_worktree
 
     real_kind = comment_verdict_residue._worktree_entry_kind
 
@@ -88,14 +92,12 @@ def test_git_worktree_blob_sha_regular_classified_fifo_fails_closed_without_bloc
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(2)
+@pytest.mark.timeout(2, func_only=True)
 def test_git_worktree_blob_sha_tracked_fifo_returns_promptly_without_writer(
-    tmp_path: Path,
+    tracked_fifo_worktree: Path,
 ) -> None:
     """PRRT_kwDOSJAM6s6eOY8W: tracked FIFO must not block on open without a writer."""
-    worktree = tmp_path / "ws_tracked_fifo"
-    worktree.mkdir()
-    replace_tracked_file_with_fifo(worktree)
+    worktree = tracked_fifo_worktree
 
     result = comment_verdict_residue._git_worktree_blob_sha(
         worktree_path=worktree,
@@ -140,14 +142,12 @@ def test_hash_untracked_residue_paths_fifo_returns_promptly_without_writer(
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(2)
+@pytest.mark.timeout(2, func_only=True)
 async def test_correction_residue_fingerprint_tracked_fifo_does_not_hang(
-    tmp_path: Path,
+    tracked_fifo_worktree: Path,
 ) -> None:
     """PRRT_kwDOSJAM6s6eOY8W: async residue probe must return promptly for tracked FIFO."""
-    worktree = tmp_path / "ws_correction_tracked_fifo"
-    worktree.mkdir()
-    replace_tracked_file_with_fifo(worktree)
+    worktree = tracked_fifo_worktree
 
     async def _run(cmd: list[str], **_kwargs: object) -> CommandResult:
         if "status" in cmd:
