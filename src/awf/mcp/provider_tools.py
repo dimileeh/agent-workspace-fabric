@@ -8,17 +8,28 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from awf.api.schemas import ErrorResponse
 from awf.api.schemas_providers import ProviderConnectionTestRequest, ProviderQueryRequest
+from awf.common.config import Settings
+from awf.mcp.server import DiskCheckProvider, _workspace_admission_disk_check
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.provider_catalog import ProviderCatalog
 from awf.service.provider_diagnostics import create_connection_test, provider_error, query_material
 from awf.service.workspaces import (
     WorkspaceCreateIdempotencyConflictError,
+    WorkspaceCreateInsufficientDiskError,
     WorkspaceProviderReadinessBlockedError,
 )
 
 
-def register_provider_tools(*, mcp: FastMCP, service: Any, safe_result: Any) -> None:
+def register_provider_tools(
+    *,
+    mcp: FastMCP,
+    service: Any,
+    safe_result: Any,
+    settings_value: Settings,
+    disk_check_provider: DiskCheckProvider | None,
+) -> None:
     catalog = ProviderCatalog()
 
     @mcp.tool()
@@ -75,10 +86,23 @@ def register_provider_tools(*, mcp: FastMCP, service: Any, safe_result: Any) -> 
                     "deadline_seconds": deadline_seconds,
                 }
             )
+            disk_check = await _workspace_admission_disk_check(
+                disk_check_provider=disk_check_provider, settings=settings_value
+            )
             result = await create_connection_test(
-                service, request, idempotency_key=idempotency_key.strip()
+                service,
+                request,
+                idempotency_key=idempotency_key.strip(),
+                disk_check=disk_check,
             )
             return safe_result(result.model_dump(mode="json"))
+        except WorkspaceCreateInsufficientDiskError as error:
+            return safe_result(
+                ErrorResponse(
+                    error_code=error.error_code, message=error.message, detail=error.detail
+                ).model_dump(mode="json"),
+                is_error=True,
+            )
         except WorkspaceCreateIdempotencyConflictError:
             return safe_result(provider_error("IDEMPOTENCY_CONFLICT"), is_error=True)
         except WorkspaceProviderReadinessBlockedError:

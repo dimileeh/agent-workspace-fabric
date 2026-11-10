@@ -207,7 +207,13 @@ def build_mcp_server(
 
     from awf.mcp.provider_tools import register_provider_tools
 
-    register_provider_tools(mcp=mcp, service=service, safe_result=_safe_result)
+    register_provider_tools(
+        mcp=mcp,
+        service=service,
+        safe_result=_safe_result,
+        settings_value=settings_value,
+        disk_check_provider=disk_check_provider,
+    )
     return mcp
 
 
