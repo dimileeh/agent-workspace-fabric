@@ -9,6 +9,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
+from awf.adapters.managed_credentials import ProviderCredentialError
 from awf.common.agent_execution import EXECUTION_POLICY_KEY, resolve_execution
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
@@ -143,6 +144,81 @@ async def test_expired_leases_and_old_intents_are_orphans_but_young_mints_are_no
         assert (young["live"], young["deleted"]) == (1, 0)
         assert (old["live"], old["deleted"]) == (0, 1)
         assert fake.keys == {}
+
+
+async def test_old_hashless_intents_without_a_remote_key_release_their_reservation():
+    fake = FakeOpenRouterManagement()
+    now = datetime.now(UTC)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        # The intent's key was deleted unused (or never minted) while the database
+        # was down: no hash is recorded, yet it reserves the whole budget.
+        await broker._reserve(ws, provider="openrouter", purpose="agent")
+        with pytest.raises(ProviderCredentialError) as exhausted:
+            await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        assert exhausted.value.reason_code == "PROVIDER_BUDGET_EXHAUSTED"
+
+        # An incomplete listing cannot prove the key absent; a young intent may
+        # still have its POST in flight.
+        await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=fake.client(),
+            now=lambda: now + timedelta(minutes=30),
+            max_pages=0,
+        )
+        await reconcile_openrouter_keys(
+            session_factory=factory, client=fake.client(), now=lambda: now
+        )
+        assert [r.status for r in await _rows(factory, ws)] == ["minting"]
+
+        await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=fake.client(),
+            now=lambda: now + timedelta(minutes=30),
+        )
+
+        (intent,) = await _rows(factory, ws)
+        assert (intent.status, intent.last_reason_code, intent.lease_expires_at) == (
+            "mint_failed",
+            "PROVIDER_MANAGED_KEY_NOT_FOUND",
+            None,
+        )
+        await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        assert fake.calls[-1][2]["name"] == f"awf-{ws}-2"
+        assert fake.calls[-1][2]["limit"] == 10.0
+
+
+async def test_a_listed_intent_left_by_the_deletion_cap_keeps_its_reservation():
+    fake = FakeOpenRouterManagement()
+    now = datetime.now(UTC)
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = ManagedKeyBroker(session_factory=factory, client=fake.client())
+        # An unbound orphan listed first uses up the sweep's only deletion; the
+        # intent's key was minted but its hash was never recorded.
+        fake.add_key(f"awf-{ws}-9")
+        _row_id, key_name, _limit, _budget = await broker._reserve(
+            ws, provider="openrouter", purpose="agent"
+        )
+        fake.add_key(key_name)
+
+        report = await reconcile_openrouter_keys(
+            session_factory=factory,
+            client=fake.client(),
+            now=lambda: now + timedelta(minutes=30),
+            max_deletions=1,
+        )
+
+        assert (report["deleted"], report["truncated"]) == (1, True)
+        # The intent's key still exists, so it must keep reserving its headroom.
+        assert [(r.seq, r.status) for r in await _rows(factory, ws)] == [
+            (1, "minting"),
+            (9, "orphan_deleted"),
+        ]
+        assert [key["name"] for key in fake.keys.values()] == [key_name]
 
 
 async def test_pagination_bounds_and_per_key_failure_isolation():

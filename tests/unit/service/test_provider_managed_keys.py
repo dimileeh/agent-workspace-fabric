@@ -449,6 +449,32 @@ async def test_unrecorded_minted_key_is_deleted_when_activation_cannot_persist(
         assert ("hash1" in fake.keys) is delete_fails
 
 
+async def test_confirmed_delete_after_activation_failure_releases_the_intent(monkeypatch):
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        ws = await _workspace(factory)
+        broker = _broker(factory, fake)
+
+        async def _fail(*_args, **_kwargs):
+            raise _db_error()
+
+        monkeypatch.setattr(broker, "_activate", _fail)
+        with pytest.raises(ProviderCredentialError):
+            await broker.acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+
+        (intent,) = await _rows(factory, ws)
+        assert (intent.status, intent.last_reason_code) == (
+            "deleted",
+            "PROVIDER_MANAGED_KEY_PERSIST_FAILED",
+        )
+        assert intent.deleted_at is not None and intent.lease_expires_at is None
+        # The deleted key never served a call, so the next mint gets the whole budget.
+        await _broker(factory, fake).acquire(workspace_id=ws, selection=_SELECTION, purpose="agent")
+        assert fake.calls[-1][2]["name"] == f"awf-{ws}-2"
+        assert fake.calls[-1][2]["limit"] == 10.0
+
+
 async def test_heartbeats_after_release_or_on_unhealthy_rows_change_nothing():
     fake = FakeOpenRouterManagement()
     async with postgres_test_engine() as engine:

@@ -86,6 +86,23 @@ class ProviderManagedKeyRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         return {row.key_name: row for row in rows}
 
+    async def hashless_intents_created_before(
+        self, cutoff: datetime, *, limit: int
+    ) -> list[ProviderManagedKey]:
+        """``minting`` intents that never recorded a hash, locked against activation."""
+        stmt = (
+            select(ProviderManagedKey)
+            .where(
+                ProviderManagedKey.status == ProviderManagedKeyStatus.minting.value,
+                ProviderManagedKey.key_hash.is_(None),
+                ProviderManagedKey.created_at <= cutoff,
+            )
+            .order_by(ProviderManagedKey.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def workspace_ids_with_unfinalized_keys(self, *, limit: int) -> list[str]:
         stmt = (
             select(ProviderManagedKey.workspace_id)

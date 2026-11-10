@@ -246,8 +246,20 @@ class ManagedKeyBroker:
         except SQLAlchemyError:
             # An unrecorded live key must not outlive this failed acquire; if the
             # delete fails too, the reconciler deletes the unbound ``awf-*`` key.
+            deleted = False
             with suppress(OpenRouterManagementError):
                 await client.delete_key(minted.info.hash)
+                deleted = True
+            if deleted:
+                # The key never served a call: release the intent's reservation
+                # (the reconciler releases it if the database is still down).
+                await self._update(
+                    row_id,
+                    status=KeyStatus.deleted.value,
+                    last_reason_code=PROVIDER_MANAGED_KEY_PERSIST_FAILED,
+                    lease_expires_at=None,
+                    deleted_at=self._now(),
+                )
             _log.warning(
                 "provider.managed_key.persist_failed",
                 workspace_id=workspace_id,

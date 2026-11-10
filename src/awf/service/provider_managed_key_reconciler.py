@@ -26,6 +26,7 @@ from awf.db.models import ProviderManagedKey, Workspace
 from awf.db.repositories import ProviderManagedKeyRepository, WorkspaceRepository
 from awf.service.openrouter_management import (
     DEFAULT_MAX_LIST_PAGES,
+    MANAGED_KEY_NOT_FOUND,
     KeyInfo,
     OpenRouterManagementClient,
     OpenRouterManagementError,
@@ -95,6 +96,11 @@ async def reconcile_openrouter_keys(
         report["deleted"] += 1
         await _mark(
             session_factory, row_id, status=KeyStatus.orphan_deleted.value, deleted_at=clock()
+        )
+    if not listing.truncated:
+        # Only a complete listing proves an old hashless intent's key absent.
+        await _release_absent_intents(
+            session_factory, {info.name for info in listing.keys}, current, limit=max_deletions
         )
     if named or report["truncated"]:
         _log.info("provider.managed_key.reconciled", **report)
@@ -178,6 +184,36 @@ async def _record_usage(
         current.updated_at = now
         await session.commit()
         return current.id
+
+
+async def _release_absent_intents(
+    session_factory: async_sessionmaker[AsyncSession],
+    listed_names: set[str],
+    now: datetime,
+    *,
+    limit: int,
+) -> None:
+    """Release old hashless intents whose key is not listed (it holds no spend).
+
+    Such a key was never minted, or was deleted unused when its activation could
+    not persist; either way the intent must stop reserving the budget.
+    """
+    async with session_factory() as session:
+        keys = ProviderManagedKeyRepository(session)
+        for row in await keys.hashless_intents_created_before(now - MINTING_GRACE, limit=limit):
+            if row.key_name in listed_names:
+                continue
+            row.status = KeyStatus.mint_failed.value
+            row.last_reason_code = MANAGED_KEY_NOT_FOUND
+            row.lease_expires_at = None
+            row.updated_at = now
+            _log.info(
+                "provider.managed_key.intent_released",
+                workspace_id=row.workspace_id,
+                key_name=row.key_name,
+                reason_code=MANAGED_KEY_NOT_FOUND,
+            )
+        await session.commit()
 
 
 async def _mark(
