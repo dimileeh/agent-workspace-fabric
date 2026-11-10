@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -36,11 +37,11 @@ def _extract_rest_paths_from_app() -> dict[str, str]:
 
 
 def _extract_mcp_tool_names() -> set[str]:
-    tool_names: set[str] = set()
-    for mcp_file in (SRC_ROOT / "mcp").glob("*.py"):
-        content = mcp_file.read_text(encoding="utf-8")
-        tool_names.update(re.findall(r'@mcp\.tool\(name="([^"]+)"\)', content))
-    return tool_names
+    from awf.common.config import Settings
+    from awf.mcp.server import build_mcp_server
+
+    mcp = build_mcp_server(service=object(), settings=Settings(_env_file=None))
+    return {tool.name for tool in asyncio.run(mcp.list_tools())}
 
 
 def _extract_cli_commands() -> set[str]:
