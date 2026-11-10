@@ -304,17 +304,21 @@ def execution_from_policy(policy: object) -> ExecutionSelection | None:
 
 
 def require_execution_admission(selection: ExecutionSelection, *, enabled: bool) -> None:
-    """Keep all expanded launch/promotion paths closed for the foundation release."""
-    if selection.third_party:
-        if not enabled:
-            raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
-        raise ValueError("EXECUTION_NETWORK_PROBE_UNSUPPORTED")
+    """Gate new selections; the isolated runtime probes before every invocation."""
+    if selection.third_party and not enabled:
+        raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
 
 
 def circuit_key(
     agent: str, policy: object, *, workspace_id: str | None = None
 ) -> CircuitKey | None:
     selected = execution_from_policy(policy)
+    if (
+        isinstance(policy, Mapping)
+        and policy.get("agent_execution_profile_pending")
+        and selected is None
+    ):
+        return None
     if selected:
         # Executor defaults can replace a native model before its first launch.
         # A historical placeholder cannot identify the circuit it will execute.
@@ -346,6 +350,19 @@ def promote_execution(policy: Mapping[str, Any], target: Mapping[str, Any]) -> d
     updated.pop("cursor_auto_mode", None)
     updated.pop("agent_effort", None)
     updated.pop(EXECUTION_POLICY_KEY, None)
+    updated.pop("coding_compatibility_evidence", None)
+    evidence = target.get("coding_compatibility_evidence")
+    if selected is not None and evidence is None:
+        evidence = next(
+            (
+                item.get("coding_compatibility_evidence")
+                for item in policy.get("provider_recovery", {}).get("fallbacks", [])
+                if execution_from_policy(item) == selected
+            ),
+            None,
+        )
+    if evidence is not None:
+        updated["coding_compatibility_evidence"] = evidence
     updated.pop("agent_provider", None)
     updated["agent_model"] = target["model"]
     if selected:
@@ -378,7 +395,10 @@ def bind_execution_profile(
             provider=target.get("agent_provider" if primary else "provider"),
             model=target.get("agent_model" if primary else "model"),
             effort=target.get("agent_effort") if primary else None,
-            allow_unverified=bool(updated.get("allow_unverified_model")),
+            allow_unverified=bool(
+                updated.get("allow_unverified_model")
+                or updated.get("require_compatibility_evidence")
+            ),
             profile=profile,
             environ=environ,
         )

@@ -869,6 +869,14 @@ async def _reject_unsupported_task_kind(
     go terminal while the recovery operation lingered unresolved.
     """
     task_kind = workspace.task_kind
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if (
+        task_kind == "provider_connection_test"
+        and is_diagnostic(workspace.task_policy)
+        and from_status == WorkspaceStatus.running
+    ):
+        return False
     if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
         message = (
             "task kind 'monitor_release_pr' is deprecated; monitor an existing "

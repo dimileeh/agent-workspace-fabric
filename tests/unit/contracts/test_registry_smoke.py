@@ -36,6 +36,12 @@ from tests.unit.mcp._parity_utils import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
+    "Provider model catalog": (
+        "tests/unit/mcp/test_provider_tools.py::test_tools_use_selected_material_and_same_create_service",
+    ),
+    "Provider connection test": (
+        "tests/unit/api/test_provider_connection_tests.py::test_diagnostic_idempotency_conflicts_and_no_feature_gate",
+    ),
     "Workspace create": (
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_hydrates_canonical_request_model",
     ),

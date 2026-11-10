@@ -25,6 +25,7 @@ from typing import Any, TextIO
 
 EXECUTION_CONTRACT_VERSION = 1
 RUNTIME_CONFIG_PATH = "/opt/awf/provider_config.py"
+RUNTIME_PYTHON_PATH = "/usr/local/bin/python3"
 _PROVIDER_PREFIXES = (
     "OPENAI_",
     "CODEX_",
@@ -215,17 +216,25 @@ def probe_connection(selection: Mapping[str, Any], environ: Mapping[str, str]) -
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
             data = json.loads(response.read(2_000_001))
+        entries = data["models"] if selection["provider"] == "ollama" else data["data"]
         names = (
             {m.get("name") for m in data["models"]}
             if selection["provider"] == "ollama"
             else {m.get("id") for m in data["data"]}
         )
-        if selection["model"] not in names and selection["model"] + ":latest" not in names:
+        model = selection["model"]
+        if model not in names:
+            model += ":latest"
+        if model not in names:
             return {"ok": False, "reason_code": "PROVIDER_MODEL_UNAVAILABLE"}
         return {
             "ok": True,
             "reason_code": "PROVIDER_ENDPOINT_READY",
             "evidence": "runtime_network_readiness_only",
+            "model_version": next(
+                (m.get("digest") for m in entries if m.get("name", m.get("id")) == model),
+                None,
+            ),
         }
     except urllib.error.HTTPError as error:
         return {"ok": False, "reason_code": f"PROVIDER_HTTP_{error.code}"}
@@ -243,6 +252,9 @@ def main() -> int:
     if selection.get("version") != EXECUTION_CONTRACT_VERSION:
         print("EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED", file=sys.stderr)
         return 78
+    if sys.argv[2:] == ["--probe-json"]:
+        print(json.dumps(probe_connection(selection, os.environ)))
+        return 0
     source = (
         Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
         if selection["agent"] == "codex"

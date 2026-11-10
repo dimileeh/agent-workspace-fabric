@@ -70,6 +70,8 @@ class CodexAdapter(AgentAdapter):
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
         ]
+        if self.diagnostic_events:
+            args.append("--json")
         selected_model = model or self._default_model
         if selected_model:
             args += ["--model", selected_model]

@@ -302,6 +302,14 @@ async def _recover_stale_active_execution(
     self: Any,
     candidate: _ActiveExecutionCandidate,
 ) -> None:
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if is_diagnostic(candidate.task_policy):
+        from awf.control.worker.provider_diagnostics import interrupt_diagnostic
+
+        await interrupt_diagnostic(self, candidate)
+        return
+
     monitor_recovery_resume_pending = await _monitor_provider_recovery_resume_pending(
         self._session_factory,
         candidate,

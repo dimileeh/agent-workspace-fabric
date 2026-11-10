@@ -91,6 +91,13 @@ async def _recover_preserved_active_execution(
     *,
     record_lineage_blocked_before_grace: bool = True,
 ) -> bool:
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if is_diagnostic(candidate.task_policy):
+        from awf.control.worker.provider_diagnostics import interrupt_diagnostic
+
+        return await interrupt_diagnostic(self, candidate)
+
     if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
         return False
 

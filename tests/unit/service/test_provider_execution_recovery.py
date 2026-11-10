@@ -329,7 +329,19 @@ def test_foundation_blocks_all_third_party_promotions(monkeypatch, provider, ena
         target_provider=target.provider,
         target_model=target.model,
     )
-    expected = "EXECUTION_NETWORK_PROBE_UNSUPPORTED" if enabled else "ADMISSION_DISABLED"
+    if enabled:
+        installed = install_recovery_selection(policy, decision)
+        assert installed["agent_execution"]["provider"] == target.provider
+        migrated, agent = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+        assert agent == target.agent and migrated["agent_execution"]["model"] == target.model
+        assert (
+            _install_fixed_recovery_model({"agent_execution": target.model_dump()}, "new-coder")[
+                "agent_execution"
+            ]["model"]
+            == "new-coder"
+        )
+        return
+    expected = "ADMISSION_DISABLED"
     with pytest.raises(ValueError, match=expected):
         install_recovery_selection(policy, decision)
     with pytest.raises(ValueError, match=expected):

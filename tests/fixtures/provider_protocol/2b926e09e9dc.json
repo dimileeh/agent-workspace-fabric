@@ -1,0 +1,75 @@
+{
+  "scope": "Preliminary CLI envelopes; never a deployed AWF live pass.",
+  "agent": "codex",
+  "provider": "ollama",
+  "model": "kimi-k2.7-code:cloud",
+  "events": [
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "AWF_NONCE=458fa1155b6580dd7f59c78fc7afbe5b\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py <<'EOF'\ndef response():\n    return 'probe:458fa1155b6580dd7f59c78fc7afbe5b'\n\n\nif __name__ == '__main__':\n    print(response())\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py <<'EOF'\ndef response():\n    return 'probe:458fa1155b6580dd7f59c78fc7afbe5b'\n\n\nif __name__ == '__main__':\n    print(response())\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_5",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /workspace/answer.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_5",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /workspace/answer.py'",
+        "aggregated_output": "probe:458fa1155b6580dd7f59c78fc7afbe5b\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    }
+  ],
+  "expected": "passed"
+}

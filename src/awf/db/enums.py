@@ -183,6 +183,9 @@ class TaskKind(StrEnum):
     Drives which executor + monitor path is used.
     """
 
+    provider_connection_test = "provider_connection_test"
+    """Internal fixed-fixture coding diagnostic; created only via provider tests."""
+
     feature_branch_pr = "feature_branch_pr"
     """Default: clone repo, run coding CLI, push PR against base branch,
     monitor comments + CI, squash-merge into base. The everyday path."""

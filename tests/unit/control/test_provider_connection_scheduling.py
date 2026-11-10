@@ -125,6 +125,6 @@ def test_claim_rejects_workers_missing_execution_contract_before_mutation():
     with pytest.raises(ValueError, match="EXECUTION_WORKER_CONTRACT_UNSUPPORTED"):
         _apply_execution_claim(worker, ws, owner_id="old")
     assert ws.execution_claimed_by is None
-    worker.execution_contract_version = 1
+    worker.execution_contract_version = 2
     _apply_execution_claim(worker, ws, owner_id="new")
     assert ws.execution_claimed_by == "new"

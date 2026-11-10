@@ -1,0 +1,132 @@
+{
+  "scope": "Preliminary CLI envelopes; never a deployed AWF live pass.",
+  "agent": "claude_code",
+  "provider": "ollama",
+  "model": "kimi-k2.7-code:cloud",
+  "events": [
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "functions.Bash:0",
+            "name": "Bash",
+            "input": {
+              "command": "python /opt/awf-probe/challenge.py",
+              "description": "Run the challenge program to get the AWF_NONCE value"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "functions.Bash:0",
+            "type": "tool_result",
+            "content": "AWF_NONCE=7a5124dafc066abf82d2c492b065acd5",
+            "is_error": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "functions.Read:1",
+            "name": "Read",
+            "input": {
+              "file_path": "/workspace/answer.py"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "functions.Read:1",
+            "type": "tool_result",
+            "content": "1\tdef response():\n2\t    return 'unfinished'\n3\t\n4\tif __name__ == '__main__':\n5\t    print(response())\n6\t"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "functions.Edit:2",
+            "name": "Edit",
+            "input": {
+              "replace_all": false,
+              "file_path": "/workspace/answer.py",
+              "old_string": "def response():\n    return 'unfinished'",
+              "new_string": "def response():\n    return 'probe:7a5124dafc066abf82d2c492b065acd5'"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "functions.Edit:2",
+            "type": "tool_result",
+            "content": "The file /workspace/answer.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "functions.Bash:3",
+            "name": "Bash",
+            "input": {
+              "command": "python /workspace/answer.py",
+              "description": "Run the answer program to verify output"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "functions.Bash:3",
+            "type": "tool_result",
+            "content": "probe:7a5124dafc066abf82d2c492b065acd5",
+            "is_error": false
+          }
+        ]
+      }
+    }
+  ],
+  "expected": "passed"
+}

@@ -15,6 +15,44 @@ from awf.adapters.provider_config import (
 from awf.common.agent_execution import resolve_execution
 
 
+@pytest.mark.parametrize("body", [b"invalid-json", b"{}", b'{"models":[null]}'])
+def test_malformed_provider_probe_is_invalid_without_launching_agent(
+    tmp_path, monkeypatch, capsys, body
+):
+    import io
+    from unittest.mock import Mock
+
+    import awf.adapters.provider_config as runtime
+
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="candidate", allow_unverified=True
+    )
+    opener = Mock()
+    opener.open.return_value = io.BytesIO(body)
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_args: opener)
+    monkeypatch.setattr(
+        runtime.sys,
+        "argv",
+        ["provider_config.py", json.dumps(selected.model_dump()), "--probe-json"],
+    )
+    monkeypatch.chdir(tmp_path)
+    launch = Mock()
+    monkeypatch.setattr(runtime, "run_cli_redacted", launch)
+
+    assert runtime.main() == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "ok": False,
+        "reason_code": "PROVIDER_RESPONSE_INVALID",
+    }
+    assert output.err == ""
+    launch.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+    request = opener.open.call_args.args[0]
+    assert request.full_url == selected.endpoint + "/api/tags"
+    assert opener.open.call_args.kwargs == {"timeout": 10}
+
+
 @pytest.mark.parametrize("agent", ["codex", "claude_code"])
 def test_parallel_workspace_config_and_credentials_are_isolated(tmp_path, agent):
     source = {

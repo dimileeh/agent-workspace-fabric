@@ -159,3 +159,22 @@ def test_auto_profile_connections_are_not_frozen_from_service_defaults(provider)
     assert "agent_execution" not in policy
     assert policy["agent_execution_profile_pending"] is True
     assert all("agent_execution" not in t for t in policy["provider_recovery"]["fallbacks"])
+
+
+def test_pending_third_party_never_projects_or_executes_as_native():
+    from awf.service.workspace_observability import effective_agent_identity
+
+    policy = {
+        "agent_execution_profile_pending": True,
+        "agent_provider": "ollama",
+        "agent_model": "candidate:cloud",
+        "allow_unverified_model": True,
+    }
+    identity = effective_agent_identity(agent="codex", task_policy=policy)
+    assert identity.model == "candidate:cloud"
+    assert identity.effort is None
+    with pytest.raises(ValueError, match="EXECUTION_PROFILE_BINDING_REQUIRED"):
+        _agent_defaults_for_workspace(
+            SimpleNamespace(agent="codex", task_policy=policy),
+            DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex],
+        )

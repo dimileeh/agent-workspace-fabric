@@ -83,6 +83,7 @@ class WorkspaceStackLaunchRequest:
     layout: WorktreeLayout
     profile: WorkspaceProfile
     execution: ExecutionSelection | None = None
+    diagnostic: bool = False
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
@@ -333,7 +334,7 @@ class ComposeStackLauncher:
         mirror_mount = AuthMount(
             source=str(layout.mirror_path),
             target=str(layout.mirror_path),
-            mode="rw",
+            mode="ro" if request.diagnostic else "rw",
         )
         auth_mounts = [mirror_mount]
         secret_lease_resolution: LocalSecretLeaseResolution | None = None
@@ -367,6 +368,10 @@ class ComposeStackLauncher:
         if isolated:
             satisfied_targets = satisfied_targets | frozenset(suppressed_paths)
             satisfied_providers = satisfied_providers | frozenset(suppressed_providers)
+        if request.diagnostic:
+            satisfied_targets |= frozenset(
+                {"/home/agent/.config/gh", "/home/agent/.ssh", "/home/agent/.gitconfig"}
+            )
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
@@ -374,6 +379,16 @@ class ComposeStackLauncher:
                 _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS,
                 suppressed_targets=suppressed_legacy_targets,
             )
+        elif request.diagnostic and self._auth_mount_resolver is not None:
+            if not third_party:
+                resolve = getattr(self._auth_mount_resolver, "resolve_diagnostic_auth", None)
+                if not callable(resolve):
+                    raise ValueError("PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED")
+                auth_mounts.extend(
+                    await asyncio.to_thread(
+                        resolve, workspace_id=request.workspace_id, agent=selected_agent
+                    )
+                )
         elif self._auth_mount_resolver is not None:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
@@ -384,7 +399,12 @@ class ComposeStackLauncher:
             auth_mounts.extend(
                 mount for mount in legacy_mounts if mount.target not in suppressed_legacy_targets
             )
-        if selected is not None and selected.third_party and self._auth_mount_resolver is not None:
+        if (
+            selected is not None
+            and selected.third_party
+            and self._auth_mount_resolver is not None
+            and not request.diagnostic
+        ):
             prepare = getattr(self._auth_mount_resolver, "resolve_execution_config", None)
             if not callable(prepare):
                 raise ValueError("EXECUTION_CONFIGURATION_ISOLATION_UNSUPPORTED")
@@ -393,6 +413,10 @@ class ComposeStackLauncher:
                     prepare, workspace_id=request.workspace_id, agent=selected.agent
                 )
             )
+        if request.diagnostic:
+            from awf.node.provider_diagnostics import diagnostic_auth_mounts
+
+            auth_mounts = diagnostic_auth_mounts(auth_mounts, selected_agent)
         services = await asyncio.to_thread(
             profile_services,
             profile,
@@ -443,7 +467,9 @@ class ComposeStackLauncher:
             )
         agent_environment = agent_environment_with_host_auth(
             agent_environment,
-            host_env={} if self._protected_profile_mounts is not None else None,
+            host_env={}
+            if request.diagnostic or self._protected_profile_mounts is not None
+            else None,
         )
         if isolated:
             agent_environment = tuple(
@@ -458,6 +484,8 @@ class ComposeStackLauncher:
                 auth_mounts,
                 _hosted_dynamic_file_auth_mount_targets(agent_environment),
             )
+        if request.diagnostic:
+            agent_environment += (("AWF_PROVIDER_DIAGNOSTIC", "1"),)
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,

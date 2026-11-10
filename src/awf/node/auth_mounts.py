@@ -194,6 +194,33 @@ class ServiceAuthMountResolver:
             overlay_mounter=self.overlay_mounter,
         )
 
+    def resolve_diagnostic_auth(self, *, workspace_id: str, agent: str) -> tuple[AuthMount, ...]:
+        """Copy only selected native auth, without tools/config or overlay state."""
+        import os
+        import re
+
+        if not re.fullmatch(r"ws_[A-Za-z0-9_]+", workspace_id):
+            raise ValueError("PROVIDER_DIAGNOSTIC_FIXTURE_FAILED")
+        relative = ".codex/auth.json" if agent == "codex" else ".claude/.credentials.json"
+        source = self.host_home / relative
+        if not source.is_file():
+            return ()
+        directory = self.work_dir / "auth" / workspace_id / "diagnostic" / agent
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = directory / source.name
+        shutil.copyfile(source, target)
+        target.chmod(0o600)
+        owner = source.stat()
+        uid = self.workspace_owner_uid if self.workspace_owner_uid is not None else owner.st_uid
+        gid = self.workspace_owner_gid if self.workspace_owner_gid is not None else owner.st_gid
+        os.chown(target, uid, gid)
+        os.chown(directory, uid, gid)
+        return (
+            AuthMount(
+                source=str(directory), target="/home/agent/" + relative.split("/")[0], mode="rw"
+            ),
+        )
+
     def resolve_execution_config(self, *, workspace_id: str, agent: str) -> AuthMount:
         """Read only configuration through the existing declared auth boundary.
 

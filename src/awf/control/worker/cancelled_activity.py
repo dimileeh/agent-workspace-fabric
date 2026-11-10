@@ -21,7 +21,10 @@ def _monitor_operations(workspace_id: Any) -> Any:
     return select(Operation).where(
         Operation.workspace_id == workspace_id,
         Operation.status.in_(("pending", "running")),
-        Operation.payload["owner"].as_string() == "pr_monitor",
+        or_(
+            Operation.payload["owner"].as_string() == "pr_monitor",
+            Operation.payload["source"].as_string() == "provider_connection_test",
+        ),
     )
 
 
@@ -94,6 +97,9 @@ async def reconcile_cancelled_activity(worker: Any, *, limit: int | None) -> Non
                     )
                 ).all()
             )
+            from awf.service.provider_diagnostics import record_diagnostic_cancellation
+
+            record_diagnostic_cancellation(ws)
             for operation in operations:
                 await OperationRepository(session).finish(
                     operation,

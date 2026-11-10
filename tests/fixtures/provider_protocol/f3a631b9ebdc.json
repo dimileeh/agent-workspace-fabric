@@ -1,0 +1,163 @@
+{
+  "scope": "Preliminary CLI envelopes; never a deployed AWF live pass.",
+  "agent": "codex",
+  "provider": "openrouter",
+  "model": "minimax/minimax-m2.7",
+  "events": [
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "AWF_NONCE=b3fcb73b1d9fe5f395c12e4ab10bd7b3\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_4",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:b3fcb73b1d9fe5f395c12e4ab10bd7b3\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_4",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:b3fcb73b1d9fe5f395c12e4ab10bd7b3\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_6",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_6",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "AWF_NONCE=30220a0069cb9d845cda4cf0b6a58ea4\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_8",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:30220a0069cb9d845cda4cf0b6a58ea4\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_8",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:30220a0069cb9d845cda4cf0b6a58ea4\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_10",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_10",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "AWF_NONCE=e62546c41ac3014f4833bb84876d0fc4\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_12",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:e62546c41ac3014f4833bb84876d0fc4\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_12",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py << 'EOF'\ndef response():\n    return \\\"probe:e62546c41ac3014f4833bb84876d0fc4\\\"\nEOF\"",
+        "aggregated_output": "",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_13",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python -c \"from answer import response; print(response())\"'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_13",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python -c \"from answer import response; print(response())\"'",
+        "aggregated_output": "probe:e62546c41ac3014f4833bb84876d0fc4\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    }
+  ],
+  "expected": "inconclusive"
+}

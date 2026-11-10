@@ -1015,3 +1015,22 @@ To verify the checked-in artifact has not drifted:
 ```bash
 uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
 ```
+
+## Provider catalog and coding diagnostics
+
+`POST /v1/providers/models/query` accepts `agent` (codex/claude_code), `provider`,
+optional `profile_ref` and inline `profile`. It returns bounded provider claims
+with `models`, `status`, `reason_code`, `checked_at`, `connection_scope`, `cached`,
+`evidence=provider_claim`, `coding_compatible=false`, `manual_entry_allowed=true`.
+Unsupported/failed discovery leaves ordinary manual model entry available.
+
+`POST /v1/providers/connection-tests` adds required `model`, optional `effort` and
+`deadline_seconds` (default 180, maximum 900). A nonempty `Idempotency-Key` is
+required. HTTP 202 returns `workspace_id`, `operation_id`,
+`label=provider_connection_test` and `status`. Identical requests replay the same
+workspace; conflicting payloads return 409 `IDEMPOTENCY_CONFLICT`. Candidate tests
+work while ordinary third-party admission is disabled. They run only the fixed
+internal fixture and never use a project repository, forge credentials or PR.
+Use existing workspace/operation/log/event reads and cancel/stop/destroy controls.
+Retry/refresh/validate/rebase/remonitor/guide are rejected with
+`PROVIDER_DIAGNOSTIC_REPLAY_FORBIDDEN`. See [provider lifecycle and evidence](AGENT_MODEL_PROVIDERS.md#discovery-and-connection-tests).

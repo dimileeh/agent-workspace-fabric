@@ -25,6 +25,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_non_fixed_with_mutation](#agent_non_fixed_with_mutation)
 
+### AGENT_PROVIDER_MODEL_UNVERIFIED
+**Problem:** No current exact coding-cycle proof matches the selected connection/runtime.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_provider_model_unverified](#agent_provider_model_unverified)
+
 ### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
 **Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
 **Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.
@@ -431,12 +438,26 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#execution_fallback_contract_unsupported](#execution_fallback_contract_unsupported)
 
+### EXECUTION_NETWORK_PROBE_PENDING
+**Problem:** Actual runtime-network readiness is deferred until invocation.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_pending](#execution_network_probe_pending)
+
 ### EXECUTION_NETWORK_PROBE_UNSUPPORTED
 **Problem:** Admission cannot verify the selected connection from the actual agent network.
 **Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
 **Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_unsupported](#execution_network_probe_unsupported)
+
+### EXECUTION_PROFILE_BINDING_REQUIRED
+**Problem:** The selected provider connection must be bound before execution.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_profile_binding_required](#execution_profile_binding_required)
 
 ### EXECUTION_PROFILE_CHANGED
 **Problem:** Provisioning retry found a repository profile or credential reference that differs from the frozen execution connection.
@@ -453,7 +474,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#execution_runtime_contract_unsupported](#execution_runtime_contract_unsupported)
 
 ### EXECUTION_WORKER_CONTRACT_UNSUPPORTED
-**Problem:** A live queue consumer does not advertise execution contract v1.
+**Problem:** A live queue consumer does not advertise the required execution worker capability (2 for expanded admission).
 **Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
 **Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
 **Related Command:** `awf workspace show <workspace_id>`
@@ -927,6 +948,167 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Refresh the provider credentials, restart or rebuild the AWF service/runtime if credentials are mounted into containers, then remonitor or reschedule the workspace.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
+
+### PROVIDER_DIAGNOSTIC_BOOTSTRAP_FAILED
+**Problem:** The isolated diagnostic runtime could not be provisioned.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_bootstrap_failed](#provider_diagnostic_bootstrap_failed)
+
+### PROVIDER_DIAGNOSTIC_CLEANUP_FAILED
+**Problem:** Diagnostic teardown failed; the owned fixture is retained.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_cleanup_failed](#provider_diagnostic_cleanup_failed)
+
+### PROVIDER_DIAGNOSTIC_CONTRACT_UNSUPPORTED
+**Problem:** The diagnostic version, fixture or frozen identity is unsupported.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_contract_unsupported](#provider_diagnostic_contract_unsupported)
+
+### PROVIDER_DIAGNOSTIC_EVIDENCE_MISSING
+**Problem:** Required typed tool evidence is missing, malformed or truncated; result is inconclusive.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_evidence_missing](#provider_diagnostic_evidence_missing)
+
+### PROVIDER_DIAGNOSTIC_EXECUTION_FAILED
+**Problem:** The one-shot diagnostic invocation failed; no replay is scheduled.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_execution_failed](#provider_diagnostic_execution_failed)
+
+### PROVIDER_DIAGNOSTIC_FIXTURE_FAILED
+**Problem:** The fixture does not satisfy the trusted nonce-dependent oracle.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_fixture_failed](#provider_diagnostic_fixture_failed)
+
+### PROVIDER_DIAGNOSTIC_HOSTED_UNSUPPORTED
+**Problem:** Hosted workers cannot enforce the diagnostic contract.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_hosted_unsupported](#provider_diagnostic_hosted_unsupported)
+
+### PROVIDER_DIAGNOSTIC_INTERRUPTED
+**Problem:** Worker ownership was lost; the diagnostic is inconclusive and cannot replay.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_interrupted](#provider_diagnostic_interrupted)
+
+### PROVIDER_DIAGNOSTIC_PASSED
+**Problem:** Ordered dependent CLI tool turns and independent fixture verification passed.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_passed](#provider_diagnostic_passed)
+
+### PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED
+**Problem:** The selected model sidecar depends on project resources or credentials.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_profile_unsupported](#provider_diagnostic_profile_unsupported)
+
+### PROVIDER_DIAGNOSTIC_PROTOCOL_PASSED
+**Problem:** The CLI protocol contains two completed dependent tool turns.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_protocol_passed](#provider_diagnostic_protocol_passed)
+
+### PROVIDER_DIAGNOSTIC_READY
+**Problem:** The isolated fixture workspace is ready.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_ready](#provider_diagnostic_ready)
+
+### PROVIDER_DIAGNOSTIC_REPLAY_FORBIDDEN
+**Problem:** This control could replay diagnostic work; create a new connection test instead.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_replay_forbidden](#provider_diagnostic_replay_forbidden)
+
+### PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED
+**Problem:** The runtime lacks the immutable diagnostic fixture capability.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_runtime_unsupported](#provider_diagnostic_runtime_unsupported)
+
+### PROVIDER_DIAGNOSTIC_TIMEOUT
+**Problem:** The bounded diagnostic deadline expired.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_timeout](#provider_diagnostic_timeout)
+
+### PROVIDER_DIAGNOSTIC_VERIFYING
+**Problem:** AWF is independently verifying the fixed fixture.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_verifying](#provider_diagnostic_verifying)
+
+### PROVIDER_DIAGNOSTIC_WORKER_UNSUPPORTED
+**Problem:** All live queue consumers must advertise diagnostic worker capability 2.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_worker_unsupported](#provider_diagnostic_worker_unsupported)
+
+### PROVIDER_DISCOVERY_AVAILABLE
+**Problem:** A bounded provider catalog is available; capabilities are provider claims.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_available](#provider_discovery_available)
+
+### PROVIDER_DISCOVERY_NETWORK_UNSUPPORTED
+**Problem:** Catalog discovery cannot reproduce the selected sidecar network.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_network_unsupported](#provider_discovery_network_unsupported)
+
+### PROVIDER_DISCOVERY_RESPONSE_INVALID
+**Problem:** Catalog shape or response bounds are invalid.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_response_invalid](#provider_discovery_response_invalid)
+
+### PROVIDER_DISCOVERY_UNAVAILABLE
+**Problem:** Catalog discovery failed; manual model entry remains available.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_unavailable](#provider_discovery_unavailable)
+
+### PROVIDER_DISCOVERY_UNSUPPORTED
+**Problem:** This provider does not expose supported catalog discovery.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_unsupported](#provider_discovery_unsupported)
+
+### PROVIDER_SELECTION_INVALID
+**Problem:** The selected agent/provider/profile is invalid.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_selection_invalid](#provider_selection_invalid)
 
 ### PROVIDER_SETUP_AUTH_INVALID
 **Problem:** AWF could not authenticate one provider during setup.

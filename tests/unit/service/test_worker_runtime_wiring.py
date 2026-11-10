@@ -106,11 +106,14 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     class _WorkspaceCleaner:
         """Test helper for WorkspaceCleaner."""
 
-        def __init__(self, *, git: object, compose: object) -> None:
+        def __init__(
+            self, *, git: object, compose: object, auth_work_dir: Path | None = None
+        ) -> None:
             """Test helper for  init  ."""
             created["runtime_cleaner"] = self
             created["cleaner_git"] = git
             created["cleaner_compose"] = compose
+            created["cleaner_auth_work_dir"] = auth_work_dir
 
     class _LocalSecretLeaseMountResolver:
         """Test helper for LocalSecretLeaseMountResolver."""
@@ -213,6 +216,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     )
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
+    assert created["cleaner_auth_work_dir"] == created["compose_work_dir"]
 
 
 @pytest.mark.unit

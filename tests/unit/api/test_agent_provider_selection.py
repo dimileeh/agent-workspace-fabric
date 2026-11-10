@@ -77,13 +77,14 @@ async def test_admission_rejects_unsupported_fleet_and_never_bypasses_runtime_ne
             started_at=now,
             last_heartbeat_at=now,
             poll_interval_seconds=5,
-            execution_contract_version=1,
+            execution_contract_version=2,
         )
         await session.commit()
     capable = await client.post("/v1/workspaces", json=body)
+    assert capable.status_code == 202
     assert (
-        capable.json()["detail"]["provider_readiness_preflight"]["reason_code"]
-        == "EXECUTION_NETWORK_PROBE_UNSUPPORTED"
+        capable.json()["provider_readiness_preflight"]["reason_code"]
+        == "EXECUTION_NETWORK_PROBE_PENDING"
     )
     async with factory() as session:
         await WorkerHeartbeatRepository(session).record_heartbeat(

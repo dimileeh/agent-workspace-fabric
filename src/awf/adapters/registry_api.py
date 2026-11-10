@@ -89,5 +89,9 @@ def get_adapter(
             runtime_executor=runtime_executor,
             trusted_git_roots=trusted_git_roots,
             execution=execution,
+            compatibility_evidence=defaults.compatibility_evidence if defaults else None,
+            require_compatibility_evidence=defaults.require_compatibility_evidence
+            if defaults
+            else False,
         ),
     )

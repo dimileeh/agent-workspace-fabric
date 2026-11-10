@@ -537,7 +537,11 @@ async def _run_claimed_provision(
     claim_epoch: int | None = None,
 ) -> None:
     """Run provisioning between paired service-resource lifecycle hooks."""
-    hook_started = provisioner._before_provision is not None
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    hook_started = provisioner._before_provision is not None and not is_diagnostic(
+        workspace.task_policy
+    )
     try:
         await provisioner._provision_claimed_workspace(
             workspace_id,

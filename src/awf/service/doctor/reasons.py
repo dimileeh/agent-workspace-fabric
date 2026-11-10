@@ -20,6 +20,7 @@ from awf.service.doctor.reasons_helpers import (
 from awf.service.doctor.reasons_monitor_runtime_restart import (
     get_monitor_runtime_restart_reasons,
 )
+from awf.service.doctor.reasons_providers import get_provider_reasons
 from awf.service.doctor.reasons_runtime_setup_replay import get_runtime_setup_replay_reasons
 from awf.service.doctor.reasons_work_slots import get_work_slot_reasons
 from awf.service.doctor.reasons_worktree_registration import (
@@ -1428,6 +1429,7 @@ _REASON_TEXT.update(get_monitor_runtime_restart_reasons(_ReasonText))
 _REASON_TEXT.update(get_worktree_registration_reasons(_ReasonText))
 _REASON_TEXT.update(get_core_startup_reasons(_ReasonText))
 _REASON_TEXT.update(get_work_slot_reasons(_ReasonText))
+_REASON_TEXT.update(get_provider_reasons(_ReasonText))
 
 
 _REASON_TEXT.update(
@@ -1442,7 +1444,7 @@ _REASON_TEXT.update(
         for code, message in {
             "THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED": "Third-party Codex/Claude admission is disabled by default.",
             "EXECUTION_CONTRACT_UNSUPPORTED": "The stored execution snapshot has an unknown version or invalid identity.",
-            "EXECUTION_WORKER_CONTRACT_UNSUPPORTED": "A live queue consumer does not advertise execution contract v1.",
+            "EXECUTION_WORKER_CONTRACT_UNSUPPORTED": "A live queue consumer does not advertise the required execution worker capability (2 for expanded admission).",
             "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED": "The runtime cannot enforce the selected provider isolation contract.",
             "EXECUTION_NETWORK_PROBE_UNSUPPORTED": "Admission cannot verify the selected connection from the actual agent network.",
             "EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED": "The declared fallback lacks a complete enforceable execution snapshot.",

@@ -1,0 +1,75 @@
+{
+  "scope": "Preliminary CLI envelopes; never a deployed AWF live pass.",
+  "agent": "codex",
+  "provider": "openrouter",
+  "model": "moonshotai/kimi-k2.7-code",
+  "events": [
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python /opt/awf-probe/challenge.py'",
+        "aggregated_output": "AWF_NONCE=274ff906d61182c749a2cf7019a0f331\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py <<'EOF'\ndef response():\n    return 'probe:274ff906d61182c749a2cf7019a0f331'\nEOF\npython /workspace/answer.py\"",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"cat > /workspace/answer.py <<'EOF'\ndef response():\n    return 'probe:274ff906d61182c749a2cf7019a0f331'\nEOF\npython /workspace/answer.py\"",
+        "aggregated_output": "",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python -c \"from answer import response; print(response())\"'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'python -c \"from answer import response; print(response())\"'",
+        "aggregated_output": "probe:274ff906d61182c749a2cf7019a0f331\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    }
+  ],
+  "expected": "passed"
+}

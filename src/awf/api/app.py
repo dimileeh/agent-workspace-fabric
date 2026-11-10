@@ -146,6 +146,9 @@ def create_app(*, use_lifespan: bool = True, lifespan: Lifespan[FastAPI] | None 
         websocket_authorization_denial_handler,
     )
 
+    from awf.api.routes import providers
+
+    app.include_router(providers.router)
     app.include_router(health.router)
     app.include_router(discovery.router)
     app.include_router(callbacks.router)
