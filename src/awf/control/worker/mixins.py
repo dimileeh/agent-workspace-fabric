@@ -288,6 +288,7 @@ class WorkerDelegatesMixin:
     _maybe_reconcile_work_slot_leases = _work_slots._maybe_reconcile_work_slot_leases
     _maybe_reconcile_openrouter_keys = _provider_keys._maybe_reconcile_openrouter_keys
     _finalize_terminal_provider_keys = _provider_keys._finalize_terminal_provider_keys
+    _stop_provider_key_reconcile = _provider_keys._stop_provider_key_reconcile
     _load_work_slot_leases_for_reconcile = _work_slots._load_work_slot_leases_for_reconcile
     _probe_work_slot_lease = _work_slots._probe_work_slot_lease
     _apply_work_slot_reconcile_action = _work_slots._apply_work_slot_reconcile_action

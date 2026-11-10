@@ -140,6 +140,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._provider_key_reconciler = provider_key_reconciler
         self._provider_key_finalizer = provider_key_finalizer
         self._next_provider_key_reconcile_at = 0.0
+        self._provider_key_reconcile_task: asyncio.Task[None] | None = None
         # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
         # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
         # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
@@ -561,7 +562,9 @@ class ControlWorker(WorkerDelegatesMixin):
         try:
             await self.run_once()
             await self.wait_for_execution_tasks()
+            await self._stop_provider_key_reconcile(drain=True)
         finally:
+            await self._stop_provider_key_reconcile()
             await self._stop_heartbeat_task(heartbeat_task)
 
     async def run_forever(self: Any) -> None:
@@ -582,6 +585,7 @@ class ControlWorker(WorkerDelegatesMixin):
                             timeout=self._config.poll_interval_seconds,
                         )
         finally:
+            await self._stop_provider_key_reconcile()
             await self._stop_heartbeat_task(heartbeat_task)
 
     def _start_heartbeat_task(self: Any) -> asyncio.Task[None]:
