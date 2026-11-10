@@ -30,6 +30,7 @@ from awf.control.executor.missing_head_recovery import recover_missing_head_afte
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.control.executor.work_slot_binding import work_slot_for
+from awf.control.provider_budget_park import is_provider_park_reason
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
@@ -212,23 +213,42 @@ async def _run_agent_task_with_service_recovery(
             planning_retry_scope_baseline=planning_retry_scope_baseline,
         )
 
-    return await _run_agent_callable_with_service_recovery(
-        self,
-        run_agent=_run_initial_agent,
-        adapter=adapter,
-        workspace=workspace,
-        profile=profile,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        model=model,
-        command_evidence=command_evidence,
-        workspace_id=workspace_id,
-        execution_owner_id=execution_owner_id,
-        before_mark_failed=before_mark_failed,
-        before_agent_retry=before_agent_retry,
-        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
-        hold_writer_lock=hold_writer_lock,
-    )
+    try:
+        return await _run_agent_callable_with_service_recovery(
+            self,
+            run_agent=_run_initial_agent,
+            adapter=adapter,
+            workspace=workspace,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            model=model,
+            command_evidence=command_evidence,
+            workspace_id=workspace_id,
+            execution_owner_id=execution_owner_id,
+            before_mark_failed=before_mark_failed,
+            before_agent_retry=before_agent_retry,
+            after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+            hold_writer_lock=hold_writer_lock,
+        )
+    except AgentRunError as exc:
+        if not is_provider_park_reason(exc.reason_code):
+            raise
+        # The workspace's own managed-key budget/key stopped an unfinished task.
+        # The caller's non-zero-exit salvage would carry partial edits into
+        # validation and a PR once HEAD advanced, never reaching the park sink:
+        # park now (``_mark_failed`` diverts park codes) with the worktree intact
+        # (PRRT_kwDOSJAM6s613nGw).
+        await _run_before_mark_failed(before_mark_failed, reason_code=exc.reason_code)
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.agent_failure,
+            message=f"agent run stopped by the managed provider key ({exc.reason_code})",
+            reason_code=exc.reason_code,
+            details=exc.details,
+        )
+        return False, None
 
 
 async def _run_agent_callable_with_service_recovery(
