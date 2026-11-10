@@ -72,6 +72,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_readopt import (
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -651,21 +652,28 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 reason_code="PROVIDER_FALLBACK",
             )
             return
-        except ProviderRecoveryAuthError:
+        except ProviderRecoveryAuthError as exc:
+            # A managed-key park reuses this unwind; its sink parks, never fails.
+            parked_reason = (
+                exc.reason_code if isinstance(exc, ProviderManagedKeyParkedError) else None
+            )
             await self._write_monitor_log(
                 monitor_log,
                 {
                     "event": "monitor.provider_auth_failed",
                     "workspace_id": workspace_id,
-                    "reason_code": PROVIDER_AUTH_FAILED,
+                    "reason_code": parked_reason or PROVIDER_AUTH_FAILED,
                 },
             )
             if state is not None:
                 await self._persist_state(workspace_id, state)
             await self._terminate_failed(
                 workspace_id,
-                message="monitor: provider authentication failed",
-                reason_code=PROVIDER_AUTH_FAILED,
+                message=f"monitor: managed provider key unavailable ({parked_reason})"
+                if parked_reason
+                else "monitor: provider authentication failed",
+                reason_code=parked_reason or PROVIDER_AUTH_FAILED,
+                details=exc.details if parked_reason else None,
             )
             return
         finally:

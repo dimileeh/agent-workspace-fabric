@@ -56,6 +56,11 @@ from awf.control.operator_grants import (
     active_operator_grant_specs_in_session,
     consume_active_operator_grants_in_session,
 )
+from awf.control.provider_budget_park import (
+    PROVIDER_BUDGET_BLOCK_TYPE,
+    is_provider_park_reason,
+    park_for_provider_key,
+)
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -540,6 +545,18 @@ async def _mark_failed(
     row underneath a replacement claimant that kept ``monitoring_pr``
     (PRRT_kwDOSJAM6s6dNBTV).
     """
+    # A workspace's own managed-key budget/key failure parks for a human; it never
+    # fails, retries blindly or falls back (every agent call site funnels here).
+    if is_provider_park_reason(reason_code) and await park_for_provider_key(
+        self,
+        workspace_id=workspace_id,
+        from_status=from_status,
+        reason_code=str(reason_code),
+        message=message,
+        details=details,
+        monitor_owner_id=monitor_owner_id,
+    ):
+        return
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         final_reason_code = reason_code or failure_reason.value.upper()
@@ -1308,6 +1325,8 @@ async def _begin_execution(
             purpose = (
                 "answer the paused plan-conformance decision"
                 if decision_block
+                else "continue after the operator raised the provider budget"
+                if ws.block_type == PROVIDER_BUDGET_BLOCK_TYPE
                 else "resolve the paused protected quality-gate violation"
             )
             ws.task_prompt = (

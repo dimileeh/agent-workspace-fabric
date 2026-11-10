@@ -195,7 +195,7 @@ async def create_connection_test(
     spec, safe, selected = diagnostic_material(
         request,
         environ=os.environ,
-        managed_openrouter=settings.openrouter_management_key is not None,
+        managed_openrouter=getattr(settings, "openrouter_management_key", None) is not None,
     )
     spec["runtime_image"] = settings.agent_runtime_image
     if settings.hosted_node is not None:

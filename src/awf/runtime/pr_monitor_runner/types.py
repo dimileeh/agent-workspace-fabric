@@ -141,6 +141,19 @@ class ProviderRecoveryAuthError(Exception):
         self.details = dict(details) if details is not None else None
 
 
+class ProviderManagedKeyParkedError(ProviderRecoveryAuthError):
+    """A managed-key budget/key failure: unwind like a broken-auth repair, then park.
+
+    Subclassing the auth error reuses every monitor call site's existing unwind
+    (persist state, finish the operation, stop the loop); the terminal sink then
+    parks the workspace in ``blocked`` with ``reason_code`` instead of failing it.
+    """
+
+    def __init__(self, reason_code: str, *, details: dict[str, object] | None = None) -> None:
+        super().__init__(f"managed provider key unavailable: {reason_code}", details=details)
+        self.reason_code = reason_code
+
+
 class _MonitorPolicyBlockedError(Exception):
     """Raised when monitor-authored changes violate blocking workspace policy."""
 

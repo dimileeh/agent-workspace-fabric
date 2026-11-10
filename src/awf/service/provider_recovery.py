@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
@@ -153,6 +154,10 @@ def provider_recovery_metadata_from_failure(
     details: Mapping[str, Any] | None,
     task_policy: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if reason_code in PROVIDER_PARK_REASON_CODES:
+        # A workspace's own managed-key budget: never retried, never a fallback,
+        # never counted against the shared connection's circuit breaker.
+        return None
     details_mapping = details if isinstance(details, Mapping) else {}
     existing = details_mapping.get("provider_recovery")
     metadata: dict[str, Any] | None
