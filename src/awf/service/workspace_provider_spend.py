@@ -18,7 +18,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.common.agent_execution import managed_openrouter_frozen
+from awf.common.agent_execution import execution_from_policy, managed_openrouter_frozen
 from awf.db.repositories import ProviderManagedKeyRepository, ProviderSpendSummary
 from awf.service.provider_managed_keys import budget_from_policy
 
@@ -91,9 +91,25 @@ def provider_spend_payload(workspace: Any) -> dict[str, Any] | None:
     return payload
 
 
-def apply_exact_spend(llm_usage: Any, provider_spend: Mapping[str, Any] | None) -> Any:
-    """Report the exact provider spend as the usage cost of a managed run."""
+def _selection_managed(policy: object) -> bool:
+    try:
+        selection = execution_from_policy(policy)
+    except ValueError:
+        return False
+    return selection is not None and selection.managed_key
+
+
+def apply_exact_spend(
+    llm_usage: Any, provider_spend: Mapping[str, Any] | None, policy: object
+) -> Any:
+    """Report the exact provider spend as the usage cost of a managed run.
+
+    Only a managed *selection* is costed by its keys: a native primary that merely
+    declares a managed fallback keeps its own recorded cost.
+    """
     if provider_spend is None or provider_spend["status"] != "available":
+        return llm_usage
+    if not _selection_managed(policy):
         return llm_usage
     return {
         **llm_usage,

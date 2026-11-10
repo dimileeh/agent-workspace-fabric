@@ -1104,7 +1104,7 @@ def workspace_observability_payload(
             now=now,
             ordered_events=ordered_events,
         ),
-        "llm_usage": apply_exact_spend(usage_payload(workspace), spend),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend, workspace.task_policy),
         "provider_spend": spend,
         "recovery": recovery_payload(
             workspace,
@@ -1117,7 +1117,7 @@ def workspace_identity_usage_payload(workspace: Workspace) -> WorkspaceIdentityU
     spend = provider_spend_payload(workspace)
     return {
         **agent_identity_payload(workspace),
-        "llm_usage": apply_exact_spend(usage_payload(workspace), spend),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend, workspace.task_policy),
         "provider_spend": spend,
     }
 

@@ -46,7 +46,7 @@ def test_unmanaged_workspaces_have_no_provider_spend():
     assert provider_spend_payload(_ws({})) is None
     assert provider_spend_payload(_ws(None)) is None
     usage = {"cost_estimate": None, "status": "unavailable", "source": "none", "reason": "x"}
-    assert apply_exact_spend(usage, None) == usage
+    assert apply_exact_spend(usage, None, {}) == usage
 
 
 def test_unloaded_spend_degrades_to_unavailable_without_inventing_cost():
@@ -57,7 +57,7 @@ def test_unloaded_spend_degrades_to_unavailable_without_inventing_cost():
     assert payload["reason"] == "provider_spend_not_loaded"
     assert payload["budget_usd"] == 4.0 and payload["spend_usd"] is None
     usage = {"cost_estimate": None, "status": "unavailable", "source": "none", "reason": "x"}
-    assert apply_exact_spend(usage, payload) == usage
+    assert apply_exact_spend(usage, payload, _MANAGED_POLICY) == usage
 
 
 def test_prefetched_spend_is_exact_and_labelled():
@@ -95,7 +95,7 @@ def test_prefetched_spend_is_exact_and_labelled():
         "source": "none",
         "reason": "usage_not_reported",
     }
-    assert apply_exact_spend(usage, loaded) == {
+    assert apply_exact_spend(usage, loaded, _MANAGED_POLICY) == {
         "input_tokens": None,
         "cost_estimate": 1.25,
         "currency": "USD",
@@ -103,6 +103,26 @@ def test_prefetched_spend_is_exact_and_labelled():
         "source": "openrouter_key_usage",
         "reason": None,
     }
+
+
+def test_managed_fallback_does_not_replace_a_native_primary_cost():
+    fallback = {"agent": "codex", "provider": "openrouter", "model": "m/x"}
+    fallback[EXECUTION_POLICY_KEY] = _SELECTION.model_dump(mode="json")
+    native = resolve_execution(agent="codex", model="gpt-5.1-codex")
+    policy = {
+        EXECUTION_POLICY_KEY: native.model_dump(mode="json"),
+        "provider_recovery": {"fallbacks": [fallback]},
+        "provider_budget": _MANAGED_POLICY["provider_budget"],
+    }
+    usage = {"cost_estimate": 3.4, "currency": "USD", "status": "available", "source": "ccusage"}
+    with prefetched_provider_spend({"ws_a": None}):
+        spend = provider_spend_payload(_ws(policy))
+
+    assert spend is not None and spend["status"] == "available" and spend["spend_usd"] == 0.0
+    assert apply_exact_spend(usage, spend, policy) == usage
+    promoted = {**policy, EXECUTION_POLICY_KEY: fallback[EXECUTION_POLICY_KEY]}
+    assert apply_exact_spend(usage, spend, promoted)["cost_estimate"] == 0.0
+    assert apply_exact_spend(usage, spend, {EXECUTION_POLICY_KEY: {"version": 0}}) == usage
 
 
 async def _managed_workspace(factory, fake: FakeOpenRouterManagement) -> str:
