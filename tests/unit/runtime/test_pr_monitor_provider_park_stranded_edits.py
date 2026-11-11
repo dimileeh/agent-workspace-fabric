@@ -10,9 +10,10 @@ hint cycle finishes the failed sink before its guard runs — committing the edi
 or failing as ``REPAIR_DIRTY_COMMIT_FAILED`` when they still will not commit.
 The marker leaves the workspace row before the resumed repair's agent runs, so a
 restart mid-agent cannot pass the agent's own dirt off as the park's residue
-(PRRT_kwDOSJAM6s619LVg). The resume commits only the dirt the park recorded,
-content and all: anything added or changed while the workspace sat parked is left
-for a human (PRRT_kwDOSJAM6s61_WVy).
+(PRRT_kwDOSJAM6s619LVg). The resume commits only the paths the park recorded,
+and only while their content still matches: anything added or changed while the
+workspace sat parked keeps the resume parked for a human as
+``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES``, untouched (PRRT_kwDOSJAM6s61_WVy).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
     PRStatus,
 )
-from awf.runtime.pr_monitor_runner import provider_park_stranded_edits
+from awf.runtime.pr_monitor_runner import provider_park_stranded_edits, remote_repair
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
@@ -49,7 +50,7 @@ from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     mark_provider_park_stranded_edits,
     record_provider_park_stranded_edits_evidence,
 )
-from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
@@ -178,6 +179,8 @@ async def test_stranded_edits_are_committed_on_the_preserved_head(tmp_path: Path
     assert sink["operation_start_head"] == _PRESERVED_HEAD
     assert sink["protected_scope_revert_remote_branch"] == _REMOTE_BRANCH
     assert sink["state"] is state
+    # The sink stages nothing but the paths the park recorded.
+    assert sink["only_paths"] == ("stranded_fix.py",)
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
     assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in state.threads_addressed_ids
 
@@ -281,16 +284,27 @@ async def test_edits_that_still_will_not_commit_fail_as_the_sink_failure(
 
 
 def _assert_left_for_a_human(
-    result: _GitPushResult | None, runner: _FakeRunner, unverified_paths: list[str]
+    result: _GitPushResult | None,
+    runner: _FakeRunner,
+    *,
+    extra_paths: tuple[str, ...] = (),
+    changed_paths: tuple[str, ...] = (),
+    sink_calls: int = 0,
 ) -> None:
     assert result is not None
     assert result.failed is True
-    assert result.reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert result.reason_code == "PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES"
+    # Parked for a human, never a terminal monitor failure.
+    assert result.terminal_monitor_failure is False
+    assert _git_push_failure_outcome(result) == "repair_start_blocked"
     assert result.details is not None
     assert result.details["phase"] == "provider_park_resume"
     assert result.details["preserved_head"] == _PRESERVED_HEAD
-    assert result.details["unverified_paths"] == unverified_paths
-    assert runner.sink_calls == []
+    assert result.details["extra_paths"] == list(extra_paths)
+    assert result.details["changed_paths"] == list(changed_paths)
+    for path in (*extra_paths, *changed_paths):
+        assert path in result.stderr
+    assert len(runner.sink_calls) == sink_calls
 
 
 @pytest.mark.unit
@@ -304,7 +318,11 @@ async def test_an_edit_made_while_parked_is_never_committed_with_the_stranded_ed
 
     result = await _resume(runner, state, tmp_path)
 
-    _assert_left_for_a_human(result, runner, ["operator_notes.py"])
+    _assert_left_for_a_human(result, runner, extra_paths=("operator_notes.py",))
+    # Nothing is committed or discarded: both files are exactly as they were.
+    worktree = tmp_path / _WORKSPACE_ID
+    assert (worktree / "operator_notes.py").read_text() == "an operator's unrelated edit\n"
+    assert (worktree / "stranded_fix.py").read_text() == "the agent's fix\n"
     # The marker stays: once a human settles the extra dirt, a later resume commits.
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
     assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY in state.threads_addressed_ids
@@ -317,7 +335,65 @@ async def test_a_stranded_file_changed_while_parked_is_left_for_a_human(tmp_path
     _write(tmp_path, "stranded_fix.py", "the agent's fix\nplus an operator's line\n")
     runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
 
-    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, changed_paths=("stranded_fix.py",))
+    assert (tmp_path / _WORKSPACE_ID / "stranded_fix.py").read_text() == (
+        "the agent's fix\nplus an operator's line\n"
+    )
+
+
+@pytest.mark.unit
+async def test_a_stranded_file_reverted_while_parked_blocks_the_rest(tmp_path: Path) -> None:
+    # Every recorded path must still hold the content the park left, not just the
+    # ones still dirty: half of the park's edits never ride in on their own.
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    _write(tmp_path, "stranded_test.py", "the agent's test\n")
+    state = await _parked_state(tmp_path, ("stranded_fix.py", "stranded_test.py"))
+    (tmp_path / _WORKSPACE_ID / "stranded_test.py").unlink()
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, changed_paths=("stranded_test.py",))
+
+
+@pytest.mark.unit
+async def test_a_file_that_appears_during_the_commit_is_left_for_a_human(
+    tmp_path: Path,
+) -> None:
+    # The writer lock only fences AWF's own writers. Dirt a human adds while the
+    # sink commits is never staged with the park's paths, and it parks the resume
+    # rather than failing it as a stranded commit.
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    runner = _FakeRunner(
+        [_dirty(["stranded_fix.py"]), _dirty(["late_notes.py"])],
+        commits=True,
+    )
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, extra_paths=("late_notes.py",), sink_calls=1)
+    assert runner.sink_calls[0]["only_paths"] == ("stranded_fix.py",)
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_a_long_list_of_unexpected_paths_is_summarized(tmp_path: Path) -> None:
+    state = await _parked_state(tmp_path)
+    extra = [f"generated/file_{index:02d}.py" for index in range(12)]
+    runner = _FakeRunner([_dirty(extra)], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.details is not None
+    # The details keep every path; the operator-facing message names the first ten.
+    assert result.details["extra_paths"] == extra
+    assert "generated/file_09.py" in result.stderr
+    assert "generated/file_10.py" not in result.stderr
+    assert "and 2 more" in result.stderr
 
 
 @pytest.mark.unit
@@ -333,7 +409,9 @@ async def test_a_park_without_evidence_commits_nothing_it_finds_dirty(
         state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] = evidence
     runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
 
-    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, extra_paths=("stranded_fix.py",))
 
 
 @pytest.mark.unit
@@ -348,7 +426,9 @@ async def test_dirt_the_resume_cannot_read_is_left_for_a_human(
     monkeypatch.setattr(provider_park_stranded_edits, "_path_identities", _unreadable)
     runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
 
-    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, changed_paths=("stranded_fix.py",))
 
 
 @pytest.mark.unit
@@ -364,6 +444,7 @@ async def test_deletions_symlinks_and_executables_the_park_left_are_committed(
 
     assert await _resume(runner, state, tmp_path) is None
     assert len(runner.sink_calls) == 1
+    assert runner.sink_calls[0]["only_paths"] == paths
 
 
 @pytest.mark.unit
@@ -390,7 +471,9 @@ async def test_a_changed_mode_link_or_kind_is_left_for_a_human(tmp_path: Path, c
         _write(tmp_path, "deleted.py", "restored by an operator\n")
     runner = _FakeRunner([_dirty([path])], commits=True)
 
-    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, [path])
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, changed_paths=(path,))
 
 
 @pytest.mark.unit
@@ -736,3 +819,108 @@ async def test_a_resume_sink_error_ends_the_resume_like_the_agents_own(
     assert "supply-chain policy blocked the stranded edits" in result.stderr
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pr_terminal", [False, True])
+async def test_budget_raise_resume_parks_unexpected_changes_for_a_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pr_terminal: bool,
+) -> None:
+    runner = _hint_runner(factory, tmp_path)
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _budget_resume_state(tmp_path)
+    _write(tmp_path, "operator_notes.py", "an operator's unrelated edit\n")
+    moot = _GitPushResult(pushed=False, failed=False, returncode=0, reason_code="PR_MERGED")
+
+    async def _guard(**_kwargs: object) -> _GitPushResult:
+        return _dirty(["operator_notes.py", "stranded_fix.py"])
+
+    async def _sink(**_kwargs: object) -> bool:
+        raise AssertionError("the resume must not commit over unexpected changes")
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        raise AssertionError("the resume must not start a repair over unexpected changes")
+
+    async def _terminal_check(**_kwargs: object) -> _GitPushResult | None:
+        return moot if pr_terminal else None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _guard)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _sink)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _terminal_check)
+
+    result = await _run_hint_cycle(runner, state, tmp_path)
+
+    assert state.pending_operator_hint is not None
+    if pr_terminal:
+        # A PR that merged or closed meanwhile makes the resume moot; no human ping.
+        assert result is moot
+        assert state.pending_operator_hint.status == "pending"
+        return
+    assert result.reason_code == "PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES"
+    assert result.terminal_monitor_failure is False
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "operator_notes.py" in (state.pending_operator_hint.status_reason or "")
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+    assert (tmp_path / _WORKSPACE_ID / "operator_notes.py").read_text() == (
+        "an operator's unrelated edit\n"
+    )
+
+
+@pytest.mark.unit
+async def test_the_sink_stages_only_the_paths_it_is_limited_to(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _ok(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_repair, "verify_head_object_exists", _ok)
+    monkeypatch.setattr(remote_repair, "repair_agent_runtime_ownership", _ok)
+    workspace_id = await seed_monitoring_workspace(factory)
+    status = " M stranded_fix.py\n?? operator_notes.py\n"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout=status)  # status before the commit-side checks
+    cmd.queue_result(stdout=status)  # status under the writer lock
+    cmd.queue_result()  # add
+    cmd.queue_result(returncode=1)  # diff --cached --quiet: something is staged
+    cmd.queue_result()  # commit
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    (tmp_path / workspace_id).mkdir()
+    protected_scope_statuses: list[object] = []
+
+    async def _repair(**kwargs: object) -> object:
+        protected_scope_statuses.append(kwargs["status_stdout"])
+        return kwargs["status_stdout"]
+
+    async def _violations(**kwargs: object) -> list[object]:
+        protected_scope_statuses.append(kwargs["status_stdout"])
+        return []
+
+    monkeypatch.setattr(runner, "_repair_protected_scope_changes_before_commit", _repair)
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations)
+
+    committed = await runner._commit_dirty_worktree(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        message="fix: commit stranded edits",
+        compose_project="awf_ws_park_stranded",
+        compose_file=tmp_path / "compose.yml",
+        task_tag=None,
+        only_paths=("stranded_fix.py",),
+    )
+
+    assert committed is True
+    add = next(call.args for call in cmd.calls if "add" in call.args)
+    assert add[add.index("--") + 1 :] == ["stranded_fix.py"]
+    # Protected-scope repair never sees, so never reverts, a path outside the limit.
+    assert protected_scope_statuses == [" M stranded_fix.py\n", " M stranded_fix.py\n"]

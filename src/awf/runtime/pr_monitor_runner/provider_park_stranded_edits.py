@@ -24,10 +24,11 @@ residue instead of failing closed on them as pre-existing dirt.
 
 The resume commits only what the park left (PRRT_kwDOSJAM6s61_WVy): the run
 loop's park sink records each path the park leaves dirty with its content, and
-the resume, under the worktree writer lock, commits only while every dirty path
-still matches that evidence. A file someone added or changed while the workspace
-sat parked — or a park with no evidence — is left for a human as pre-existing
-dirt instead of riding into the repair commit.
+the resume, under the worktree writer lock, commits exactly those paths — and
+only while every one still holds that content and no other path is dirty. A
+file someone added or changed while the workspace sat parked — or a park with no
+evidence — is neither committed nor discarded: the resume stays parked for a
+human as ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES``, naming those paths.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
+    _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
 )
@@ -66,12 +68,13 @@ PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: Final = (
 )
 """Reserved ``MonitorState.threads_addressed_ids`` key: what the park left dirty.
 
-A JSON object mapping each dirty path to its content identity, recorded by the
-run loop's park sink before it persists the parked state. It lives and leaves
-with the stranded-edits marker.
+A JSON object mapping each dirty repo-relative path to its content identity,
+recorded by the run loop's park sink before it persists the parked state
+alongside the marker's HEAD. It lives and leaves with the stranded-edits marker.
 """
 
 _RESUME_COMMIT_MESSAGE: Final = "fix: commit repair edits stranded by a managed provider key park"
+_MESSAGE_PATH_LIMIT: Final = 10
 
 _log = get_logger(__name__)
 
@@ -100,7 +103,7 @@ async def record_provider_park_stranded_edits_evidence(
 
     The paths are the ones the repair-start guard reports — the ones the resumed
     sink would stage — each with its content identity. A worktree the guard or the
-    hashing cannot read records nothing, and the resume then fails closed on any
+    hashing cannot read records nothing, and the resume then commits none of the
     dirt it finds.
     """
     threads_addressed = state.threads_addressed_ids
@@ -152,14 +155,16 @@ async def commit_provider_park_stranded_edits(
 
     The marker is dropped once the worktree is clean — the retried sink committed
     the edits, or something already had — from the workspace row as well as from
-    memory, before the resumed repair's agent can dirty the worktree again. Edits
-    that still will not commit return
+    memory, before the resumed repair's agent can dirty the worktree again. The
+    sink commits only the paths the park recorded, and only while every one still
+    holds the content the park left and nothing else is dirty. Otherwise nothing
+    is committed or discarded: the resume returns
+    ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES`` naming the extra and changed paths
+    and keeps the marker. Recorded edits that still will not commit return
     ``REPAIR_DIRTY_COMMIT_FAILED`` with the stranded paths, and a ``git status``
-    failure is returned as-is, exactly as the repair-start guard returns it. Dirt
-    the park's evidence does not vouch for is never committed: it returns
-    ``PRE_EXISTING_DIRTY_WORKTREE`` naming the unverified paths and keeps the
-    marker. Sink exceptions propagate: the caller handles them as it handles the
-    same sink raising inside the repair agent's run.
+    failure is returned as-is, exactly as the repair-start guard returns it. Sink
+    exceptions propagate: the caller handles them as it handles the same sink
+    raising inside the repair agent's run.
     """
     preserved_head = state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY)
     if preserved_head is None:
@@ -173,15 +178,17 @@ async def commit_provider_park_stranded_edits(
             operation_type=operation_type,
         )
         if dirty is not None and dirty.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
-            unverified_paths = await _unverified_stranded_paths(
-                state, worktree_path=worktree_path, paths=_dirty_paths(dirty)
+            recorded = _recorded_identities(state)
+            extra_paths, changed_paths = await _unexpected_worktree_changes(
+                recorded, worktree_path=worktree_path, dirty_paths=_dirty_paths(dirty)
             )
-            if unverified_paths:
-                return _unverified_stranded_edits_result(
+            if extra_paths or changed_paths:
+                return _unexpected_worktree_changes_result(
                     dirty,
                     workspace_id=workspace_id,
                     preserved_head=preserved_head,
-                    unverified_paths=unverified_paths,
+                    extra_paths=extra_paths,
+                    changed_paths=changed_paths,
                 )
             await runner._commit_dirty_worktree(
                 workspace_id=workspace_id,
@@ -192,12 +199,24 @@ async def commit_provider_park_stranded_edits(
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_push_url,
                 operation_start_head=preserved_head or None,
+                only_paths=tuple(sorted(recorded)),
             )
             dirty = await runner._pre_existing_dirty_repair_worktree_result(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 operation_type=operation_type,
             )
+            # The lock only fences AWF's own writers: dirt a human added meanwhile
+            # was never staged, and stays theirs to settle.
+            extra_paths = sorted(set(_dirty_paths(dirty)) - recorded.keys())
+            if dirty is not None and extra_paths:
+                return _unexpected_worktree_changes_result(
+                    dirty,
+                    workspace_id=workspace_id,
+                    preserved_head=preserved_head,
+                    extra_paths=extra_paths,
+                    changed_paths=[],
+                )
     if dirty is None:
         # Row first: a write fault then leaves the in-memory marker for the next
         # in-process resume to retry, rather than a row-only one a restart reloads.
@@ -265,30 +284,50 @@ def _path_identity(path: Path) -> str | None:
     return f"file:{'x' if info.st_mode & 0o111 else '-'}:{digest}"
 
 
-async def _unverified_stranded_paths(
-    state: MonitorState, *, worktree_path: Path, paths: list[str]
-) -> list[str]:
-    """Return the dirty paths the park's evidence does not vouch for."""
+def _recorded_identities(state: MonitorState) -> dict[str, str | None]:
+    """What the park recorded it left dirty; empty when it recorded nothing usable."""
     try:
         evidence = json.loads(
             state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY) or ""
         )
-        current = await asyncio.to_thread(_path_identities, worktree_path, paths)
-    except (ValueError, OSError):
-        return sorted(paths)
-    if not isinstance(evidence, dict):
-        return sorted(paths)
-    return sorted(
-        path for path in paths if current[path] is None or evidence.get(path) != current[path]
+    except ValueError:
+        return {}
+    return cast("dict[str, str | None]", evidence) if isinstance(evidence, dict) else {}
+
+
+async def _unexpected_worktree_changes(
+    recorded: dict[str, str | None], *, worktree_path: Path, dirty_paths: list[str]
+) -> tuple[list[str], list[str]]:
+    """Return the dirty paths the park did not record, and the recorded paths that changed.
+
+    Every recorded path is checked, dirty or not: a stranded edit someone reverted
+    while parked would otherwise let the rest of the park's edits commit without it.
+    A recorded path the resume cannot read counts as changed.
+    """
+    extra_paths = sorted(path for path in dirty_paths if path not in recorded)
+    try:
+        current = await asyncio.to_thread(_path_identities, worktree_path, list(recorded))
+    except OSError:
+        return extra_paths, sorted(recorded)
+    changed_paths = sorted(
+        path for path, identity in current.items() if identity is None or identity != recorded[path]
     )
+    return extra_paths, changed_paths
 
 
-def _unverified_stranded_edits_result(
+def _path_summary(paths: list[str]) -> str:
+    shown = ", ".join(paths[:_MESSAGE_PATH_LIMIT])
+    hidden = len(paths) - _MESSAGE_PATH_LIMIT
+    return f"{shown} and {hidden} more" if hidden > 0 else shown
+
+
+def _unexpected_worktree_changes_result(
     dirty: _GitPushResult,
     *,
     workspace_id: str,
     preserved_head: str,
-    unverified_paths: list[str],
+    extra_paths: list[str],
+    changed_paths: list[str],
 ) -> _GitPushResult:
     from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
@@ -296,25 +335,32 @@ def _unverified_stranded_edits_result(
     details.update(
         phase="provider_park_resume",
         preserved_head=preserved_head or None,
-        unverified_paths=unverified_paths,
+        extra_paths=extra_paths,
+        changed_paths=changed_paths,
     )
     _log.warning(
-        "monitor.provider_park_stranded_edits_unverified",
+        "monitor.provider_park_resume_unexpected_worktree_changes",
         workspace_id=workspace_id,
-        reason_code=_PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        reason_code=_PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
         preserved_head=preserved_head or None,
-        unverified_paths=unverified_paths,
+        extra_paths=extra_paths,
+        changed_paths=changed_paths,
     )
+    findings = []
+    if extra_paths:
+        findings.append(f"dirty paths the park did not leave: {_path_summary(extra_paths)}")
+    if changed_paths:
+        findings.append(f"recorded paths changed since the park: {_path_summary(changed_paths)}")
     return _GitPushResult(
         pushed=False,
         failed=True,
         returncode=1,
         stderr=(
             "A managed provider key park left uncommitted repair edits, but the repair "
-            "worktree no longer holds only those edits; refusing to commit changes the "
-            "park did not leave."
+            "worktree holds changes the park did not leave; AWF committed none of them "
+            f"and left them untouched for a human ({'; '.join(findings)})."
         ),
-        reason_code=_PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        reason_code=_PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
         details=details,
     )
 

@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult, VerdictResult
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+    _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
@@ -154,6 +155,21 @@ async def _run_operator_hint_cycle(
             state=state,
         )
     if stranded_result is not None:
+        if stranded_result.reason_code == _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON:
+            # Changes the park did not leave stay put for a human (non-terminal);
+            # like the sink errors above, a PR that ended meanwhile needs no one.
+            terminal_moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="operator_hint_provider_park_resume",
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            if terminal_moot_result is not None:
+                return cast(_GitPushResult, terminal_moot_result)
+            mark_operator_hint_needs_human(state, stranded_result.stderr)
         return stranded_result
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,

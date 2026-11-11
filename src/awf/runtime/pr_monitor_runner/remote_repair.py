@@ -11,7 +11,7 @@ import json as json
 import os as os
 import re as re
 import time as time
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -846,6 +846,18 @@ async def _clear_block_resume_phase(self: Any, workspace_id: str) -> None:
         await session.commit()
 
 
+def _porcelain_limited_to(status_stdout: str, only_paths: Collection[str] | None) -> str:
+    """Keep the ``git status --porcelain`` entries whose paths all lie in ``only_paths``."""
+    if only_paths is None:
+        return status_stdout
+    allowed = set(only_paths)
+    return "".join(
+        line
+        for line in status_stdout.splitlines(keepends=True)
+        if set(_changed_paths_from_porcelain(line)) <= allowed
+    )
+
+
 async def _commit_dirty_worktree(
     self: Any,
     *,
@@ -859,6 +871,7 @@ async def _commit_dirty_worktree(
     remote_push_url: str | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
+    only_paths: Collection[str] | None = None,
 ) -> bool:
     """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -866,6 +879,10 @@ async def _commit_dirty_worktree(
     formatting, testing, or summarising. PR #35 exposed that failure
     mode: the monitor treated the CLI failure as a bot defer, but the
     useful fix was left dirty in the service worktree and never pushed.
+
+    ``only_paths`` limits the sink to those repo-relative paths: any other dirt
+    is neither staged nor handed to protected-scope repair, so it stays exactly
+    as it is (PRRT_kwDOSJAM6s61_WVy).
     """
 
     worktree_path = self._worktrees_root / workspace_id
@@ -1201,10 +1218,11 @@ async def _commit_dirty_worktree(
             stderr=status.stderr[:400],
         )
         return False
-    untracked = set(_untracked_paths_from_porcelain(status.stdout))
+    status_stdout = _porcelain_limited_to(status.stdout, only_paths)
+    untracked = set(_untracked_paths_from_porcelain(status_stdout))
     changed_paths = tuple(
         path
-        for path in _changed_paths_from_porcelain(status.stdout)
+        for path in _changed_paths_from_porcelain(status_stdout)
         if not (path in untracked and is_under_agent_runtime_root(path))
     )
     if not changed_paths:
@@ -1233,7 +1251,7 @@ async def _commit_dirty_worktree(
     if compose_project is not None and compose_file is not None:
         repaired_status = await self._repair_protected_scope_changes_before_commit(
             workspace_id=workspace_id,
-            status_stdout=status.stdout,
+            status_stdout=status_stdout,
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
@@ -1265,10 +1283,11 @@ async def _commit_dirty_worktree(
                 stderr=stage_status.stderr[:400],
             )
             return False
-        stage_untracked = set(_untracked_paths_from_porcelain(stage_status.stdout))
+        stage_stdout = _porcelain_limited_to(stage_status.stdout, only_paths)
+        stage_untracked = set(_untracked_paths_from_porcelain(stage_stdout))
         stage_paths = sorted(
             path
-            for path in _changed_paths_from_porcelain(stage_status.stdout)
+            for path in _changed_paths_from_porcelain(stage_stdout)
             if not (path in stage_untracked and is_under_agent_runtime_root(path))
         )
         if not stage_paths:
@@ -1293,13 +1312,13 @@ async def _commit_dirty_worktree(
             # pass can repair a concurrent protected-scope edit before staging.
             staged_violations = await self._protected_scope_violations_for_status(
                 workspace_id=workspace_id,
-                status_stdout=stage_status.stdout,
+                status_stdout=stage_stdout,
             )
             if staged_violations and protected_scope_revert_remote_branch is not None:
                 staged_violations = (
                     await self._protected_scope_violations_not_restored_to_remote_branch(
                         workspace_id=workspace_id,
-                        status_stdout=stage_status.stdout,
+                        status_stdout=stage_stdout,
                         violations=staged_violations,
                         remote_branch=protected_scope_revert_remote_branch,
                         remote_push_url=remote_push_url,
