@@ -109,8 +109,10 @@ async def commit_provider_park_stranded_edits(
             operation_type=operation_type,
         )
     if dirty is None:
-        state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
+        # Row first: a write fault then leaves the in-memory marker for the next
+        # in-process resume to retry, rather than a row-only one a restart reloads.
         await _drop_marker_from_workspace_row(runner, workspace_id=workspace_id)
+        state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
         _log.info(
             "monitor.provider_park_stranded_edits_committed",
             workspace_id=workspace_id,

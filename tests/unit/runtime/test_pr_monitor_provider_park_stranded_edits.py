@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -83,10 +85,12 @@ class _FakeRunner:
         return self.commits
 
 
-async def _resume(runner: object, state: MonitorState, tmp_path: Path) -> _GitPushResult | None:
+async def _resume(
+    runner: object, state: MonitorState, tmp_path: Path, *, workspace_id: str = _WORKSPACE_ID
+) -> _GitPushResult | None:
     return await commit_provider_park_stranded_edits(
         runner,
-        workspace_id=_WORKSPACE_ID,
+        workspace_id=workspace_id,
         worktree_path=tmp_path / _WORKSPACE_ID,
         state=state,
         compose_project="awf_ws_park_stranded",
@@ -149,6 +153,50 @@ async def test_an_already_clean_worktree_just_drops_the_marker(tmp_path: Path) -
     assert await _resume(runner, state, tmp_path) is None
     assert runner.sink_calls == []
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_failed_row_clear_keeps_the_marker_for_the_next_resume(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Clearing memory ahead of the row would leave a later in-process resume with
+    # no marker to retry, while the row kept one a restart mid-agent reloads.
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            **(ws.monitor_threads_addressed or {}),
+            PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: _PRESERVED_HEAD,
+        }
+        await session.commit()
+
+    def _faulting_factory() -> AsyncSession:
+        session = factory()
+
+        async def _commit() -> None:
+            raise SQLAlchemyError("connection dropped")
+
+        monkeypatch.setattr(session, "commit", _commit)
+        return session
+
+    runner = _FakeRunner([None, None], commits=True)
+    runner._deps = SimpleNamespace(session_factory=_faulting_factory)  # type: ignore[attr-defined]
+    state = _parked_state()
+
+    with pytest.raises(SQLAlchemyError):
+        await _resume(runner, state, tmp_path, workspace_id=workspace_id)
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+    runner._deps = SimpleNamespace(session_factory=factory)  # type: ignore[attr-defined]
+    assert await _resume(runner, state, tmp_path, workspace_id=workspace_id) is None
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in (ws.monitor_threads_addressed or {})
 
 
 @pytest.mark.unit
