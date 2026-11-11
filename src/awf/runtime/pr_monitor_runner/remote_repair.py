@@ -1193,6 +1193,7 @@ async def _commit_dirty_worktree(
                         remote_push_url=remote_push_url,
                         operation_start_head=recovered,
                         task_tag=task_tag,
+                        only_paths=only_paths,
                     )
                     return bool(repair_residue_committed)
             return True

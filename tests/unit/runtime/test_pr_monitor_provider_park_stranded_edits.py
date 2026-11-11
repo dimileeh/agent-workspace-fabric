@@ -924,3 +924,79 @@ async def test_the_sink_stages_only_the_paths_it_is_limited_to(
     assert add[add.index("--") + 1 :] == ["stranded_fix.py"]
     # Protected-scope repair never sees, so never reverts, a path outside the limit.
     assert protected_scope_statuses == [" M stranded_fix.py\n", " M stranded_fix.py\n"]
+
+
+@pytest.mark.unit
+async def test_the_sink_keeps_its_limit_when_it_reenters_after_head_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The residue re-entry after HEAD-object recovery keeps ``only_paths``
+    (PRRT_kwDOSJAM6s62ABOL): an unrelated path left dirty after the recovered
+    commit's protected-scope repair is neither staged nor handed to repair."""
+    head_checks = [False, True]
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return head_checks.pop(0)
+
+    async def _ok(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _recover(*_args: object, **_kwargs: object) -> str:
+        return "recovered_sha_12345"
+
+    monkeypatch.setattr(remote_repair, "verify_head_object_exists", _verify_head_object_exists)
+    monkeypatch.setattr(remote_repair, "_recover_missing_head_object_from_filesystem", _recover)
+    monkeypatch.setattr(remote_repair, "repair_agent_runtime_ownership", _ok)
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    mirror = tmp_path / "mirrors" / "test.git"
+    (mirror / "worktrees" / workspace_id).mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {mirror}/worktrees/{workspace_id}\n")
+    (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
+    residue = " M stranded_fix.py\n?? operator_notes.py\n"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="live_head\n")  # rev-parse HEAD
+    cmd.queue_result(stdout="M\0stranded_fix.py\0")  # recovered diff
+    cmd.queue_result(stdout=residue)  # status after the recovered commit's repair
+    cmd.queue_result(stdout=residue)  # re-entry: status before the commit-side checks
+    cmd.queue_result(stdout=residue)  # re-entry: status under the writer lock
+    cmd.queue_result()  # add
+    cmd.queue_result(returncode=1)  # diff --cached --quiet: something is staged
+    cmd.queue_result()  # commit
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    protected_scope_statuses: list[object] = []
+
+    async def _repair(**kwargs: object) -> object:
+        protected_scope_statuses.append(kwargs["status_stdout"])
+        return kwargs["status_stdout"]
+
+    async def _no_policy_block(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_repair_protected_scope_changes_before_commit", _repair)
+    monkeypatch.setattr(runner, "_refresh_supply_chain_policy_before_push", _no_policy_block)
+
+    committed = await runner._commit_dirty_worktree(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        message="fix: commit stranded edits",
+        compose_project="awf_ws_park_stranded",
+        compose_file=tmp_path / "compose.yml",
+        operation_start_head="base_sha_12345",
+        task_tag=None,
+        only_paths=("stranded_fix.py",),
+    )
+
+    assert committed is True
+    assert head_checks == []
+    add = next(call.args for call in cmd.calls if "add" in call.args)
+    assert add[add.index("--") + 1 :] == ["stranded_fix.py"]
+    assert protected_scope_statuses == [" M stranded_fix.py\n", " M stranded_fix.py\n"]
