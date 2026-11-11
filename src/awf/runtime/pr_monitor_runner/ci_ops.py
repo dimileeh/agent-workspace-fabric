@@ -1027,13 +1027,12 @@ async def _run_ci_fix(
             )
             if stranded_dirty is not None:
                 park_preserved_head: str | None = None
-                if (
-                    agent_run_err.reason_code in PROVIDER_PARK_REASON_CODES
-                    and stranded_dirty.reason_code != _REPAIR_WORKTREE_STATUS_FAILED_REASON
-                ):
+                if agent_run_err.reason_code in PROVIDER_PARK_REASON_CODES:
                     # The handler persists the state before it raises the park:
                     # mark the stranded edits first so that write already carries
                     # the marker, as the pre-push fix pass does (PRRT_kwDOSJAM6s61-Nzn).
+                    # A failed ``git status`` recheck marks too: the resume re-runs
+                    # it and drops the marker on a clean tree (PRRT_kwDOSJAM6s61-Nzs).
                     park_preserved_head = await self._rev_parse_head(worktree_path)
                     mark_provider_park_stranded_edits(state, park_preserved_head)
                 provider_recovery_exc: BaseException | None = None
@@ -1060,6 +1059,17 @@ async def _run_ci_fix(
                         workspace_id=workspace_id,
                         stderr=str((stranded_dirty.details or {}).get("status_stderr", ""))[:400],
                     )
+                    if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
+                        # A managed-key park parks for a human, never fails on the
+                        # status error (PRRT_kwDOSJAM6s61-Nzs).
+                        _keep_ci_repair_edits_for_provider_park(
+                            workspace_id=workspace_id,
+                            state=state,
+                            preserved_head=park_preserved_head,
+                            park_exc=provider_recovery_exc,
+                            agent_run_err=agent_run_err,
+                        )
+                        raise provider_recovery_exc
                     return await _moot_or_failure(cast(_GitPushResult, stranded_dirty))
                 stranded_paths = list((stranded_dirty.details or {}).get("paths", []))
                 if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):

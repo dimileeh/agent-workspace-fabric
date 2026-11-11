@@ -28,7 +28,10 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import CheckFailure, MonitorState
 from awf.runtime.pr_monitor_runner import ci_ops as ci_ops_module
-from awf.runtime.pr_monitor_runner.constants import _PRE_EXISTING_DIRTY_WORKTREE_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+    _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
 )
@@ -165,6 +168,63 @@ async def test_ci_repair_agent_park_keeps_stranded_edits_and_marks_the_resume(
         assert ws is not None
         threads_addressed = ws.monitor_threads_addressed or {}
         assert threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _POST_SINK_HEAD
+
+
+@pytest.mark.unit
+async def test_ci_repair_agent_park_still_parks_when_the_recheck_status_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed post-commit ``git status`` must not turn the park into a failure.
+
+    Managed-key parks wait for a human and never fail the workspace; the status
+    failure only means the stranded edits are unknown, so the resume is marked to
+    re-check them (PRRT_kwDOSJAM6s61-Nzs).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status_failed = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=128,
+        stderr="git status failed",
+        reason_code=_REPAIR_WORKTREE_STATUS_FAILED_REASON,
+        details={"status_stderr": "fatal: index file corrupt"},
+    )
+    salvage, rollback = _patch_ci_fix_seams(
+        runner,
+        monkeypatch,
+        run_agent=AsyncMock(
+            side_effect=AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False, "provider_budget": {"limit_usd": 5}},
+            )
+        ),
+        commit_dirty_worktree=AsyncMock(return_value=False),
+        dirty_results=[None, status_failed],
+    )
+    state = MonitorState()
+
+    with pytest.raises(ProviderManagedKeyParkedError) as exc_info:
+        await _run_ci_fix(runner, workspace_id=workspace_id, tmp_path=tmp_path, state=state)
+
+    salvage.assert_not_awaited()
+    rollback.assert_not_awaited()
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _POST_SINK_HEAD
+    details = exc_info.value.details
+    assert details is not None
+    assert details["phase"] == "ci_repair_commit_sink"
+    assert "dirty_commit_error" not in details
 
 
 @pytest.mark.unit
