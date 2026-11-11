@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import CheckFailure, MonitorState
 from awf.runtime.pr_monitor_runner import ci_ops as ci_ops_module
@@ -156,6 +157,14 @@ async def test_ci_repair_agent_park_keeps_stranded_edits_and_marks_the_resume(
     assert details["phase"] == "ci_repair_commit_sink"
     assert details["stranded_paths"] == ["src/fix.py"]
     assert details["dirty_commit_error"]["preserved_head"] == _POST_SINK_HEAD
+    # The provider handler's own state write ahead of the park already carries the
+    # marker, so a restart before the run loop's next write still finds it
+    # (PRRT_kwDOSJAM6s61-Nzn).
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        threads_addressed = ws.monitor_threads_addressed or {}
+        assert threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _POST_SINK_HEAD
 
 
 @pytest.mark.unit

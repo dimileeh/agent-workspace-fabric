@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.common.command_evidence import (
     append_command_evidence,
 )
@@ -314,12 +315,11 @@ async def _salvage_ci_repair_dirty_output(
     return {"repair_salvage": details}
 
 
-async def _keep_ci_repair_edits_for_provider_park(
-    self: Any,
+def _keep_ci_repair_edits_for_provider_park(
     *,
     workspace_id: str,
-    worktree_path: Path,
     state: MonitorState | None,
+    preserved_head: str | None,
     park_exc: ProviderManagedKeyParkedError,
     agent_run_err: AgentRunError | None,
     stranded_paths: list[str] | None = None,
@@ -334,7 +334,6 @@ async def _keep_ci_repair_edits_for_provider_park(
     them before its pre-existing-dirty guard runs (``provider_park_stranded_edits``,
     PRRT_kwDOSJAM6s619mxi), as the pre-push park paths already do.
     """
-    preserved_head = await self._rev_parse_head(worktree_path)
     mark_provider_park_stranded_edits(state, preserved_head)
     details: dict[str, Any] = {
         "phase": "ci_repair_commit_sink",
@@ -735,11 +734,10 @@ async def _run_ci_fix(
         # A managed-key park in the in-sink protected-scope repair: keep the CI
         # repair's edits for the budget-raise resume instead of the salvage and
         # rollback below (PRRT_kwDOSJAM6s619mxi).
-        await _keep_ci_repair_edits_for_provider_park(
-            self,
+        _keep_ci_repair_edits_for_provider_park(
             workspace_id=workspace_id,
-            worktree_path=worktree_path,
             state=state,
+            preserved_head=await self._rev_parse_head(worktree_path),
             park_exc=exc,
             agent_run_err=agent_run_err,
         )
@@ -1028,6 +1026,16 @@ async def _run_ci_fix(
                 operation_type="ci_repair",
             )
             if stranded_dirty is not None:
+                park_preserved_head: str | None = None
+                if (
+                    agent_run_err.reason_code in PROVIDER_PARK_REASON_CODES
+                    and stranded_dirty.reason_code != _REPAIR_WORKTREE_STATUS_FAILED_REASON
+                ):
+                    # The handler persists the state before it raises the park:
+                    # mark the stranded edits first so that write already carries
+                    # the marker, as the pre-push fix pass does (PRRT_kwDOSJAM6s61-Nzn).
+                    park_preserved_head = await self._rev_parse_head(worktree_path)
+                    mark_provider_park_stranded_edits(state, park_preserved_head)
                 provider_recovery_exc: BaseException | None = None
                 try:
                     await self._handle_provider_agent_run_error(
@@ -1058,11 +1066,10 @@ async def _run_ci_fix(
                     # The budget-raise resume continues from this worktree: keep
                     # the stranded edits rather than salvage and roll them back
                     # (PRRT_kwDOSJAM6s619mxi).
-                    await _keep_ci_repair_edits_for_provider_park(
-                        self,
+                    _keep_ci_repair_edits_for_provider_park(
                         workspace_id=workspace_id,
-                        worktree_path=worktree_path,
                         state=state,
+                        preserved_head=park_preserved_head,
                         park_exc=provider_recovery_exc,
                         agent_run_err=agent_run_err,
                         stranded_paths=stranded_paths,
