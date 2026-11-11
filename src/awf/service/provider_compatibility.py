@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import cast, select
 from sqlalchemy.dialects.postgresql import JSONB
 
+from awf.adapters.managed_credentials import exec_environment
 from awf.common.agent_execution import ExecutionSelection, execution_from_policy
 from awf.db.models import Workspace
 from awf.runtime.provider_diagnostic_fixture import FIXTURE_VERSION
@@ -72,7 +73,12 @@ async def attach_compatibility(session: Any, policy: dict[str, Any]) -> dict[str
 
 
 async def guard_runtime_compatibility(
-    adapter: Any, *, compose_project: str, compose_file: Any, workspace_id: str | None
+    adapter: Any,
+    *,
+    compose_project: str,
+    compose_file: Any,
+    workspace_id: str | None,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     if (
         not adapter.require_compatibility_evidence
@@ -91,11 +97,14 @@ async def guard_runtime_compatibility(
         id=workspace_id, agent=adapter.execution.agent, compose_project_name=compose_project
     )
     identity = await runtime_identity(SimpleNamespace(_runner=adapter._runner), ws, compose_file)
+    # A managed key reaches the probe exactly like the run: by name, exec-only.
+    passthrough = [arg for name in env or {} for arg in ("-e", name)]
     health = await adapter._runner.run(
         [
             *compose_args(ws, compose_file),
             "exec",
             "-T",
+            *passthrough,
             "agent",
             RUNTIME_PYTHON_PATH,
             "-I",
@@ -105,6 +114,7 @@ async def guard_runtime_compatibility(
             "--probe-json",
         ],
         timeout_seconds=12,
+        **({"env": exec_environment(env)} if env else {}),
     )
     try:
         probe = json.loads(health.stdout)

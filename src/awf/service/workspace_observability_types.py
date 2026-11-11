@@ -129,11 +129,13 @@ class WorkspaceRecoveryPayload(TypedDict):
 class WorkspaceObservabilityPayload(AgentIdentityPayload):
     lifecycle: list[LifecycleStagePayload]
     llm_usage: LlmUsagePayload
+    provider_spend: dict[str, Any] | None
     recovery: WorkspaceRecoveryPayload | None
 
 
 class WorkspaceIdentityUsagePayload(AgentIdentityPayload):
     llm_usage: LlmUsagePayload
+    provider_spend: dict[str, Any] | None
 
 
 class _RecoveryOperationLike(Protocol):

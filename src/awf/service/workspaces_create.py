@@ -84,7 +84,10 @@ from awf.service.scheduler import (
     task_class_priority as scheduler_task_class_priority,
 )
 from awf.service.workspaces_create_policy import (
-    freeze_execution_policy as freeze_execution_policy,
+    freeze_diagnostic_policy,
+    freeze_execution_policy,
+    provider_budget_request_matches,
+    required_worker_contract_version,
 )
 from awf.service.workspaces_create_policy import (
     workspace_create_task_policy_snapshot as workspace_create_task_policy_snapshot,
@@ -182,10 +185,11 @@ async def create_workspace_row(
             enabled=diagnostic_spec is not None
             or resolved_settings.third_party_agent_providers_enabled,
             environ=provider_environ if provider_environ is not None else os.environ,
+            settings=resolved_settings,
+            hosted=payload.hosted is not None or isinstance(hosted_authority, WorkspaceAuthority),
         )
         if diagnostic_spec is not None:
-            base_task_policy["agent_execution"] = diagnostic_spec["selection"]
-            base_task_policy["provider_diagnostic"] = {"request": diagnostic_spec}
+            freeze_diagnostic_policy(base_task_policy, diagnostic_spec)
         from awf.service.provider_compatibility import attach_compatibility
 
         base_task_policy = await attach_compatibility(session, base_task_policy)
@@ -202,7 +206,8 @@ async def create_workspace_row(
             from awf.db.repositories import WorkerHeartbeatRepository
 
             if not await WorkerHeartbeatRepository(session).supports_execution_contract(
-                now=datetime.now(UTC), minimum_version=2
+                now=datetime.now(UTC),
+                minimum_version=required_worker_contract_version(base_task_policy),
             ):
                 raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
     except ValueError as error:
@@ -483,6 +488,7 @@ def workspace_create_payload_matches(
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
+        and provider_budget_request_matches(_stored_task_policy(existing), payload)
     )
 
 

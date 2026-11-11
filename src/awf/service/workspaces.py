@@ -76,10 +76,12 @@ from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
 )
+from awf.service.workspace_provider_spend import provider_spend_scope
 from awf.service.workspace_runtime_health import (
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
 )
+from awf.service.workspaces_provider_budget import _WorkspaceProviderBudgetMixin
 from awf.service.workspaces_retry_errors import (
     WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceRetryError,
@@ -586,7 +588,7 @@ class ResourceReservationPlan:
         }
 
 
-class WorkspaceService:
+class WorkspaceService(_WorkspaceProviderBudgetMixin):
     """Domain operations shared across REST routes and MCP tools."""
 
     def __init__(
@@ -633,7 +635,8 @@ class WorkspaceService:
                 if existing is not None:
                     if not workspace_create_payload_matches(existing, req):
                         raise WorkspaceCreateIdempotencyConflictError()
-                    return workspace_response(existing)
+                    async with provider_spend_scope(s, [existing.id]):
+                        return workspace_response(existing)
 
             if disk_check is None and disk_check_factory is not None:
                 disk_check = await _resolve_disk_check_factory(disk_check_factory)
@@ -651,7 +654,8 @@ class WorkspaceService:
                 node_id=effective_worker_node_id(resolved_settings),
             )
             await s.commit()
-            return workspace_response(ws)
+            async with provider_spend_scope(s, [ws.id]):
+                return workspace_response(ws)
 
     async def retry_workspace(
         self,
@@ -713,11 +717,10 @@ class WorkspaceService:
                 egress_audit = (
                     _egress_audit_response(audit_record) if audit_record is not None else None
                 )
-            return workspace_response(
-                ws,
-                validation_provenance=validation_provenance,
-                egress_audit=egress_audit,
-            )
+            async with provider_spend_scope(s, [ws.id]):
+                return workspace_response(
+                    ws, validation_provenance=validation_provenance, egress_audit=egress_audit
+                )
 
     async def get_egress_audit_evidence(
         self,
@@ -759,7 +762,8 @@ class WorkspaceService:
                 repo_url=repo_url,
                 limit=limit,
             )
-            return [workspace_response(r) for r in rows]
+            async with provider_spend_scope(s, [row.id for row in rows]):
+                return [workspace_response(r) for r in rows]
 
     async def cancel_workspace(
         self,

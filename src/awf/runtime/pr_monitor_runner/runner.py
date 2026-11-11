@@ -61,6 +61,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    record_provider_park_stranded_edits_evidence,
+)
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
 from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
@@ -72,6 +75,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_readopt import (
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -651,21 +655,37 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 reason_code="PROVIDER_FALLBACK",
             )
             return
-        except ProviderRecoveryAuthError:
+        except ProviderRecoveryAuthError as exc:
+            # A managed-key park reuses this unwind; its sink parks, never fails.
+            parked_reason = (
+                exc.reason_code if isinstance(exc, ProviderManagedKeyParkedError) else None
+            )
             await self._write_monitor_log(
                 monitor_log,
                 {
                     "event": "monitor.provider_auth_failed",
                     "workspace_id": workspace_id,
-                    "reason_code": PROVIDER_AUTH_FAILED,
+                    "reason_code": parked_reason or PROVIDER_AUTH_FAILED,
                 },
             )
             if state is not None:
+                if parked_reason:
+                    # Record what a marked park leaves dirty, so the budget-raise
+                    # resume commits nothing else (PRRT_kwDOSJAM6s61_WVy).
+                    await record_provider_park_stranded_edits_evidence(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=self._worktrees_root / workspace_id,
+                        state=state,
+                    )
                 await self._persist_state(workspace_id, state)
             await self._terminate_failed(
                 workspace_id,
-                message="monitor: provider authentication failed",
-                reason_code=PROVIDER_AUTH_FAILED,
+                message=f"monitor: managed provider key unavailable ({parked_reason})"
+                if parked_reason
+                else "monitor: provider authentication failed",
+                reason_code=parked_reason or PROVIDER_AUTH_FAILED,
+                details=exc.details if parked_reason else None,
             )
             return
         finally:

@@ -348,6 +348,20 @@ A nonblank directive is required; a file grant alone cannot resume this pause.
 AWF resumes the same checkout without bypassing validation or merge gates. See
 [Workspace Profiles](CONCEPTS.md#workspace-profiles) for the conformance contract.
 
+Set the managed OpenRouter budget of a workspace and resume a budget park:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace provider-budget ws_123 \
+  --usd 25 --reason "approved larger refactor"
+```
+
+`awf workspace provider-budget` applies only to workspaces whose OpenRouter
+selection uses AWF-minted keys (`OPENROUTER_MANAGEMENT_KEY` configured). `--usd`
+is the new total budget and must exceed the recorded spend. Set the initial
+budget with `awf workspace create --provider-budget-usd N` (default
+`AWF_OPENROUTER_WORKSPACE_LIMIT_USD`). `awf workspace show` and `list` with
+`--format pretty` print an "Exact provider spend" line.
+
 Inspect workspace observability data:
 
 ```bash

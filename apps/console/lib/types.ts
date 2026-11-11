@@ -57,6 +57,23 @@ export interface LlmUsageSummary {
   reason: string | null;
 }
 
+// Exact spend of a managed OpenRouter workspace (USD), summed from its
+// AWF-minted keys' usage counters.
+export interface ProviderSpend {
+  kind?: "exact_provider_spend";
+  provider?: string;
+  status: "available" | "unavailable";
+  spend_usd?: number | null;
+  budget_usd?: number | null;
+  remaining_usd?: number | null;
+  currency?: "USD";
+  key_count?: number;
+  live_key_count?: number;
+  last_read_at?: string | null;
+  source?: "openrouter_key_usage";
+  reason?: string | null;
+}
+
 export interface PricingMetadata {
   provider: string;
   model: string;
@@ -221,6 +238,7 @@ export interface WorkspaceOverview {
   network_posture: NetworkPosture | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  provider_spend?: ProviderSpend | null;
   pricing?: PricingMetadata | null;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];
@@ -574,6 +592,7 @@ export interface Workspace {
   workflow_finished_at?: string | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  provider_spend?: ProviderSpend | null;
   pricing?: PricingMetadata | null;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];

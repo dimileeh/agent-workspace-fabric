@@ -56,6 +56,7 @@ compactId,
 fallbackLlmUsage,
 formatCostWithPricing,
 formatDateTime,
+formatProviderSpend,
 formatUsageProvenance,
 pricingAvailabilityReason,
 recordedDurationLabel,
@@ -79,6 +80,7 @@ ArtifactPresenceItem,
 ConsoleCapabilities,
 MergeQueueItem,
 PricingMetadata,
+ProviderSpend,
 ProviderReadinessPreflight,
 Workspace,
 WorkspaceOperatorAction,
@@ -741,6 +743,7 @@ export function WorkspaceSummary({
         <UsageSummaryBlock
           usage={workspace?.llm_usage ?? overview.llm_usage}
           pricing={workspace?.pricing ?? overview.pricing ?? null}
+          providerSpend={workspace?.provider_spend ?? overview.provider_spend ?? null}
         />
         <ProviderReadinessPreflightBlock
           preflight={workspace?.provider_readiness_preflight ?? overview.provider_readiness_preflight ?? null}
@@ -1073,13 +1076,21 @@ export function OperatorControlIcon({
 export function UsageSummaryBlock({
   usage,
   pricing,
+  providerSpend,
 }: {
   usage: Workspace["llm_usage"] | null | undefined;
   pricing: PricingMetadata | null | undefined;
+  providerSpend?: ProviderSpend | null;
 }) {
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
   const showCost = safeUsage.cost_estimate !== null;
+  const spendLine = formatProviderSpend(providerSpend);
+  const spendFooter = spendLine ? (
+    <div data-testid="provider-spend" className="mono mt-1 truncate text-[11px] text-fg-muted">
+      {spendLine}
+    </div>
+  ) : null;
 
   if (
     safeUsage.status === "unavailable" ||
@@ -1101,6 +1112,7 @@ export function UsageSummaryBlock({
         <div className="mt-2 truncate text-[11px] text-fg-muted">
           {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         </div>
+        {spendFooter}
       </div>
     );
   }
@@ -1144,6 +1156,7 @@ export function UsageSummaryBlock({
           </>
         ) : null}
       </div>
+      {spendFooter}
     </div>
   );
 }

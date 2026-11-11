@@ -17,6 +17,7 @@ from datetime import (
 from typing import Any, Literal, cast
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.common.agent_execution import circuit_key
 from awf.db.repositories import (
     ProviderModelCircuitBreakerRepository,
@@ -38,6 +39,7 @@ from awf.runtime.pr_monitor_runner.recovery_payloads import (
     _task_policy_with_monitor_circuit_retry_state,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -292,6 +294,13 @@ async def _handle_provider_agent_run_error(
 ) -> Literal["fallback", "retry", "auth_failed", "terminal", "deterministic"]:
     if state is not None:
         await self._persist_state(workspace_id, state)
+    if exc.reason_code in PROVIDER_PARK_REASON_CODES:
+        # The workspace's own managed-key budget: no recovery attempt, no circuit
+        # record, no fallback; the monitor unwinds and its terminal sink parks.
+        raise ProviderManagedKeyParkedError(
+            exc.reason_code,
+            details={"provider_budget": exc.details.get("provider_budget")},
+        ) from exc
     action = await self._record_provider_agent_run_error(workspace_id, exc)
     if action == "fallback":
         raise ProviderRecoveryFallbackError() from exc

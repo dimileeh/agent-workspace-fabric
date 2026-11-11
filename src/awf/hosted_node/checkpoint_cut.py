@@ -38,6 +38,7 @@ TABLES = tuple(
             "workspace_events",
             "workspace_secret_leases",
             "provider_model_circuit_breakers",
+            "provider_managed_keys",
             "queue_decisions",
             "pr_feedback_resolutions",
             "stale_reasons",

@@ -454,6 +454,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(
                     self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
                 ),
@@ -1393,6 +1394,7 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(
                     self._agent_runtime_executor
                     if pr_adoption_is_hosted(workspace.task_policy)

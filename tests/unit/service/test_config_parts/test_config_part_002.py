@@ -338,7 +338,8 @@ def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_serv
     compose_path = Path(__file__).resolve().parents[4] / "docker" / "compose" / "local-service.yml"
     compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
 
-    for service_name in ("api", "worker", "migrate"):
+    # ``migrate`` carries only its database settings (no control-plane credentials).
+    for service_name in ("api", "worker"):
         service = compose["services"][service_name]
         environment = {
             item.split("=", 1)[0]: item.split("=", 1)[1]

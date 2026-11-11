@@ -9,7 +9,7 @@ from pydantic import AwareDatetime, Field, field_validator
 from awf.hosted_node.schemas import Generation, Identity, Opaque, StrictModel
 
 Digest = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
-CHECKPOINT_SCHEMA_REVISION = "85ce3f9b2a61"
+CHECKPOINT_SCHEMA_REVISION = "9e3b7c41d2a6"
 
 
 class CheckpointRequest(StrictModel):

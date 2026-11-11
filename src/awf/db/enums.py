@@ -138,6 +138,7 @@ class OperationType(StrEnum):
     monitor_state = "monitor_state"
     adopt_pr = "adopt_pr"
     destroy = "destroy"
+    provider_budget = "provider_budget"
 
 
 class CallbackDeliveryStatus(StrEnum):
@@ -327,6 +328,24 @@ class WorkSlotLeasePhase(StrEnum):
     unsatisfiable = "unsatisfiable"
     held = "held"
     adopted = "adopted"
+
+
+class ProviderManagedKeyStatus(StrEnum):
+    """Lifecycle of a ``provider_managed_keys`` row (managed OpenRouter keys).
+
+    ``minting`` is the intent committed before the management API call;
+    ``active`` keys back a live invocation; ``deleted``/``orphan_deleted`` keys
+    are finalized with a final usage read; ``delete_failed`` keys keep their
+    headroom reserved until a later finalize deletes them; ``mint_failed``
+    intents never produced a key. Stored as a plain string, never a SQL enum.
+    """
+
+    minting = "minting"
+    active = "active"
+    deleted = "deleted"
+    delete_failed = "delete_failed"
+    mint_failed = "mint_failed"
+    orphan_deleted = "orphan_deleted"
 
 
 class ResourceReservationPhase(StrEnum):

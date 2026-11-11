@@ -8,6 +8,7 @@ from typing import Any
 from awf.db.enums import OperationStatus
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderManagedKeyParkedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
 )
@@ -54,6 +55,9 @@ def _provider_recovery_operation_result_updates(exc: BaseException) -> dict[str,
     if not isinstance(details, dict):
         return {}
     updates: dict[str, object] = {}
+    if isinstance(exc, ProviderManagedKeyParkedError):
+        # Label the operation with the park reason, not a broken-auth failure.
+        updates.update(outcome="provider_key_parked", reason_code=exc.reason_code)
     repair_salvage = details.get("repair_salvage")
     if isinstance(repair_salvage, dict):
         updates["repair_salvage"] = repair_salvage

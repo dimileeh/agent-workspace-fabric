@@ -19,7 +19,7 @@ from awf.api.schemas import (
     WorkspaceReasonWithLegacyRequestedTierRequest,
     WorkspaceReasonWithLegacyStopStackRequest,
 )
-from awf.api.schemas_responses import WorkspaceRemonitorRequest
+from awf.api.schemas_responses import WorkspaceProviderBudgetRequest, WorkspaceRemonitorRequest
 from awf.common.config import Settings, get_settings
 from awf.hosted_node.lifecycle_operations import commit_hosted
 from awf.service.controls import (
@@ -49,6 +49,8 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from awf.service.controls_provider_budget import ProviderBudgetControlError
+from awf.service.openrouter_management import management_client_from_settings
 
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}",
@@ -262,6 +264,41 @@ async def rebase_workspace(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/provider-budget",
+    response_model=WorkspaceControlResponse,
+    responses={
+        400: {"model": HttpExceptionErrorResponse, "description": "Bad Request"},
+        409: {"model": HttpExceptionErrorResponse, "description": "Conflict"},
+        502: {"model": HttpExceptionErrorResponse, "description": "Management API failure"},
+    },
+)
+async def set_workspace_provider_budget(
+    workspace_id: str,
+    payload: WorkspaceProviderBudgetRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> WorkspaceControlResponse:
+    """Set the managed OpenRouter budget (USD) of a workspace.
+
+    The live managed key's limit is updated first; the new budget, the audit
+    event and a resume of a provider-budget block follow. ``usd`` must exceed
+    the exact provider spend already recorded."""
+    try:
+        return await _controls(session).set_provider_budget(
+            workspace_id,
+            usd=payload.usd,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+            management_client=management_client_from_settings(settings),
+        )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete("", response_model=WorkspaceControlResponse)
 async def destroy_workspace(
     workspace_id: str,
@@ -305,6 +342,8 @@ def _controls(
 def _http_error(exc: WorkspaceControlError) -> HTTPException:
     if isinstance(exc, WorkspaceNotFoundError):
         status_code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, ProviderBudgetControlError):
+        status_code = exc.http_status
     elif isinstance(
         exc,
         (

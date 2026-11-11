@@ -48,7 +48,9 @@ falls through to native execution. The snapshot follows planning, execution,
 repair, monitor reconstruction, restart/resume and recovery through existing
 adapter defaults. Workspace, task, attempt and recovery projections expose it.
 Unknown third-party pricing remains unknown; native profile prices are not
-applied to another selection. Native usage collectors are not used to invent
+applied to another selection. With managed OpenRouter keys, OpenRouter runs
+report exact provider spend instead (see
+[Managed OpenRouter keys and budgets](#managed-openrouter-keys-and-budgets)). Native usage collectors are not used to invent
 third-party token/cost data.
 
 ```mermaid
@@ -266,6 +268,138 @@ Workers in this release advertise capability **2** (execution selection remains 
 compatible, and dispatch rechecks capability. This metadata cannot make an
 already-running old binary safe. Follow the mandatory [upgrade and rollback
 sequence](UPGRADE.md#provider-foundation-compatibility-floor).
+
+## Managed OpenRouter keys and budgets
+
+Third-party OpenRouter runs normally share one static `OPENROUTER_API_KEY`, so
+their spend is unattributed and unbounded. Configuring an OpenRouter
+**management** key turns on exact per-workspace cost tracking and budgets through
+OpenRouter's key-management API (`/api/v1/keys`).
+
+**Opt-in.** Set `OPENROUTER_MANAGEMENT_KEY` in the service environment. Compose
+forwards it (with `AWF_OPENROUTER_WORKSPACE_LIMIT_USD`) to the `api` and `worker`
+services only; never to `migrate`, the console or any workspace stack. Both
+processes remove it from their own process environment once settings resolve,
+so Docker Compose, git and agent subprocesses cannot inherit or interpolate it.
+Profile environment values, service/companion environment and env-secret leases
+that reference it are rejected with `PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN`.
+It never enters hosted payloads, logs, argv or the database, and service config
+payloads and support bundles redact it. Without a management key nothing
+changes: the static key, unknown pricing and today's stacks stay as they are.
+
+**Selection identity.** With a management key, every OpenRouter selection
+frozen at creation uses the fixed credential reference `managed/openrouter`.
+This covers primaries, declared fallbacks, auto-profile bindings, monitor
+repairs and diagnostics. The connection and cooldown scope is the same for every
+managed selection and never fragments per workspace or per key. Toggling the
+management key later does not change existing rows: a managed row on an API or
+worker without the key parks with `PROVIDER_MANAGEMENT_KEY_MISSING` and never
+falls back to the static key. Managed admission requires every live queue
+consumer at worker capability **3**. Ollama, native and OpenCode selections are
+unchanged. Hosted runtimes reject managed selections
+(`PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED`).
+
+**Budget.** The budget is frozen beside the selection in
+`task_policy.provider_budget`:
+
+```json
+{"version": 1, "provider": "openrouter", "managed": true,
+ "limit_usd": 10.0, "requested_usd": null, "source": "default"}
+```
+
+- The default comes from `AWF_OPENROUTER_WORKSPACE_LIMIT_USD` (10 USD).
+- Override it per task with REST `task.provider_budget_usd`, CLI
+  `workspace create --provider-budget-usd` or MCP `awf_create_workspace`
+  `provider_budget_usd`.
+- A budget without a managed selection is rejected with
+  `PROVIDER_BUDGET_UNSUPPORTED`.
+- Connection tests run under a fixed 1 USD budget.
+- Idempotent replays compare the requested budget.
+
+**Key lifecycle.**
+
+- **Mint.** Just before the selected credential is materialized for an agent
+  invocation, AWF mints `awf-<workspace>-<seq>` with `include_byok_in_limit=true`
+  and a limit equal to the remaining budget: the budget minus the spend of
+  finalized keys, minus the full limit of keys that might still be live.
+- **Inject.** The value is passed by name only (`docker compose exec -e
+  OPENROUTER_API_KEY`) to the runtime probe and the isolated runner as the
+  selected credential. It never enters `compose.yml`, the container config or
+  argv. Managed stacks render no OpenRouter credential at all.
+- **Heartbeat.** During the invocation AWF reads the key's usage on a bounded
+  cadence (`openrouter_usage_poll_interval_seconds`, default 120 s).
+- **Release.** Afterwards AWF reads the final usage, persists it, and then deletes
+  the key. A cancelled caller cannot strand a key.
+- **Replacement.** Container recreation, monitor resume and worker restart always
+  lead to a new key. Under the workspace claim, a key (or hashless minting intent)
+  the worker does not hold is dead: it is finalized (or released) before the next
+  mint, even while its lease is unexpired.
+- **What is stored.** AWF persists only the non-secret identity (name, hash, seq,
+  limit, usage, BYOK usage), never a key value. Spend is `usage + byok_usage`,
+  summed across all of a workspace's keys.
+
+**Exact spend.** Workspace show/list, overview, the task list, the websocket
+snapshot and MCP report `provider_spend`
+(`kind: exact_provider_spend`, spend, budget, remaining, key counts, last read).
+For managed runs `llm_usage` reports that exact spend with source
+`openrouter_key_usage`, labelled **Exact provider spend** in the CLI and console,
+instead of `unknown`.
+
+**Budget exhaustion.** A failed run whose final key read shows no remaining limit
+becomes `PROVIDER_BUDGET_EXHAUSTED`. Otherwise only the CLI's own error counts: an
+HTTP 402 / limit-reached message in the tail of stderr. If the key read still shows
+headroom, that 402 is the OpenRouter account balance, not the workspace budget,
+and becomes `PROVIDER_ACCOUNT_CREDITS_EXHAUSTED` (top up the account, then re-set
+the budget to resume). If the key read failed, it stays `PROVIDER_BUDGET_EXHAUSTED`.
+Payment text in tool output or the transcript never counts. The workspace is
+parked (`blocked`, block type `provider_budget`) at both failure sinks (executor
+and PR monitor):
+
+- It is never failed.
+- It is never retried blindly.
+- It never falls back to another provider.
+- It is never counted against the shared circuit breaker.
+
+A mint failure (`PROVIDER_MANAGED_KEY_UNAVAILABLE`) parks only that selection.
+So does a mint that only headroom still held by keys AWF could not finalize yet
+blocks (spend alone leaves budget); its park event reports `reserved_usd`.
+Raise the budget to resume:
+
+| Intent | REST | CLI | MCP |
+| --- | --- | --- | --- |
+| Set budget and resume | `POST /v1/workspaces/{id}/provider-budget` `{"usd": N}` | `awf workspace provider-budget <ws> --usd N` | `awf_set_workspace_provider_budget` |
+
+The control requires an `Idempotency-Key` (`If-Match` is optional). It works as
+follows:
+
+1. It updates the live key's limit before any state change. A management-API
+   failure returns 502 with its reason code and leaves nothing changed.
+2. It freezes the new budget (`source: operator`) and records
+   `provider.budget.raised` plus a control audit event.
+3. It resumes the park: a pre-PR park re-invokes the agent with a "provider budget
+   raised" directive, and a monitor-origin park returns to `monitoring_pr`.
+
+The new budget must exceed the recorded spend. Diagnostics never park: exhaustion
+is their terminal outcome.
+
+**Cleanup and reconciliation.** When a workspace's runtime is released at a
+terminal state, AWF final-reads and deletes its keys. A bounded periodic
+reconciler (`openrouter_key_reconcile_interval_seconds`, default 900 s) does the
+following:
+
+- It lists `awf-*` keys page by page.
+- After recording their usage, it deletes every key with no live binding:
+  orphans from crashes, terminal workspaces, failed deletes and unbound mints
+  older than a 10-minute grace window. An active key stays live while its lease
+  is unexpired or its workspace holds a live execution or monitor claim. Each
+  deletion emits `provider.managed_key.orphan_deleted`
+  (`PROVIDER_MANAGED_KEY_ORPHAN_DELETED`); a database error on one key is counted
+  as failed without aborting the sweep.
+- It skips and counts keys of workspaces unknown to this control plane; it never
+  deletes them.
+
+Management-API failures are reason-coded (`PROVIDER_MANAGEMENT_API_*`) and never
+block unrelated work.
 
 ## Discovery and connection tests
 

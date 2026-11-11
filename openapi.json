@@ -4336,7 +4336,8 @@
           "human_wait",
           "monitor_state",
           "adopt_pr",
-          "destroy"
+          "destroy",
+          "provider_budget"
         ],
         "title": "OperationType",
         "type": "string"
@@ -6719,6 +6720,113 @@
           "circuit_breakers_open"
         ],
         "title": "ProviderRecoveryStateSummaryResponse",
+        "type": "object"
+      },
+      "ProviderSpendResponse": {
+        "description": "Exact provider spend of a managed OpenRouter workspace (USD).\n\nSummed from the usage counters of the workspace's AWF-minted keys\n(``usage + byok_usage``); ``unavailable`` when the spend was not loaded.",
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "currency": {
+            "const": "USD",
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "key_count": {
+            "default": 0,
+            "title": "Key Count",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "exact_provider_spend",
+            "default": "exact_provider_spend",
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_read_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Read At"
+          },
+          "live_key_count": {
+            "default": 0,
+            "title": "Live Key Count",
+            "type": "integer"
+          },
+          "provider": {
+            "default": "openrouter",
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "remaining_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usd"
+          },
+          "source": {
+            "const": "openrouter_key_usage",
+            "default": "openrouter_key_usage",
+            "title": "Source",
+            "type": "string"
+          },
+          "spend_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend Usd"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProviderSpendResponse",
         "type": "object"
       },
       "PullRequestMonitorAdoptionRequest": {
@@ -9226,6 +9334,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WorkspacePricingMetadataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"
@@ -13055,6 +13173,16 @@
               }
             ]
           },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recovery": {
             "anyOf": [
               {
@@ -13384,6 +13512,43 @@
           }
         },
         "title": "WorkspaceProfileSelection",
+        "type": "object"
+      },
+      "WorkspaceProviderBudgetRequest": {
+        "additionalProperties": false,
+        "description": "Set a managed OpenRouter workspace budget (USD); resumes a provider-budget block.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "New total workspace budget in USD.",
+            "gt": 0,
+            "lt": 1000000,
+            "title": "Usd"
+          }
+        },
+        "required": [
+          "usd"
+        ],
+        "title": "WorkspaceProviderBudgetRequest",
         "type": "object"
       },
       "WorkspaceProviderFallbackTarget": {
@@ -14476,6 +14641,16 @@
               }
             ]
           },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recovery": {
             "anyOf": [
               {
@@ -15226,6 +15401,27 @@
               }
             ],
             "title": "Provider"
+          },
+          "provider_budget_usd": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "gt": 0,
+                "lt": 1000000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "USD budget for managed OpenRouter keys; defaults to AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection.",
+            "title": "Provider Budget Usd"
           },
           "provider_recovery": {
             "anyOf": [
@@ -21211,6 +21407,154 @@
         "summary": "List Workspace Operations",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}/provider-budget": {
+      "post": {
+        "description": "Set the managed OpenRouter budget (USD) of a workspace.\n\nThe live managed key's limit is updated first; the new budget, the audit\nevent and a resume of a provider-budget block follow. ``usd`` must exceed\nthe exact provider spend already recorded.",
+        "operationId": "set_workspace_provider_budget_v1_workspaces__workspace_id__provider_budget_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceProviderBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Management API failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Set Workspace Provider Budget",
+        "tags": [
+          "workspace-controls"
         ]
       }
     },

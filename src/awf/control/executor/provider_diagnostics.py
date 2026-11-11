@@ -11,6 +11,7 @@ from typing import Any
 
 from awf.adapters.base import AgentRunError, get_adapter
 from awf.adapters.diagnostic_events import coding_witness
+from awf.adapters.managed_credentials import exec_environment, managed_credential_scope
 from awf.adapters.provider_config import RUNTIME_PYTHON_PATH
 from awf.common.agent_execution import execution_from_policy
 from awf.control.executor.work_slot_binding import work_slot_for
@@ -18,6 +19,7 @@ from awf.db.enums import FailureReason, OperationStatus, OperationType, Workspac
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.runtime.provider_diagnostic_fixture import FIXTURE_VERSION, PROMPT, RUNTIME_FIXTURE_PATH
 from awf.service.provider_diagnostics import DIAGNOSTIC_KEY, DIAGNOSTIC_KIND
+from awf.service.provider_managed_keys import PROVIDER_PARK_REASON_CODES
 
 
 def compose_args(ws: Any, compose_file: Path) -> list[str]:
@@ -31,7 +33,9 @@ def compose_args(ws: Any, compose_file: Path) -> list[str]:
     ]
 
 
-async def runtime_identity(executor: Any, ws: Any, compose_file: Path) -> dict[str, Any]:
+async def runtime_identity(
+    executor: Any, ws: Any, compose_file: Path, *, env: dict[str, str] | None = None
+) -> dict[str, Any]:
     prefix = compose_args(ws, compose_file)
     capability = await executor._runner.run(
         [
@@ -72,6 +76,8 @@ async def runtime_identity(executor: Any, ws: Any, compose_file: Path) -> dict[s
                 *prefix,
                 "exec",
                 "-T",
+                # A managed key reaches the probe like the run: by name, exec-only.
+                *(arg for name in env or {} for arg in ("-e", name)),
                 "agent",
                 RUNTIME_PYTHON_PATH,
                 "-I",
@@ -81,6 +87,7 @@ async def runtime_identity(executor: Any, ws: Any, compose_file: Path) -> dict[s
                 "--probe-json",
             ],
             timeout_seconds=12,
+            **({"env": exec_environment(env)} if env else {}),
         )
         try:
             probe = json.loads(health.stdout)
@@ -212,20 +219,29 @@ async def execute_diagnostic(executor: Any, ws: Any, *, compose_file: Path) -> N
 
         require_diagnostic_contract(ws)
         deadline = diagnostic["request"]["deadline_seconds"]
-        async with asyncio.timeout(deadline):
-            identity = await runtime_identity(executor, ws, compose_file)
+        adapter = get_adapter(
+            ws.agent,
+            runner=executor._runner,
+            execution=selected,
+            log_store=executor._log_store,
+            agent_wall_timeout_seconds=deadline,
+            agent_idle_timeout_seconds=deadline,
+            credential_broker=getattr(executor, "_credential_broker", None),
+        )
+        adapter.diagnostic_events = True
+        # One managed key (if any) serves the probe and the run, then is deleted.
+        async with (
+            asyncio.timeout(deadline),
+            managed_credential_scope(
+                adapter, workspace_id=ws.id, purpose="provider_diagnostic"
+            ) as lease,
+        ):
+            identity = await runtime_identity(
+                executor, ws, compose_file, **({"env": dict(lease.env)} if lease else {})
+            )
             result.update(identity)
             if not await persist_runtime_identity(executor, ws, identity):
                 return
-            adapter = get_adapter(
-                ws.agent,
-                runner=executor._runner,
-                execution=selected,
-                log_store=executor._log_store,
-                agent_wall_timeout_seconds=deadline,
-                agent_idle_timeout_seconds=deadline,
-            )
-            adapter.diagnostic_events = True
             run = await adapter.run(
                 compose_project=ws.compose_project_name or "awf_" + ws.id,
                 compose_file=compose_file,
@@ -234,6 +250,7 @@ async def execute_diagnostic(executor: Any, ws: Any, *, compose_file: Path) -> N
                 log_source="provider_diagnostic",
                 worktree_path=executor._config.worktrees_root / ws.id,
                 work_slot=work_slot_for(executor, ws.id),
+                credential_lease=lease,
             )
             proof = coding_witness(ws.agent, run.stdout, prompt=PROMPT)
             result["protocol_evidence"] = proof.status
@@ -281,6 +298,10 @@ async def execute_diagnostic(executor: Any, ws: Any, *, compose_file: Path) -> N
         result["reason_code"] = (
             "PROVIDER_DIAGNOSTIC_TIMEOUT"
             if isinstance(error, TimeoutError)
+            # Diagnostics never park: an exhausted or unavailable managed key is
+            # the terminal diagnostic outcome, recorded with its own reason.
+            else result["execution_reason_code"]
+            if result["execution_reason_code"] in PROVIDER_PARK_REASON_CODES
             else "PROVIDER_DIAGNOSTIC_EXECUTION_FAILED"
         )
     await finish_diagnostic(executor, ws, result)

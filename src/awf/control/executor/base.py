@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import (
 
 from awf.adapters.base import AgentDefaults
 from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS, defaults_with_model_overrides
+from awf.adapters.managed_credentials import ProviderCredentialBroker
 from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
@@ -64,6 +65,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
         usage_sampler: UsageSampler | None = None,
+        credential_broker: ProviderCredentialBroker | None = None,
         agent_runtime_executor: AgentRuntimeExecutor | None = None,
         hosted_validation: Any | None = None,
         ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
@@ -115,6 +117,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
         self._usage_sampler = usage_sampler
+        self._credential_broker = credential_broker
         self._agent_runtime_executor = agent_runtime_executor
         self._hosted_validation = hosted_validation
         self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout

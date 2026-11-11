@@ -911,3 +911,69 @@ async def test_pre_push_validation_fix_pass_returns_commit_exception_rollback_fa
     assert (committed, failure_reason) == (False, "PRE_PUSH_VALIDATION_ROLLBACK_FAILED")
     assert rollback_calls[0]["reason"] == "commit_exception"
     assert rollback_calls[0]["restore_ref"] == post_agent_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reason_code", ["PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_MANAGED_KEY_UNAVAILABLE"]
+)
+async def test_pre_push_validation_fix_pass_park_code_unwinds_as_a_managed_key_park(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason_code: str,
+) -> None:
+    """A managed-key park code never feeds more fix passes or a validation failure."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+    from awf.runtime.pr_monitor_runner.types import ProviderManagedKeyParkedError
+
+    fix_start_head = "6" * 40
+    workspace_id, runner, _cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
+    commit_calls: list[dict[str, object]] = []
+    budget = {"budget_usd": "1.000000", "spend_usd": "1.000000"}
+
+    async def _run_agent_with_recovery(**_kwargs: object) -> None:
+        raise AgentRunError(
+            agent="codex",
+            result=CommandResult(returncode=78, stdout="", stderr=reason_code),
+            reason_code=reason_code,
+            details={"provider_budget": budget, "retryable": False},
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return fix_start_head
+
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        commit_calls.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_agent_with_recovery
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _worktree_path: None)
+
+    with pytest.raises(ProviderManagedKeyParkedError) as raised:
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=_failed_validation_result(
+                pre_push_validation,
+                tmp_path,
+                workspace_head_sha=fix_start_head,
+            ),
+            pass_number=1,
+            total_passes=3,
+            validation_commands=("pytest -q",),
+        )
+
+    assert raised.value.reason_code == reason_code
+    assert raised.value.details["provider_budget"] == budget
+    assert commit_calls == []

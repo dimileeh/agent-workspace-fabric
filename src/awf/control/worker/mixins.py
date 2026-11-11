@@ -8,6 +8,7 @@ from awf.control.worker import cleanup as _cleanup
 from awf.control.worker import cleanup_auth_overlay as _cleanup_auth_overlay
 from awf.control.worker import cleanup_service_gc as _cleanup_service_gc
 from awf.control.worker import dispatch_methods as _dispatch_methods
+from awf.control.worker import provider_keys as _provider_keys
 from awf.control.worker import recovery as _recovery
 from awf.control.worker import scheduler_methods as _scheduler_methods
 from awf.control.worker import work_slots as _work_slots
@@ -285,6 +286,9 @@ class WorkerDelegatesMixin:
     _claim_ready_work_slots = _work_slots._claim_ready_work_slots
     _ensure_work_slot_startup_check = _work_slots._ensure_work_slot_startup_check
     _maybe_reconcile_work_slot_leases = _work_slots._maybe_reconcile_work_slot_leases
+    _maybe_reconcile_openrouter_keys = _provider_keys._maybe_reconcile_openrouter_keys
+    _finalize_terminal_provider_keys = _provider_keys._finalize_terminal_provider_keys
+    _stop_provider_key_reconcile = _provider_keys._stop_provider_key_reconcile
     _load_work_slot_leases_for_reconcile = _work_slots._load_work_slot_leases_for_reconcile
     _probe_work_slot_lease = _work_slots._probe_work_slot_lease
     _apply_work_slot_reconcile_action = _work_slots._apply_work_slot_reconcile_action

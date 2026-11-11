@@ -8,6 +8,7 @@ from typing import Any
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.auto_merge import AUTO_MERGE_INTENT_POLICY_KEY
 from awf.common.companions import COMPANION_POLICY_KEY
+from awf.common.config import DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
     DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
@@ -88,9 +89,25 @@ def freeze_execution_policy(
     profile: Mapping[str, Any] | None,
     enabled: bool,
     environ: Mapping[str, str],
+    settings: object = None,
+    hosted: bool = False,
 ) -> dict[str, Any]:
-    """Freeze the primary and every declared fallback using one resolved profile."""
-    from awf.common.agent_execution import resolve_execution
+    """Freeze the primary and every declared fallback using one resolved profile.
+
+    With managed OpenRouter keys configured, every OpenRouter target uses the
+    fixed managed credential reference and the workspace budget is frozen once,
+    beside the selections, in ``provider_budget``.
+    """
+    from awf.common.agent_execution import (
+        PROVIDER_BUDGET_POLICY_KEY,
+        provider_budget_policy,
+        resolve_execution,
+    )
+
+    managed_openrouter = getattr(settings, "openrouter_management_key", None) is not None
+    default_budget_usd = getattr(
+        settings, "openrouter_workspace_limit_usd", DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD
+    )
 
     policy = workspace_create_task_policy_snapshot(payload)
     from awf.common.workspace_policy import cursor_auto_model_selector
@@ -122,7 +139,20 @@ def freeze_execution_policy(
                 allow_unverified=True,
                 profile=profile,
                 environ=environ if profile is not None else {},
+                managed_openrouter=managed_openrouter,
             )
+        )
+    managed = any(s.managed_key for s in snapshots)
+    if managed and hosted:
+        raise ValueError("PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED")
+    requested_budget = payload.task.provider_budget_usd
+    if requested_budget is not None and not managed:
+        raise ValueError("PROVIDER_BUDGET_UNSUPPORTED")
+    if managed:
+        policy[PROVIDER_BUDGET_POLICY_KEY] = provider_budget_policy(
+            limit_usd=requested_budget if requested_budget is not None else default_budget_usd,
+            source="task" if requested_budget is not None else "default",
+            requested_usd=requested_budget,
         )
     if not payload.preflight.allow_unverified_model and any(s.third_party for s in snapshots):
         policy["require_compatibility_evidence"] = True
@@ -142,3 +172,39 @@ def freeze_execution_policy(
         if profile is not None or not snapshot.third_party:
             target["agent_execution"] = snapshot.model_dump(mode="json")
     return policy
+
+
+def freeze_diagnostic_policy(policy: dict[str, Any], diagnostic_spec: Mapping[str, Any]) -> None:
+    """Freeze a diagnostic's selection; a managed one runs under a small fixed budget."""
+    from awf.common.agent_execution import (
+        DIAGNOSTIC_PROVIDER_BUDGET_USD,
+        MANAGED_OPENROUTER_CREDENTIAL_REF,
+        PROVIDER_BUDGET_POLICY_KEY,
+        provider_budget_policy,
+    )
+
+    policy["agent_execution"] = diagnostic_spec["selection"]
+    policy["provider_diagnostic"] = {"request": diagnostic_spec}
+    policy.pop(PROVIDER_BUDGET_POLICY_KEY, None)
+    if diagnostic_spec["selection"]["credential_ref"] == MANAGED_OPENROUTER_CREDENTIAL_REF:
+        policy[PROVIDER_BUDGET_POLICY_KEY] = provider_budget_policy(
+            limit_usd=DIAGNOSTIC_PROVIDER_BUDGET_USD, source="diagnostic"
+        )
+
+
+def required_worker_contract_version(policy: Mapping[str, Any]) -> int:
+    """Live queue consumers must mint managed keys (3) or run expanded work (2)."""
+    from awf.common.agent_execution import (
+        MANAGED_PROVIDER_KEY_WORKER_VERSION,
+        managed_openrouter_frozen,
+    )
+
+    return MANAGED_PROVIDER_KEY_WORKER_VERSION if managed_openrouter_frozen(policy) else 2
+
+
+def provider_budget_request_matches(
+    stored_policy: Mapping[str, Any], payload: WorkspaceCreateRequest
+) -> bool:
+    """Idempotent replays compare the requested budget, not later operator raises."""
+    stored = stored_policy.get("provider_budget") or {}
+    return stored.get("requested_usd") == payload.task.provider_budget_usd

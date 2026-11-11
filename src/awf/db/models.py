@@ -41,6 +41,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
 from awf.db.model_summaries import _queue_decision_summary, _resource_reservation_summary
+from awf.db.provider_key_models import ProviderManagedKey as ProviderManagedKey
 from awf.db.work_slot_models import WorkSlotLease as WorkSlotLease
 from awf.hosted_node import lifecycle_models as lifecycle_models  # noqa: F401
 from awf.hosted_node import models as hosted_models  # noqa: F401

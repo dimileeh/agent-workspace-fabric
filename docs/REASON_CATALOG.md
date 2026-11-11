@@ -474,7 +474,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#execution_runtime_contract_unsupported](#execution_runtime_contract_unsupported)
 
 ### EXECUTION_WORKER_CONTRACT_UNSUPPORTED
-**Problem:** A live queue consumer does not advertise the required execution worker capability (2 for expanded admission).
+**Problem:** A live queue consumer does not advertise the required execution worker capability (2 for expanded admission, 3 for managed OpenRouter keys).
 **Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
 **Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
 **Related Command:** `awf workspace show <workspace_id>`
@@ -942,12 +942,47 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
 
+### PROVIDER_ACCOUNT_CREDITS_EXHAUSTED
+**Problem:** The OpenRouter account balance ran out of credits while the workspace's managed key still had budget; the workspace is parked (blocked) for a human instead of failing.
+**Likely Cause:** The agent CLI's own error (the tail of its stderr) reported HTTP 402 / insufficient credits while the authoritative key read still showed remaining limit.
+**Operator Fix:** Top up the OpenRouter account (this is the account balance, not the workspace budget), then re-set the provider budget to resume where it stopped. AWF never retries blindly or falls back to another provider for this reason.
+**Related Command:** `awf workspace provider-budget <workspace_id> --usd <amount>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_account_credits_exhausted](#provider_account_credits_exhausted)
+
 ### PROVIDER_AUTH_FAILED
 **Problem:** A workspace agent or PR monitor could not run because the selected LLM provider authentication failed.
 **Likely Cause:** The provider token is expired, reused, missing inside the workspace runtime, or rejected by the provider CLI/API.
 **Operator Fix:** Refresh the provider credentials, restart or rebuild the AWF service/runtime if credentials are mounted into containers, then remonitor or reschedule the workspace.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
+
+### PROVIDER_BUDGET_EXHAUSTED
+**Problem:** The workspace's managed OpenRouter key reached its USD budget; the workspace is parked (blocked) for a human instead of failing.
+**Likely Cause:** The agent's OpenRouter calls returned HTTP 402 / limit reached, or the authoritative key read showed no remaining limit.
+**Operator Fix:** Check the exact provider spend, then raise the budget to resume where it stopped. AWF never retries blindly or falls back to another provider for this reason.
+**Related Command:** `awf workspace provider-budget <workspace_id> --usd <amount>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_exhausted](#provider_budget_exhausted)
+
+### PROVIDER_BUDGET_INVALID
+**Problem:** The requested provider budget is not a USD amount above the recorded spend.
+**Likely Cause:** The amount was zero, negative, non-numeric, too large or at/below the spend AWF already recorded.
+**Operator Fix:** Choose a budget greater than the workspace's exact provider spend and below 1,000,000 USD.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_invalid](#provider_budget_invalid)
+
+### PROVIDER_BUDGET_RAISED
+**Problem:** An operator set a new managed provider budget for the workspace.
+**Likely Cause:** `awf workspace provider-budget` (REST/MCP equivalent) updated the frozen budget and the live key's limit.
+**Operator Fix:** No action is needed; a provider-budget block resumes automatically.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_raised](#provider_budget_raised)
+
+### PROVIDER_BUDGET_UNSUPPORTED
+**Problem:** This workspace has no managed OpenRouter budget to set.
+**Likely Cause:** No management key was configured at creation, the selection is not OpenRouter, or the workspace is already terminal.
+**Operator Fix:** Provider budgets apply only to live workspaces whose OpenRouter selection uses an AWF-minted key; configure OPENROUTER_MANAGEMENT_KEY before creating them.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_unsupported](#provider_budget_unsupported)
 
 ### PROVIDER_DIAGNOSTIC_BOOTSTRAP_FAILED
 **Problem:** The isolated diagnostic runtime could not be provisioned.
@@ -1102,6 +1137,104 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_unsupported](#provider_discovery_unsupported)
+
+### PROVIDER_MANAGED_KEYS_DOWNGRADE_UNSAFE
+**Problem:** The schema downgrade would drop recorded managed-key spend.
+**Likely Cause:** provider_managed_keys still has rows.
+**Operator Fix:** Keep the compatible code and schema; finalize and archive managed keys before an administrative downgrade.
+**Related Command:** `alembic current`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_keys_downgrade_unsafe](#provider_managed_keys_downgrade_unsafe)
+
+### PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED
+**Problem:** Managed OpenRouter keys are not supported on hosted runtimes.
+**Likely Cause:** Hosted execution cannot receive per-invocation exec-time credentials.
+**Operator Fix:** Run managed OpenRouter workspaces on local Core, or create the hosted workspace without a management key configured.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_hosted_unsupported](#provider_managed_key_hosted_unsupported)
+
+### PROVIDER_MANAGED_KEY_NOT_FOUND
+**Problem:** OpenRouter no longer has the managed key AWF recorded.
+**Likely Cause:** The key was already deleted by AWF, the reconciler or an operator.
+**Operator Fix:** No action is needed; AWF treats the key as deleted.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_not_found](#provider_managed_key_not_found)
+
+### PROVIDER_MANAGED_KEY_ORPHAN_DELETED
+**Problem:** The reconciler deleted an AWF-minted OpenRouter key with no live binding.
+**Likely Cause:** A worker restart, crash or terminal transition left the key behind.
+**Operator Fix:** No action is needed; its usage was recorded before deletion.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_orphan_deleted](#provider_managed_key_orphan_deleted)
+
+### PROVIDER_MANAGED_KEY_PERSIST_FAILED
+**Problem:** AWF could not record a managed key update in the database.
+**Likely Cause:** A transient database error during a usage read or key release.
+**Operator Fix:** Check database health; the next finalize or reconcile pass records the usage.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_persist_failed](#provider_managed_key_persist_failed)
+
+### PROVIDER_MANAGED_KEY_RECONCILE_FAILED
+**Problem:** The periodic managed-key reconciliation or terminal finalization failed.
+**Likely Cause:** The OpenRouter management API or the database was unavailable during the sweep.
+**Operator Fix:** Check worker logs for the management reason code; the sweep retries on its next interval and never blocks other work.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_reconcile_failed](#provider_managed_key_reconcile_failed)
+
+### PROVIDER_MANAGED_KEY_UNAVAILABLE
+**Problem:** AWF could not mint a managed OpenRouter key; only this selection is parked.
+**Likely Cause:** The OpenRouter management API rejected or failed the key creation (auth, rate limit, outage), the key could not be recorded, or keys AWF could not finalize yet still hold the budget that spend leaves.
+**Operator Fix:** Inspect the management reason code (or provider_budget.reserved_usd) in the park event, fix the OpenRouter account or management key, then raise or re-set the budget to resume.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_unavailable](#provider_managed_key_unavailable)
+
+### PROVIDER_MANAGEMENT_API_RATE_LIMITED
+**Problem:** The OpenRouter management API rate-limited AWF (HTTP 429).
+**Likely Cause:** Many concurrent key mints, reads or deletions.
+**Operator Fix:** Wait and retry; reduce concurrent managed workspaces if this persists.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_rate_limited](#provider_management_api_rate_limited)
+
+### PROVIDER_MANAGEMENT_API_REJECTED
+**Problem:** The OpenRouter management API rejected the request (HTTP 4xx).
+**Likely Cause:** An invalid limit, a conflicting key or an account restriction.
+**Operator Fix:** Inspect the operation and HTTP status; the request shape or account state is invalid.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_rejected](#provider_management_api_rejected)
+
+### PROVIDER_MANAGEMENT_API_RESPONSE_INVALID
+**Problem:** The OpenRouter management API returned an invalid or oversized response.
+**Likely Cause:** Bad JSON, an unexpected shape, a redirect or a response above 2 MB.
+**Operator Fix:** Retry later; report the endpoint behaviour if it persists.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_response_invalid](#provider_management_api_response_invalid)
+
+### PROVIDER_MANAGEMENT_API_UNAUTHORIZED
+**Problem:** OpenRouter rejected the management key (HTTP 401/403).
+**Likely Cause:** The management key expired, was revoked or lacks key-management permission.
+**Operator Fix:** Replace OPENROUTER_MANAGEMENT_KEY with a valid, unexpired management key.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_unauthorized](#provider_management_api_unauthorized)
+
+### PROVIDER_MANAGEMENT_API_UNAVAILABLE
+**Problem:** The OpenRouter management API was unreachable or failed (5xx, timeout).
+**Likely Cause:** An OpenRouter outage, network failure or the 10-second request bound.
+**Operator Fix:** Retry later; affected workspaces park and resume once a budget is re-set.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_unavailable](#provider_management_api_unavailable)
+
+### PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN
+**Problem:** A profile tried to reference the OpenRouter management key.
+**Likely Cause:** Workspace stacks must never receive the control-plane management key.
+**Operator Fix:** Remove OPENROUTER_MANAGEMENT_KEY references from runtime/service/companion environment values and env-secret declarations.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_credential_forbidden](#provider_management_credential_forbidden)
+
+### PROVIDER_MANAGEMENT_KEY_MISSING
+**Problem:** A managed OpenRouter workspace ran on an API/worker without a management key.
+**Likely Cause:** The management key was removed after the workspace froze a managed selection.
+**Operator Fix:** Set OPENROUTER_MANAGEMENT_KEY for the API and worker services and restart them; the workspace never falls back to the static OPENROUTER_API_KEY.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_key_missing](#provider_management_key_missing)
 
 ### PROVIDER_SELECTION_INVALID
 **Problem:** The selected agent/provider/profile is invalid.

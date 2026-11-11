@@ -26,6 +26,7 @@ from starlette.requests import Request
 import awf.api.request_admission as request_admission
 import awf.api.routes.workspaces as workspaces_route
 import awf.service.workspace_observability as workspace_observability
+import awf.service.workspace_provider_spend as workspace_provider_spend
 from awf.api.app import configure_database, create_app
 from awf.api.deps import get_db_session
 from awf.common.config import Settings, get_settings
@@ -929,10 +930,23 @@ class TestWorkspaceDirectRoutes:
                 del kwargs
                 return [workspace]
 
+        class FakeProviderManagedKeyRepository:
+            def __init__(self, session: object) -> None:
+                del session
+
+            async def spend_by_workspace_ids(self, workspace_ids: list[str]) -> dict[str, Any]:
+                del workspace_ids
+                return {}
+
         monkeypatch.setattr(
             workspace_observability,
             "WorkspaceRepository",
             FakeWorkspaceRepository,
+        )
+        monkeypatch.setattr(
+            workspace_provider_spend,
+            "ProviderManagedKeyRepository",
+            FakeProviderManagedKeyRepository,
         )
 
         response = await workspaces_route.list_workspace_overview(

@@ -2,14 +2,30 @@ import { expect, type Page, test } from "@playwright/test";
 
 const now = "2026-05-02T12:00:00.000Z";
 
-type UsageKind = "available" | "unavailable" | "ccusage" | "ccusage_timeout";
+type UsageKind = "available" | "unavailable" | "ccusage" | "ccusage_timeout" | "managed";
 
 const WORKSPACE_DEFS: { id: string; title: string; usage: UsageKind }[] = [
   { id: "ws_usage", title: "Usage Workspace", usage: "available" },
   { id: "ws_no_usage", title: "No Usage Workspace", usage: "unavailable" },
   { id: "ws_ccusage", title: "Ccusage Workspace", usage: "ccusage" },
   { id: "ws_ccusage_timeout", title: "Ccusage Timeout Workspace", usage: "ccusage_timeout" },
+  { id: "ws_managed", title: "Managed Budget Workspace", usage: "managed" },
 ];
+
+const MANAGED_SPEND = {
+  kind: "exact_provider_spend",
+  provider: "openrouter",
+  status: "available",
+  spend_usd: 1.25,
+  budget_usd: 4,
+  remaining_usd: 2.75,
+  currency: "USD",
+  key_count: 2,
+  live_key_count: 0,
+  last_read_at: now,
+  source: "openrouter_key_usage",
+  reason: null,
+};
 
 function llmUsageFor(usage: UsageKind) {
   switch (usage) {
@@ -30,6 +46,8 @@ function llmUsageFor(usage: UsageKind) {
       };
     case "ccusage_timeout":
       return { status: "unavailable", input_tokens: null, output_tokens: null, total_tokens: null, cost_estimate: null, currency: null, source: "ccusage", reason: "ccusage_timeout" };
+    case "managed":
+      return { status: "available", input_tokens: null, output_tokens: null, total_tokens: null, cost_estimate: 1.25, currency: "USD", source: "openrouter_key_usage", reason: null };
     default:
       return { status: "unavailable" };
   }
@@ -107,6 +125,23 @@ test("dashboard renders ccusage-backed totals and source label", async ({ page }
   await expect(usageBlock.getByText("pricing not configured", { exact: false })).not.toBeVisible();
   // The ccusage source is surfaced as a friendly provenance label.
   await expect(usageBlock.getByText("ccusage", { exact: false })).toBeVisible();
+});
+
+test("dashboard labels managed OpenRouter cost as exact provider spend", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page
+    .getByRole("button", { name: "Open workspace details for Managed Budget Workspace", exact: true })
+    .click();
+
+  const usageBlock = page.getByTestId("llm-usage");
+  await expect(usageBlock).toBeVisible();
+  await expect(usageBlock.getByText("$1.2500", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("Exact provider spend", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("provider-spend")).toHaveText(
+    "Exact provider spend: $1.25 of $4.00 (remaining $2.75)",
+  );
 });
 
 test("dashboard renders ccusage unavailable reason", async ({ page }) => {
@@ -268,6 +303,7 @@ function workspaceOverview(id: string, title: string, usage: UsageKind) {
     updated_at: now,
     lifecycle: [],
     llm_usage: llmUsageFor(usage),
+    provider_spend: usage === "managed" ? MANAGED_SPEND : null,
     coordination_warnings: [],
   };
 }

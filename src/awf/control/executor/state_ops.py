@@ -56,6 +56,11 @@ from awf.control.operator_grants import (
     active_operator_grant_specs_in_session,
     consume_active_operator_grants_in_session,
 )
+from awf.control.provider_budget_park import (
+    PROVIDER_BUDGET_BLOCK_TYPE,
+    is_provider_park_reason,
+    park_for_provider_key,
+)
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -532,14 +537,31 @@ async def _mark_failed(
     details: Mapping[str, Any] | None = None,
     salvage: Mapping[str, Any] | None = None,
     monitor_owner_id: str | None = None,
+    execution_owner_id: str | None = None,
 ) -> None:
     """Mark the workspace failed when still in ``from_status``.
 
     ``monitor_owner_id`` optionally fences the transition on
     ``monitor_claimed_by`` so a superseded PR-monitor recovery cannot fail the
     row underneath a replacement claimant that kept ``monitoring_pr``
-    (PRRT_kwDOSJAM6s6dNBTV).
+    (PRRT_kwDOSJAM6s6dNBTV). ``execution_owner_id`` likewise fences both the
+    provider-key park and the failure CAS on ``execution_claimed_by`` so a
+    superseded executor cannot park or fail a replacement claimant's row
+    (PRRT_kwDOSJAM6s615vfG).
     """
+    # A workspace's own managed-key budget/key failure parks for a human; it never
+    # fails, retries blindly or falls back (every agent call site funnels here).
+    if is_provider_park_reason(reason_code) and await park_for_provider_key(
+        self,
+        workspace_id=workspace_id,
+        from_status=from_status,
+        reason_code=str(reason_code),
+        message=message,
+        details=details,
+        monitor_owner_id=monitor_owner_id,
+        execution_owner_id=execution_owner_id,
+    ):
+        return
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         final_reason_code = reason_code or failure_reason.value.upper()
@@ -559,6 +581,8 @@ async def _mark_failed(
         extra_conditions: tuple[Any, ...] = ()
         if monitor_owner_id is not None:
             extra_conditions = (Workspace.monitor_claimed_by == monitor_owner_id,)
+        if execution_owner_id is not None:
+            extra_conditions += (Workspace.execution_claimed_by == execution_owner_id,)
         ws = await repo.transition_if_current(
             workspace_id,
             from_status=from_status,
@@ -1308,6 +1332,8 @@ async def _begin_execution(
             purpose = (
                 "answer the paused plan-conformance decision"
                 if decision_block
+                else "continue after the operator raised the provider budget"
+                if ws.block_type == PROVIDER_BUDGET_BLOCK_TYPE
                 else "resolve the paused protected quality-gate violation"
             )
             ws.task_prompt = (

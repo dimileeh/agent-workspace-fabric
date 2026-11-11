@@ -113,6 +113,11 @@ def workspace_create(
     agent: str = typer.Option("codex", "--agent"),
     provider: str | None = typer.Option(None, "--provider"),
     allow_unverified_model: bool = typer.Option(False, "--allow-unverified-model"),
+    provider_budget_usd: float | None = typer.Option(
+        None,
+        "--provider-budget-usd",
+        help="USD budget for managed OpenRouter keys (default AWF_OPENROUTER_WORKSPACE_LIMIT_USD).",
+    ),
     model: str | None = typer.Option(None, "--model"),
     effort: str | None = typer.Option(
         None,
@@ -245,6 +250,9 @@ def workspace_create(
         body["task"]["provider"] = provider
     if _option_default(allow_unverified_model):
         body["preflight"]["allow_unverified_model"] = True
+    provider_budget_usd = _option_default(provider_budget_usd)
+    if provider_budget_usd is not None:
+        body["task"]["provider_budget_usd"] = provider_budget_usd
     if model is not None:
         body["task"]["model"] = model
     if effort is not None:
@@ -353,6 +361,21 @@ def attention_marker(item: Mapping[str, Any]) -> str:
     return f"⚠ {workspace_id} awaiting human: {reason}"
 
 
+def format_provider_spend_line(payload: Any) -> str | None:
+    """Return the exact-provider-spend line for a managed OpenRouter workspace."""
+    spend = payload.get("provider_spend") if isinstance(payload, Mapping) else None
+    if not isinstance(spend, Mapping):
+        return None
+    if spend.get("status") != "available":
+        return f"Exact provider spend: unavailable ({spend.get('reason') or 'unknown'})"
+    budget = spend.get("budget_usd")
+    line = f"Exact provider spend: ${spend.get('spend_usd', 0):.2f}"
+    if budget is not None:
+        line += f" of ${budget:.2f} (remaining ${spend.get('remaining_usd') or 0:.2f}"
+        line += f", {spend.get('key_count', 0)} keys)"
+    return line
+
+
 def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) -> None:
     """Echo the awaiting-human attention line after a pretty ``workspace show``."""
     if fmt != OutputFormat.pretty or response.status_code >= 400 or not response.content:
@@ -363,9 +386,9 @@ def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) 
         return
     if not isinstance(payload, Mapping):
         return
-    line = format_attention_line(payload)
-    if line is not None:
-        typer.echo(line)
+    for line in (format_attention_line(payload), format_provider_spend_line(payload)):
+        if line is not None:
+            typer.echo(line)
 
 
 def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) -> None:
@@ -390,6 +413,11 @@ def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) 
         marker = attention_marker(item) if isinstance(item, Mapping) else ""
         if marker:
             typer.echo(marker)
+        spend = format_provider_spend_line(item)
+        if spend is not None:
+            typer.echo(
+                f"{item.get('id') or item.get('workspace_id')} {spend[:1].lower()}{spend[1:]}"
+            )
 
 
 @workspace_app.command("show")
@@ -595,6 +623,49 @@ def workspace_guide(
         fmt=fmt,
         action="guide",
     )
+
+
+@workspace_app.command("provider-budget")
+def workspace_provider_budget(
+    workspace_id: str = typer.Argument(...),
+    usd: float = typer.Option(
+        ...,
+        "--usd",
+        help="New total managed OpenRouter budget in USD; must exceed recorded spend.",
+    ),
+    reason: str | None = typer.Option(None, "--reason", help="Optional operator audit reason."),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Set a workspace's managed OpenRouter budget and resume a provider-budget block.
+
+    The live managed key's limit is updated to the new remaining headroom; a
+    workspace parked with PROVIDER_BUDGET_EXHAUSTED resumes where it stopped.
+    """
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="provider-budget",
+    )
+    body: dict[str, object] = {"usd": usd}
+    if reason is not None:
+        body["reason"] = reason
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/provider-budget",
+        base_url=_base_url(base_url),
+        json=body,
+        headers=headers,
+    )
+    _handle_response(response, fmt)
 
 
 @workspace_app.command("instruct")

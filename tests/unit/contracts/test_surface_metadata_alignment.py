@@ -319,7 +319,8 @@ def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None
     }
 
     assert required_capabilities == {capability.name for capability in control_capabilities()} | {
-        "provider_connection_test"
+        "provider_connection_test",
+        "set_provider_budget",
     }
     assert required_capabilities <= supported_capabilities
     assert CAPABILITIES_BY_NAME["create_workspace"].supports_idempotency_key is True

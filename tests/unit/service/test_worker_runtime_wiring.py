@@ -209,6 +209,11 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["executor_kwargs"]["validation"] is created["validation"]
     assert created["executor_kwargs"]["agent_runtime_executor"] is None
     assert created["executor_kwargs"]["hosted_validation"] is None
+    from awf.service.provider_managed_keys import ManagedKeyBroker
+
+    # No management key configured: managed rows fail closed, never a static key.
+    broker = created["executor_kwargs"]["credential_broker"]
+    assert isinstance(broker, ManagedKeyBroker) and broker._client is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
     assert (
         created["provisioner_kwargs"]["config"].agent_defaults
@@ -1079,6 +1084,7 @@ def _stub_worker_runtime_dependencies(
             pr_monitor_factory: object,
             log_store: object,
             usage_sampler: object = None,
+            credential_broker: object = None,
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
@@ -1086,6 +1092,7 @@ def _stub_worker_runtime_dependencies(
             stack_launcher: object = None,
         ) -> None:
             """Test helper for  init  ."""
+            del credential_broker
             del hosted_validation
             del ensure_hosted_monitor_checkout
             del worktree_activity_git_roots

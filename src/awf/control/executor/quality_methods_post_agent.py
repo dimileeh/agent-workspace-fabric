@@ -22,6 +22,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.agent_service_recovery import (
     _run_agent_callable_with_service_recovery,
+    _run_before_mark_failed,
 )
 from awf.control.executor.constants import (
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
@@ -45,6 +46,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.work_slot_binding import work_slot_for
+from awf.control.provider_budget_park import is_provider_park_reason
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
@@ -189,6 +191,26 @@ async def _run_post_agent_semantic_precommit_repair(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+        if is_provider_park_reason(exc.reason_code):
+            # The workspace's own managed-key budget/key stopped the repair. The
+            # commit retry below would replace that reason with
+            # POST_AGENT_COMMIT_PRECOMMIT_FAILED and terminally fail the workspace:
+            # park now (``_mark_failed`` diverts park codes) with the worktree
+            # intact (PRRT_kwDOSJAM6s614vKD).
+            await _run_before_mark_failed(before_mark_failed, reason_code=exc.reason_code)
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.agent_failure,
+                message=(
+                    "post-agent pre-commit repair stopped by the managed provider key "
+                    f"({exc.reason_code})"
+                ),
+                reason_code=exc.reason_code,
+                details=exc.details,
+                execution_owner_id=execution_owner_id,
+            )
+            return False
     if repair_error is not None and getattr(adapter, "is_hosted", False):
         await self._record_post_agent_commit_format_repair(
             workspace_id=workspace_id,

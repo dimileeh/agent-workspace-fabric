@@ -349,6 +349,7 @@ async def execute(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
                 trusted_git_roots=self._trusted_git_roots_for_workspace(
                     workspace_id=workspace_id,

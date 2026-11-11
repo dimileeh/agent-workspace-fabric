@@ -148,6 +148,10 @@ class ServiceSettings:
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None
     local_capacity_dind_slots: int | None = None
+    openrouter_management_key: str | None = field(default=None, repr=False)
+    openrouter_workspace_limit_usd: float = 10.0
+    openrouter_usage_poll_interval_seconds: float = 120.0
+    openrouter_key_reconcile_interval_seconds: float = 900.0
 
     def __post_init__(self) -> None:
         """Catch a non-positive tail at settings resolution, not worker startup.
@@ -318,6 +322,12 @@ def resolve_service_settings(
         local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
         local_capacity_memory_gb=settings.local_capacity_memory_gb,
         local_capacity_dind_slots=settings.local_capacity_dind_slots,
+        openrouter_management_key=settings.openrouter_management_key,
+        openrouter_workspace_limit_usd=settings.openrouter_workspace_limit_usd,
+        openrouter_usage_poll_interval_seconds=settings.openrouter_usage_poll_interval_seconds,
+        openrouter_key_reconcile_interval_seconds=(
+            settings.openrouter_key_reconcile_interval_seconds
+        ),
     )
 
 
@@ -340,7 +350,12 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
         payload["network_posture_open_legacy_cutoff"] = (
             settings.network_posture_open_legacy_cutoff.isoformat()
         )
-    for key in ("api_token", "github_token", "hosted_delegation_bearer_token"):
+    for key in (
+        "api_token",
+        "github_token",
+        "hosted_delegation_bearer_token",
+        "openrouter_management_key",
+    ):
         if payload.get(key):
             payload[key] = "<redacted>"
     return payload
