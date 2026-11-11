@@ -276,7 +276,9 @@ def _path_identity(path: Path) -> str | None:
     """What ``git add`` would stage from ``path``; ``None`` when that is unverifiable.
 
     A directory (a nested repository or submodule) or any other special file has no
-    content identity here, so it never matches and is always left for a human.
+    content identity here, so it never matches and is always left for a human. A
+    file swapped after its type check is never followed or waited on: a symlink
+    fails the open and a FIFO or other special file has no identity.
     """
     try:
         info = path.lstat()
@@ -286,9 +288,13 @@ def _path_identity(path: Path) -> str | None:
         return "symlink:" + hashlib.sha256(os.fsencode(path.readlink())).hexdigest()
     if not stat.S_ISREG(info.st_mode):
         return None
-    with path.open("rb") as handle:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            return None
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
-    return f"file:{'x' if info.st_mode & 0o111 else '-'}:{digest}"
+    return f"file:{'x' if opened.st_mode & 0o111 else '-'}:{digest}"
 
 
 def _recorded_identities(state: MonitorState) -> dict[str, str | None]:

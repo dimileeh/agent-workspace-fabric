@@ -19,6 +19,7 @@ workspace sat parked keeps the resume parked for a human as
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -502,6 +503,36 @@ async def test_a_changed_mode_link_or_kind_is_left_for_a_human(tmp_path: Path, c
     result = await _resume(runner, state, tmp_path)
 
     _assert_left_for_a_human(result, runner, changed_paths=(path,))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("swap", ["fifo", "symlink"])
+async def test_a_file_swapped_after_its_type_check_is_left_for_a_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: str
+) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    _write(tmp_path, "copy.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    target = tmp_path / _WORKSPACE_ID / "stranded_fix.py"
+    stale = target.lstat()
+    target.unlink()
+    if swap == "fifo":
+        # Opened blocking, a FIFO without a writer would hang the resume forever.
+        os.mkfifo(target)
+    else:
+        # Followed, a link to identical content would hash as the recorded file.
+        target.symlink_to("copy.py")
+    real_lstat = Path.lstat
+
+    def _lstat_before_the_swap(self: Path) -> os.stat_result:
+        return stale if self == target else real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat_before_the_swap)
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, changed_paths=("stranded_fix.py",))
 
 
 @pytest.mark.unit
