@@ -283,6 +283,33 @@ async def test_live_key_patch_failures_leave_no_state_change(tmp_path, client, c
         assert len(events) == len(before_events)
 
 
+async def test_raise_finalizes_a_live_binding_whose_key_is_already_deleted(tmp_path):
+    # A finalize deleted the key after persisting its usage, but its status write
+    # failed: the row stays active and only a budget raise can resume the park.
+    fake = FakeOpenRouterManagement()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        workspace_id = await _workspace(factory, fake, tmp_path)
+        del fake.keys["hash1"]
+
+        response = await _set(factory, workspace_id, fake, usd=3)
+
+        assert ("PATCH", "/keys/hash1", {"limit": 3.0}) in fake.calls
+        ws, events, keys = await _load(factory, workspace_id)
+        assert response.operation_status == "succeeded"
+        assert ws.task_policy["provider_budget"]["limit_usd"] == 3.0
+        assert ws.pending_operator_hint["reason"] == "provider_budget_raised"
+        assert keys[-1].status == "deleted"
+        assert keys[-1].last_reason_code == "PROVIDER_MANAGED_KEY_NOT_FOUND"
+        assert keys[-1].deleted_at is not None and keys[-1].lease_expires_at is None
+        assert keys[-1].spend_usd == Decimal("0.5")
+        released = next(e for e in events if e.event_type == "provider.managed_key.released")
+        assert released.reason_code == "PROVIDER_MANAGED_KEY_NOT_FOUND"
+        raised = next(e for e in events if e.event_type == "provider.budget.raised")
+        assert raised.payload["patched_keys"] == {}
+        assert raised.payload["spend_usd"] == "0.500000"
+
+
 async def test_without_a_live_key_the_raise_needs_no_management_api(tmp_path):
     fake = FakeOpenRouterManagement()
     async with postgres_test_engine() as engine:

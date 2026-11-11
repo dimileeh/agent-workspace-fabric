@@ -36,11 +36,12 @@ from awf.service.controls_helpers import (
     _operator_operation_payload,
 )
 from awf.service.openrouter_management import (
+    MANAGED_KEY_NOT_FOUND,
     OpenRouterManagementClient,
     OpenRouterManagementError,
 )
 from awf.service.openrouter_management import usd as quantize_usd
-from awf.service.provider_managed_keys import reserved_usd, usd_text
+from awf.service.provider_managed_keys import _key_payload, reserved_usd, usd_text
 
 PROVIDER_BUDGET_RAISED: Final[str] = "PROVIDER_BUDGET_RAISED"
 PROVIDER_BUDGET_INVALID: Final[str] = "PROVIDER_BUDGET_INVALID"
@@ -139,6 +140,22 @@ async def set_provider_budget(
         try:
             await management_client.update_key_limit(str(row.key_hash), limit)
         except OpenRouterManagementError as error:
+            if error.reason_code == MANAGED_KEY_NOT_FOUND:
+                # Already deleted (a finalize whose status write failed): the key is
+                # deleted only after its usage is durable, so finalize the binding.
+                now = utcnow()
+                row.status = KeyStatus.deleted.value
+                row.last_reason_code = MANAGED_KEY_NOT_FOUND
+                row.lease_expires_at = None
+                row.deleted_at = now
+                row.updated_at = now
+                await repo.add_event(
+                    workspace,
+                    event_type="provider.managed_key.released",
+                    reason_code=MANAGED_KEY_NOT_FOUND,
+                    payload=_key_payload(row),
+                )
+                continue
             raise ProviderBudgetControlError(
                 error_code=error.reason_code,
                 message="OpenRouter rejected the managed key limit update.",
