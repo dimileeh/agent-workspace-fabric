@@ -160,7 +160,9 @@ async def commit_provider_park_stranded_edits(
     holds the content the park left and nothing else is dirty. Otherwise nothing
     is committed or discarded: the resume returns
     ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES`` naming the extra and changed paths
-    and keeps the marker. Recorded edits that still will not commit return
+    and keeps the marker; when the extra paths appear only after the sink has
+    committed the recorded ones, the result also names those committed paths.
+    Recorded edits that still will not commit return
     ``REPAIR_DIRTY_COMMIT_FAILED`` with the stranded paths, and a ``git status``
     failure is returned as-is, exactly as the repair-start guard returns it. Sink
     exceptions propagate: the caller handles them as it handles the same sink
@@ -189,8 +191,10 @@ async def commit_provider_park_stranded_edits(
                     preserved_head=preserved_head,
                     extra_paths=extra_paths,
                     changed_paths=changed_paths,
+                    committed_paths=[],
                 )
-            await runner._commit_dirty_worktree(
+            recorded_dirty = recorded.keys() & set(_dirty_paths(dirty))
+            committed = await runner._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=_RESUME_COMMIT_MESSAGE,
                 compose_project=compose_project,
@@ -208,7 +212,8 @@ async def commit_provider_park_stranded_edits(
             )
             # The lock only fences AWF's own writers: dirt a human added meanwhile
             # was never staged, and stays theirs to settle.
-            extra_paths = sorted(set(_dirty_paths(dirty)) - recorded.keys())
+            dirty_paths = set(_dirty_paths(dirty))
+            extra_paths = sorted(dirty_paths - recorded.keys())
             if dirty is not None and extra_paths:
                 return _unexpected_worktree_changes_result(
                     dirty,
@@ -216,6 +221,8 @@ async def commit_provider_park_stranded_edits(
                     preserved_head=preserved_head,
                     extra_paths=extra_paths,
                     changed_paths=[],
+                    # HEAD already moved past the park's: say so, never deny it.
+                    committed_paths=sorted(recorded_dirty - dirty_paths) if committed else [],
                 )
     if dirty is None:
         # Row first: a write fault then leaves the in-memory marker for the next
@@ -328,6 +335,7 @@ def _unexpected_worktree_changes_result(
     preserved_head: str,
     extra_paths: list[str],
     changed_paths: list[str],
+    committed_paths: list[str],
 ) -> _GitPushResult:
     from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
@@ -337,6 +345,7 @@ def _unexpected_worktree_changes_result(
         preserved_head=preserved_head or None,
         extra_paths=extra_paths,
         changed_paths=changed_paths,
+        committed_paths=committed_paths,
     )
     _log.warning(
         "monitor.provider_park_resume_unexpected_worktree_changes",
@@ -345,20 +354,28 @@ def _unexpected_worktree_changes_result(
         preserved_head=preserved_head or None,
         extra_paths=extra_paths,
         changed_paths=changed_paths,
+        committed_paths=committed_paths,
     )
     findings = []
     if extra_paths:
         findings.append(f"dirty paths the park did not leave: {_path_summary(extra_paths)}")
     if changed_paths:
         findings.append(f"recorded paths changed since the park: {_path_summary(changed_paths)}")
+    if committed_paths:
+        disposition = (
+            "AWF committed the park's own edits on the local branch "
+            f"({_path_summary(committed_paths)}) but left those changes uncommitted"
+        )
+    else:
+        disposition = "AWF committed none of them and left them"
     return _GitPushResult(
         pushed=False,
         failed=True,
         returncode=1,
         stderr=(
             "A managed provider key park left uncommitted repair edits, but the repair "
-            "worktree holds changes the park did not leave; AWF committed none of them "
-            f"and left them untouched for a human ({'; '.join(findings)})."
+            f"worktree holds changes the park did not leave; {disposition} untouched "
+            f"for a human ({'; '.join(findings)})."
         ),
         reason_code=_PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
         details=details,

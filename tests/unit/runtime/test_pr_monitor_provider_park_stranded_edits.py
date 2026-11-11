@@ -289,6 +289,7 @@ def _assert_left_for_a_human(
     *,
     extra_paths: tuple[str, ...] = (),
     changed_paths: tuple[str, ...] = (),
+    committed_paths: tuple[str, ...] = (),
     sink_calls: int = 0,
 ) -> None:
     assert result is not None
@@ -302,8 +303,11 @@ def _assert_left_for_a_human(
     assert result.details["preserved_head"] == _PRESERVED_HEAD
     assert result.details["extra_paths"] == list(extra_paths)
     assert result.details["changed_paths"] == list(changed_paths)
-    for path in (*extra_paths, *changed_paths):
+    assert result.details["committed_paths"] == list(committed_paths)
+    for path in (*extra_paths, *changed_paths, *committed_paths):
         assert path in result.stderr
+    # The operator-facing message never denies a commit the sink already made.
+    assert ("AWF committed none of them" in result.stderr) is not bool(committed_paths)
     assert len(runner.sink_calls) == sink_calls
 
 
@@ -374,9 +378,33 @@ async def test_a_file_that_appears_during_the_commit_is_left_for_a_human(
 
     result = await _resume(runner, state, tmp_path)
 
-    _assert_left_for_a_human(result, runner, extra_paths=("late_notes.py",), sink_calls=1)
+    _assert_left_for_a_human(
+        result,
+        runner,
+        extra_paths=("late_notes.py",),
+        committed_paths=("stranded_fix.py",),
+        sink_calls=1,
+    )
     assert runner.sink_calls[0]["only_paths"] == ("stranded_fix.py",)
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_a_file_that_appears_during_a_failed_commit_claims_no_commit(
+    tmp_path: Path,
+) -> None:
+    # The recorded edit is still dirty after a sink that committed nothing, so the
+    # message must not report it as committed alongside the late dirt.
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    runner = _FakeRunner(
+        [_dirty(["stranded_fix.py"]), _dirty(["late_notes.py", "stranded_fix.py"])],
+        commits=False,
+    )
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, extra_paths=("late_notes.py",), sink_calls=1)
 
 
 @pytest.mark.unit
