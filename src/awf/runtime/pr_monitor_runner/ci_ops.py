@@ -1061,7 +1061,12 @@ async def _run_ci_fix(
                     )
                     if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
                         # A managed-key park parks for a human, never fails on the
-                        # status error (PRRT_kwDOSJAM6s61-Nzs).
+                        # status error (PRRT_kwDOSJAM6s61-Nzs) — but a PR that went
+                        # terminal mid-repair still completes as moot rather than
+                        # parking (#910, PRRT_kwDOSJAM6s61-mAW).
+                        moot_result = await _moot_if_pr_terminal()
+                        if moot_result is not None:
+                            return moot_result
                         _keep_ci_repair_edits_for_provider_park(
                             workspace_id=workspace_id,
                             state=state,

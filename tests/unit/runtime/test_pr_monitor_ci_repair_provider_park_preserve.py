@@ -262,3 +262,65 @@ async def test_ci_repair_sink_park_keeps_edits_and_marks_the_resume(
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _POST_SINK_HEAD
     assert exc_info.value.details is not None
     assert exc_info.value.details["phase"] == "ci_repair_commit_sink"
+
+
+@pytest.mark.unit
+async def test_ci_repair_status_failed_park_completes_moot_on_a_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PR that merged mid-repair completes as moot instead of parking (#910).
+
+    The status-failure branch returned through the terminal recheck before the
+    park re-raise was added there; the park must not skip it and block a merged
+    PR for a human (PRRT_kwDOSJAM6s61-mAW).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status_failed = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=128,
+        stderr="git status failed",
+        reason_code=_REPAIR_WORKTREE_STATUS_FAILED_REASON,
+        details={"status_stderr": "fatal: index file corrupt"},
+    )
+    _patch_ci_fix_seams(
+        runner,
+        monkeypatch,
+        run_agent=AsyncMock(
+            side_effect=AgentRunError(
+                agent="codex",
+                result=CommandResult(returncode=78, stdout="", stderr="PROVIDER_BUDGET_EXHAUSTED"),
+                reason_code="PROVIDER_BUDGET_EXHAUSTED",
+                details={"retryable": False, "provider_budget": {"limit_usd": 5}},
+            )
+        ),
+        commit_dirty_worktree=AsyncMock(return_value=False),
+        dirty_results=[None, status_failed],
+    )
+    moot = _GitPushResult(pushed=False, failed=False, returncode=0, reason_code="PR_MERGED")
+    monkeypatch.setattr(
+        runner, "_post_action_pr_terminal_push_result_if_moot", AsyncMock(return_value=moot)
+    )
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        state=MonitorState(),
+    )
+
+    assert result is moot
