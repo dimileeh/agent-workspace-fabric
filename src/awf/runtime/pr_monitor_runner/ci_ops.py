@@ -53,12 +53,16 @@ from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failu
 from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
     pre_push_infrastructure_park_result,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    mark_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -308,6 +312,57 @@ async def _salvage_ci_repair_dirty_output(
         affected_paths_count=len(details["affected_paths"]),
     )
     return {"repair_salvage": details}
+
+
+async def _keep_ci_repair_edits_for_provider_park(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    state: MonitorState | None,
+    park_exc: ProviderManagedKeyParkedError,
+    agent_run_err: AgentRunError | None,
+    stranded_paths: list[str] | None = None,
+) -> None:
+    """Leave CI-repair edits in place for a managed-key park and mark the resume.
+
+    The park blocks the workspace until a human raises the budget, and that resume
+    continues from this worktree. The salvage-and-rollback that precedes provider
+    retry/fallback/auth would reset the unfinished edits away first, so the resume
+    would restart the repair without them. Keep them and mark the state instead
+    (the run loop persists it ahead of the park): the resumed hint cycle commits
+    them before its pre-existing-dirty guard runs (``provider_park_stranded_edits``,
+    PRRT_kwDOSJAM6s619mxi), as the pre-push park paths already do.
+    """
+    preserved_head = await self._rev_parse_head(worktree_path)
+    mark_provider_park_stranded_edits(state, preserved_head)
+    details: dict[str, Any] = {
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "pushed": False,
+    }
+    if agent_run_err is not None:
+        details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
+    if stranded_paths is not None:
+        details["stranded_paths"] = stranded_paths
+        details["dirty_commit_error"] = {
+            "reason_code": _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+            "preserved_head": preserved_head,
+            "stranded_paths": stranded_paths,
+            "message": (
+                f"Managed provider key parked the CI repair ({park_exc.reason_code}) and "
+                "the dirty-worktree sink could not commit the edits it left behind; they "
+                "are stranded in the repair worktree."
+            ),
+        }
+    _attach_provider_recovery_details(park_exc, details)
+    _log.warning(
+        "monitor.ci_fix_provider_park_preserved",
+        workspace_id=workspace_id,
+        reason_code=park_exc.reason_code,
+        preserved_head=preserved_head,
+        stranded_paths=stranded_paths,
+    )
 
 
 async def _salvage_and_rollback_stranded_ci_repair_output(
@@ -676,6 +731,19 @@ async def _run_ci_fix(
             task_tag=task_tag,
             operation_start_head=operation_start_head,
         )
+    except ProviderManagedKeyParkedError as exc:
+        # A managed-key park in the in-sink protected-scope repair: keep the CI
+        # repair's edits for the budget-raise resume instead of the salvage and
+        # rollback below (PRRT_kwDOSJAM6s619mxi).
+        await _keep_ci_repair_edits_for_provider_park(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            state=state,
+            park_exc=exc,
+            agent_run_err=agent_run_err,
+        )
+        raise
     except (
         ProviderRecoveryRetryError,
         ProviderRecoveryFallbackError,
@@ -986,6 +1054,20 @@ async def _run_ci_fix(
                     )
                     return await _moot_or_failure(cast(_GitPushResult, stranded_dirty))
                 stranded_paths = list((stranded_dirty.details or {}).get("paths", []))
+                if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
+                    # The budget-raise resume continues from this worktree: keep
+                    # the stranded edits rather than salvage and roll them back
+                    # (PRRT_kwDOSJAM6s619mxi).
+                    await _keep_ci_repair_edits_for_provider_park(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        state=state,
+                        park_exc=provider_recovery_exc,
+                        agent_run_err=agent_run_err,
+                        stranded_paths=stranded_paths,
+                    )
+                    raise provider_recovery_exc
                 # Salvage and roll back FIRST: the stranded repair output must be
                 # preserved and the worktree cleaned whatever the PR now says, and
                 # this helper re-raises provider recovery instead of returning when
