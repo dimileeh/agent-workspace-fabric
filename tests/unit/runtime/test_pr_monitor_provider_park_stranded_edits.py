@@ -10,14 +10,19 @@ hint cycle finishes the failed sink before its guard runs — committing the edi
 or failing as ``REPAIR_DIRTY_COMMIT_FAILED`` when they still will not commit.
 The marker leaves the workspace row before the resumed repair's agent runs, so a
 restart mid-agent cannot pass the agent's own dirt off as the park's residue
-(PRRT_kwDOSJAM6s619LVg).
+(PRRT_kwDOSJAM6s619LVg). The resume commits only the dirt the park recorded,
+content and all: anything added or changed while the workspace sat parked is left
+for a human (PRRT_kwDOSJAM6s61_WVy).
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -25,16 +30,31 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, OperatorHint
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    OperatorHint,
+    PRStatus,
+)
+from awf.runtime.pr_monitor_runner import provider_park_stranded_edits
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     commit_provider_park_stranded_edits,
     mark_provider_park_stranded_edits,
+    record_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
-from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderManagedKeyParkedError,
+    ProviderRecoveryAuthError,
+    _MonitorPolicyBlockedError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -101,10 +121,25 @@ async def _resume(
     )
 
 
-def _parked_state() -> MonitorState:
+async def _parked_state(
+    tmp_path: Path, paths: tuple[str, ...] = ("stranded_fix.py",)
+) -> MonitorState:
+    """Mark a park and record the evidence of what it left dirty."""
     state = MonitorState()
     mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    await record_provider_park_stranded_edits_evidence(
+        _FakeRunner([_dirty(list(paths))], commits=True),
+        workspace_id=_WORKSPACE_ID,
+        worktree_path=tmp_path / _WORKSPACE_ID,
+        state=state,
+    )
     return state
+
+
+def _write(tmp_path: Path, path: str, content: str) -> None:
+    target = tmp_path / _WORKSPACE_ID / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
 
 
 @pytest.mark.unit
@@ -130,8 +165,9 @@ async def test_without_a_park_marker_the_resume_never_touches_the_worktree(
 
 @pytest.mark.unit
 async def test_stranded_edits_are_committed_on_the_preserved_head(tmp_path: Path) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
     runner = _FakeRunner([_dirty(["stranded_fix.py"]), None], commits=True)
-    state = _parked_state()
 
     assert await _resume(runner, state, tmp_path) is None
 
@@ -143,12 +179,13 @@ async def test_stranded_edits_are_committed_on_the_preserved_head(tmp_path: Path
     assert sink["protected_scope_revert_remote_branch"] == _REMOTE_BRANCH
     assert sink["state"] is state
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+    assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
 async def test_an_already_clean_worktree_just_drops_the_marker(tmp_path: Path) -> None:
     runner = _FakeRunner([None], commits=True)
-    state = _parked_state()
+    state = await _parked_state(tmp_path)
 
     assert await _resume(runner, state, tmp_path) is None
     assert runner.sink_calls == []
@@ -170,6 +207,7 @@ async def test_a_failed_row_clear_keeps_the_marker_for_the_next_resume(
         ws.monitor_threads_addressed = {
             **(ws.monitor_threads_addressed or {}),
             PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: _PRESERVED_HEAD,
+            PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: "{}",
         }
         await session.commit()
 
@@ -184,7 +222,7 @@ async def test_a_failed_row_clear_keeps_the_marker_for_the_next_resume(
 
     runner = _FakeRunner([None, None], commits=True)
     runner._deps = SimpleNamespace(session_factory=_faulting_factory)  # type: ignore[attr-defined]
-    state = _parked_state()
+    state = await _parked_state(tmp_path)
 
     with pytest.raises(SQLAlchemyError):
         await _resume(runner, state, tmp_path, workspace_id=workspace_id)
@@ -197,6 +235,9 @@ async def test_a_failed_row_clear_keeps_the_marker_for_the_next_resume(
         ws = await WorkspaceRepository(session).get(workspace_id)
         assert ws is not None
         assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in (ws.monitor_threads_addressed or {})
+        assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in (
+            ws.monitor_threads_addressed or {}
+        )
 
 
 @pytest.mark.unit
@@ -209,7 +250,7 @@ async def test_a_status_failure_is_reported_as_the_guard_reports_it(tmp_path: Pa
         reason_code="REPAIR_WORKTREE_STATUS_FAILED",
     )
     runner = _FakeRunner([status_failed], commits=True)
-    state = _parked_state()
+    state = await _parked_state(tmp_path)
 
     assert await _resume(runner, state, tmp_path) is status_failed
     assert runner.sink_calls == []
@@ -224,7 +265,7 @@ async def test_edits_that_still_will_not_commit_fail_as_the_sink_failure(
         [_dirty(["stranded_fix.py"]), _dirty(["stranded_fix.py"])],
         commits=False,
     )
-    state = _parked_state()
+    state = await _parked_state(tmp_path)
 
     result = await _resume(runner, state, tmp_path)
 
@@ -237,6 +278,273 @@ async def test_edits_that_still_will_not_commit_fail_as_the_sink_failure(
     assert result.details["phase"] == "provider_park_resume"
     assert result.details["preserved_head"] == _PRESERVED_HEAD
     assert len(runner.sink_calls) == 1
+
+
+def _assert_left_for_a_human(
+    result: _GitPushResult | None, runner: _FakeRunner, unverified_paths: list[str]
+) -> None:
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert result.details is not None
+    assert result.details["phase"] == "provider_park_resume"
+    assert result.details["preserved_head"] == _PRESERVED_HEAD
+    assert result.details["unverified_paths"] == unverified_paths
+    assert runner.sink_calls == []
+
+
+@pytest.mark.unit
+async def test_an_edit_made_while_parked_is_never_committed_with_the_stranded_edits(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    _write(tmp_path, "operator_notes.py", "an operator's unrelated edit\n")
+    runner = _FakeRunner([_dirty(["operator_notes.py", "stranded_fix.py"])], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner, ["operator_notes.py"])
+    # The marker stays: once a human settles the extra dirt, a later resume commits.
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+    assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_stranded_file_changed_while_parked_is_left_for_a_human(tmp_path: Path) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\nplus an operator's line\n")
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("evidence", [None, "not json", "[]"])
+async def test_a_park_without_evidence_commits_nothing_it_finds_dirty(
+    tmp_path: Path, evidence: str | None
+) -> None:
+    # A restart between the marker's write and the park sink, or a park whose
+    # worktree could not be read, leaves no evidence to vouch for any dirt.
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    if evidence is not None:
+        state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] = evidence
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+
+
+@pytest.mark.unit
+async def test_dirt_the_resume_cannot_read_is_left_for_a_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await _parked_state(tmp_path)
+
+    def _unreadable(_worktree_path: Path, _paths: list[str]) -> dict[str, str | None]:
+        raise PermissionError("stranded_fix.py")
+
+    monkeypatch.setattr(provider_park_stranded_edits, "_path_identities", _unreadable)
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, ["stranded_fix.py"])
+
+
+@pytest.mark.unit
+async def test_deletions_symlinks_and_executables_the_park_left_are_committed(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "run.sh", "#!/bin/sh\n")
+    (tmp_path / _WORKSPACE_ID / "run.sh").chmod(0o755)
+    (tmp_path / _WORKSPACE_ID / "latest").symlink_to("run.sh")
+    paths = ("deleted.py", "latest", "run.sh")
+    state = await _parked_state(tmp_path, paths)
+    runner = _FakeRunner([_dirty(list(paths)), None], commits=True)
+
+    assert await _resume(runner, state, tmp_path) is None
+    assert len(runner.sink_calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("change", ["exec_bit", "symlink_target", "recreated", "directory"])
+async def test_a_changed_mode_link_or_kind_is_left_for_a_human(tmp_path: Path, change: str) -> None:
+    _write(tmp_path, "run.sh", "#!/bin/sh\n")
+    (tmp_path / _WORKSPACE_ID / "latest").symlink_to("run.sh")
+    _write(tmp_path, "nested/README.md", "a nested repository\n")
+    paths = {
+        "exec_bit": "run.sh",
+        "symlink_target": "latest",
+        "recreated": "deleted.py",
+        # A directory has no content identity to vouch for, even when unchanged.
+        "directory": "nested",
+    }
+    path = paths[change]
+    state = await _parked_state(tmp_path, (path,))
+    if change == "exec_bit":
+        (tmp_path / _WORKSPACE_ID / "run.sh").chmod(0o755)
+    elif change == "symlink_target":
+        (tmp_path / _WORKSPACE_ID / "latest").unlink()
+        (tmp_path / _WORKSPACE_ID / "latest").symlink_to("nested/README.md")
+    elif change == "recreated":
+        _write(tmp_path, "deleted.py", "restored by an operator\n")
+    runner = _FakeRunner([_dirty([path])], commits=True)
+
+    _assert_left_for_a_human(await _resume(runner, state, tmp_path), runner, [path])
+
+
+@pytest.mark.unit
+async def test_the_park_records_its_own_evidence_once(tmp_path: Path) -> None:
+    unmarked = MonitorState()
+    runner = _FakeRunner([], commits=True)
+    await record_provider_park_stranded_edits_evidence(
+        runner, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=unmarked
+    )
+    # Only a marked park records evidence.
+    assert runner.guard_calls == []
+    assert unmarked.threads_addressed_ids == {}
+
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    evidence = json.loads(
+        state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY]
+    )
+    assert list(evidence) == ["stranded_fix.py"]
+    assert str(evidence["stranded_fix.py"]).startswith("file:-:")
+
+    # A second park sink keeps the evidence of what the park itself left.
+    await record_provider_park_stranded_edits_evidence(
+        runner, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=state
+    )
+    assert runner.guard_calls == []
+    # A new park drops the old evidence for its own sink to record.
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_clean_park_records_empty_evidence(tmp_path: Path) -> None:
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+
+    await record_provider_park_stranded_edits_evidence(
+        _FakeRunner([None], commits=True),
+        workspace_id=_WORKSPACE_ID,
+        worktree_path=tmp_path / _WORKSPACE_ID,
+        state=state,
+    )
+
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] == "{}"
+
+
+class _UnreadableWorktreeRunner(_FakeRunner):
+    async def _pre_existing_dirty_repair_worktree_result(
+        self, **kwargs: object
+    ) -> _GitPushResult | None:
+        raise OSError("git could not be spawned")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["status_failed", "spawn_failed"])
+async def test_an_unreadable_worktree_records_no_evidence(tmp_path: Path, failure: str) -> None:
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    status_failed = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=128,
+        reason_code="REPAIR_WORKTREE_STATUS_FAILED",
+    )
+    runner = (
+        _FakeRunner([status_failed], commits=True)
+        if failure == "status_failed"
+        else _UnreadableWorktreeRunner([], commits=True)
+    )
+
+    await record_provider_park_stranded_edits_evidence(
+        runner, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=state
+    )
+
+    assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("parks", [True, False])
+async def test_the_park_sink_records_the_evidence_before_it_persists_the_park(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parks: bool,
+) -> None:
+    runner = _hint_runner(factory, tmp_path)
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = MonitorState(started_at=0.0)
+    workspace = SimpleNamespace(
+        status=WorkspaceStatus.monitoring_pr.value,
+        monitor_started_at=datetime.now(UTC),
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        pr_number=42,
+        branch_base="development",
+        remote_push_branch=_REMOTE_BRANCH,
+        task_kind="feature_branch_pr",
+        branch_name=_REMOTE_BRANCH,
+        task_policy={},
+    )
+    persisted: list[dict[str, str]] = []
+
+    async def _execute(**_kwargs: object) -> bool:
+        mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+        if parks:
+            raise ProviderManagedKeyParkedError("PROVIDER_BUDGET_EXHAUSTED")
+        raise ProviderRecoveryAuthError()
+
+    async def _persist_state(_workspace_id: str, persisted_state: MonitorState) -> None:
+        persisted.append(dict(persisted_state.threads_addressed_ids))
+
+    async def _guard(**_kwargs: object) -> _GitPushResult:
+        return _dirty(["stranded_fix.py"])
+
+    monkeypatch.setattr(runner, "_open_monitor_log", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_write_monitor_log", AsyncMock())
+    monkeypatch.setattr(runner, "_load_workspace", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(runner, "_load_state", lambda _ws: state)
+    monkeypatch.setattr(
+        runner,
+        "_fetch_status_for_decision",
+        AsyncMock(
+            return_value=PRStatus(
+                number=42,
+                head_sha=_PRESERVED_HEAD,
+                mergeable=MergeableState.MERGEABLE,
+                check_state=CheckState.SUCCESS,
+                unresolved_inline_threads=(),
+                unresolved_review_comments=(),
+                base_behind_count=0,
+                merge_state_status=MergeStateStatus.CLEAN,
+            )
+        ),
+    )
+    monkeypatch.setattr(runner, "_execute", _execute)
+    monkeypatch.setattr(runner, "_persist_state", _persist_state)
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _guard)
+    terminate_failed = AsyncMock()
+    monkeypatch.setattr(runner, "_terminate_failed", terminate_failed)
+
+    await runner.run(  # type: ignore[attr-defined]
+        workspace_id=_WORKSPACE_ID,
+        compose_project="awf_ws_park_stranded",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    terminate_failed.assert_awaited_once()
+    assert len(persisted) == 1
+    if not parks:
+        # A broken-auth failure fails the workspace; there is no resume to vouch for.
+        assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in persisted[0]
+        return
+    evidence = json.loads(persisted[0][PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])
+    assert list(evidence) == ["stranded_fix.py"]
 
 
 def _hint_runner(factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> object:
@@ -270,8 +578,8 @@ async def _run_hint_cycle(
     )
 
 
-def _budget_resume_state() -> MonitorState:
-    state = _parked_state()
+async def _budget_resume_state(tmp_path: Path) -> MonitorState:
+    state = await _parked_state(tmp_path)
     state.pending_operator_hint = OperatorHint(
         reason="provider budget raised",
         operation_id="op_provider_budget",
@@ -288,7 +596,7 @@ async def test_budget_raise_resume_continues_past_the_dirty_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = _hint_runner(factory, tmp_path)
-    state = _budget_resume_state()
+    state = await _budget_resume_state(tmp_path)
     worktree = {"dirty": True}
     sink_calls: list[dict[str, object]] = []
     stop = _GitPushResult(pushed=False, failed=True, returncode=1, reason_code="STOP_HERE")
@@ -330,10 +638,11 @@ async def test_the_marker_leaves_the_row_before_the_resumed_repair_runs(
         ws.monitor_threads_addressed = {
             **(ws.monitor_threads_addressed or {}),
             PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: _PRESERVED_HEAD,
+            PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: "{}",
         }
         await session.commit()
     runner = _hint_runner(factory, tmp_path)
-    state = _budget_resume_state()
+    state = await _budget_resume_state(tmp_path)
     worktree = {"dirty": True}
     rows_at_repair_start: list[dict[str, str]] = []
     stop = _GitPushResult(pushed=False, failed=True, returncode=1, reason_code="STOP_HERE")
@@ -359,6 +668,7 @@ async def test_the_marker_leaves_the_row_before_the_resumed_repair_runs(
     assert await _run_hint_cycle(runner, state, tmp_path, workspace_id=workspace_id) is stop
     assert len(rows_at_repair_start) == 1
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in rows_at_repair_start[0]
+    assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in rows_at_repair_start[0]
 
 
 @pytest.mark.unit
@@ -368,7 +678,7 @@ async def test_budget_raise_resume_reports_a_repeat_sink_failure_not_pre_existin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = _hint_runner(factory, tmp_path)
-    state = _budget_resume_state()
+    state = await _budget_resume_state(tmp_path)
 
     async def _guard(**_kwargs: object) -> _GitPushResult:
         return _dirty(["stranded_fix.py"])
@@ -398,7 +708,7 @@ async def test_a_resume_sink_error_ends_the_resume_like_the_agents_own(
     pr_terminal: bool,
 ) -> None:
     runner = _hint_runner(factory, tmp_path)
-    state = _budget_resume_state()
+    state = await _budget_resume_state(tmp_path)
     moot = _GitPushResult(pushed=False, failed=False, returncode=0, reason_code="PR_MERGED")
 
     async def _guard(**_kwargs: object) -> _GitPushResult:

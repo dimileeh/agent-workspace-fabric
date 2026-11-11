@@ -61,6 +61,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    record_provider_park_stranded_edits_evidence,
+)
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
 from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
@@ -666,6 +669,15 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 },
             )
             if state is not None:
+                if parked_reason:
+                    # Record what a marked park leaves dirty, so the budget-raise
+                    # resume commits nothing else (PRRT_kwDOSJAM6s61_WVy).
+                    await record_provider_park_stranded_edits_evidence(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=self._worktrees_root / workspace_id,
+                        state=state,
+                    )
                 await self._persist_state(workspace_id, state)
             await self._terminate_failed(
                 workspace_id,

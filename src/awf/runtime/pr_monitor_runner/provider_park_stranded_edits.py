@@ -21,10 +21,22 @@ The marker leaves the workspace row before the resumed repair's agent runs
 returns, so a marker dropped in memory alone would reload on a restart mid-agent,
 and the next resume would commit the agent's leftover files as the park's
 residue instead of failing closed on them as pre-existing dirt.
+
+The resume commits only what the park left (PRRT_kwDOSJAM6s61_WVy): the run
+loop's park sink records each path the park leaves dirty with its content, and
+the resume, under the worktree writer lock, commits only while every dirty path
+still matches that evidence. A file someone added or changed while the workspace
+sat parked — or a park with no evidence — is left for a human as pre-existing
+dirt instead of riding into the repair commit.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -34,6 +46,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
@@ -48,6 +61,16 @@ park itself, and the operator-hint resume keeps the row's map intact until it
 drops the key from the row itself.
 """
 
+PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: Final = (
+    "__awf_provider_park_stranded_edits_evidence__"
+)
+"""Reserved ``MonitorState.threads_addressed_ids`` key: what the park left dirty.
+
+A JSON object mapping each dirty path to its content identity, recorded by the
+run loop's park sink before it persists the parked state. It lives and leaves
+with the stranded-edits marker.
+"""
+
 _RESUME_COMMIT_MESSAGE: Final = "fix: commit repair edits stranded by a managed provider key park"
 
 _log = get_logger(__name__)
@@ -56,9 +79,61 @@ _log = get_logger(__name__)
 def mark_provider_park_stranded_edits(
     state: MonitorState | None, preserved_head: str | None
 ) -> None:
-    """Record that a park left uncommitted repair edits for the resumed hint cycle."""
+    """Record that a park left uncommitted repair edits for the resumed hint cycle.
+
+    Evidence from an earlier park is dropped: the run loop's park sink records
+    this park's (``record_provider_park_stranded_edits_evidence``).
+    """
     if state is not None:
         state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] = preserved_head or ""
+        state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
+
+
+async def record_provider_park_stranded_edits_evidence(
+    runner: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    state: MonitorState,
+) -> None:
+    """Record what a marked park leaves dirty, before the parked state is persisted.
+
+    The paths are the ones the repair-start guard reports — the ones the resumed
+    sink would stage — each with its content identity. A worktree the guard or the
+    hashing cannot read records nothing, and the resume then fails closed on any
+    dirt it finds.
+    """
+    threads_addressed = state.threads_addressed_ids
+    if (
+        PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in threads_addressed
+        or PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY in threads_addressed
+    ):
+        return
+    try:
+        dirty = await runner._pre_existing_dirty_repair_worktree_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="provider_park_evidence",
+        )
+        if dirty is not None and dirty.reason_code != _PRE_EXISTING_DIRTY_WORKTREE_REASON:
+            _log.warning(
+                "monitor.provider_park_stranded_edits_evidence_unavailable",
+                workspace_id=workspace_id,
+                reason_code=dirty.reason_code,
+            )
+            return
+        paths = _dirty_paths(dirty)
+        identities = await asyncio.to_thread(_path_identities, worktree_path, paths)
+    except OSError as exc:
+        _log.warning(
+            "monitor.provider_park_stranded_edits_evidence_unavailable",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+        )
+        return
+    threads_addressed[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] = json.dumps(
+        identities, sort_keys=True
+    )
 
 
 async def commit_provider_park_stranded_edits(
@@ -80,39 +155,55 @@ async def commit_provider_park_stranded_edits(
     memory, before the resumed repair's agent can dirty the worktree again. Edits
     that still will not commit return
     ``REPAIR_DIRTY_COMMIT_FAILED`` with the stranded paths, and a ``git status``
-    failure is returned as-is, exactly as the repair-start guard returns it. Sink
-    exceptions propagate: the caller handles them as it handles the same sink
-    raising inside the repair agent's run.
+    failure is returned as-is, exactly as the repair-start guard returns it. Dirt
+    the park's evidence does not vouch for is never committed: it returns
+    ``PRE_EXISTING_DIRTY_WORKTREE`` naming the unverified paths and keeps the
+    marker. Sink exceptions propagate: the caller handles them as it handles the
+    same sink raising inside the repair agent's run.
     """
     preserved_head = state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY)
     if preserved_head is None:
         return None
-    dirty = await runner._pre_existing_dirty_repair_worktree_result(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        operation_type=operation_type,
-    )
-    if dirty is not None and dirty.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
-        await runner._commit_dirty_worktree(
-            workspace_id=workspace_id,
-            message=_RESUME_COMMIT_MESSAGE,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            protected_scope_revert_remote_branch=remote_branch,
-            remote_push_url=remote_push_url,
-            operation_start_head=preserved_head or None,
-        )
+    # The writer lock spans the evidence check and the commit, so no other AWF
+    # writer can change the worktree between the two.
+    async with hold_exclusive_worktree_writer_lock(worktree_path):
         dirty = await runner._pre_existing_dirty_repair_worktree_result(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             operation_type=operation_type,
         )
+        if dirty is not None and dirty.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
+            unverified_paths = await _unverified_stranded_paths(
+                state, worktree_path=worktree_path, paths=_dirty_paths(dirty)
+            )
+            if unverified_paths:
+                return _unverified_stranded_edits_result(
+                    dirty,
+                    workspace_id=workspace_id,
+                    preserved_head=preserved_head,
+                    unverified_paths=unverified_paths,
+                )
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=_RESUME_COMMIT_MESSAGE,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                operation_start_head=preserved_head or None,
+            )
+            dirty = await runner._pre_existing_dirty_repair_worktree_result(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_type=operation_type,
+            )
     if dirty is None:
         # Row first: a write fault then leaves the in-memory marker for the next
         # in-process resume to retry, rather than a row-only one a restart reloads.
         await _drop_marker_from_workspace_row(runner, workspace_id=workspace_id)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
+        state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         _log.info(
             "monitor.provider_park_stranded_edits_committed",
             workspace_id=workspace_id,
@@ -146,8 +237,90 @@ async def commit_provider_park_stranded_edits(
     )
 
 
+def _dirty_paths(dirty: _GitPushResult | None) -> list[str]:
+    paths = (dirty.details or {}).get("paths") if dirty is not None else None
+    return [str(path) for path in paths] if isinstance(paths, list) else []
+
+
+def _path_identities(worktree_path: Path, paths: list[str]) -> dict[str, str | None]:
+    return {path: _path_identity(worktree_path / path) for path in paths}
+
+
+def _path_identity(path: Path) -> str | None:
+    """What ``git add`` would stage from ``path``; ``None`` when that is unverifiable.
+
+    A directory (a nested repository or submodule) or any other special file has no
+    content identity here, so it never matches and is always left for a human.
+    """
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink:" + hashlib.sha256(os.fsencode(path.readlink())).hexdigest()
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    with path.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    return f"file:{'x' if info.st_mode & 0o111 else '-'}:{digest}"
+
+
+async def _unverified_stranded_paths(
+    state: MonitorState, *, worktree_path: Path, paths: list[str]
+) -> list[str]:
+    """Return the dirty paths the park's evidence does not vouch for."""
+    try:
+        evidence = json.loads(
+            state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY) or ""
+        )
+        current = await asyncio.to_thread(_path_identities, worktree_path, paths)
+    except (ValueError, OSError):
+        return sorted(paths)
+    if not isinstance(evidence, dict):
+        return sorted(paths)
+    return sorted(
+        path for path in paths if current[path] is None or evidence.get(path) != current[path]
+    )
+
+
+def _unverified_stranded_edits_result(
+    dirty: _GitPushResult,
+    *,
+    workspace_id: str,
+    preserved_head: str,
+    unverified_paths: list[str],
+) -> _GitPushResult:
+    from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+
+    details = dict(dirty.details or {})
+    details.update(
+        phase="provider_park_resume",
+        preserved_head=preserved_head or None,
+        unverified_paths=unverified_paths,
+    )
+    _log.warning(
+        "monitor.provider_park_stranded_edits_unverified",
+        workspace_id=workspace_id,
+        reason_code=_PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        preserved_head=preserved_head or None,
+        unverified_paths=unverified_paths,
+    )
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=(
+            "A managed provider key park left uncommitted repair edits, but the repair "
+            "worktree no longer holds only those edits; refusing to commit changes the "
+            "park did not leave."
+        ),
+        reason_code=_PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        details=details,
+    )
+
+
 async def _drop_marker_from_workspace_row(runner: Any, *, workspace_id: str) -> None:
-    """Remove ONLY the stranded-edits marker from the persisted row.
+    """Remove ONLY the stranded-edits marker (and its evidence) from the persisted row.
 
     Never the whole ``MonitorState``, which inside a fix cycle can still carry
     unconfirmed verdicts (#305) — the single-key shape
@@ -164,5 +337,6 @@ async def _drop_marker_from_workspace_row(runner: Any, *, workspace_id: str) -> 
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
+        threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         ws.monitor_threads_addressed = threads_addressed
         await session.commit()
