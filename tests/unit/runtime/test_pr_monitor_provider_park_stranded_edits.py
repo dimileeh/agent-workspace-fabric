@@ -8,6 +8,9 @@ operator hint, and that cycle's repair-start guard rejected the stranded edits a
 (PRRT_kwDOSJAM6s618pY4). The park now marks the monitor state, and the resumed
 hint cycle finishes the failed sink before its guard runs — committing the edits,
 or failing as ``REPAIR_DIRTY_COMMIT_FAILED`` when they still will not commit.
+The marker leaves the workspace row before the resumed repair's agent runs, so a
+restart mid-agent cannot pass the agent's own dirt off as the park's residue
+(PRRT_kwDOSJAM6s619LVg).
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
@@ -34,6 +38,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    seed_monitoring_workspace,
 )
 
 _PRESERVED_HEAD = "b" * 40
@@ -196,10 +201,16 @@ def _hint_runner(factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> o
     )
 
 
-async def _run_hint_cycle(runner: object, state: MonitorState, tmp_path: Path) -> _GitPushResult:
+async def _run_hint_cycle(
+    runner: object,
+    state: MonitorState,
+    tmp_path: Path,
+    *,
+    workspace_id: str = _WORKSPACE_ID,
+) -> _GitPushResult:
     assert state.pending_operator_hint is not None
     return await runner._run_operator_hint_cycle(  # type: ignore[attr-defined]
-        workspace_id=_WORKSPACE_ID,
+        workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         pr_head_sha=_PRESERVED_HEAD,
@@ -253,6 +264,53 @@ async def test_budget_raise_resume_continues_past_the_dirty_guard(
     assert await _run_hint_cycle(runner, state, tmp_path) is stop
     assert len(sink_calls) == 1
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_the_marker_leaves_the_row_before_the_resumed_repair_runs(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The hint cycle only persists its state after the agent returns. A marker
+    # dropped in memory alone would reload on a restart mid-agent, and the next
+    # resume would commit the agent's leftover files as the park's residue.
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            **(ws.monitor_threads_addressed or {}),
+            PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: _PRESERVED_HEAD,
+        }
+        await session.commit()
+    runner = _hint_runner(factory, tmp_path)
+    state = _budget_resume_state()
+    worktree = {"dirty": True}
+    rows_at_repair_start: list[dict[str, str]] = []
+    stop = _GitPushResult(pushed=False, failed=True, returncode=1, reason_code="STOP_HERE")
+
+    async def _guard(**_kwargs: object) -> _GitPushResult | None:
+        return _dirty(["stranded_fix.py"]) if worktree["dirty"] else None
+
+    async def _sink(**_kwargs: object) -> bool:
+        worktree["dirty"] = False
+        return True
+
+    async def _start_head(**_kwargs: object) -> tuple[str, _GitPushResult]:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            rows_at_repair_start.append(dict(ws.monitor_threads_addressed or {}))
+        return (_PRESERVED_HEAD, stop)
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _guard)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _sink)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+
+    assert await _run_hint_cycle(runner, state, tmp_path, workspace_id=workspace_id) is stop
+    assert len(rows_at_repair_start) == 1
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in rows_at_repair_start[0]
 
 
 @pytest.mark.unit

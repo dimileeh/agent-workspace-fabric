@@ -15,6 +15,12 @@ preserved HEAD and the repair carries on, or — when they still will not commit
 the resume fails as the ``REPAIR_DIRTY_COMMIT_FAILED`` the park recorded, never
 as an unrelated pre-existing-dirty worktree. Never a rollback: the edits are only
 ever committed or left where they are.
+
+The marker leaves the workspace row before the resumed repair's agent runs
+(PRRT_kwDOSJAM6s619LVg): the hint cycle only persists its state after the agent
+returns, so a marker dropped in memory alone would reload on a restart mid-agent,
+and the next resume would commit the agent's leftover files as the park's
+residue instead of failing closed on them as pre-existing dirt.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from awf.common.logging import get_logger
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
@@ -37,7 +44,8 @@ PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: Final = "__awf_provider_park_stranded_ed
 
 Its value is the HEAD the park preserved (empty when it could not be read); it
 reaches the workspace row through the run loop's ``_persist_state`` ahead of the
-park itself, and the operator-hint resume keeps the row's map intact.
+park itself, and the operator-hint resume keeps the row's map intact until it
+drops the key from the row itself.
 """
 
 _RESUME_COMMIT_MESSAGE: Final = "fix: commit repair edits stranded by a managed provider key park"
@@ -68,7 +76,9 @@ async def commit_provider_park_stranded_edits(
     """Finish a park's failed dirty sink; ``None`` lets the resumed repair start.
 
     The marker is dropped once the worktree is clean — the retried sink committed
-    the edits, or something already had. Edits that still will not commit return
+    the edits, or something already had — from the workspace row as well as from
+    memory, before the resumed repair's agent can dirty the worktree again. Edits
+    that still will not commit return
     ``REPAIR_DIRTY_COMMIT_FAILED`` with the stranded paths, and a ``git status``
     failure is returned as-is, exactly as the repair-start guard returns it. Sink
     exceptions propagate: the caller handles them as it handles the same sink
@@ -100,6 +110,7 @@ async def commit_provider_park_stranded_edits(
         )
     if dirty is None:
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
+        await _drop_marker_from_workspace_row(runner, workspace_id=workspace_id)
         _log.info(
             "monitor.provider_park_stranded_edits_committed",
             workspace_id=workspace_id,
@@ -131,3 +142,25 @@ async def commit_provider_park_stranded_edits(
         reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
         details=details,
     )
+
+
+async def _drop_marker_from_workspace_row(runner: Any, *, workspace_id: str) -> None:
+    """Remove ONLY the stranded-edits marker from the persisted row.
+
+    Never the whole ``MonitorState``, which inside a fix cycle can still carry
+    unconfirmed verdicts (#305) — the single-key shape
+    ``_clear_preserved_head_marker_durably`` uses. A write fault propagates: the
+    resume then stops before its agent runs, and the next one finds a clean
+    worktree and drops the marker again.
+    """
+    session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
+    if not callable(session_factory):
+        return
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
+        ws.monitor_threads_addressed = threads_addressed
+        await session.commit()
