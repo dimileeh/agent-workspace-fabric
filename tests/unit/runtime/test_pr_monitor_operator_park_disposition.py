@@ -288,6 +288,11 @@ def _assert_untouched(state: MonitorState, thread_id: str = _THREAD) -> None:
             f"{_THREAD} FIXED by abc1234. {_OTHER} FIXED by def5678 once CI passes",
             {_THREAD: ParkRuling("fixed", "abc1234"), _OTHER: None},
         ),
+        # A condition in an earlier clause does not void a later, unconditional one.
+        (
+            f"Only rule what is listed. {_THREAD} is a false positive",
+            {_THREAD: ParkRuling("false_positive")},
+        ),
     ],
 )
 def test_park_dispositions_parses_per_thread_rulings(
@@ -307,6 +312,10 @@ def test_park_dispositions_parses_per_thread_rulings(
         f"{_THREAD} is not fixed by abc1234",
         f"{_THREAD} FIXED by abc1234 once CI passes",
         f"{_THREAD} FIXED by 1234567",  # an all-digit token is not a SHA
+        # A condition or negation earlier in the clause, before the thread id.
+        f"If CI passes, {_THREAD} is a false positive",
+        f"Do not mark {_THREAD} as a false positive",
+        f"Once CI is green: ok. Never call {_THREAD} FIXED by abc1234",
     ],
 )
 def test_park_dispositions_without_a_usable_ruling_is_none(guide: str | None) -> None:

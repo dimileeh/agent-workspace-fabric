@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner.operator_preserved_attempt import (
     _CONDITION_RE,
     _REJECT_NEGATED_RE,
     PreservedAttemptOutcome,
+    _clause_start,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
@@ -144,8 +145,9 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
 
     Each occurrence of a thread id opens a segment that runs to the next thread
     id or the next ``.``, ``;`` or newline. A segment rules "fixed" or "false
-    positive" only when no negation precedes the phrase in the segment and no
-    condition word is anywhere in it. A thread whose segments carry no usable
+    positive" only when no negation precedes the phrase and no condition word is
+    anywhere in it, counting the clause lead-in before the thread id ("If CI
+    passes, PRRT_x ...", "Do not mark PRRT_x ..."). A thread whose segments carry no usable
     ruling, or disagree, maps to ``None`` so the guide fails closed rather than
     guessing.
     """
@@ -163,7 +165,7 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         segment_break = _SEGMENT_BREAK_RE.search(text, start, end)
         segment = text[start : segment_break.start() if segment_break else end]
-        rulings = _segment_rulings(segment)
+        rulings = _segment_rulings(segment, text[_clause_start(text, start) : start])
         if rulings is None:
             voided.add(thread_id)
         else:
@@ -176,8 +178,12 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
     }
 
 
-def _segment_rulings(segment: str) -> set[ParkRuling] | None:
-    """The rulings one segment carries; ``None`` when a phrase in it is voided."""
+def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
+    """The rulings one segment carries; ``None`` when a phrase in it is voided.
+
+    ``lead_in`` is the clause text before the segment's thread id, so a condition
+    or negation written ahead of the id still voids the ruling.
+    """
     matches: list[tuple[re.Match[str], ParkRuling]] = [
         (match, ParkRuling("fixed", match.group("sha").lower()))
         for match in _FIXED_RE.finditer(segment)
@@ -187,8 +193,8 @@ def _segment_rulings(segment: str) -> set[ParkRuling] | None:
     )
     if not matches:
         return set()
-    if _CONDITION_RE.search(segment) or any(
-        _REJECT_NEGATED_RE.search(segment[: match.start()]) for match, _ in matches
+    if _CONDITION_RE.search(lead_in + segment) or any(
+        _REJECT_NEGATED_RE.search(lead_in + segment[: match.start()]) for match, _ in matches
     ):
         return None
     return {ruling for _, ruling in matches}
