@@ -896,6 +896,7 @@ async def _run_fix_cycle(
             monitor_log=monitor_log,
             operation_start_head=operation_start_head,
             source_head_sha=operation_start_head,
+            repo=repo,
         )
         if protected_scope_block is not None
         else await self._validated_git_push_result(

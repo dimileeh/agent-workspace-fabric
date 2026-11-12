@@ -88,8 +88,10 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
 )
+from awf.runtime.pr_monitor_runner.remote_repair_diffs import _remote_branch_fetch_error_type
 from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -120,11 +122,26 @@ async def _repair_protected_scope_commits_before_push(
     monitor_log: WorkspaceLogSink | None = None,
     operation_start_head: str | None = None,
     source_head_sha: str | None = None,
+    resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult:
     """Roll back a protected-scope repair delta before any push occurs."""
 
     del compose_project, compose_file, state
 
+    if protected_scope_block.transient_baseline_unavailable:  # park instead (#1221)
+        return cast(
+            _GitPushResult,
+            await self._park_for_protected_scope_baseline_unavailable(
+                workspace_id=workspace_id,
+                worktree_path=self._worktrees_root / workspace_id,
+                remote_branch=remote_branch,
+                resume_phase=resume_phase,
+                message=protected_scope_block.message,
+                pr_number=pr_number,
+                repo=repo,
+            ),
+        )
     if (
         protected_scope_block.reason_code != _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
         or not protected_scope_block.violations
@@ -1060,16 +1077,15 @@ async def _protected_scope_violations_not_restored_to_remote_branch(
     untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
     worktree_path = self._worktrees_root / workspace_id
     remote = remote_push_url or "origin"
-    fetch_result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "fetch",
-            remote,
-            f"refs/heads/{remote_branch}",
-        ]
+    fetch_result = await self._retry_transient_remote_branch_fetch(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote=remote,
+        remote_branch=remote_branch,
+        fetch_result=await self._remote_branch_fetch_once(
+            worktree_path=worktree_path, remote=remote, remote_branch=remote_branch
+        ),
+        context="protected_scope_restore_verification",
     )
     if not fetch_result.ok:
         message = (
@@ -1083,7 +1099,7 @@ async def _protected_scope_violations_not_restored_to_remote_branch(
             workspace_id=workspace_id,
             stderr=fetch_result.stderr[:400],
         )
-        raise ProtectedScopeDiffError(message)
+        raise _remote_branch_fetch_error_type(fetch_result)(message)
 
     remaining: list[QualityGateViolation] = []
     restored_paths: list[str] = []
@@ -1366,6 +1382,7 @@ async def _protected_scope_diff_unavailable_block(
         "refusing to push this repair until the PR branch diff baseline "
         f"is available. {redacted_error}"
     )
+    transient = isinstance(exc, ProtectedScopeBaselineUnavailableError)
     await self._append_workspace_events(
         workspace_id=workspace_id,
         events=[
@@ -1376,6 +1393,7 @@ async def _protected_scope_diff_unavailable_block(
                     "reason": "diff_baseline_unavailable",
                     "remote_branch": remote_branch,
                     "error": redacted_error,
+                    **({"transient": True} if transient else {}),
                 },
             )
         ],
@@ -1383,6 +1401,7 @@ async def _protected_scope_diff_unavailable_block(
     return _ProtectedScopePushBlock(
         message=message,
         reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        transient_baseline_unavailable=transient,
     )
 
 
@@ -1398,6 +1417,17 @@ async def _protected_scope_diff_unavailable_push_result(
         remote_branch=remote_branch,
         exc=exc,
     )
+    if block.transient_baseline_unavailable:  # commit-sink baseline outage: park (#1221)
+        return cast(
+            _GitPushResult,
+            await self._park_for_protected_scope_baseline_unavailable(
+                workspace_id=workspace_id,
+                worktree_path=self._worktrees_root / workspace_id,
+                remote_branch=remote_branch,
+                resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+                message=block.message,
+            ),
+        )
     return _GitPushResult(
         pushed=False,
         failed=True,

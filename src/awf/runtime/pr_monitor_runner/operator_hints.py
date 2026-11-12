@@ -790,6 +790,14 @@ async def _run_operator_hint_cycle(
             base_branch=base_branch or "",
             operation_start_head=operation_start_head,
             source_head_sha=operation_start_head,
+            # A transient baseline outage parks under the resume's ORIGIN, like the
+            # violation re-block above (#1221).
+            resume_phase=(
+                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+            ),
+            repo=repo,
         )
         if protected_scope_block is not None
         else await self._validated_git_push_result(
@@ -839,6 +847,12 @@ async def _run_operator_hint_cycle(
         # branches below consume the single-use operator grant, finalize the hint,
         # or park needs_human against a PR that no longer exists; the loop's shared
         # terminal finisher runs the handling ``decide()`` would have chosen (#910).
+        return cast(_GitPushResult, push_result)
+    if push_result.paused_into_blocked:
+        # A transient protected-scope baseline outage parked the workspace in
+        # ``blocked`` (#1221). Its bumped block epoch supersedes this hint, so
+        # clear it like the re-block branches instead of parking it needs_human.
+        state.pending_operator_hint = None
         return cast(_GitPushResult, push_result)
     if push_result.failed:
         if (
@@ -1015,6 +1029,10 @@ async def _operator_hint_agent_error_result(
                 exc=exc,
             ),
         )
+        if push_result.paused_into_blocked:
+            # Transient baseline outage parked the workspace (#1221); see above.
+            state.pending_operator_hint = None
+            return push_result
         reason = (
             push_result.stderr or str(exc)
         ).strip() or "protected-scope policy could not verify the operator hint repair push"

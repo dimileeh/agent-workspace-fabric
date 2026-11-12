@@ -13,6 +13,7 @@ from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_mes
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.common.work_slot import work_slot_kwargs
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
 from awf.control.executor.helpers import (
     _pre_push_validation_phase_names,
     _profile_for_workspace,
@@ -99,6 +100,7 @@ from awf.runtime.pr_monitor_runner.remote_repair import (
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
@@ -340,13 +342,32 @@ async def _validated_git_push_result(
         if moot_result is not None:
             return cast(_GitPushResult, moot_result)
     if not validation_result.passed:
+        details = validation_result.failure_details()
+        if (
+            validation_result.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+            and details.get("transient_baseline_unavailable") is True
+        ):
+            # A fix-pass or dirty-finalize commit hit a protected-scope baseline
+            # outage that outlived its bounded retries (#1221): park with the
+            # worktree and unpushed commit kept instead of failing terminally.
+            return cast(
+                _GitPushResult,
+                await self._park_for_protected_scope_baseline_unavailable(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+                    message=validation_result.message,
+                    details=details,
+                ),
+            )
         return _GitPushResult(
             pushed=False,
             failed=True,
             returncode=1,
             stderr=validation_result.message,
             reason_code=validation_result.reason_code,
-            details=validation_result.failure_details(),
+            details=details,
         )
     return cast(
         _GitPushResult,
@@ -452,6 +473,12 @@ async def _run_pre_push_validation_with_fix_passes(
                 pass_number=pass_index + 1,
                 error=repr(exc),
             )
+            extra_details = validation_result.extra_details
+            if isinstance(exc, ProtectedScopeBaselineUnavailableError):
+                extra_details = {
+                    **(extra_details or {}),
+                    "transient_baseline_unavailable": True,
+                }
             return replace(
                 validation_result,
                 reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
@@ -459,6 +486,7 @@ async def _run_pre_push_validation_with_fix_passes(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"protected-scope diff unavailable: {exc}"
                 ),
+                extra_details=extra_details,
             )
         except _MonitorPolicyBlockedError as exc:
             _log.warning(

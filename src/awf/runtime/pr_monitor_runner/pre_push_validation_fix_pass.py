@@ -1046,7 +1046,10 @@ async def _run_pre_push_validation_fix_pass_impl(
         # / ``AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED``), so the monitor loop
         # terminates instead of retrying — no residue rollback is needed (the
         # stranded dirt surfaces only on a later operator resume, matching every
-        # other commit-sink caller's treatment of these two).
+        # other commit-sink caller's treatment of these two). The exception is a
+        # transient baseline outage that outlived its bounded retries
+        # (``ProtectedScopeBaselineUnavailableError``, #1221): the push seam parks
+        # the workspace in ``blocked`` with the worktree kept instead.
         _raise_unproven_timeout_cleanup()
         raise
     except Exception as exc:

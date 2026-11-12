@@ -1208,6 +1208,7 @@ async def _run_ci_fix(
                 monitor_log=monitor_log,
                 operation_start_head=operation_start_head,
                 source_head_sha=operation_start_head,
+                repo=repo,
             ),
         )
     return cast(
