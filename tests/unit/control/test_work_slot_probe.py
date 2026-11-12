@@ -121,9 +121,21 @@ async def test_no_running_agent_container_is_absent(services: list[RuntimeServic
     assert await _run(_probe(_Inspector(snapshot))) == "absent"
 
 
-async def test_running_container_without_service_label_is_unknown() -> None:
-    snapshot = RuntimeSnapshot(stack_state="running", services=[_unlabeled("running")])
+@pytest.mark.parametrize("state", ["running", "paused"])
+async def test_live_container_without_service_label_is_unknown(state: str) -> None:
+    snapshot = RuntimeSnapshot(stack_state="running", services=[_unlabeled(state)])
     assert await _run(_probe(_Inspector(snapshot))) == "unknown"
+
+
+async def test_paused_agent_container_is_unknown_without_exec() -> None:
+    # ``docker pause`` freezes the tagged process rather than ending it, and a
+    # paused container cannot be exec'd into: unpausing would resume the old
+    # invocation, so its lease must be kept rather than released as absent.
+    runner = FakeCommandRunner()
+    snapshot = RuntimeSnapshot(stack_state="running", services=[_agent("paused")])
+
+    assert await _run(_probe(_Inspector(snapshot), runner)) == "unknown"
+    assert runner.calls == []
 
 
 @pytest.mark.parametrize(

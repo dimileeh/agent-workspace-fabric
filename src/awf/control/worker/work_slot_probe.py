@@ -22,6 +22,10 @@ from awf.control.worker.logging import _log
 from awf.control.worker.protocols import RuntimeInspectorProtocol, WorkSlotLeaseProbeResult
 
 _AGENT_SERVICE = "agent"
+# ``docker pause`` freezes processes without ending them, so a paused container
+# may still hold the tagged invocation and resume it on unpause.
+_PAUSED_STATE = "paused"
+_LIVE_STATES = frozenset({"running", _PAUSED_STATE})
 
 
 class LocalWorkSlotProcessProbe:
@@ -75,15 +79,19 @@ class LocalWorkSlotProcessProbe:
             None,
         )
         if agent is None and any(
-            not service.service_label_available and service.state.strip().lower() == "running"
+            not service.service_label_available and service.state.strip().lower() in _LIVE_STATES
             for service in snapshot.services
         ):
             # A failed ``docker inspect`` hides the Compose service label, so a
-            # running unlabeled container may still be the agent: fail closed.
+            # live unlabeled container may still be the agent: fail closed.
             return "unknown"
-        if agent is None or agent.state.strip().lower() != "running":
-            # No running agent container means no tagged process can survive.
+        agent_state = agent.state.strip().lower() if agent is not None else None
+        if agent_state not in _LIVE_STATES:
+            # No live agent container means no tagged process can survive.
             return "absent"
+        if agent_state == _PAUSED_STATE:
+            # Frozen processes cannot be exec-probed but may resume: keep the lease.
+            return "unknown"
         if compose_file is None:
             # A running agent we cannot exec into cannot be proven idle.
             return "unknown"
