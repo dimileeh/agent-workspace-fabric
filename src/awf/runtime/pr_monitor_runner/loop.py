@@ -62,6 +62,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
     _pending_review_feedback_count,
+    _record_ci_repair_attempt,
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -777,6 +778,7 @@ async def _execute(
             },
             extra_identity=tuple(failure.name for failure in action.failures),
         )
+        _record_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
         try:
             push_result = await self._run_ci_fix(
                 repo=repo,

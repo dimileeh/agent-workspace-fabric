@@ -11,6 +11,7 @@ import pytest
 import awf.runtime.pr_monitor as pr_monitor_module
 from awf.runtime.pr_monitor import (
     AddressComments,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
     MergeableState,
@@ -18,14 +19,17 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
     NotifyHuman,
+    OperatorHint,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    SyncBase,
     WaitForCI,
     WaitForTransientCI,
     _ci_failure_identity,
+    _ci_repair_attempted_state_key,
     _ci_transient_infra_wait_count,
     _ci_transient_infra_wait_count_key,
     _ci_transient_infra_wait_exhausted,
@@ -448,6 +452,165 @@ class TestCiFailure:
             MonitorConfig(),
         )
         assert isinstance(action, AddressComments)
+
+
+_ACTIONABLE_FAILURE = CheckFailure(
+    name="ci-required",
+    conclusion="FAILURE",
+    log_excerpt="FAILED tests/test_x.py::test_y - AssertionError: expected 1",
+    run_id="r1",
+)
+
+
+def _review_comment(comment_id: str = "RC1") -> ReviewComment:
+    return ReviewComment(
+        comment_id=comment_id,
+        body_excerpt="Outside diff range: please handle the None case.",
+        author="coderabbitai[bot]",
+    )
+
+
+def _ci_failed_with_wave(**overrides: object) -> PRStatus:
+    kwargs: dict[str, object] = {
+        "check_state": CheckState.FAILURE,
+        "ci_failures": (_ACTIONABLE_FAILURE,),
+        "inline": (_thread(author="coderabbitai[bot]"),),
+    }
+    kwargs.update(overrides)
+    return _status(**kwargs)  # type: ignore[arg-type]
+
+
+def _attempted_state(head_sha: str = "abc123") -> MonitorState:
+    key = _ci_repair_attempted_state_key(head_sha, (_ACTIONABLE_FAILURE,))
+    return MonitorState(threads_addressed_ids={key: "1"})
+
+
+class TestCiFailureVsReviewWave:
+    """#1216: a concluded CI failure on the current head is not starved by a
+    new bot-review wave; comments still win for pending CI and after one
+    attempt on an unchanged head."""
+
+    @pytest.mark.unit
+    def test_concluded_ci_failure_with_new_threads_repairs_ci_first(self) -> None:
+        action = decide(_ci_failed_with_wave(), MonitorState(), MonitorConfig())
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (_ACTIONABLE_FAILURE,)
+
+    @pytest.mark.unit
+    def test_concluded_ci_failure_with_new_review_comment_repairs_ci_first(self) -> None:
+        status = _ci_failed_with_wave(inline=(), reviews=(_review_comment(),))
+
+        action = decide(status, MonitorState(), MonitorConfig())
+
+        assert isinstance(action, ReportCiFailure)
+
+    @pytest.mark.unit
+    def test_pending_ci_with_new_threads_still_addresses_comments(self) -> None:
+        status = _ci_failed_with_wave(check_state=CheckState.PENDING, ci_failures=())
+
+        action = decide(status, MonitorState(), MonitorConfig())
+
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_failure_with_runs_still_in_progress_addresses_comments(self) -> None:
+        status = _ci_failed_with_wave(ci_runs_in_progress=True)
+
+        action = decide(status, MonitorState(), MonitorConfig())
+
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_repair_already_attempted_on_this_head_addresses_comments(self) -> None:
+        action = decide(_ci_failed_with_wave(), _attempted_state(), MonitorConfig())
+
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_attempt_marker_for_older_head_does_not_suppress_hoist(self) -> None:
+        action = decide(
+            _ci_failed_with_wave(head_sha="new456"),
+            _attempted_state("abc123"),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+
+    @pytest.mark.unit
+    def test_transient_ci_failure_is_not_hoisted_over_comments(self) -> None:
+        transient = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="HTTP 502 Bad Gateway while downloading artifact",
+            run_id="r1",
+        )
+        status = _ci_failed_with_wave(ci_failures=(transient,))
+        without_wave = _ci_failed_with_wave(ci_failures=(transient,), inline=())
+
+        action = decide(status, MonitorState(), MonitorConfig())
+
+        assert isinstance(decide(without_wave, MonitorState(), MonitorConfig()), RerunTransientCI)
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_failure_without_actionable_logs_is_not_hoisted(self) -> None:
+        empty = CheckFailure(name="ci-required", conclusion="FAILURE", log_excerpt="")
+        status = _ci_failed_with_wave(ci_failures=(empty,))
+        without_wave = _ci_failed_with_wave(ci_failures=(empty,), inline=())
+
+        action = decide(status, MonitorState(), MonitorConfig())
+
+        assert isinstance(decide(without_wave, MonitorState(), MonitorConfig()), NotifyHuman)
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_parked_comment_repair_is_not_preempted(self) -> None:
+        workflow_scope = MonitorState()
+        workflow_scope.mark_awaiting_workflow_scope()
+        parked = MonitorState()
+        parked.mark_parked_unpublished_repair("sig")
+
+        for state in (workflow_scope, parked):
+            action = decide(_ci_failed_with_wave(), state, MonitorConfig())
+            assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_without_new_items_attempt_marker_does_not_change_ci_repair(self) -> None:
+        status = _ci_failed_with_wave(inline=())
+
+        action = decide(status, _attempted_state(), MonitorConfig())
+
+        assert isinstance(action, ReportCiFailure)
+
+    @pytest.mark.unit
+    def test_sync_base_still_outranks_ci_hoist(self) -> None:
+        action = decide(_ci_failed_with_wave(base_behind=1), MonitorState(), MonitorConfig())
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_operator_hint_still_outranks_ci_hoist(self) -> None:
+        state = MonitorState(pending_operator_hint=OperatorHint(reason="guide"))
+
+        action = decide(_ci_failed_with_wave(), state, MonitorConfig())
+
+        assert isinstance(action, AddressOperatorHint)
+
+    @pytest.mark.unit
+    def test_attempted_key_is_stable_on_run_id_and_scoped_to_head(self) -> None:
+        drifted = CheckFailure(
+            name="CI / test",
+            conclusion="TIMED_OUT",
+            log_excerpt="other wording",
+            run_id="r1",
+        )
+
+        key = _ci_repair_attempted_state_key("abc123", (_ACTIONABLE_FAILURE,))
+
+        assert key.startswith("__awf_ci_repair_attempted:abc123:")
+        assert key == _ci_repair_attempted_state_key("abc123", (drifted,))
+        assert key != _ci_repair_attempted_state_key("def456", (_ACTIONABLE_FAILURE,))
 
 
 class TestCiTransientInfraWaitHelpers:
