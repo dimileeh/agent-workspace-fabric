@@ -1080,7 +1080,7 @@ def _discard_ci_repair_attempt(
     head_sha: str,
     failures: tuple[CheckFailure, ...],
 ) -> None:
-    """Undo the #1216 marker when provider recovery skipped the CI repair."""
+    """Undo the #1216 marker when a provider unwind or park left the CI repair unlanded."""
     state.threads_addressed_ids.pop(_ci_repair_attempted_state_key(head_sha, failures), None)
 
 

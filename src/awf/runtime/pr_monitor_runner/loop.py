@@ -816,7 +816,8 @@ async def _execute(
             )
             raise
         except ProviderRecoveryRetryError as exc:
-            # No repair ran; keep CI priority over review waves on the next pass.
+            # No repair landed on this or the other unwinds below (or a park), so keep
+            # CI priority over review waves when the monitor next decides.
             _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             retry_result: dict[str, object] = {
                 "status": "failed",
@@ -835,6 +836,7 @@ async def _execute(
             )
             raise
         except ProviderRecoveryFallbackError as exc:
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             fallback_result: dict[str, object] = {
                 "status": "failed",
                 "outcome": "provider_fallback",
@@ -852,6 +854,7 @@ async def _execute(
             )
             raise
         except ProviderRecoveryAuthError as exc:
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             auth_extra: dict[str, object] = {"failure_count": len(action.failures)}
             auth_extra.update(_provider_recovery_operation_result_updates(exc))
             await self._finish_provider_auth_failed_operation(
@@ -908,6 +911,7 @@ async def _execute(
         if push_result.parked_needs_human:
             # #1182: the pre-push infrastructure park forbids a CI-repair agent on
             # this PR head; hold the same human wait as the comment-repair arm.
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             return bool(
                 await _finish_parked_repair_cycle(
                     self,

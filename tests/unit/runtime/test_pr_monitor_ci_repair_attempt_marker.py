@@ -25,7 +25,13 @@ from awf.runtime.pr_monitor import (
     _ci_transient_rerun_state_key,
 )
 from awf.runtime.pr_monitor_runner.helpers import _record_ci_repair_attempt, _with_ci_failures
-from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderManagedKeyParkedError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -115,3 +121,97 @@ async def test_ci_repair_dispatch_records_attempt_and_drops_it_on_provider_retry
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
     assert [(op.type, op.error_code) for op in operations] == [("ci_repair", "PROVIDER_OUTAGE")]
+
+
+async def _dispatch_ci_repair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    *,
+    state: MonitorState,
+    outcome: BaseException | _GitPushResult,
+) -> str:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _with_ci_failures(_green_status(), _FAILURES)
+    marker = _ci_repair_attempted_state_key(status.head_sha, _FAILURES)
+
+    async def _run_ci_fix(**_kwargs: object) -> _GitPushResult:
+        assert marker in state.threads_addressed_ids
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    mocker.patch.object(runner, "_run_ci_fix", _run_ci_fix)
+    await runner._execute(
+        action=ReportCiFailure(failures=_FAILURES),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    return marker
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ProviderRecoveryFallbackError(),
+        ProviderRecoveryAuthError(),
+        ProviderManagedKeyParkedError("OPENROUTER_KEY_BUDGET_EXHAUSTED"),
+    ],
+    ids=["fallback", "auth", "managed_key_park"],
+)
+async def test_ci_repair_marker_dropped_when_provider_recovery_unwinds_the_repair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    exc: BaseException,
+) -> None:
+    state = MonitorState(started_at=0.0)
+    marker = _ci_repair_attempted_state_key(
+        _with_ci_failures(_green_status(), _FAILURES).head_sha, _FAILURES
+    )
+
+    with pytest.raises(type(exc)):
+        await _dispatch_ci_repair(factory, tmp_path, mocker, state=state, outcome=exc)
+
+    # The run loop persists state on these unwinds; no repair landed, so a resumed
+    # monitor must still give the concluded CI failure priority over review waves.
+    assert marker not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_ci_repair_marker_dropped_when_repair_parks_for_a_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    state = MonitorState(started_at=0.0)
+    parked = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="parked for a human",
+        reason_code="PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED",
+        parked_needs_human=True,
+        details={"phase": "pre_push_validation", "pushed": False},
+    )
+
+    marker = await _dispatch_ci_repair(factory, tmp_path, mocker, state=state, outcome=parked)
+
+    assert marker not in state.threads_addressed_ids
