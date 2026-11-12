@@ -252,12 +252,20 @@ def _live_thread(
 
 
 async def _ancestor_commit(
-    self: Any, *, workspace_id: str, sha: str, head_sha: str
+    self: Any,
+    *,
+    workspace_id: str,
+    sha: str,
+    head_sha: str,
+    remote_branch: str | None,
+    remote_push_url: str | None,
 ) -> tuple[str | None, str | None]:
     """``(full_sha, None)`` when ``sha`` is an ancestor of ``head_sha``, else ``(None, detail)``.
 
     Fails closed, unlike the #934 reachability probe: here the probe *is* the
-    evidence, so anything short of a clean "yes" refuses the ruling.
+    evidence, so anything short of a clean "yes" refuses the ruling. The PR
+    branch is fetched first: after a mutation park the worktree sits on the
+    rollback commit, so the PR head and the cited fix may exist only remotely.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
         _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
@@ -271,6 +279,21 @@ async def _ancestor_commit(
         return None, "ancestry_unverified"
     worktree_path = self._worktrees_root / workspace_id
     try:
+        if remote_branch:
+            fetched = await self._remote_branch_fetch_once(
+                worktree_path=worktree_path,
+                remote=remote_push_url or "origin",
+                remote_branch=remote_branch,
+            )
+            if not fetched.ok:
+                # Objects already local may still prove the claim; the probe
+                # below fails closed when they do not.
+                _log.warning(
+                    "monitor.operator_park_disposition_fetch_failed",
+                    workspace_id=workspace_id,
+                    remote_branch=remote_branch,
+                    returncode=fetched.returncode,
+                )
         resolved = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"
@@ -313,6 +336,8 @@ async def _stage(
     status: PRStatus,
     state: MonitorState,
     rulings: dict[str, ParkRuling | None],
+    remote_branch: str | None,
+    remote_push_url: str | None,
 ) -> tuple[list[_Staged], str | None]:
     """Check every named thread before any changes; ``(staged, None)`` or ``([], detail)``."""
     staged: list[_Staged] = []
@@ -329,7 +354,12 @@ async def _stage(
         commit: str | None = None
         if ruling.sha is not None:
             commit, detail = await _ancestor_commit(
-                self, workspace_id=workspace_id, sha=ruling.sha, head_sha=status.head_sha
+                self,
+                workspace_id=workspace_id,
+                sha=ruling.sha,
+                head_sha=status.head_sha,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
             )
             if commit is None:
                 return [], detail
@@ -403,6 +433,7 @@ async def apply_park_disposition(
     remote_branch: str | None,
     operation_id: str | None,
     monitor_log: WorkspaceLogSink | None,
+    remote_push_url: str | None = None,
 ) -> PreservedAttemptOutcome | None:
     """Apply an operator ruling on mutation-parked threads before the hint's agent cycle.
 
@@ -422,7 +453,13 @@ async def apply_park_disposition(
     if not any(_is_ruleable_park(state, thread_id) for thread_id in rulings):
         return None
     staged, detail = await _stage(
-        self, workspace_id=workspace_id, status=status, state=state, rulings=rulings
+        self,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+        rulings=rulings,
+        remote_branch=remote_branch,
+        remote_push_url=remote_push_url,
     )
     audit: dict[str, Any] = {
         "workspace_id": workspace_id,

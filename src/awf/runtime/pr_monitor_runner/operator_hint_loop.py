@@ -132,6 +132,7 @@ async def handle_operator_hint_action(
             remote_branch=remote_branch,
             operation_id=operation.operation_id if operation is not None else None,
             monitor_log=monitor_log,
+            remote_push_url=remote_push_url,
         )
     if disposition is not None:
         await self._persist_state(workspace_id, state)

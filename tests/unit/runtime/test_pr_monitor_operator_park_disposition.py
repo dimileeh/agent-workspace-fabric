@@ -216,7 +216,13 @@ async def _runner(
 
 
 async def _guide_poll(
-    runner: Any, workspace_id: str, gh: OrderedForge, state: MonitorState, status: PRStatus
+    runner: Any,
+    workspace_id: str,
+    gh: OrderedForge,
+    state: MonitorState,
+    status: PRStatus,
+    *,
+    remote_push_url: str | None = None,
 ) -> bool:
     gh.remember_review_threads(
         status.unresolved_inline_threads + status.outdated_unresolved_inline_threads
@@ -236,7 +242,7 @@ async def _guide_poll(
         compose_project=f"awf_{workspace_id}",
         compose_file=Path("/tmp/compose.yml"),
         monitor_log=None,
-        remote_push_url=None,
+        remote_push_url=remote_push_url,
         finish_if_pr_terminal=_not_terminal,
         finish_if_pr_terminal_after_cleanup_error=_not_terminal,
     )
@@ -390,6 +396,92 @@ async def test_fixed_by_ancestor_sha_resolves_the_parked_thread_and_stops_notify
     assert evidence["head_sha"] == _HEAD
     assert evidence["rollback_head"] == _ROLLBACK
     assert evidence["hint_operation_id"] == "op_guide_1213"
+
+
+def _fetches(cmd: FakeCommandRunner) -> list[list[str]]:
+    return [call.args for call in cmd.calls if call.args[:1] == ["git"] and "fetch" in call.args]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("remote_push_url", "remote"),
+    [(None, "origin"), ("https://forge.example/acme/widgets.git", None)],
+    ids=["origin", "push_url"],
+)
+async def test_fixed_ruling_fetches_the_pr_branch_before_the_ancestry_probe(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    remote_push_url: str | None,
+    remote: str | None,
+) -> None:
+    # After a mutation park the worktree sits on the rollback commit while the PR
+    # head (and the operator's fix) may exist only on the remote: without a fetch
+    # the probe would refuse a legitimate ruling on every retry.
+    runner, workspace_id, gh, _cycle, cmd = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked(thread)
+    _arm(state, _fixed())
+
+    await _guide_poll(
+        runner, workspace_id, gh, state, _status(thread), remote_push_url=remote_push_url
+    )
+
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+    fetches = _fetches(cmd)
+    assert len(fetches) == 1
+    assert fetches[0][-2:] == [remote or remote_push_url, f"refs/heads/awf/{workspace_id}"]
+    order = [
+        "fetch" if "fetch" in call.args else "probe"
+        for call in cmd.calls
+        if call.args[:1] == ["git"] and ({"fetch", "rev-parse", "merge-base"} & set(call.args))
+    ]
+    assert order[0] == "fetch"
+
+
+@pytest.mark.unit
+async def test_failed_pr_branch_fetch_still_probes_local_objects(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, _cycle, cmd = await _runner(factory, tmp_path)
+    cmd.respond_when(lambda args: "fetch" in args, returncode=128, stderr="network down")
+    thread = _thread()
+    state = _parked(thread)
+    _arm(state, _fixed())
+
+    await _guide_poll(runner, workspace_id, gh, state, _status(thread))
+
+    assert len(_fetches(cmd)) == 1
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_ancestry_probe_without_a_remote_branch_skips_the_fetch(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, _gh, _cycle, cmd = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked(thread)
+    _arm(state, _fixed())
+    hint = state.pending_operator_hint
+    assert hint is not None
+
+    outcome = await apply_park_disposition(
+        runner,
+        workspace_id=workspace_id,
+        repo=_REPO,
+        pr_number=42,
+        status=_status(thread),
+        state=state,
+        hint=hint,
+        base_branch="main",
+        remote_branch=None,
+        operation_id=None,
+        monitor_log=None,
+    )
+
+    assert outcome is not None
+    assert _fetches(cmd) == []
+    assert any("merge-base" in call for call in _git_calls(cmd))
 
 
 @pytest.mark.unit
