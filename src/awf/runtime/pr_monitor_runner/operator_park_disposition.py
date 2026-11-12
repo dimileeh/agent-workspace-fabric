@@ -102,6 +102,14 @@ _FIXED_RE = re.compile(
 )
 _FALSE_POSITIVE_RE = re.compile(r"\bfalse[\s-]positive\b", re.IGNORECASE)
 _SEGMENT_BREAK_RE = re.compile(r"[.;\n]")
+# A question, an investigation request, or a hedge is not a ruling: "is this a
+# false positive?", "investigate whether ...", "probably a false positive".
+_TENTATIVE_RE = re.compile(
+    r"\?|\b(?:is|are|was|were)\s+(?:this|it|that)\b"
+    r"|\b(?:whether|investigat\w*|check|verify|confirm|determine|assess|evaluate"
+    r"|maybe|perhaps|possibly|probably|likely|might|could)\b",
+    re.IGNORECASE,
+)
 
 # ``git merge-base --is-ancestor`` answers "no", and ``git rev-parse --verify
 # --quiet`` answers "no such commit", with exit 1. Any other non-zero exit is no
@@ -154,9 +162,9 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
 
     Each occurrence of a thread id opens a segment that runs to the next thread
     id or the next ``.``, ``;`` or newline. A segment rules "fixed" or "false
-    positive" only when no negation precedes the phrase and no condition word is
-    anywhere in it, counting the clause lead-in before the thread id ("If CI
-    passes, PRRT_x ...", "Do not mark PRRT_x ..."). A thread whose segments carry no usable
+    positive" only when no negation precedes the phrase and no condition word,
+    question or hedge is anywhere in it, counting the clause lead-in before the
+    thread id ("If CI passes, PRRT_x ...", "Do not mark PRRT_x ..."). A thread whose segments carry no usable
     ruling, or disagree, maps to ``None`` so the guide fails closed rather than
     guessing.
     """
@@ -202,8 +210,12 @@ def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
     )
     if not matches:
         return set()
-    if _CONDITION_RE.search(lead_in + segment) or any(
-        _REJECT_NEGATED_RE.search(lead_in + segment[: match.start()]) for match, _ in matches
+    if (
+        _CONDITION_RE.search(lead_in + segment)
+        or _TENTATIVE_RE.search(lead_in + segment)
+        or any(
+            _REJECT_NEGATED_RE.search(lead_in + segment[: match.start()]) for match, _ in matches
+        )
     ):
         return None
     return {ruling for _, ruling in matches}

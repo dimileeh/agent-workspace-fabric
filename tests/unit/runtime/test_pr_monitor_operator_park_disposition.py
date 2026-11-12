@@ -316,6 +316,12 @@ def test_park_dispositions_parses_per_thread_rulings(
         f"If CI passes, {_THREAD} is a false positive",
         f"Do not mark {_THREAD} as a false positive",
         f"Once CI is green: ok. Never call {_THREAD} FIXED by abc1234",
+        # A question or an investigation request is not a ruling.
+        f"{_THREAD}: investigate whether this is a false positive",
+        f"{_THREAD}: is this a false positive?",
+        f"{_THREAD}: is this a false positive",
+        f"Can you check if {_THREAD} was FIXED by abc1234",
+        f"{_THREAD} is probably a false positive",
     ],
 )
 def test_park_dispositions_without_a_usable_ruling_is_none(guide: str | None) -> None:
@@ -566,13 +572,21 @@ async def test_guide_that_cannot_be_applied_fails_closed_and_changes_nothing(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "guide",
+    [
+        f"Please take another look at {_THREAD}.",
+        f"{_THREAD}: investigate whether this is a false positive",
+        f"{_THREAD}: is this a false positive?",
+    ],
+)
 async def test_guide_without_a_ruling_still_runs_the_agent(
-    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, guide: str
 ) -> None:
     runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
     thread = _thread()
     state = _parked(thread)
-    _arm(state, f"Please take another look at {_THREAD}.")
+    _arm(state, guide)
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
