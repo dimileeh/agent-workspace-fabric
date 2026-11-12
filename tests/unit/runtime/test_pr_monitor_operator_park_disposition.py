@@ -4,7 +4,8 @@ The production repro: three threads were parked on refused correction attempts,
 later commits fixed them, and the operator guided "make NO code changes; record
 dispositions only: thread A FIXED by commit Y". The agent ran, did nothing, the
 hint was consumed, and the monitor returned to ``NotifyHuman`` on every poll.
-These tests pin the explicit ruling: it is applied without the agent, the
+These tests pin the explicit ruling, one strict ``AWF-RULING`` line per thread
+(#1215; prose is never parsed for one): it is applied without the agent, the
 FIXED claim is checked against the PR head, and the thread is replied to and
 resolved with an operator-sourced disposition. Anything short of that fails
 closed with a distinct reason code.
@@ -261,55 +262,40 @@ def _assert_untouched(state: MonitorState, thread_id: str = _THREAD) -> None:
 # --- parser -----------------------------------------------------------------------
 
 
+def _fixed(thread_id: str = _THREAD, sha: str = _FIX[:8]) -> str:
+    return f"AWF-RULING {thread_id} FIXED {sha}"
+
+
+def _false_positive(thread_id: str = _THREAD) -> str:
+    return f"AWF-RULING {thread_id} FALSE_POSITIVE"
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("guide", "expected"),
     [
+        (_fixed(sha=_FIX), {_THREAD: ParkRuling("fixed", _FIX)}),
+        (_fixed(sha="ABC1234"), {_THREAD: ParkRuling("fixed", "abc1234")}),
+        # An all-digit SHA is a SHA here: the grammar, not the token shape, says so.
+        (_fixed(sha="1234567"), {_THREAD: ParkRuling("fixed", "1234567")}),
+        (_false_positive(), {_THREAD: ParkRuling("false_positive")}),
         (
-            f"Make NO code changes; record dispositions only: thread {_THREAD} FIXED by "
-            f"commit {_FIX[:10]}, thread {_OTHER} FIXED by `abc1234`.",
-            {_THREAD: ParkRuling("fixed", _FIX[:10]), _OTHER: ParkRuling("fixed", "abc1234")},
-        ),
-        (f"{_THREAD} is a false positive.", {_THREAD: ParkRuling("false_positive")}),
-        (f"{_THREAD}: false-positive", {_THREAD: ParkRuling("false_positive")}),
-        # A ruling plus a bare id: the bare thread fails the guide closed.
-        (
-            f"{_THREAD} fixed in abc1234. Look at {_OTHER}.",
-            {_THREAD: ParkRuling("fixed", "abc1234"), _OTHER: None},
-        ),
-        # Disagreeing rulings on one thread.
-        (f"{_THREAD} FIXED by abc1234; {_THREAD} is a false positive", {_THREAD: None}),
-        # A negated or conditional ruling voids that thread.
-        (
-            f"{_THREAD} FIXED by abc1234; {_OTHER} is not a false positive",
-            {_THREAD: ParkRuling("fixed", "abc1234"), _OTHER: None},
-        ),
-        (
-            f"{_THREAD} FIXED by abc1234. {_OTHER} FIXED by def5678 once CI passes",
-            {_THREAD: ParkRuling("fixed", "abc1234"), _OTHER: None},
-        ),
-        # A condition in an earlier clause does not void a later, unconditional one.
-        (
-            f"Only rule what is listed. {_THREAD} is a false positive",
+            f"{_false_positive()}: the guard already exists upstream",
             {_THREAD: ParkRuling("false_positive")},
         ),
-        # A negation in an earlier comma or "and" sub-clause rules on something else.
+        # One ruling per line; prose lines around them are not rulings.
         (
-            f"Make no code changes, {_THREAD} is a false positive",
-            {_THREAD: ParkRuling("false_positive")},
+            f"Make NO code changes; record dispositions only.\n"
+            f"{_fixed()}\r\n  {_false_positive(_OTHER)}  \nThanks!",
+            {_THREAD: ParkRuling("fixed", _FIX[:8]), _OTHER: ParkRuling("false_positive")},
         ),
-        (
-            f"Do not change code and {_THREAD} is FIXED by abc1234",
-            {_THREAD: ParkRuling("fixed", "abc1234")},
-        ),
-        # So does an "only" there: it scopes that sub-clause, not the ruling.
-        (
-            f"Make only doc edits, {_THREAD} is a false positive",
-            {_THREAD: ParkRuling("false_positive")},
-        ),
+        # A repeated identical ruling is one ruling; disagreeing ones fail closed.
+        (f"{_fixed()}\n{_fixed()}", {_THREAD: ParkRuling("fixed", _FIX[:8])}),
+        (f"{_fixed()}\n{_false_positive()}", {_THREAD: None}),
+        (f"{_fixed()}\n{_fixed(sha='abc1234')}", {_THREAD: None}),
     ],
 )
-def test_park_dispositions_parses_per_thread_rulings(
+def test_park_dispositions_accepts_the_exact_ruling_grammar(
     guide: str, expected: dict[str, ParkRuling | None]
 ) -> None:
     assert park_dispositions(guide) == expected
@@ -321,35 +307,33 @@ def test_park_dispositions_parses_per_thread_rulings(
     [
         None,
         "",
-        "FIXED by abc1234",  # no thread named
-        f"{_THREAD}: please take another look.",
-        f"{_THREAD} is not fixed by abc1234",
-        f"{_THREAD} FIXED by abc1234 once CI passes",
-        f"{_THREAD} FIXED by 1234567",  # an all-digit token is not a SHA
-        # A condition or negation earlier in the clause, before the thread id.
-        f"If CI passes, {_THREAD} is a false positive",
-        f"Do not mark {_THREAD} as a false positive",
-        # A list of thread ids does not split a negation off the later ids.
-        f"Do not mark {_OTHER}, {_THREAD} as a false positive",
-        f"Do not mark {_OTHER} and {_THREAD} as a false positive",
-        # A negation left dangling before a break still governs what follows it.
-        f"Do not, under any circumstances, mark {_THREAD} as a false positive",
-        # "only" in the ruling's own sub-clause still scopes the ruling.
-        f"Make edits, only {_THREAD} is a false positive",
-        f"Once CI is green: ok. Never call {_THREAD} FIXED by abc1234",
-        # A question or an investigation request is not a ruling.
-        f"{_THREAD}: investigate whether this is a false positive",
-        f"{_THREAD}: is this a false positive?",
-        f"{_THREAD}: is this a false positive",
-        f"Can you check if {_THREAD} was FIXED by abc1234",
-        f"{_THREAD} is probably a false positive",
-        # A question that names the thread before the ruling phrase.
-        f"Is {_THREAD} a false positive",
-        f"Was {_THREAD} FIXED by abc1234",
-        f"Do you think {_THREAD} is a false positive",
+        # The prose rulings earlier rounds parsed are not rulings any more.
+        f"{_THREAD} FIXED by {_FIX[:8]}",
+        f"{_THREAD} is a false positive.",
+        f"Make no code changes, {_THREAD} is a false positive",
+        # Near-misses: case, extra words, missing or malformed parts.
+        f"awf-ruling {_THREAD} FIXED {_FIX[:8]}",
+        f"AWF-RULING {_THREAD} fixed {_FIX[:8]}",
+        f"AWF-RULING {_THREAD} false_positive",
+        f"AWF-RULING {_THREAD} FALSE POSITIVE",
+        f"AWF-RULING {_THREAD} FIXED by {_FIX[:8]}",
+        f"AWF-RULING {_THREAD} FIXED {_FIX[:8]} once CI passes",
+        f"AWF-RULING {_THREAD} FALSE_POSITIVE?",
+        f"AWF-RULING {_THREAD} FALSE_POSITIVE:",
+        f"AWF-RULING {_THREAD} FIXED abc123",
+        f"AWF-RULING {_THREAD} FIXED {'a' * 41}",
+        f"AWF-RULING {_THREAD} FIXED {_FIX[:7]}z",
+        f"AWF-RULING {_THREAD}",
+        f"AWF-RULING FIXED {_FIX[:8]}",
+        f"AWF-RULING thread-{_THREAD} FALSE_POSITIVE",
+        # A ruling line embedded in prose, quoted, or bulleted is not on its own line.
+        f"Please apply: {_fixed()}",
+        f"Do not send {_false_positive()}",
+        f"- {_fixed()}",
+        f"`{_fixed()}`",
     ],
 )
-def test_park_dispositions_without_a_usable_ruling_is_none(guide: str | None) -> None:
+def test_park_dispositions_ignores_anything_but_the_exact_grammar(guide: str | None) -> None:
     assert park_dispositions(guide) is None
 
 
@@ -364,7 +348,7 @@ async def test_fixed_by_ancestor_sha_resolves_the_parked_thread_and_stops_notify
     thread = _thread()
     state = _parked(thread)
     status = _status(thread)
-    _arm(state, f"Make NO code changes; record dispositions only: {_THREAD} FIXED by {_FIX[:8]}.")
+    _arm(state, f"Make NO code changes; record dispositions only.\n{_fixed()}")
 
     terminal = await _guide_poll(runner, workspace_id, gh, state, status)
 
@@ -415,7 +399,7 @@ async def test_false_positive_ruling_resolves_an_outdated_park_without_git(
     runner, workspace_id, gh, cycle, cmd = await _runner(factory, tmp_path)
     thread = _thread(outdated=True)
     state = _parked(thread)
-    _arm(state, f"{_THREAD} is a false positive.")
+    _arm(state, _false_positive())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -436,7 +420,7 @@ async def test_two_threads_in_one_guide_are_both_applied(
     runner, workspace_id, gh, _cycle, _cmd = await _runner(factory, tmp_path)
     first, second = _thread(), _thread(_OTHER, body="other finding")
     state = _parked(first, second)
-    _arm(state, f"thread {_THREAD} FIXED by {_FIX[:8]}, thread {_OTHER} FIXED by {_FIX[:9]}")
+    _arm(state, f"{_fixed()}\n{_fixed(_OTHER, _FIX[:9])}")
 
     await _guide_poll(runner, workspace_id, gh, state, _status(first, second))
 
@@ -455,7 +439,7 @@ async def test_legacy_mutation_park_without_its_record_is_still_ruleable(
     thread = _thread()
     state = _parked(thread)
     state.threads_addressed_ids.pop(_park_key())
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -488,7 +472,7 @@ async def test_fixed_claim_without_ancestry_evidence_is_refused(
     runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path, **git)
     thread = _thread()
     state = _parked(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     terminal = await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -524,7 +508,7 @@ async def test_ancestry_probe_failure_is_refused(
     runner._deps.runner = broken
     thread = _thread()
     state = _parked(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -541,7 +525,7 @@ async def test_unknown_pr_head_is_refused(
     runner, workspace_id, gh, _cycle, cmd = await _runner(factory, tmp_path)
     thread = _thread()
     state = _parked(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread, head=""))
 
@@ -553,7 +537,7 @@ async def test_unknown_pr_head_is_refused(
 @pytest.mark.parametrize(
     ("setup", "detail"),
     [
-        ("bare_second_thread", "thread_without_disposition"),
+        ("conflicting_rulings", "thread_without_disposition"),
         ("not_mutation_park", "not_mutation_park"),
         ("thread_closed", "thread_not_open"),
         ("conversation_changed", "conversation_changed"),
@@ -567,12 +551,12 @@ async def test_guide_that_cannot_be_applied_fails_closed_and_changes_nothing(
     thread = _thread()
     state = _parked(thread)
     live = (thread,)
-    guide = f"{_THREAD} FIXED by {_FIX[:8]}"
-    if setup == "bare_second_thread":
-        guide += f". Also look at {_OTHER}."
+    guide = _fixed()
+    if setup == "conflicting_rulings":
+        guide += f"\n{_false_positive()}"
     elif setup == "not_mutation_park":
         # A guide that rules on a mutation park takes over every thread it rules on.
-        guide += f". {_OTHER} is a false positive."
+        guide += f"\n{_false_positive(_OTHER)}"
         _sync_needs_human_reason(
             state, _OTHER, VerdictResult(verdict="needs_human", reason="needs a product call")
         )
@@ -601,8 +585,11 @@ async def test_guide_that_cannot_be_applied_fails_closed_and_changes_nothing(
     "guide",
     [
         f"Please take another look at {_THREAD}.",
-        f"{_THREAD}: investigate whether this is a false positive",
         f"{_THREAD}: is this a false positive?",
+        # Prose and near-miss rulings go through the agent cycle, never applied.
+        f"Make NO code changes; {_THREAD} FIXED by {_FIX[:8]}.",
+        f"awf-ruling {_THREAD} FIXED {_FIX[:8]}",
+        f"AWF-RULING {_THREAD} FALSE_POSITIVE because the guard exists",
     ],
 )
 async def test_guide_without_a_ruling_still_runs_the_agent(
@@ -623,8 +610,8 @@ async def test_guide_without_a_ruling_still_runs_the_agent(
 @pytest.mark.parametrize(
     "guide",
     [
-        f"{_THREAD} is a false positive.",
-        f"Please take another look at {_OTHER}. {_THREAD} FIXED by {_FIX[:8]}.",
+        _false_positive(),
+        f"Please take another look at {_OTHER}.\n{_fixed()}",
     ],
 )
 async def test_ruling_on_no_mutation_park_still_runs_the_agent(
@@ -653,7 +640,7 @@ async def test_pending_protected_block_is_left_to_the_grant_protocol(
     thread = _thread()
     state = _parked(thread)
     state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, _HEAD)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
     hint = state.pending_operator_hint
     assert hint is not None
 
@@ -690,7 +677,7 @@ async def test_resolve_fault_re_parks_with_the_forge_reason_and_a_repeat_reuses_
     thread = _thread()
     state = _parked(thread)
     status = _status(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, status)
 
@@ -710,7 +697,7 @@ async def test_resolve_fault_re_parks_with_the_forge_reason_and_a_repeat_reuses_
 
     gh.resolve_error = None
     gh.events.clear()
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}", operation_id="op_guide_1213_retry")
+    _arm(state, _fixed(), operation_id="op_guide_1213_retry")
     await _guide_poll(runner, workspace_id, gh, state, status)
 
     assert cycle.calls == []
@@ -733,7 +720,7 @@ async def test_reply_fault_re_parks_and_a_repeat_guide_retries_the_reply(
     thread = _thread()
     state = _parked(thread)
     status = _status(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, status)
 
@@ -743,7 +730,7 @@ async def test_reply_fault_re_parks_and_a_repeat_guide_retries_the_reply(
 
     gh.reply_error = None
     gh.events.clear()
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}", operation_id="op_guide_1213_retry")
+    _arm(state, _fixed(), operation_id="op_guide_1213_retry")
     await _guide_poll(runner, workspace_id, gh, state, status)
 
     assert cycle.calls == []
@@ -772,7 +759,7 @@ async def test_reply_fault_park_left_by_another_source_is_not_ruleable(
             reason="agent triage",
         ),
     )
-    _arm(state, f"{_THREAD} is a false positive")
+    _arm(state, _false_positive())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -798,7 +785,7 @@ async def test_ruling_retires_a_reply_posted_for_an_earlier_verdict(
             resolved=True,
         ),
     )
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
@@ -829,7 +816,7 @@ async def test_refused_reply_keeps_the_thread_open_under_its_own_park(
     monkeypatch.setattr(operator_park_disposition, "reply_before_resolve", _refuse)
     thread = _thread()
     state = _parked(thread)
-    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+    _arm(state, _fixed())
 
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 

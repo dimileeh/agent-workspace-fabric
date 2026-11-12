@@ -8,17 +8,22 @@ changes", the agent cycle had nothing to do: the hint was consumed and
 applied an operator ruling as a disposition without a worktree mutation.
 
 This module applies such a ruling without the agent, the same way #1189's
-``operator_preserved_attempt`` applies its ruling. Each named thread must carry
-exactly one ruling: "FIXED by <sha>" or "false positive". The whole guide is
-checked before anything changes. Every named thread must be a live mutation
-park, open on the PR, with the conversation the park answered unchanged. A FIXED
-claim needs evidence: the cited commit must resolve and be an ancestor of the PR
-head. Each thread then records the operator-sourced disposition, gets AWF's
-disposition reply, and is resolved. Each step is audited under its reason code.
+``operator_preserved_attempt`` applies its ruling. A ruling is one guide line in
+a strict, machine-readable grammar (#1215), never English prose:
+
+    AWF-RULING <thread_id> FIXED <sha>
+    AWF-RULING <thread_id> FALSE_POSITIVE[: <reason>]
+
+The whole guide is checked before anything changes. Every ruled thread must be
+a live mutation park, open on the PR, with the conversation the park answered
+unchanged. A FIXED claim needs evidence: the cited commit must resolve and be
+an ancestor of the PR head. Each thread then records the operator-sourced
+disposition, gets AWF's disposition reply, and is resolved. Each step is
+audited under its reason code.
 
 Anything short of that fails closed: no thread changes, and the hint parks
 ``needs_human`` with ``OPERATOR_PARK_DISPOSITION_UNAPPLIED`` and a detail. A
-guide that carries no ruling phrase, or rules on no mutation park, never reaches
+guide that carries no ruling line, or rules on no mutation park, never reaches
 any of this, so the agent cycle (and the #938 clear-and-retriage path) runs as
 before.
 """
@@ -53,17 +58,12 @@ from awf.runtime.pr_monitor_runner.helpers import _agent_failed_reason_state_key
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
-    _operator_hint_review_thread_id_candidates,
+    _OPERATOR_HINT_REVIEW_THREAD_ID_RE,
 )
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint,
 )
-from awf.runtime.pr_monitor_runner.operator_preserved_attempt import (
-    _CONDITION_RE,
-    _REJECT_NEGATED_RE,
-    PreservedAttemptOutcome,
-    _clause_start,
-)
+from awf.runtime.pr_monitor_runner.operator_preserved_attempt import PreservedAttemptOutcome
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_AUDIT_UNAVAILABLE,
     THREAD_DISPOSITION_REPLY_FAILED,
@@ -92,41 +92,14 @@ _REPLY_FAULT_REASON_PREFIXES = (
     f"{REVIEW_THREAD_AUDIT_UNAVAILABLE}:",
 )
 
-# "FIXED by|in [commit] <sha>", the SHA a standalone 7-40 hex token with at least
-# one digit and one letter (the #1189 shape: an all-digit token is a comment id,
-# an all-letter one a word).
-_FIXED_RE = re.compile(
-    r"\bfixed\s+(?:by|in)\s+(?:commit\s+)?`?"
-    r"(?P<sha>(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40})(?![\w-])",
-    re.IGNORECASE,
-)
-_FALSE_POSITIVE_RE = re.compile(r"\bfalse[\s-]positive\b", re.IGNORECASE)
-_SEGMENT_BREAK_RE = re.compile(r"[.;\n]")
-# A question, an investigation request, or a hedge is not a ruling: "is this a
-# false positive?", "investigate whether ...", "probably a false positive".
-_TENTATIVE_RE = re.compile(
-    r"\?|\b(?:is|are|was|were)\s+(?:this|it|that)\b"
-    r"|\b(?:whether|investigat\w*|check|verify|confirm|determine|assess|evaluate"
-    r"|maybe|perhaps|possibly|probably|likely|might|could)\b",
-    re.IGNORECASE,
-)
-# A clause that opens on an auxiliary verb asks rather than rules, even without a
-# "?": "Is PRRT_x a false positive", "Do you think PRRT_x is ...". "Do not ..."
-# is an instruction, not a question.
-_QUESTION_LEAD_RE = re.compile(
-    r"^\W*(?:is|are|was|were|do(?!\s+not\b)|does|did|can|should|would|will)\b",
-    re.IGNORECASE,
-)
-# A comma or "and"/"but" opens a sub-clause in the lead-in; a negation in an
-# earlier one governs that sub-clause ("make no code changes, PRRT_x is ..."),
-# unless it dangles with nothing after it ("Do not, ever, mark PRRT_x ...").
-_SUBCLAUSE_BREAK_RE = re.compile(r",|\b(?:and|but)\b", re.IGNORECASE)
-_DANGLING_NEGATION_RE = re.compile(r"\b(?:not|never|no|\w+n['’]t)\W*$", re.IGNORECASE)
-# ``_CONDITION_RE`` without "only": like a negation, an "only" scopes just its own
-# sub-clause ("make only doc edits, PRRT_x is ..."), so only the ruling's sub-clause
-# is scanned for it; a real condition anywhere in the lead-in still governs.
-_LEAD_IN_CONDITION_RE = re.compile(
-    r"\b(?:if|unless|once|when|whenever|until|after|before|provided)\b", re.IGNORECASE
+# One ruling per line, the whole line and nothing else (#1215):
+#   AWF-RULING <thread_id> FIXED <sha>
+#   AWF-RULING <thread_id> FALSE_POSITIVE[: <reason>]
+# Keywords are case-sensitive and the SHA is 7-40 hex digits. Any other line,
+# however close, is not a ruling: prose is never parsed for one.
+_RULING_LINE_RE = re.compile(
+    r"AWF-RULING[ \t]+(?P<thread_id>\S+)[ \t]+"
+    r"(?:FIXED[ \t]+(?P<sha>[0-9a-fA-F]{7,40})|FALSE_POSITIVE(?::[ \t]*\S.*)?)"
 )
 
 # ``git merge-base --is-ancestor`` answers "no", and ``git rev-parse --verify
@@ -136,8 +109,8 @@ _GIT_NO_RETURN_CODE = 1
 
 _UNAPPLIED_EXPLANATION: dict[str, str] = {
     "thread_without_disposition": (
-        "a named thread has no single, unconditional 'FIXED by <sha>' or 'false positive' "
-        "ruling, so AWF cannot tell what the guide rules for it."
+        "a thread has AWF-RULING lines that disagree, so AWF cannot tell what the guide "
+        "rules for it."
     ),
     "not_mutation_park": (
         "a named thread is not parked on a refused correction attempt "
@@ -176,91 +149,29 @@ class _Staged:
 
 
 def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
-    """Parse per-thread rulings; ``None`` when the guide carries no ruling at all.
+    """Per-thread ``AWF-RULING`` lines; ``None`` when the guide carries none.
 
-    Each occurrence of a thread id opens a segment that runs to the next thread
-    id or the next ``.``, ``;`` or newline. A segment rules "fixed" or "false
-    positive" only when no negation precedes the phrase and no condition word,
-    question or hedge is anywhere in it, counting the clause lead-in before the
-    thread id ("If CI passes, PRRT_x ...", "Do not mark PRRT_x ..."). A negation in
-    an earlier comma or "and" sub-clause of the lead-in rules on something else
-    ("make no code changes, PRRT_x ...") and does not count; nor does an "only". A thread whose segments carry no usable
-    ruling, or disagree, maps to ``None`` so the guide fails closed rather than
-    guessing.
+    Only a line that full-matches the grammar, naming a review-thread id, is a
+    ruling. A thread whose ruling lines disagree maps to ``None`` so the guide
+    fails closed rather than guessing. The optional false-positive reason is the
+    operator's note: it stays with the guide and is never posted.
     """
-    if not text:
-        return None
-    thread_ids = _operator_hint_review_thread_id_candidates(text)
-    starts = sorted(
-        (match.start(), thread_id)
-        for thread_id in thread_ids
-        for match in re.finditer(re.escape(thread_id), text)
-    )
-    found: dict[str, set[ParkRuling]] = {thread_id: set() for thread_id in thread_ids}
-    voided: set[str] = set()
-    for index, (start, thread_id) in enumerate(starts):
-        end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
-        segment_break = _SEGMENT_BREAK_RE.search(text, start, end)
-        segment = text[start : segment_break.start() if segment_break else end]
-        lead_in = text[_clause_start(text, start) : start]
-        rulings = _segment_rulings(segment, lead_in, _negation_lead_in(lead_in, thread_ids))
-        if rulings is None:
-            voided.add(thread_id)
-        else:
-            found[thread_id].update(rulings)
-    if not any(found.values()):
+    found: dict[str, set[ParkRuling]] = {}
+    for line in (text or "").splitlines():
+        match = _RULING_LINE_RE.fullmatch(line.strip())
+        if match is None or not _OPERATOR_HINT_REVIEW_THREAD_ID_RE.fullmatch(
+            match.group("thread_id")
+        ):
+            continue
+        sha = match.group("sha")
+        ruling = ParkRuling("fixed", sha.lower()) if sha else ParkRuling("false_positive")
+        found.setdefault(match.group("thread_id"), set()).add(ruling)
+    if not found:
         return None
     return {
-        thread_id: next(iter(rulings)) if len(rulings) == 1 and thread_id not in voided else None
+        thread_id: next(iter(rulings)) if len(rulings) == 1 else None
         for thread_id, rulings in found.items()
     }
-
-
-def _segment_rulings(segment: str, lead_in: str, negation_lead_in: str) -> set[ParkRuling] | None:
-    """The rulings one segment carries; ``None`` when a phrase in it is voided.
-
-    ``lead_in`` is the clause text before the segment's thread id, so a condition
-    written ahead of the id still voids the ruling; ``negation_lead_in`` is the
-    part of it a negation or an "only" must sit in to do the same.
-    """
-    matches: list[tuple[re.Match[str], ParkRuling]] = [
-        (match, ParkRuling("fixed", match.group("sha").lower()))
-        for match in _FIXED_RE.finditer(segment)
-    ]
-    matches.extend(
-        (match, ParkRuling("false_positive")) for match in _FALSE_POSITIVE_RE.finditer(segment)
-    )
-    if not matches:
-        return set()
-    if (
-        _LEAD_IN_CONDITION_RE.search(lead_in)
-        or _CONDITION_RE.search(negation_lead_in + segment)
-        or _TENTATIVE_RE.search(lead_in + segment)
-        or _QUESTION_LEAD_RE.search(lead_in)
-        or any(
-            _REJECT_NEGATED_RE.search(negation_lead_in + segment[: match.start()])
-            for match, _ in matches
-        )
-    ):
-        return None
-    return {ruling for _, ruling in matches}
-
-
-def _negation_lead_in(lead_in: str, thread_ids: tuple[str, ...]) -> str:
-    """The lead-in's last sub-clause, plus any earlier one ending on a dangling negation.
-
-    A break right after another thread id only continues a list ("Do not mark
-    PRRT_x, PRRT_y ...") and splits nothing.
-    """
-    pieces: list[str] = []
-    piece_start = 0
-    for match in _SUBCLAUSE_BREAK_RE.finditer(lead_in):
-        if lead_in[: match.start()].rstrip(" \t`*'\"").endswith(thread_ids):
-            continue
-        pieces.append(lead_in[piece_start : match.start()])
-        piece_start = match.end()
-    dangling = [piece for piece in pieces if _DANGLING_NEGATION_RE.search(piece)]
-    return " ".join([*dangling, lead_in[piece_start:]])
 
 
 def _is_ruleable_park(state: MonitorState, thread_id: str) -> bool:
@@ -475,10 +386,9 @@ async def apply_park_disposition(
     rulings = park_dispositions(hint.directive)
     if rulings is None or state.has_preserved_protected_block:
         return None
-    if not any(
-        ruling is not None and _is_ruleable_park(state, thread_id)
-        for thread_id, ruling in rulings.items()
-    ):
+    # A ruling line is deliberate, so one naming a mutation park takes over the
+    # guide even when it conflicts: that fails closed below, never to the agent.
+    if not any(_is_ruleable_park(state, thread_id) for thread_id in rulings):
         return None
     staged, detail = await _stage(
         self, workspace_id=workspace_id, status=status, state=state, rulings=rulings
@@ -510,7 +420,8 @@ async def apply_park_disposition(
             state,
             f"{OPERATOR_PARK_DISPOSITION_UNAPPLIED}: the operator ruling on a parked review "
             f"thread was not applied ({detail}): {_UNAPPLIED_EXPLANATION[detail]} Send a guide "
-            "naming each parked thread id followed by 'FIXED by <sha>' or 'false positive'.",
+            "with one line per parked thread: 'AWF-RULING <thread_id> FIXED <sha>' or "
+            "'AWF-RULING <thread_id> FALSE_POSITIVE[: <reason>]'.",
         )
         return PreservedAttemptOutcome(
             outcome="operator_hint_park_disposition_unapplied",

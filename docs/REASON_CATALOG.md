@@ -845,7 +845,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
 
 ### OPERATOR_PARK_DISPOSITION_APPLIED
-**Problem:** An operator guide ruled a review thread parked on a refused correction attempt FIXED by a commit or a false positive, so AWF recorded that disposition, replied in the thread and resolved it.
+**Problem:** An operator guide's AWF-RULING line ruled a review thread parked on a refused correction attempt FIXED by a commit or a false positive, so AWF recorded that disposition, replied in the thread and resolved it.
 **Likely Cause:** The thread was parked needs_human with AGENT_NON_FIXED_WITH_MUTATION. A FIXED ruling is applied only when the cited commit is an ancestor of the PR head. No agent ran and the worktree was not changed.
 **Operator Fix:** No action is required. The event evidence names the thread, the ruling, the cited commit and the PR head it was checked against. The guide's other instructions were not run; send a follow-up guide for them.
 **Related Command:** `awf workspace events <workspace_id>`
@@ -860,8 +860,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### OPERATOR_PARK_DISPOSITION_UNAPPLIED
 **Problem:** An operator guide ruled on a review thread parked on a refused correction attempt, but AWF could not apply the ruling, so every named thread stays parked.
-**Likely Cause:** A named thread had no single unconditional ruling, was not a mutation park, was no longer open, or had new replies; or the cited commit did not resolve or was not an ancestor of the PR head. AWF does not guess.
-**Operator Fix:** Read the detail in the notice or audit event. Then guide again, naming each parked thread id followed by 'FIXED by <sha>' (a commit already on the PR head) or 'false positive'. Guide without that wording to have the agent re-triage.
+**Likely Cause:** A thread's AWF-RULING lines disagreed, or a ruled thread was not a mutation park, was no longer open, or had new replies; or the cited commit did not resolve or was not an ancestor of the PR head. AWF does not guess.
+**Operator Fix:** Read the detail in the notice or audit event. Then guide again with one line per parked thread, exactly 'AWF-RULING <thread_id> FIXED <sha>' (a 7-40 hex commit already on the PR head) or 'AWF-RULING <thread_id> FALSE_POSITIVE' (optionally followed by ': <reason>', never posted). Keywords are case-sensitive; any other line, prose included, is not a ruling. Guide without an AWF-RULING line to have the agent re-triage.
 **Related Command:** `awf workspace events <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_unapplied](#operator_park_disposition_unapplied)
 

@@ -456,9 +456,9 @@ def get_comment_repair_reasons(
         ),
         "OPERATOR_PARK_DISPOSITION_APPLIED": reason_text_cls(
             (
-                "An operator guide ruled a review thread parked on a refused correction attempt "
-                "FIXED by a commit or a false positive, so AWF recorded that disposition, replied "
-                "in the thread and resolved it."
+                "An operator guide's AWF-RULING line ruled a review thread parked on a refused "
+                "correction attempt FIXED by a commit or a false positive, so AWF recorded that "
+                "disposition, replied in the thread and resolved it."
             ),
             (
                 "No action is required. The event evidence names the thread, the ruling, the "
@@ -479,14 +479,17 @@ def get_comment_repair_reasons(
                 "attempt, but AWF could not apply the ruling, so every named thread stays parked."
             ),
             (
-                "Read the detail in the notice or audit event. Then guide again, naming each "
-                "parked thread id followed by 'FIXED by <sha>' (a commit already on the PR head) "
-                "or 'false positive'. Guide without that wording to have the agent re-triage."
+                "Read the detail in the notice or audit event. Then guide again with one line "
+                "per parked thread, exactly 'AWF-RULING <thread_id> FIXED <sha>' (a 7-40 hex "
+                "commit already on the PR head) or 'AWF-RULING <thread_id> FALSE_POSITIVE' "
+                "(optionally followed by ': <reason>', never posted). Keywords are "
+                "case-sensitive; any other line, prose included, is not a ruling. Guide without "
+                "an AWF-RULING line to have the agent re-triage."
             ),
             (
-                "A named thread had no single unconditional ruling, was not a mutation park, was "
-                "no longer open, or had new replies; or the cited commit did not resolve or was "
-                "not an ancestor of the PR head. AWF does not guess."
+                "A thread's AWF-RULING lines disagreed, or a ruled thread was not a mutation "
+                "park, was no longer open, or had new replies; or the cited commit did not "
+                "resolve or was not an ancestor of the PR head. AWF does not guess."
             ),
             "awf workspace events <workspace_id>",
             reason_catalog_link("OPERATOR_PARK_DISPOSITION_UNAPPLIED"),
