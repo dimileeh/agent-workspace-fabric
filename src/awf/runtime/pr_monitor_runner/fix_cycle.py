@@ -442,6 +442,8 @@ async def _run_fix_cycle(
                             workspace_id=workspace_id,
                             remote_branch=remote_branch,
                             exc=exc,
+                            pr_number=pr_number,
+                            repo=repo,
                         ),
                     )
                 )
@@ -655,6 +657,8 @@ async def _run_fix_cycle(
                             workspace_id=workspace_id,
                             remote_branch=remote_branch,
                             exc=exc,
+                            pr_number=pr_number,
+                            repo=repo,
                         ),
                     )
                 )

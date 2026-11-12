@@ -1411,6 +1411,8 @@ async def _protected_scope_diff_unavailable_push_result(
     workspace_id: str,
     remote_branch: str,
     exc: ProtectedScopeDiffError,
+    pr_number: int | None = None,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult:
     block = await self._protected_scope_diff_unavailable_block(
         workspace_id=workspace_id,
@@ -1426,6 +1428,8 @@ async def _protected_scope_diff_unavailable_push_result(
                 remote_branch=remote_branch,
                 resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
                 message=block.message,
+                pr_number=pr_number,
+                repo=repo,
             ),
         )
     return _GitPushResult(

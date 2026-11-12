@@ -48,6 +48,8 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
     ReportCiFailure,
+    ReviewComment,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
@@ -730,6 +732,52 @@ async def test_park_returns_moot_result_when_pr_merged_during_retries(
     assert result.paused_into_blocked is False
     workspace = await _workspace(factory, workspace_id)
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("item_kind", ["thread", "review"])
+async def test_comment_repair_commit_sink_park_rechecks_terminal_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    item_kind: str,
+) -> None:
+    """PRRT_kwDOSJAM6s621eJn: a PR merged during the fetch retries is not parked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, closed=True))
+    runner = _runner(factory, tmp_path, cmd)
+
+    async def _raise_baseline_unavailable(**_kwargs: object) -> object:
+        raise ProtectedScopeBaselineUnavailableError("fetch failed: Could not resolve host")
+
+    monkeypatch.setattr(runner, "_address_thread", _raise_baseline_unavailable)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _raise_baseline_unavailable)
+    thread = ReviewThread(
+        thread_id="PRRT_baseline", path="src/app.py", line=1, body_excerpt="fix", author="r"
+    )
+    review = ReviewComment(comment_id="C_baseline", body_excerpt="fix", author="r")
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,) if item_kind == "thread" else (),
+        initial_reviews=(review,) if item_kind == "review" else (),
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pr_terminal is not None
+    assert result.paused_into_blocked is False
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert not await _events(
+        factory, workspace_id, "workspace.monitor_protected_scope_diff_unavailable_parked"
+    )
 
 
 @pytest.mark.unit
