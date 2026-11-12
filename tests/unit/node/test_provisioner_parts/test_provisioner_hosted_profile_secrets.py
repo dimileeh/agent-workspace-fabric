@@ -95,6 +95,9 @@ async def test_hosted_profile_secret_error_fails_as_non_transient_profile_resolu
         assert reloaded is not None
         assert reloaded.status == WorkspaceStatus.failed.value
         assert reloaded.failure_reason == "profile_resolution_failure"
+        # Refused before Compose I/O: the pre-launch project name must not
+        # linger as a host-port blocker on the failed row.
+        assert reloaded.compose_project_name is None
         assert reloaded.failure_message is not None
         assert reloaded.failure_message.startswith(f"{reason_code}:")
         assert "'local_db_password'" in reloaded.failure_message

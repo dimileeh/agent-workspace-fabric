@@ -831,6 +831,9 @@ class Provisioner(
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
+                # Launch-time profile refusals (e.g. hosted secret declarations)
+                # run after the pre-launch commit but before Compose I/O.
+                clear_unlaunched_compose_project=not stack_launch_started,
                 # Deferred Cursor ready-path skips publishing resolved_profile;
                 # companion graph failures after that probe still need the
                 # snapshot so retry overlays profile-only CURSOR_API_KEY.
