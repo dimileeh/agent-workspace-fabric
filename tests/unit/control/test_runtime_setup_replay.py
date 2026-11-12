@@ -43,6 +43,7 @@ from awf.profiles.models import (
     ProfileValidation,
     WorkspaceProfile,
 )
+from awf.runtime import validation_runner
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -521,6 +522,16 @@ class _HangingRunner:
         raise AssertionError("unreachable")  # pragma: no cover - the event is never set
 
 
+class _HangingCleanupRunner(_HangingRunner):
+    """``_HangingRunner`` whose timeout cleanup exec never returns either (#1218)."""
+
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        if "awf-cleanup" in args:
+            self.cleanups.append(args)
+            await self._never.wait()
+        return await super().run(args)
+
+
 class _ProfileCapturingValidation:
     """Validation double recording the profile handed to ``run_profile_phases``."""
 
@@ -630,6 +641,40 @@ class TestReplayCommandTimeout:
         )
         assert len(runner.hung) == 2
         assert len(runner.cleanups) == 2
+
+    @pytest.mark.unit
+    async def test_hung_cleanup_after_command_timeout_fails_replay_as_cleanup_failure(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A wedged cleanup exec is bounded and reported as the cleanup failure."""
+        monkeypatch.setattr(runtime_setup_replay, "SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(validation_runner, "_PHASE_TIMEOUT_CLEANUP_TIMEOUT_SECONDS", 0.05)
+        ws_id = await _seed_monitoring_pr(factory)
+        runner = _HangingCleanupRunner()
+        validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(setup=[ProfileCommand(command="sleep-forever-install")]),
+        )
+
+        outcome = await asyncio.wait_for(
+            _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW, profile=profile),
+            timeout=10,
+        )
+
+        assert not outcome.ok and outcome.replayed
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason is FailureReason.infrastructure_failure
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert outcome.message is not None
+        assert "cleanup timed out after 0.05s" in outcome.message
+        assert len(runner.hung) == 1
+        assert len(runner.cleanups) == 1
+        assert await _replay_events(factory, ws_id) == []
 
     @pytest.mark.unit
     async def test_profile_timeout_wins_and_unbounded_commands_get_the_default(
