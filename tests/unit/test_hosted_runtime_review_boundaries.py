@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import structlog.testing
 from sqlalchemy import text
 
 from awf.common.commands import FakeCommandRunner
@@ -25,6 +26,7 @@ from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace, associa
 from awf.hosted_node.runtime_worker import start_runtime
 from awf.hosted_node.schemas import Refresh
 from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import ProfileResolutionError
 from awf.service.resource_capacity import LocalCapacityLimits
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_capacity import configured
@@ -111,6 +113,132 @@ async def test_exact_explicit_profile_declarations_resolve_readonly_workspace_vi
         Path(result.mounts[0].source) / "github.api-key",
     }
     assert not result.environment
+
+
+def _protected_declarations(association):
+    return [
+        {"name": role, "provider": "protected", "target": binding.target}
+        for role, binding in (
+            ("agent", association.credentials.agent),
+            ("github", association.credentials.github),
+        )
+    ]
+
+
+async def test_optional_unsupported_profile_secrets_are_skipped_by_name_only(
+    workspace, monkeypatch
+):
+    runtime, association, _ = workspace
+    sentinel = f"sentinel-{secrets.token_hex(16)}"
+    monkeypatch.setenv("LOCAL_DB_PASSWORD", sentinel)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "boundary",
+            "secrets": [
+                *_protected_declarations(association),
+                {
+                    "name": "local_db_password",
+                    "kind": "env",
+                    "provider": "env",
+                    "ref": "env/LOCAL_DB_PASSWORD",
+                    "target": "LOCAL_DB_PASSWORD",
+                    "required": False,
+                },
+                {
+                    "name": "local_cache_token",
+                    "kind": "env",
+                    "provider": "env",
+                    "ref": "env/LOCAL_DB_PASSWORD",
+                    "target": "LOCAL_CACHE_TOKEN",
+                    "required": False,
+                },
+            ],
+        }
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await runtime.profile_mounts(profile, association.workspace_id)
+
+    assert [mount.target for mount in result.mounts] == ["/run/awf/secrets"]
+    assert not result.environment
+    assert list(result.metadata["hosted_skipped_optional_secrets"]) == [
+        "local_db_password",
+        "local_cache_token",
+    ]
+    skipped_logs = [log for log in logs if log["event"] == "hosted_node.profile_secret_skipped"]
+    assert len(skipped_logs) == 1
+    assert skipped_logs[0]["reason_code"] == "HOSTED_OPTIONAL_SECRET_SKIPPED"
+    assert skipped_logs[0]["workspace_id"] == association.workspace_id
+    assert skipped_logs[0]["secret_names"] == ["local_db_password", "local_cache_token"]
+    for evidence in (repr(result.metadata), repr(logs)):
+        assert sentinel not in evidence
+        assert "env/LOCAL_DB_PASSWORD" not in evidence
+
+
+async def test_exact_profile_declarations_record_no_skipped_secrets(workspace):
+    runtime, association, _ = workspace
+    profile = WorkspaceProfile.model_validate(
+        {"name": "boundary", "secrets": _protected_declarations(association)}
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await runtime.profile_mounts(profile, association.workspace_id)
+
+    assert "hosted_skipped_optional_secrets" not in result.metadata
+    assert not [log for log in logs if log["event"] == "hosted_node.profile_secret_skipped"]
+
+
+async def test_required_unsupported_profile_secret_fails_as_profile_resolution(workspace):
+    runtime, association, _ = workspace
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "boundary",
+            "secrets": [
+                *_protected_declarations(association),
+                {
+                    "name": "local_db_password",
+                    "kind": "env",
+                    "provider": "env",
+                    "ref": "env/LOCAL_DB_PASSWORD",
+                    "target": "LOCAL_DB_PASSWORD",
+                },
+            ],
+        }
+    )
+    with pytest.raises(ProfileResolutionError) as caught:
+        await runtime.profile_mounts(profile, association.workspace_id)
+
+    assert isinstance(caught.value, MaterialDeniedError)
+    assert caught.value.reason == caught.value.reason_code == "PROTECTED_DECLARATION_UNSUPPORTED"
+    assert caught.value.status == 422
+    assert "'local_db_password'" in str(caught.value)
+    assert "env/LOCAL_DB_PASSWORD" not in str(caught.value)
+    # The refusal is classified before any protected material is read or published.
+    assert await runtime.publication(association.workspace_id) is None
+
+
+@pytest.mark.parametrize("required", [True, False])
+async def test_mismatched_protected_declaration_is_profile_resolution_failure(workspace, required):
+    runtime, association, _ = workspace
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "boundary",
+            "secrets": [
+                {
+                    "name": "agent",
+                    "provider": "protected",
+                    "mode": "rw",
+                    "target": association.credentials.agent.target,
+                    "required": required,
+                }
+            ],
+        }
+    )
+    with pytest.raises(ProfileResolutionError) as caught:
+        await runtime.profile_mounts(profile, association.workspace_id)
+
+    assert isinstance(caught.value, MaterialDeniedError)
+    assert caught.value.reason == caught.value.reason_code == "PROTECTED_DECLARATION_MISMATCH"
+    assert "'agent'" in str(caught.value)
+    assert await runtime.publication(association.workspace_id) is None
 
 
 @pytest.mark.parametrize("fault", ["absent_anchor", "pending_anchor", "absent_current"])
