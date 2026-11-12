@@ -1083,6 +1083,81 @@ async def test_validated_push_park_persists_stranded_edits_evidence_before_block
 
 
 @pytest.mark.unit
+async def test_ci_repair_sink_baseline_outage_records_stranded_edits_before_parking(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CI-repair commit sink that outlives its baseline retries leaves the edits dirty.
+
+    The park must mark them, record what it left and persist both, so the guide
+    resume commits exactly those edits instead of failing at its pre-existing-dirty
+    guard as ``PRE_EXISTING_DIRTY_WORKTREE`` (PRRT_kwDOSJAM6s622NyK).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    (worktree_path / "src").mkdir(parents=True)
+    (worktree_path / "src" / "fix.py").write_text("fixed\n")
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        AsyncMock(
+            side_effect=[
+                None,  # clean worktree before the repair
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    reason_code="PRE_EXISTING_DIRTY_WORKTREE",
+                    details={"paths": ["src/fix.py"]},
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        AsyncMock(return_value=("abc1234567890def", None)),
+    )
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        runner, "_post_action_pr_terminal_push_result_if_moot", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=_REPAIR_COMMIT_SHA))
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProtectedScopeBaselineUnavailableError("dns")),
+    )
+    state = MonitorState()
+
+    result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        status=_status(),
+        state=state,
+    )
+
+    assert result.paused_into_blocked is True
+    assert (worktree_path / "src" / "fix.py").read_text() == "fixed\n"
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.blocked.value
+    persisted = workspace.monitor_threads_addressed or {}
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _REPAIR_COMMIT_SHA
+    evidence = json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])
+    assert list(evidence) == ["src/fix.py"]
+    assert evidence["src/fix.py"].startswith("file:")
+
+
+@pytest.mark.unit
 def test_worktree_check_extra_details_merge_into_details() -> None:
     check = ValidationWorktreeCheck(
         clean=False,

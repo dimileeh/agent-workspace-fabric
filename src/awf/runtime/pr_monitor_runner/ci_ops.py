@@ -56,12 +56,14 @@ from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
 )
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     mark_provider_park_stranded_edits,
+    record_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
@@ -923,6 +925,17 @@ async def _run_ci_fix(
                 await self._handle_provider_agent_run_error(
                     workspace_id, agent_run_err, state=state
                 )
+        if isinstance(exc, ProtectedScopeBaselineUnavailableError) and state is not None:
+            # A transient baseline outage parks the workspace with the worktree
+            # kept (#1221), and the sink failed before ``git commit``: mark the
+            # CI repair's uncommitted edits, record what they are and persist both
+            # ahead of the park, so the guide resume commits exactly those edits
+            # before its pre-existing-dirty guard (PRRT_kwDOSJAM6s622NyK).
+            mark_provider_park_stranded_edits(state, await self._rev_parse_head(worktree_path))
+            await record_provider_park_stranded_edits_evidence(
+                self, workspace_id=workspace_id, worktree_path=worktree_path, state=state
+            )
+            await self._persist_state(workspace_id, state)
         return cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
