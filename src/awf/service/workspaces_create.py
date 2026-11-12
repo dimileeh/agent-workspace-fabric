@@ -887,6 +887,7 @@ def _stored_task_provider_recovery_policy(
     for target in result.get("fallbacks", []):
         if isinstance(target, dict):
             target.pop("agent_execution", None)
+            target.pop("coding_compatibility_evidence", None)
     return result
 
 
