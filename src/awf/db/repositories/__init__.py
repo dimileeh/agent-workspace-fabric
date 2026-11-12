@@ -74,6 +74,11 @@ from awf.db.repositories.base import (
     resolve_session_dialect_name,
     validation_command_set_hash,
 )
+from awf.db.repositories.provider_managed_key_repo import (
+    UNFINALIZED_KEY_STATUSES,
+    ProviderManagedKeyRepository,
+    ProviderSpendSummary,
+)
 from awf.db.repositories.quality_repo import (
     MergeCandidateRepository,
     PolicyFindingRepository,
@@ -97,6 +102,13 @@ from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskExternalIdConflictError,
     TaskRepository,
+)
+from awf.db.repositories.work_slot_lease_repo import (
+    IN_USE_WORK_SLOT_LEASE_PHASES,
+    WorkSlotLeaseDetail,
+    WorkSlotLeaseRepository,
+    WorkSlotSnapshot,
+    summarize_work_slot_leases,
 )
 from awf.db.repositories.workspace_repo import (
     CallbackDeliveryRepository,
@@ -199,6 +211,14 @@ __all__ = [
     "QueueDecisionRepository",
     "WorkerHeartbeatRepository",
     "ServiceGCRequestRepository",
+    "IN_USE_WORK_SLOT_LEASE_PHASES",
+    "UNFINALIZED_KEY_STATUSES",
+    "ProviderManagedKeyRepository",
+    "ProviderSpendSummary",
+    "WorkSlotLeaseDetail",
+    "WorkSlotLeaseRepository",
+    "WorkSlotSnapshot",
+    "summarize_work_slot_leases",
     "new_workspace_id",
     "AGE_BOOST_MAX",
     "AGE_BOOST_INTERVAL_SECONDS",

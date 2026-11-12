@@ -35,6 +35,7 @@ from awf.service.metrics_types import (
     ResourceConcurrency,
     ResourceSaturationSummary,
     WorkerConcurrencySettings,
+    WorkSlotSummary,
     WorkspaceSaturationCounts,
     _AllocatedResourceAuxiliaryCounts,
 )
@@ -214,10 +215,23 @@ def _resource_concurrency(
     status_counts: dict[str, int],
     *,
     worker: WorkerConcurrencySettings,
+    work_slots: WorkSlotSummary,
 ) -> ResourceConcurrency:
     from awf.service.metrics_capacity import _resource_concurrency as impl
 
-    return impl(status_counts, worker=worker)
+    return impl(status_counts, worker=worker, work_slots=work_slots)
+
+
+async def _work_slot_summary(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    limit: int,
+    now: datetime,
+) -> WorkSlotSummary:
+    from awf.service.metrics_capacity import _work_slot_summary as impl
+
+    return await impl(session, node_id=node_id, limit=limit, now=now)
 
 
 async def _capacity_queue_summary(*args: Any, **kwargs: Any) -> CapacityQueueSummary:
@@ -310,7 +324,13 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
         auxiliary_counts=allocation_auxiliary_counts,
     )
-    concurrency = _resource_concurrency(status_counts, worker=worker)
+    work_slots = await _work_slot_summary(
+        session,
+        node_id=node_id,
+        limit=settings.worker_max_concurrent_executions,
+        now=generated_at,
+    )
+    concurrency = _resource_concurrency(status_counts, worker=worker, work_slots=work_slots)
     resolved_disk_check = disk_check
     if resolved_disk_check is None:
         resolved_disk_check = await asyncio.to_thread(
@@ -354,6 +374,7 @@ async def summarize_resource_saturation_for_session(
     )
     provider_circuit_breakers = [
         ProviderCircuitBreakerSummary(
+            connection_scope=breaker.connection_scope,
             provider=breaker.provider,
             model=breaker.model,
             state=breaker.state,
@@ -384,6 +405,7 @@ async def summarize_resource_saturation_for_session(
         allocated_capacity=allocated_capacity,
         capacity_queue=capacity_queue,
         concurrency=concurrency,
+        work_slots=work_slots,
         disk=resolved_disk_check,
         orphan_resources=resolved_orphan_resources,
         runtime_health=resolved_runtime_health,

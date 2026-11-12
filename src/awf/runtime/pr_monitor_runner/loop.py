@@ -61,7 +61,9 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
+    _discard_ci_repair_attempt,
     _pending_review_feedback_count,
+    _record_ci_repair_attempt,
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -90,6 +92,36 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
 )
+
+_WORK_SLOT_MONITOR_ACTIONS = (AddressComments, AddressOperatorHint, ReportCiFailure, SyncBase)
+"""Monitor actions that may run an agent or validation and so keep a work slot."""
+
+
+async def _release_work_slot_before_pure_wait(self: Any, action: MonitorAction) -> None:
+    """Release a retained work slot before an action that runs no agent/validation.
+
+    Pure waiting holds no work slot (slot-release). A lease the worker task
+    retained from the previous agent/validation action (or the inline claim lease
+    of the first monitor run) is released before WaitForCI, NotifyHuman, Merge
+    and every other non-work action; the work actions reacquire at their
+    agent/validation hooks.
+    """
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None and not isinstance(action, _WORK_SLOT_MONITOR_ACTIONS):
+        await work_slot.release_idle()
+
+
+async def _release_work_slot_before_retry_wait(self: Any) -> None:
+    """Release a retained work slot before an outer-loop transient retry wait.
+
+    ``run()`` backs off on a status-fetch or escaped execute-path fault without
+    reaching ``_execute``'s release hook, and no repair cycle is active there, so
+    a lease kept from the inline claim or the last agent/validation run must not
+    be held through the backoff. Waits inside a repair cycle keep it.
+    """
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None:
+        await work_slot.release_idle()
 
 
 async def _execute(
@@ -166,6 +198,8 @@ async def _execute(
             "blocking_reviews": len(status.blocking_reviews),
         },
     )
+
+    await _release_work_slot_before_pure_wait(self, action)
 
     # Clear awaiting-human attention as soon as the monitor resumes with a
     # non-human action. ``Merge`` owns its own attention handling because branch
@@ -745,6 +779,7 @@ async def _execute(
             },
             extra_identity=tuple(failure.name for failure in action.failures),
         )
+        _record_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
         try:
             push_result = await self._run_ci_fix(
                 repo=repo,
@@ -781,6 +816,9 @@ async def _execute(
             )
             raise
         except ProviderRecoveryRetryError as exc:
+            # No repair landed on this or the other unwinds below (or a park), so keep
+            # CI priority over review waves when the monitor next decides.
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             retry_result: dict[str, object] = {
                 "status": "failed",
                 "outcome": "provider_retry",
@@ -798,6 +836,7 @@ async def _execute(
             )
             raise
         except ProviderRecoveryFallbackError as exc:
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             fallback_result: dict[str, object] = {
                 "status": "failed",
                 "outcome": "provider_fallback",
@@ -815,6 +854,7 @@ async def _execute(
             )
             raise
         except ProviderRecoveryAuthError as exc:
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             auth_extra: dict[str, object] = {"failure_count": len(action.failures)}
             auth_extra.update(_provider_recovery_operation_result_updates(exc))
             await self._finish_provider_auth_failed_operation(
@@ -871,6 +911,7 @@ async def _execute(
         if push_result.parked_needs_human:
             # #1182: the pre-push infrastructure park forbids a CI-repair agent on
             # this PR head; hold the same human wait as the comment-repair arm.
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             return bool(
                 await _finish_parked_repair_cycle(
                     self,

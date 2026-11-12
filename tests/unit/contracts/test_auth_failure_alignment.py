@@ -68,6 +68,14 @@ _CLI_ARGUMENT_VALUES = {
 }
 
 _CLI_OPTION_VALUES_BY_CAPABILITY = {
+    "provider_models": {"--agent": "codex", "--provider": "ollama"},
+    "provider_connection_test": {
+        "--agent": "codex",
+        "--provider": "ollama",
+        "--model": "candidate:cloud",
+        "--idempotency-key": "auth-test",
+    },
+    "set_provider_budget": {"--usd": "5"},
     "adopt_pr_monitor": {
         "--repo": "owner/repo",
         "--pr": "1",

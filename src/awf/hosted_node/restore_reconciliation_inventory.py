@@ -148,7 +148,10 @@ async def inventory(
     if len(workspace_ids) > MAX_RESTORE_WORKSPACES:
         raise MaterialDeniedError("RESTORE_INVENTORY_UNSUPPORTED")
     await read("task_attempts", "workspace_id = ANY(:ids)", {"ids": workspace_ids})
-    task_ids = [row["task_id"] for (kind, _), row in records.items() if kind == "task_attempts"]
+    task_workspaces: dict[str, set[str]] = {}
+    for (kind, _), row in records.items():
+        if kind == "task_attempts":
+            task_workspaces.setdefault(row["task_id"], set()).add(row["workspace_id"])
     task_predicate = "id = ANY(:ids)"
     if initial:
         task_predicate += " OR NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id)"
@@ -161,7 +164,7 @@ async def inventory(
         "tasks",
         task_predicate,
         {
-            "ids": task_ids,
+            "ids": list(task_workspaces),
             "owner": gate.identity["owner"],
             "restore_id": binding.restore_id,
         },
@@ -207,11 +210,7 @@ async def inventory(
                 raise MaterialDeniedError("RESTORE_ASSOCIATION_INVALID")
         task_id = row.get("task_id")
         if family == "tasks":
-            matches = {
-                a["workspace_id"]
-                for (kind, _), a in records.items()
-                if kind == "task_attempts" and a["task_id"] == identifier
-            }
+            matches = task_workspaces.get(identifier, set())
             workspace_id = next(iter(matches)) if len(matches) == 1 else None
         projected.append(
             RestoreInventoryRow(

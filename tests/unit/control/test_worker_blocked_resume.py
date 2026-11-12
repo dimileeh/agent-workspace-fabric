@@ -13,21 +13,26 @@ that is still awaiting an operator decision (which would spin
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog.testing
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.control.worker.constants import ORDERED_BLOCKED_RESUME_REASON
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import OperatorGrantAuditRecord
+from awf.db.models import OperatorGrantAuditRecord, WorkSlotLease
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
+from tests.unit.control._work_slot_support import lease_rows
+from tests.unit.control._worker_work_slot_support import add_lease, create_in_status, wait_until
 
 WORKER_TEST_TIMEOUT_SECONDS = 60.0
 
@@ -348,37 +353,120 @@ async def _create_ready(
         return ws.id
 
 
+class _HookingBlockedExecutor(_RecordingBlockedExecutor):
+    """Resumes hold the injected work slot like an agent run until released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bound: dict[str, Any] = {}
+        self.holding: list[str] = []
+        self.execute_calls: list[str] = []
+        self.release = asyncio.Event()
+
+    def work_slot_binding(self, workspace_id: str, work_slot: Any) -> Any:
+        self.bound[workspace_id] = work_slot
+        return contextlib.nullcontext()
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        self.execute_calls.append(workspace_id)
+
+    async def resume_blocked_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        self.resume_blocked_calls.append(workspace_id)
+        async with self.bound[workspace_id].hold("agent"):
+            self.holding.append(workspace_id)
+            await self.release.wait()
+
+
 @pytest.mark.unit
-async def test_run_once_prioritizes_blocked_resume_over_ready_when_slots_limited(
+async def test_run_once_queues_blocked_resume_ahead_of_ready_for_the_work_slot(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
 ) -> None:
-    # With only one execution slot, an operator-cleared blocked workspace must
-    # take the slot ahead of fresh ready work: in-flight paused executions take
-    # priority over starting brand-new ones. Guards against silent regression of
-    # the dispatch ordering in ``run_once`` (blocked-resume before ready).
+    # With the only work slot busy, an operator-cleared blocked resume is
+    # dispatched and queues FIFO at its hook; when the slot frees it goes to the
+    # resume, not to fresh ready work (slot-release: in-flight paused executions
+    # take priority over starting brand-new ones).
+    busy_id = await _create_ready(session_factory, origin_repo, "busy")
     blocked_id = await _create_blocked(
         session_factory,
         origin_repo,
         "blocked-first",
         directive="revert the change",
     )
+    executor = _HookingBlockedExecutor()
+    worker = _worker(session_factory, executor)  # type: ignore[arg-type]
+    busy_lease = await add_lease(session_factory, busy_id, holder=worker._worker_id)  # noqa: SLF001
+    async with session_factory() as s:
+        busy = await WorkspaceRepository(s).get(busy_id)
+        assert busy is not None
+        busy.status = WorkspaceStatus.running.value
+        await s.commit()
     ready_id = await _create_ready(session_factory, origin_repo, "ready-work")
 
-    executor = _RecordingBlockedExecutor()
-    worker = _worker(session_factory, executor)
+    try:
+        await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        assert executor.resume_blocked_calls == [blocked_id]
+        assert executor.execute_calls == []
+        await wait_until(lambda: _lease_phases(session_factory, blocked_id, {"waiting"}))
 
-    dispatched = await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-    await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        async with session_factory() as s:
+            await s.execute(delete(WorkSlotLease).where(WorkSlotLease.invocation_id == busy_lease))
+            await s.commit()
+        worker._notify_work_slot_released()  # noqa: SLF001
+        await wait_until(lambda: executor.holding == [blocked_id])
 
-    assert dispatched == 1
-    assert executor.resume_blocked_calls == [blocked_id]
-    # The single slot went to the blocked resume; the ready workspace was left
-    # untouched for a later cycle.
-    async with session_factory() as s:
-        ready_ws = await WorkspaceRepository(s).get(ready_id)
-        assert ready_ws is not None
-        assert ready_ws.status == WorkspaceStatus.ready.value
+        await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        assert executor.execute_calls == []
+        async with session_factory() as s:
+            ready_ws = await WorkspaceRepository(s).get(ready_id)
+            assert ready_ws is not None
+            assert ready_ws.status == WorkspaceStatus.ready.value
+    finally:
+        executor.release.set()
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
+
+
+async def _lease_phases(
+    session_factory: async_sessionmaker[AsyncSession], workspace_id: str, phases: set[str]
+) -> bool:
+    return phases <= {
+        row.phase for row in await lease_rows(session_factory, workspace_id=workspace_id)
+    }
+
+
+@pytest.mark.unit
+async def test_run_once_resumes_blocked_workspace_with_seven_idle_monitors_present(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # Regression for the measured starvation: idle (WaitForCI) monitors held
+    # every slot, so cleared blocked workspaces never resumed. Monitors now hold
+    # no work slot, so the resume runs and acquires at its hook.
+    for index in range(7):
+        await create_in_status(session_factory, WorkspaceStatus.monitoring_pr, f"idle-{index}")
+    blocked_id = await _create_blocked(
+        session_factory, origin_repo, "cleared", directive="revert the change"
+    )
+    executor = _HookingBlockedExecutor()
+    worker = _worker(session_factory, executor)  # type: ignore[arg-type]
+    worker._claim_monitoring_pr_ids = _claim_monitors_without_dispatch  # type: ignore[method-assign]  # noqa: SLF001
+
+    try:
+        await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        await wait_until(lambda: executor.holding == [blocked_id])
+    finally:
+        executor.release.set()
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
+
+
+async def _claim_monitors_without_dispatch(workspace_ids: list[str], *, limit: int) -> list[str]:
+    # The idle monitors are already tracked by another worker; none is resumed here.
+    del workspace_ids, limit
+    return []
 
 
 @pytest.mark.unit

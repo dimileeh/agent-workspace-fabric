@@ -1,0 +1,142 @@
+{
+  "scope": "Preliminary CLI envelopes; never a deployed AWF live pass.",
+  "agent": "claude_code",
+  "provider": "openrouter",
+  "model": "minimax/minimax-m2.7",
+  "events": [
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_02f4f68a2ad548f2bdfc306f",
+            "caller": {
+              "type": "direct"
+            },
+            "name": "Bash",
+            "input": {
+              "command": "python /opt/awf-probe/challenge.py"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "call_02f4f68a2ad548f2bdfc306f",
+            "type": "tool_result",
+            "content": "AWF_NONCE=d0d8c25c141b167ec07f5da0640ddbe0",
+            "is_error": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_56cead034ce94e4a81079adc",
+            "caller": {
+              "type": "direct"
+            },
+            "name": "Read",
+            "input": {
+              "file_path": "/workspace/answer.py"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "call_56cead034ce94e4a81079adc",
+            "type": "tool_result",
+            "content": "1\tdef response():\n2\t    return 'unfinished'\n3\t\n4\tif __name__ == '__main__':\n5\t    print(response())\n6\t"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_72ea67b927394858bb4b8f7f",
+            "caller": {
+              "type": "direct"
+            },
+            "name": "Edit",
+            "input": {
+              "replace_all": false,
+              "file_path": "/workspace/answer.py",
+              "old_string": "def response():\n    return 'unfinished'",
+              "new_string": "def response():\n    return 'probe:d0d8c25c141b167ec07f5da0640ddbe0'"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "call_72ea67b927394858bb4b8f7f",
+            "type": "tool_result",
+            "content": "The file /workspace/answer.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_b6b366c428f5468dbabcd350",
+            "caller": {
+              "type": "direct"
+            },
+            "name": "Bash",
+            "input": {
+              "command": "python /workspace/answer.py"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "call_b6b366c428f5468dbabcd350",
+            "type": "tool_result",
+            "content": "probe:d0d8c25c141b167ec07f5da0640ddbe0",
+            "is_error": false
+          }
+        ]
+      }
+    }
+  ],
+  "expected": "passed"
+}

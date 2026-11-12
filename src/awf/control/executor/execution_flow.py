@@ -23,6 +23,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
@@ -71,7 +72,11 @@ from awf.control.executor.recovery_payloads import (
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
 )
-from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
+from awf.control.executor.state_ops import (
+    ProviderFailureDivert,
+    _execution_circuit_allows_launch,
+    _sync_resolved_profile,
+)
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     PauseResumeReason,
@@ -79,6 +84,7 @@ from awf.control.executor.types import (
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.db.enums import (
     AgentRuntime,
@@ -153,6 +159,17 @@ async def execute(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
+
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if is_diagnostic(ws.task_policy):
+        from awf.control.executor.provider_diagnostics import execute_diagnostic
+        from awf.control.executor.state_ops import _freeze_execution_defaults
+
+        if not await _freeze_execution_defaults(self, ws):
+            return
+        await execute_diagnostic(self, ws, compose_file=compose_file)
+        return
 
     # Recovery paths skip non-feature dispatch, so deprecated/unsupported task
     # kinds must fail fast here instead of silently resuming validation as
@@ -306,6 +323,16 @@ async def execute(
 
     try:
         try:
+            from awf.control.executor.state_ops import _freeze_execution_defaults
+
+            if not await _freeze_execution_defaults(self, ws):
+                return
+            if (
+                recovery is None
+                and not resume_skip_agent
+                and not await _execution_circuit_allows_launch(self, ws)
+            ):
+                return
             try:
                 agent = AgentRuntime(ws.agent)
                 defaults = self._defaults_for(agent)
@@ -322,6 +349,7 @@ async def execute(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
                 trusted_git_roots=self._trusted_git_roots_for_workspace(
                     workspace_id=workspace_id,
@@ -452,6 +480,7 @@ async def execute(
                 phase_names=setup_phase_names,
                 worktree_path=worktree_path,
                 **setup_run_kwargs,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
         except ComposeExecCleanupError as exc:
             if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -895,7 +924,12 @@ async def execute(
             timeout_seconds=timeout_seconds,
         )
 
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
+    # The work slot first: a pre-commit repair below can run an agent, and a run
+    # queued for a slot must never hold the lock GC and recovery git ops wait on.
+    async with (
+        hold_work_slot(work_slot_for(self, workspace_id), "agent"),
+        hold_exclusive_worktree_writer_lock(worktree_path),
+    ):
         try:
             if recovery is None:
                 # Branch-drift recovery: fast-forward the expected AWF branch onto

@@ -171,6 +171,33 @@ class ResourceConcurrency:
 
 
 @dataclass(frozen=True)
+class WorkSlotSummary:
+    """Broker-owned work-slot usage (slot-release).
+
+    A work slot means provisioning, an agent run or a validation run is in flight
+    right now; waiting monitors and paused workspaces hold none. ``in_use``
+    counts held and adopted leases (cleanup-unproven included); ``waiting`` and
+    ``unsatisfiable`` are queued invocations; ``reason_code`` is
+    ``MONITOR_WAITING_FOR_WORK_SLOT`` while anything is queued. The
+    ``*_workspace_ids`` name the holders and the FIFO-ordered waiters so an
+    operator can act on a sustained wait.
+    """
+
+    limit: int
+    in_use: int
+    available: int
+    waiting: int
+    unsatisfiable: int
+    adopted: int
+    cleanup_unproven: int
+    oldest_wait_seconds: float | None
+    reason_code: str | None
+    holder_workspace_ids: tuple[str, ...] = ()
+    waiting_workspace_ids: tuple[str, ...] = ()
+    unsatisfiable_workspace_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AdmissionSummary:
     ok: bool
     status: str
@@ -250,6 +277,7 @@ class ProviderCircuitBreakerSummary:
     cooldown_until: datetime | None
     last_reason_code: str | None
     last_workspace_id: str | None
+    connection_scope: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -286,6 +314,7 @@ class ResourceSaturationSummary:
     allocated_capacity: ResourceCapacitySummary
     capacity_queue: CapacityQueueSummary
     concurrency: ResourceConcurrency
+    work_slots: WorkSlotSummary
     disk: DiskCheck
     orphan_resources: OrphanResourceSummary
     runtime_health: WorkspaceRuntimeHealthSummary

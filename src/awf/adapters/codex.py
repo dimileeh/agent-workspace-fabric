@@ -46,7 +46,7 @@ class CodexAdapter(AgentAdapter):
     def get_provider(self, model: str | None) -> str:
         """Return the provider family used for Codex runs."""
         del model
-        return "openai"
+        return self.execution.provider if self.execution else "openai"
 
     @property
     def hosted_env_passthrough_names(self) -> tuple[str, ...]:
@@ -59,6 +59,8 @@ class CodexAdapter(AgentAdapter):
         can resolve the same credential, base URL, organization, and project
         settings that a local Compose run would surface.
         """
+        if self.execution is not None and self.execution.third_party:
+            return ("OPENROUTER_API_KEY",) if self.execution.provider == "openrouter" else ()
         return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CODEX_OPENAI_ENV_NAMES)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
@@ -68,6 +70,8 @@ class CodexAdapter(AgentAdapter):
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
         ]
+        if self.diagnostic_events:
+            args.append("--json")
         selected_model = model or self._default_model
         if selected_model:
             args += ["--model", selected_model]

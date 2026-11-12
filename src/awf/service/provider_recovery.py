@@ -11,12 +11,19 @@ from typing import TYPE_CHECKING, Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
     AGENT_SERVICE_UNHEALTHY,
     classify_provider_failure,
-    infer_provider,
+)
+from awf.common.agent_execution import (
+    ExecutionSelection,
+    circuit_key,
+    execution_from_policy,
+    promote_execution,
+    require_execution_admission,
 )
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
@@ -68,11 +75,14 @@ class FallbackTarget:
     agent: str
     provider: str | None
     model: str
+    execution: ExecutionSelection | None = None
 
-    def to_payload(self) -> dict[str, str]:
-        payload = {"agent": self.agent, "model": self.model}
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"agent": self.agent, "model": self.model}
         if self.provider is not None:
             payload["provider"] = self.provider
+        if self.execution is not None:
+            payload["agent_execution"] = self.execution.model_dump(mode="json")
         return payload
 
 
@@ -114,6 +124,7 @@ class ProviderRecoveryDecision:
     fallback_attempt_number: int
     retry_attempt_number: int
     launched_fallback_attempts: int = 0
+    target_execution: ExecutionSelection | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +154,10 @@ def provider_recovery_metadata_from_failure(
     details: Mapping[str, Any] | None,
     task_policy: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if reason_code in PROVIDER_PARK_REASON_CODES:
+        # A workspace's own managed-key budget: never retried, never a fallback,
+        # never counted against the shared connection's circuit breaker.
+        return None
     details_mapping = details if isinstance(details, Mapping) else {}
     existing = details_mapping.get("provider_recovery")
     metadata: dict[str, Any] | None
@@ -196,6 +211,9 @@ def decide_provider_recovery(
         current_model,
     )
     model = _metadata_str(metadata, "model") or current_model
+    selection = execution_from_policy(task_policy)
+    if selection is not None and selection.third_party:
+        provider, model = selection.provider, selection.model
 
     from awf.service.provider_readiness import is_launchable_agent
 
@@ -228,6 +246,8 @@ def decide_provider_recovery(
             effective_default_model=effective_default_model,
         ),
     )
+    if selection is not None and selection.third_party:
+        default_fallback_target = None
     if default_fallback_target is not None:
         return ProviderRecoveryDecision(
             action="fallback",
@@ -236,6 +256,7 @@ def decide_provider_recovery(
             target_agent=default_fallback_target.agent,
             target_provider=default_fallback_target.provider,
             target_model=default_fallback_target.model,
+            target_execution=default_fallback_target.execution,
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number + 1,
@@ -252,6 +273,7 @@ def decide_provider_recovery(
             target_agent=current_agent,
             target_provider=provider,
             target_model=model,
+            target_execution=selection,
             reason_code=PROVIDER_RETRY_DELAYED_REASON,
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number,
@@ -268,6 +290,7 @@ def decide_provider_recovery(
             target_agent=fallback_target.agent,
             target_provider=fallback_target.provider,
             target_model=fallback_target.model,
+            target_execution=fallback_target.execution,
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
             fallback_attempt_number=target_index + 1,
@@ -507,6 +530,17 @@ async def create_provider_recovery_attempt_row(
         recovery_metadata,
         "model",
     )
+    selected_execution = execution_from_policy(source.task_policy)
+    if selected_execution is not None:
+        recovery_metadata = {
+            **recovery_metadata,
+            "execution": selected_execution.model_dump(mode="json"),
+            "connection_scope": selected_execution.connection_scope(source.id),
+        }
+        if selected_execution.third_party:
+            recovery_metadata.update(
+                provider=selected_execution.provider, model=selected_execution.model
+            )
     policy = parse_provider_recovery_policy(source.task_policy)
     state = parse_provider_recovery_state(source.task_policy)
     decision = decide_provider_recovery(
@@ -586,10 +620,7 @@ async def create_provider_recovery_attempt_row(
         if decision.action == "fallback":  # pragma: no branch
             source.agent = decision.target_agent or source.agent
             if decision.target_model is not None:  # pragma: no branch
-                source.task_policy = _install_fixed_recovery_model(
-                    source.task_policy,
-                    decision.target_model,
-                )
+                source.task_policy = install_recovery_selection(source.task_policy, decision)
     if source_workspace_mutated:  # pragma: no branch
         await repo.advance_workspace_version(source)
     if source_not_before is not None:
@@ -644,7 +675,7 @@ async def create_provider_recovery_attempt_row(
     # Same-provider retries may carry target_model equal to the current Auto
     # selector; only real fallbacks should pin a fixed model and clear mode.
     if decision.action == "fallback" and decision.target_model is not None:
-        new_policy = _install_fixed_recovery_model(new_policy, decision.target_model)
+        new_policy = install_recovery_selection(new_policy, decision)
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -846,20 +877,9 @@ def parse_provider_recovery_state(
 
 
 def provider_for_agent_model(agent: str, model: str | None) -> str | None:
-    # Env-key-only runtimes keep a stable provider identity independent of model IDs.
-    if agent in {"cursor", "antigravity"}:
-        return agent
-    inferred = infer_provider(model=model)
-    return (
-        inferred
-        if inferred is not None
-        else {
-            "codex": "openai",
-            "claude_code": "anthropic",
-            "opencode": "opencode",
-            "grok": "xai",
-        }.get(agent)
-    )
+    from awf.common.agent_execution import provider_for_agent_model as resolve_provider
+
+    return resolve_provider(agent, model)
 
 
 def provider_cooldown_not_before(
@@ -1006,6 +1026,14 @@ async def _record_provider_circuit_breaker(
 ) -> None:
     provider = _metadata_str(metadata, "provider")
     model = _metadata_str(metadata, "model") or _policy_model(source.task_policy)
+    selected = execution_from_policy(source.task_policy)
+    key = (
+        circuit_key(source.agent, source.task_policy, workspace_id=source.id)
+        if selected is not None and selected.third_party
+        else None
+    )
+    if key is not None:
+        provider, model = key[:2]
     fingerprint = _metadata_str(metadata, "failure_fingerprint")
     reason_code = _metadata_str(metadata, "reason_code")
     if provider is None or model is None or fingerprint is None or reason_code is None:
@@ -1017,6 +1045,7 @@ async def _record_provider_circuit_breaker(
     await ProviderModelCircuitBreakerRepository(session).record_failure(
         provider=provider,
         model=model,
+        connection_scope=key[2] if key is not None and len(key) == 3 else "legacy",
         reason_code=reason_code,
         failure_fingerprint=fingerprint,
         workspace_id=source.id,
@@ -1083,7 +1112,7 @@ def _install_fixed_recovery_model(
     task_policy: Mapping[str, Any],
     target_model: str,
 ) -> dict[str, Any]:
-    """Install a fixed recovery model and clear Cursor Auto mode if present.
+    """Install a fixed model in both legacy policy and the frozen selection.
 
     Admission treats ``cursor_auto_mode`` and a fixed ``agent_model`` as mutually
     exclusive. Provider recovery historically copied Auto mode while writing the
@@ -1091,6 +1120,41 @@ def _install_fixed_recovery_model(
     silently ignored the selected recovery target.
     """
 
+    selected = execution_from_policy(task_policy)
+    if selected is not None:
+        if selected.third_party:
+            from awf.common.agent_execution import resolve_execution
+            from awf.common.config import get_settings
+
+            require_execution_admission(
+                selected, enabled=get_settings().third_party_agent_providers_enabled
+            )
+            # Approval changes the model only; validate that choice without
+            # re-resolving the frozen endpoint, credential or network identity.
+            resolve_execution(
+                agent=selected.agent,
+                provider=selected.provider,
+                model=target_model,
+                effort=selected.effort,
+                allow_unverified=selected.compatibility == "unverified",
+            )
+        promoted = selected.model_copy(update={"model": target_model, "model_explicit": True})
+        if selected.agent == "opencode":
+            from awf.adapters.opencode import opencode_provider_for_model
+
+            provider = opencode_provider_for_model(target_model)
+            constraint = task_policy.get("agent_provider")
+            if constraint is not None and constraint != provider:
+                raise ValueError("AGENT_PROVIDER_UNSUPPORTED")
+            promoted = promoted.model_copy(update={"provider": provider})
+        updated = promote_execution(
+            task_policy,
+            {"model": target_model, "agent_execution": promoted.model_dump(mode="json")},
+        )
+        if selected.agent == "opencode" and task_policy.get("agent_provider") is None:
+            # A model-only approval must not turn an inferred backend into a constraint.
+            updated.pop("agent_provider", None)
+        return updated
     updated = {**dict(task_policy), "agent_model": target_model}
     updated.pop(CURSOR_AUTO_MODE_POLICY_KEY, None)
     return updated
@@ -1131,6 +1195,11 @@ def _recovery_task_policy(
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
+        **(
+            {"target_execution": decision.target_execution.model_dump(mode="json")}
+            if decision.target_execution is not None
+            else {}
+        ),
         "recommended_action": (
             None
             if decision.reason_code == UNSUPPORTED_AGENT_RUNTIME
@@ -1174,6 +1243,11 @@ def _decision_payload(
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
+        **(
+            {"target_execution": decision.target_execution.model_dump(mode="json")}
+            if decision.target_execution is not None
+            else {}
+        ),
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
         "launched_fallback_attempts": decision.launched_fallback_attempts,
@@ -1260,7 +1334,11 @@ def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
             targets.append(None)
             continue
         provider = _mapping_str(item, "provider") or provider_for_agent_model(agent, model)
-        targets.append(FallbackTarget(agent=agent, provider=provider, model=model))
+        targets.append(
+            FallbackTarget(
+                agent=agent, provider=provider, model=model, execution=execution_from_policy(item)
+            )
+        )
     return targets
 
 
@@ -1371,3 +1449,42 @@ def __getattr__(name: str) -> object:
 
         return getattr(_provider_recovery_state, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def install_recovery_selection(
+    task_policy: Mapping[str, Any], decision: ProviderRecoveryDecision
+) -> dict[str, Any]:
+    """Promote an explicit complete fallback on both monitor and attempt paths."""
+    if decision.action != "fallback":
+        return dict(task_policy)
+    for target in parse_provider_recovery_policy(task_policy).fallbacks:
+        if target and (target.agent, target.provider, target.model) == (
+            decision.target_agent,
+            decision.target_provider,
+            decision.target_model,
+        ):
+            if target.execution is not None:
+                if target.execution.third_party:
+                    from awf.common.config import get_settings
+
+                    require_execution_admission(
+                        target.execution,
+                        enabled=get_settings().third_party_agent_providers_enabled,
+                    )
+                return promote_execution(task_policy, target.to_payload())
+            if decision.target_provider in {"ollama", "openrouter"} and decision.target_agent in {
+                "codex",
+                "claude_code",
+            }:
+                raise ValueError("EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED")
+            source_execution = execution_from_policy(task_policy)
+            if source_execution is not None and source_execution.third_party:
+                raise ValueError("EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED")
+            updated = _install_fixed_recovery_model(task_policy, target.model)
+            updated.pop("agent_provider", None)
+            updated.pop("agent_execution", None)
+            updated.pop("agent_effort", None)
+            return updated
+    # Preserve the existing implicit native capacity fallback only for native
+    # selections. Expanded selections never reach this path.
+    return _install_fixed_recovery_model(task_policy, decision.target_model or "")

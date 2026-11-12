@@ -138,6 +138,7 @@ class OperationType(StrEnum):
     monitor_state = "monitor_state"
     adopt_pr = "adopt_pr"
     destroy = "destroy"
+    provider_budget = "provider_budget"
 
 
 class CallbackDeliveryStatus(StrEnum):
@@ -182,6 +183,9 @@ class TaskKind(StrEnum):
 
     Drives which executor + monitor path is used.
     """
+
+    provider_connection_test = "provider_connection_test"
+    """Internal fixed-fixture coding diagnostic; created only via provider tests."""
 
     feature_branch_pr = "feature_branch_pr"
     """Default: clone repo, run coding CLI, push PR against base branch,
@@ -307,6 +311,56 @@ SERVICE_GC_REQUEST_STATUS_RUNNING: Final = "running"
 SERVICE_GC_REQUEST_STATUS_COMPLETED: Final = "completed"
 SERVICE_GC_REQUEST_STATUS_FAILED: Final = "failed"
 SERVICE_GC_REQUEST_STATUS_EXPIRED: Final = "expired"
+
+
+class WorkSlotLeasePhase(StrEnum):
+    """Lifecycle of a broker-owned ``work_slot_leases`` row (slot-release).
+
+    A work slot means provisioning, an agent run or a validation run is in flight
+    right now. ``waiting`` rows hold a persisted FIFO ticket; ``unsatisfiable`` rows
+    keep that ticket but leave the runnable queue because their peak can never fit
+    the configured local capacity; ``held`` rows occupy a slot; ``adopted`` rows
+    are leases a restarted worker took over because their ``awf-exec`` process was
+    still in flight. Stored as a plain string, never a SQL enum.
+    """
+
+    waiting = "waiting"
+    unsatisfiable = "unsatisfiable"
+    held = "held"
+    adopted = "adopted"
+
+
+class ProviderManagedKeyStatus(StrEnum):
+    """Lifecycle of a ``provider_managed_keys`` row (managed OpenRouter keys).
+
+    ``minting`` is the intent committed before the management API call;
+    ``active`` keys back a live invocation; ``deleted``/``orphan_deleted`` keys
+    are finalized with a final usage read; ``delete_failed`` keys keep their
+    headroom reserved until a later finalize deletes them; ``mint_failed``
+    intents never produced a key. Stored as a plain string, never a SQL enum.
+    """
+
+    minting = "minting"
+    active = "active"
+    deleted = "deleted"
+    delete_failed = "delete_failed"
+    mint_failed = "mint_failed"
+    orphan_deleted = "orphan_deleted"
+
+
+class ResourceReservationPhase(StrEnum):
+    """Phase of a ``resource_reservations`` row.
+
+    ``workspace_lifecycle`` is the legacy value written at reservation time and
+    keeps counting at peak. The work-slot broker flips a workspace's active
+    reservations to ``peak`` when it acquires a work slot and to ``steady`` when it
+    releases one, so an idle (waiting) workspace only counts its steady footprint
+    against the peak dimensions of local capacity.
+    """
+
+    workspace_lifecycle = "workspace_lifecycle"
+    steady = "steady"
+    peak = "peak"
 
 
 PLAN_CONFORMANCE_DECISION_BLOCK_TYPE: Final = "plan_conformance_decision"

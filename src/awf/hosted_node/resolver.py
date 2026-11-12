@@ -13,6 +13,11 @@ from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.material_store import MaterialStore
+from awf.hosted_node.profile_secrets import (
+    PROTECTED_DECLARATION_MISMATCH,
+    HostedProfileSecretError,
+    partition_hosted_profile_secrets,
+)
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.schemas import Binding, Identity
 from awf.node.compose_manager import AuthMount
@@ -104,7 +109,9 @@ class ProtectedResolver:
         mounts = []
         selected = []
         seen = set()
-        for declaration in profile.secrets:
+        # Optional declarations the node cannot provide are skipped (never mounted).
+        claims, _ = partition_hosted_profile_secrets(profile.secrets, bindings)
+        for declaration in claims:
             binding = bindings.get(declaration.name)
             if (
                 binding is None
@@ -116,7 +123,7 @@ class ProtectedResolver:
                 or declaration.ref is not None
                 or declaration.target in seen
             ):
-                raise MaterialDeniedError("PROTECTED_DECLARATION_MISMATCH")
+                raise HostedProfileSecretError(PROTECTED_DECLARATION_MISMATCH, declaration.name)
             seen.add(declaration.target)
             status = await receiver.status(binding)
             if status.status != "current" or status.receipt_id is None:

@@ -205,14 +205,17 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             pr_monitor_factory: object,
             log_store: object,
             usage_sampler: object = None,
+            credential_broker: object = None,
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
             worktree_activity_git_roots: object = None,
+            stack_launcher: object = None,
         ) -> None:
             del hosted_validation
             del ensure_hosted_monitor_checkout
             created["executor"] = self
+            created["executor_credential_broker"] = credential_broker
             created["executor_session_factory"] = session_factory
             created["executor_runner"] = runner
             created["executor_compose"] = compose
@@ -223,6 +226,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["executor_log_store"] = log_store
             created["executor_usage_sampler"] = usage_sampler
             created["executor_worktree_activity_git_roots"] = worktree_activity_git_roots
+            created["executor_stack_launcher"] = stack_launcher
 
     class _ControlWorker:
         def __init__(
@@ -238,6 +242,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -319,6 +324,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["git_worktree_owner_uid"] == 1000
     assert created["git_worktree_owner_gid"] == 1000
     assert created["applied_git_env"] == created["git_env"]
+    assert created["executor_stack_launcher"] is created["provisioner_stack_launcher"]
     assert created["executor_compose"] is created["stack_compose"]
     assert created["secret_resolver_host_home"] == Path(settings.host_home).resolve()
     assert created["secret_resolver_work_dir"] == work_dir

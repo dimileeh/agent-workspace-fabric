@@ -953,3 +953,47 @@ def _stale_active_execution_failure_message(
         "worktree, and retained evidence were preserved for inspection. Inspect the "
         "workspace, then redispatch the task from a clean base when ready."
     )
+
+
+def _apply_execution_claim(self: Any, ws: Workspace, *, owner_id: str) -> None:
+    """Stamp ``ws`` with this worker's execution claim and bump the fencing epoch.
+
+    Shared by both requested-claim blocks (D8). ``execution_claim_epoch`` is
+    incremented with a SQL-side expression so monotonicity holds regardless of
+    any in-memory staleness: the row is freshly row-locked / atomically
+    transitioned by the caller, so a later claimant always lands a strictly
+    higher epoch and a stale worker is fenced on its next CAS write. The
+    concrete value is read back later via ``_read_execution_claim_epoch`` (D2),
+    so the SQL-expression placeholder is never read inside the claim txn.
+    """
+    from awf.common.agent_execution import (
+        MANAGED_PROVIDER_KEY_WORKER_VERSION,
+        execution_from_policy,
+        managed_openrouter_frozen,
+    )
+
+    selected = execution_from_policy(ws.task_policy)
+    required = (
+        MANAGED_PROVIDER_KEY_WORKER_VERSION
+        if managed_openrouter_frozen(ws.task_policy)
+        else 2
+        if (selected is not None and selected.third_party)
+        or (ws.task_policy or {}).get("agent_execution_profile_pending")
+        else 0
+    )
+    if getattr(self, "execution_contract_version", 0) < required:
+        raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
+    from awf.service.provider_diagnostics import DIAGNOSTIC_WORKER_VERSION, is_diagnostic
+
+    if (
+        is_diagnostic(ws.task_policy)
+        and getattr(self, "execution_contract_version", 0) < DIAGNOSTIC_WORKER_VERSION
+    ):
+        raise ValueError("PROVIDER_DIAGNOSTIC_WORKER_UNSUPPORTED")
+    ws.execution_claimed_by = owner_id
+    ws.execution_claim_expires_at = self._execution_claim_expires_at()
+    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+    if self._config.node_id is not None:
+        # Recovery for named workers is node-scoped, so ownership must be
+        # persisted with the claim before a provisioner crash can strand it.
+        ws.node_id = self._config.node_id

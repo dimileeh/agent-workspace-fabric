@@ -8,6 +8,7 @@ from typing import Any
 from awf.db.enums import OperationStatus
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderManagedKeyParkedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
 )
@@ -54,6 +55,9 @@ def _provider_recovery_operation_result_updates(exc: BaseException) -> dict[str,
     if not isinstance(details, dict):
         return {}
     updates: dict[str, object] = {}
+    if isinstance(exc, ProviderManagedKeyParkedError):
+        # Label the operation with the park reason, not a broken-auth failure.
+        updates.update(outcome="provider_key_parked", reason_code=exc.reason_code)
     repair_salvage = details.get("repair_salvage")
     if isinstance(repair_salvage, dict):
         updates["repair_salvage"] = repair_salvage
@@ -153,6 +157,12 @@ async def _finish_parked_repair_cycle(
         workspace_id,
         reason=push_result.error_message or reason_code,
     )
+    # The park keeps ``decide()`` on a work action, so ``_execute`` never releases
+    # the lease retained from this cycle's agent/validation run; a human wait must
+    # not hold a work slot, so free it here before sleeping (slot-release).
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None:
+        await work_slot.release_idle()
     await self._deps.sleep(self._config.poll_interval_seconds)
     return False
 

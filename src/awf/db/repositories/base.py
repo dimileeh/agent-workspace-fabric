@@ -35,6 +35,7 @@ from awf.common.owned_paths import normalize_owned_path
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import (
     OperationStatus,
+    ResourceReservationPhase,
     WorkspaceStatus,
 )
 from awf.db.models import (
@@ -100,6 +101,7 @@ _VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebas
 _WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.running.value,
 )
+RESOURCE_RESERVATION_STEADY_PHASE: Final[str] = ResourceReservationPhase.steady.value
 ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.provisioning.value,
     WorkspaceStatus.ready.value,
@@ -132,6 +134,7 @@ _CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
 _PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "provider",
     "model",
+    "connection_scope",
 )
 _WORKER_HEARTBEAT_CONFLICT_COLUMNS: Final[tuple[str, ...]] = ("worker_id",)
 _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
@@ -425,6 +428,10 @@ def _worker_heartbeat_upsert_stmt(dialect_name: str | None) -> Any | None:
     return inserted.on_conflict_do_update(
         index_elements=_WORKER_HEARTBEAT_CONFLICT_COLUMNS,
         set_={
+            "execution_contract_version": case(
+                (excluded_is_newer, inserted.excluded.execution_contract_version),
+                else_=WorkerHeartbeat.execution_contract_version,
+            ),
             "node_id": case(
                 (excluded_is_newer, inserted.excluded.node_id),
                 else_=WorkerHeartbeat.node_id,
@@ -561,6 +568,13 @@ def _active_resource_reservation_status_filter(
     return Workspace.status.in_(status_values)
 
 
+def _phase_aware_peak(peak: Any, steady: Any) -> Any:
+    return case(
+        (ResourceReservation.phase == RESOURCE_RESERVATION_STEADY_PHASE, steady),
+        else_=peak,
+    )
+
+
 def _active_latest_resource_reservation_totals_stmt(
     *,
     statuses: Iterable[WorkspaceStatus | str] | None = None,
@@ -580,8 +594,16 @@ def _active_latest_resource_reservation_totals_stmt(
             Workspace.node_id.label("workspace_node_id"),
             ResourceReservation.steady_cpu.label("steady_cpu"),
             ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
-            ResourceReservation.peak_cpu.label("peak_cpu"),
-            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            # A workspace whose work slot was released (reservation phase
+            # ``steady``) only occupies its steady footprint on the peak
+            # dimensions; legacy ``workspace_lifecycle`` and ``peak`` rows keep
+            # counting at peak (slot-release).
+            _phase_aware_peak(ResourceReservation.peak_cpu, ResourceReservation.steady_cpu).label(
+                "peak_cpu"
+            ),
+            _phase_aware_peak(
+                ResourceReservation.peak_memory_gb, ResourceReservation.steady_memory_gb
+            ).label("peak_memory_gb"),
             ResourceReservation.disk_mb.label("disk_mb"),
             ResourceReservation.dind_slots.label("dind_slots"),
             func.row_number()

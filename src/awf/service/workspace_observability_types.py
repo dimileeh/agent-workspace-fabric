@@ -71,6 +71,9 @@ class WorkspaceRecoverySummary:
 
 
 class AgentIdentityPayload(TypedDict):
+    agent_provider: str | None
+    agent_execution: dict[str, Any] | None
+    agent_connection_scope: str | None
     agent_model: str | None
     agent_effort: str | None
     cursor_auto_mode: str | None
@@ -126,11 +129,13 @@ class WorkspaceRecoveryPayload(TypedDict):
 class WorkspaceObservabilityPayload(AgentIdentityPayload):
     lifecycle: list[LifecycleStagePayload]
     llm_usage: LlmUsagePayload
+    provider_spend: dict[str, Any] | None
     recovery: WorkspaceRecoveryPayload | None
 
 
 class WorkspaceIdentityUsagePayload(AgentIdentityPayload):
     llm_usage: LlmUsagePayload
+    provider_spend: dict[str, Any] | None
 
 
 class _RecoveryOperationLike(Protocol):

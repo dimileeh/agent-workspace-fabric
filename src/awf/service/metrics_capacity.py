@@ -12,14 +12,17 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import expression
 
+from awf.common.agent_execution import CircuitKey, circuit_key
 from awf.common.config import Settings
-from awf.common.workspace_policy import agent_model_from_task_policy
+from awf.common.work_slot import MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ResourceReservation, Workspace
 from awf.db.repositories import (
     ProviderModelCircuitBreakerRepository,
+    WorkSlotLeaseRepository,
     resolve_session_dialect_name,
     scheduler_order_expressions,
+    summarize_work_slot_leases,
 )
 from awf.service.disk import DiskCheck
 from awf.service.metrics_resources import (
@@ -36,6 +39,7 @@ from awf.service.metrics_types import (
     FailureAction,
     ResourceConcurrency,
     WorkerConcurrencySettings,
+    WorkSlotSummary,
     _AllocatedResourceAuxiliaryCounts,
     _CapacityQueueAllocated,
     _CapacityQueueCandidate,
@@ -44,7 +48,6 @@ from awf.service.metrics_types import (
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
-    provider_for_agent_model,
 )
 from awf.service.resource_capacity import (
     LOCAL_CAPACITY_CONSTRAINTS,
@@ -103,6 +106,9 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(
 
 PROVISION_IN_USE_STATUSES = frozenset({WorkspaceStatus.provisioning.value})
 PROVISION_QUEUE_STATUSES = frozenset({WorkspaceStatus.requested.value})
+# Workspace statuses that keep a warm execution stack. No longer the execution
+# lane source: the lane counts work-slot leases (slot-release), which waiting
+# monitors and blocked/recovering workspaces do not hold.
 EXECUTION_IN_USE_STATUSES = frozenset(
     {
         WorkspaceStatus.running.value,
@@ -110,11 +116,10 @@ EXECUTION_IN_USE_STATUSES = frozenset(
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
         # A blocked workspace keeps its warm stack + execution claim while it
-        # awaits an operator decision, so it still holds an execution slot.
+        # awaits an operator decision (it holds no work slot).
         WorkspaceStatus.blocked.value,
         # A recovering workspace keeps its warm stack + execution claim during
-        # the provider cooldown while it auto-retries in place, so it still holds
-        # an execution slot (#612).
+        # the provider cooldown while it auto-retries in place (#612; no work slot).
         WorkspaceStatus.recovering.value,
     }
 )
@@ -396,16 +401,19 @@ async def _provider_recovery_eligible_capacity_queue_candidates(
         return []
 
     cooldown_eligible: list[_CapacityQueueCandidate] = []
-    circuit_candidate_pairs: dict[str, tuple[str, str]] = {}
+    circuit_candidate_pairs: dict[str, CircuitKey] = {}
     for candidate in candidates:
         workspace = candidate.workspace
         not_before = provider_cooldown_not_before(workspace.task_policy)
         if not_before is not None and not_before > scoring_at:
             continue
-        model = agent_model_from_task_policy(workspace.task_policy)
-        provider = provider_for_agent_model(workspace.agent, model)
-        if provider is not None and model is not None:
-            circuit_candidate_pairs[workspace.id] = (provider, model)
+        try:
+            key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        except ValueError:
+            # The scheduler rejects this row; capacity must exclude it as well.
+            continue
+        if key is not None:
+            circuit_candidate_pairs[workspace.id] = key
         cooldown_eligible.append(candidate)
 
     if not circuit_candidate_pairs:
@@ -575,15 +583,61 @@ def _workspace_node_scope_filter(node_id: str) -> Any:
     return or_(Workspace.node_id == node_id, Workspace.node_id.is_(None))
 
 
+async def _work_slot_summary(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    limit: int,
+    now: datetime,
+) -> WorkSlotSummary:
+    """Summarize the node's work-slot leases (db-layer query; no ``control`` import)."""
+    snapshot = summarize_work_slot_leases(
+        await WorkSlotLeaseRepository(session).list_for_node(node_id=node_id),
+        limit=limit,
+        now=now,
+    )
+    oldest = snapshot.oldest_ticket_at
+    return WorkSlotSummary(
+        limit=snapshot.limit,
+        in_use=snapshot.in_use,
+        available=snapshot.free,
+        waiting=snapshot.waiting,
+        unsatisfiable=snapshot.unsatisfiable,
+        adopted=snapshot.adopted,
+        cleanup_unproven=snapshot.cleanup_unproven,
+        oldest_wait_seconds=(
+            max(0.0, (now - oldest).total_seconds()) if oldest is not None else None
+        ),
+        reason_code=(
+            MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
+            if snapshot.waiting or snapshot.unsatisfiable
+            else None
+        ),
+        holder_workspace_ids=tuple(lease.workspace_id for lease in snapshot.holders()),
+        waiting_workspace_ids=tuple(snapshot.waiting_workspace_ids()),
+        unsatisfiable_workspace_ids=tuple(snapshot.unsatisfiable_workspace_ids()),
+    )
+
+
 def _resource_concurrency(
     status_counts: dict[str, int],
     *,
     worker: WorkerConcurrencySettings,
+    work_slots: WorkSlotSummary,
 ) -> ResourceConcurrency:
+    """Concurrency lanes; the execution lane counts work-slot leases (slot-release).
+
+    Waiting monitors and blocked/recovering rows hold no lease, so they are not
+    execution ``in_use``; queued invocations join ready rows in ``queued``.
+    """
     provision_in_use = _sum_status_counts(status_counts, PROVISION_IN_USE_STATUSES)
     provision_queued = _sum_status_counts(status_counts, PROVISION_QUEUE_STATUSES)
-    execution_in_use = _sum_status_counts(status_counts, EXECUTION_IN_USE_STATUSES)
-    execution_queued = _sum_status_counts(status_counts, EXECUTION_QUEUE_STATUSES)
+    execution_in_use = work_slots.in_use
+    execution_queued = (
+        _sum_status_counts(status_counts, EXECUTION_QUEUE_STATUSES)
+        + work_slots.waiting
+        + work_slots.unsatisfiable
+    )
     return ResourceConcurrency(
         provision=ConcurrencyLane(
             limit=worker.max_concurrent_provisions,

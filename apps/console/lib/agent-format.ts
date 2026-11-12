@@ -4,11 +4,11 @@ import { RFC3339_DATE_TIME } from "./rfc3339-date-time.ts";
 
 type AgentLabelWorkspace = Pick<
   WorkspaceOverview,
-  "agent" | "agent_model" | "agent_effort" | "cursor_auto_mode"
+  "agent" | "agent_provider" | "agent_model" | "agent_effort" | "cursor_auto_mode"
 >;
 type AgentTitleWorkspace = Pick<
   WorkspaceOverview,
-  "agent" | "agent_model" | "agent_effort" | "cursor_auto_mode"
+  "agent" | "agent_provider" | "agent_model" | "agent_effort" | "cursor_auto_mode"
 > &
   Partial<Pick<WorkspaceOverview, "agent_model_source" | "agent_effort_source">>;
 type AgentEffortWorkspace = Pick<WorkspaceOverview, "agent_effort"> &
@@ -48,7 +48,9 @@ const NON_CONFIRMING_MODEL_SOURCES = new Set([
 
 export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
   const model = displayAgentModel(workspace);
-  return [workspace.agent, model, workspace.agent_effort].filter(Boolean).join(" · ");
+  return [workspace.agent, displayAgentProvider(workspace.agent_provider), model, workspace.agent_effort]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /**
@@ -63,6 +65,10 @@ export function formatAgentIdentityLabel(workspace: AgentLabelWorkspace): string
 
 export function formatAgentTitle(workspace: AgentTitleWorkspace): string {
   const parts: string[] = [workspace.agent];
+  const provider = displayAgentProvider(workspace.agent_provider);
+  if (provider) {
+    parts.push(`provider ${provider}`);
+  }
   const model = displayAgentModel(workspace);
   if (model) {
     parts.push(model);
@@ -922,6 +928,21 @@ export function mergeWorkspacePresentationFields(
       ? detailConfirmedSource
       : overview.confirmed_execution_model_source,
   };
+}
+
+function displayAgentProvider(provider: string | null | undefined): string | null {
+  const value = provider?.trim();
+  if (!value) return null;
+  const labels: Record<string, string> = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    ollama: "Ollama",
+    openrouter: "OpenRouter",
+    google: "Google",
+    xai: "xAI",
+    cursor: "Cursor",
+  };
+  return Object.hasOwn(labels, value) ? labels[value] : value;
 }
 
 function displayAgentModel(workspace: AgentLabelWorkspace): string | null {

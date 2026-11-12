@@ -20,6 +20,7 @@ from awf.control.executor import (
     quality_methods,
     quality_methods_post_agent,
 )
+from awf.control.executor import agent_service_recovery as executor_agent_service_recovery
 from awf.control.executor import execution_flow as execution_flow_mod
 from awf.control.executor.quality_gates import _PostAgentCommitClassification
 from awf.db.enums import AgentRuntime
@@ -28,6 +29,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 from tests.postgres import postgres_test_engine
+from tests.unit.control._work_slot_support import LockProbeWorkSlot
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_001 import (
     _NoopResumeCompose,
     _RecordingValidation,
@@ -190,3 +192,43 @@ async def test_post_agent_semantic_precommit_repair_skips_nested_writer_lock(
 
     assert result is True
     assert recovery_kwargs.get("hold_writer_lock") is False
+
+
+@pytest.mark.unit
+async def test_execution_takes_its_work_slot_before_every_worktree_writer_lock(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run queued for a slot never holds the writer flock GC and recovery wait on.
+
+    The agent run's service-recovery lock and the post-agent commit lock (whose
+    pre-commit repair can run an agent) are both entered with the slot held.
+    """
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")
+    fake.queue_result(returncode=0, stdout="awf/x\n")
+    fake.queue_result(returncode=0)
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")
+    fake.queue_result(returncode=0)
+    fake.queue_result(returncode=0, stdout="0\n")
+    executor = _make_executor(fake, factory, tmp_path)
+    slot = LockProbeWorkSlot(tmp_path / "work" / "worktrees" / ws_id)
+    depths_at_lock: list[tuple[str, int]] = []
+    for module in (execution_flow_mod, executor_agent_service_recovery):
+        original_lock = module.hold_exclusive_worktree_writer_lock
+
+        def _spy(worktree_path: Path, *, _module: Any = module, _lock: Any = original_lock) -> Any:
+            depths_at_lock.append((_module.__name__.rsplit(".", 1)[-1], slot.depth))
+            return _lock(worktree_path)
+
+        monkeypatch.setattr(module, "hold_exclusive_worktree_writer_lock", _spy)
+
+    with executor.work_slot_binding(ws_id, slot):
+        await executor.execute(ws_id)
+
+    assert {name for name, _ in depths_at_lock} == {"execution_flow", "agent_service_recovery"}
+    assert all(depth > 0 for _, depth in depths_at_lock)
+    assert slot.acquisitions
+    assert not any(under_lock for _, under_lock in slot.acquisitions)

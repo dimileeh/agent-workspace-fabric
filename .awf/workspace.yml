@@ -7,6 +7,10 @@ awf:
   runtime:
     environment:
       PYTHONUNBUFFERED: "1"
+      # Cap uv's parallel downloads: with the default (50) concurrent wheel
+      # downloads, workspace containers on Wi-Fi-only hosts can stall until the
+      # 900s setup timeout (c=50 timed out, c=4 finished in seconds).
+      UV_CONCURRENT_DOWNLOADS: "4"
       AWF_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
       AWF_TEST_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
   services:

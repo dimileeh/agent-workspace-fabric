@@ -67,6 +67,7 @@ from awf.service.controls_helpers import (
     _reset_stale_monitor_execution_claims,
     _workspace_pr_operation_context,
 )
+from awf.service.controls_provider_budget import _ProviderBudgetControlMixin
 
 _OPERATOR_GUIDE_REASON_CODE = "OPERATOR_GUIDE"
 
@@ -814,7 +815,11 @@ async def _guide_monitor_origin_blocked_workspace(
     )
 
 
-class _WorkspaceGuideMixin:
-    """Wires the extracted operator-guidance control onto the control service."""
+class _WorkspaceGuideMixin(_ProviderBudgetControlMixin):
+    """Wires the extracted operator-guidance control onto the control service.
+
+    The provider-budget control rides on this mixin: raising a budget is the
+    operator decision that resumes a provider-budget block.
+    """
 
     guide_workspace = guide_workspace

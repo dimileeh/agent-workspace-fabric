@@ -875,6 +875,9 @@ def _secret_values(
         values.add(settings.api_token)
     if settings.github_token and len(settings.github_token) >= 4:
         values.add(settings.github_token)
+    management_key = getattr(settings, "openrouter_management_key", None)
+    if management_key and len(management_key) >= 4:
+        values.add(management_key)
     try:
         password = make_url(settings.database_url).password
     except Exception:

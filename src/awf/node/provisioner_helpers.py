@@ -17,7 +17,7 @@ from awf.common.workspace_policy import (
 )
 from awf.db.enums import EgressDecision
 from awf.db.models import Workspace
-from awf.db.repositories import ResourceReservationRepository
+from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.node.compose_manager import ComposeProjectPaths
 from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.models import WorkspaceProfile
@@ -113,6 +113,40 @@ def _stack_companion_env_secret_event_payload(
         if key in plan_metadata:
             metadata[key] = redact_audit_value(plan_metadata[key])
     return metadata
+
+
+def _stack_hosted_skipped_secret_event_payload(
+    *,
+    stack_paths: ComposeProjectPaths,
+) -> dict[str, Any] | None:
+    """Build the hosted skipped-optional-secret payload (names only), or None."""
+    names = stack_paths.secret_lease_mount_metadata.get("hosted_skipped_optional_secrets")
+    if not names:
+        return None
+    secret_names = [str(name) for name in names]
+    return {
+        "schema": "hosted_profile_secret_skipped.v1",
+        "secret_names": secret_names,
+        "count": len(secret_names),
+    }
+
+
+async def _record_hosted_skipped_secret_event(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    stack_paths: ComposeProjectPaths,
+) -> None:
+    """Append the names-only hosted skipped-optional-secret event, when any were skipped."""
+    payload = _stack_hosted_skipped_secret_event_payload(stack_paths=stack_paths)
+    if payload is None:
+        return
+    await repo.add_event(
+        workspace,
+        event_type="workspace.hosted_profile_secret_skipped",
+        reason_code="HOSTED_OPTIONAL_SECRET_SKIPPED",
+        payload=payload,
+    )
 
 
 def _provision_local_branch_name(
@@ -537,7 +571,11 @@ async def _run_claimed_provision(
     claim_epoch: int | None = None,
 ) -> None:
     """Run provisioning between paired service-resource lifecycle hooks."""
-    hook_started = provisioner._before_provision is not None
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    hook_started = provisioner._before_provision is not None and not is_diagnostic(
+        workspace.task_policy
+    )
     try:
         await provisioner._provision_claimed_workspace(
             workspace_id,
@@ -601,6 +639,47 @@ def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
     if isinstance(value, list):
         return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
     return value == REDACTION_MARKER
+
+
+def _validate_bound_execution_profile(ws: Workspace, profile: WorkspaceProfile) -> None:
+    """Reject profile drift when rehydrating an already-bound connection."""
+    from awf.common.agent_execution import execution_from_policy, resolve_execution
+    from awf.profiles.resolver import ProfileResolutionError
+
+    policy = ws.task_policy or {}
+    if policy.get("agent_execution_profile_pending"):
+        return
+    targets = [policy, *policy.get("provider_recovery", {}).get("fallbacks", [])]
+    selections = [execution_from_policy(target) for target in targets]
+    expanded = [
+        selected for selected in selections if selected is not None and selected.third_party
+    ]
+    if not expanded:
+        return
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+    try:
+        if redact_audit_value(snapshot) != redact_audit_value(ws.resolved_profile):
+            raise ValueError
+        for selected in expanded:
+            if selected.provider != "openrouter":
+                continue
+            # The audit snapshot hides credential aliases. Compare their names
+            # separately, while leaving frozen daemon defaults authoritative.
+            rebound = resolve_execution(
+                agent=selected.agent,
+                provider=selected.provider,
+                model=selected.model,
+                allow_unverified=True,
+                profile=snapshot,
+                managed_openrouter=selected.managed_key,
+            )
+            if rebound.credential_ref != selected.credential_ref:
+                raise ValueError
+    except ValueError:
+        raise ProfileResolutionError(
+            "Resolved profile no longer matches the frozen execution connection.",
+            reason_code="EXECUTION_PROFILE_CHANGED",
+        ) from None
 
 
 def check_unsupported_agent_runtime(agent_name: str) -> str | None:

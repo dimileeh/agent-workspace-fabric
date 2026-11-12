@@ -1,6 +1,7 @@
 import type {
   LlmUsageSummary,
   PricingMetadata,
+  ProviderSpend,
   ResourceSaturationSummary,
   WorkspaceLifecycleStage,
   WorkspaceStatus,
@@ -187,8 +188,34 @@ export function fallbackLlmUsage(
 const USAGE_SOURCE_LABELS: Record<string, string> = {
   ccusage: "ccusage",
   operations: "operations",
+  openrouter_key_usage: "Exact provider spend",
   none: "none",
 };
+
+const PROVIDER_SPEND_REASON_LABELS: Record<string, string> = {
+  provider_spend_not_loaded: "not loaded",
+};
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+// Exact spend of a managed OpenRouter workspace, summed from its AWF-minted
+// keys. Always a text label, never color alone (DESIGN.md).
+export function formatProviderSpend(spend: ProviderSpend | null | undefined): string | null {
+  if (!spend) {
+    return null;
+  }
+  if (spend.status !== "available" || spend.spend_usd == null) {
+    const reason = spend.reason ? PROVIDER_SPEND_REASON_LABELS[spend.reason] ?? spend.reason : "unknown";
+    return `Exact provider spend: unavailable (${reason})`;
+  }
+  const spent = `Exact provider spend: ${formatUsd(spend.spend_usd)}`;
+  if (spend.budget_usd == null) {
+    return spent;
+  }
+  return `${spent} of ${formatUsd(spend.budget_usd)} (remaining ${formatUsd(spend.remaining_usd ?? 0)})`;
+}
 
 const USAGE_REASON_LABELS: Record<string, string> = {
   usage_not_reported: "not reported",

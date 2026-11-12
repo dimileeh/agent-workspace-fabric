@@ -334,6 +334,31 @@ class ResourceConcurrencyResponse(BaseModel):
     execution: ConcurrencyLaneResponse
 
 
+class WorkSlotSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    limit: int = Field(description="Configured work slots (AWF_WORKER_MAX_CONCURRENT_EXECUTIONS).")
+    in_use: int = Field(
+        description="Held work-slot leases: provisioning, agent or validation runs in flight."
+    )
+    available: int = Field(description="Free work slots.")
+    waiting: int = Field(description="Invocations queued (FIFO) for a work slot.")
+    unsatisfiable: int = Field(
+        description="Queued invocations whose peak can never fit the configured local capacity."
+    )
+    adopted: int = Field(description="Leases a restarted worker adopted from a dead holder.")
+    cleanup_unproven: int = Field(
+        description="Held leases kept until their awf-exec process is proven gone."
+    )
+    oldest_wait_seconds: float | None = Field(
+        default=None, description="Age of the oldest queued work-slot ticket."
+    )
+    reason_code: str | None = Field(
+        default=None,
+        description="MONITOR_WAITING_FOR_WORK_SLOT while any invocation is queued.",
+    )
+
+
 class DiskCheckResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -378,6 +403,7 @@ class CapacityQueueSummaryResponse(BaseModel):
 class ProviderCircuitBreakerSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    connection_scope: str = "legacy"
     provider: str
     model: str
     state: str
@@ -481,7 +507,16 @@ class ResourceSaturationSummaryResponse(BaseModel):
         ),
     )
     concurrency: ResourceConcurrencyResponse = Field(
-        description="Provisioning and execution worker lane saturation.",
+        description=(
+            "Provisioning and execution worker lane saturation. The execution lane counts "
+            "work-slot leases; queued includes ready rows and queued work-slot invocations."
+        ),
+    )
+    work_slots: WorkSlotSummaryResponse = Field(
+        description=(
+            "Work-slot usage: slots in use, queued and unsatisfiable waiters. Waiting PR "
+            "monitors and blocked/recovering workspaces hold no work slot."
+        ),
     )
     disk: DiskCheckResponse = Field(
         description="Disk pressure check for the AWF work directory.",

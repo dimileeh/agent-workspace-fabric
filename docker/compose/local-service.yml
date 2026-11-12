@@ -48,6 +48,7 @@ x-awf-service: &awf-service
     - BITBUCKET_AUTH_MODE=${BITBUCKET_AUTH_MODE:-}
     - AWF_DATABASE_URL=postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:-awf_dev}@postgres:5432/awf
     - AWF_DOCKER_HOST=unix:///var/run/docker.sock
+    - AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED=${AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED:-false}
     - AWF_AGENT_RUNTIME_IMAGE=${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}
     - AWF_COMPANION_IMAGE_CACHE_ENABLED=${AWF_COMPANION_IMAGE_CACHE_ENABLED:-true}
     - AWF_COMPANION_IMAGE_RETENTION_HOURS=${AWF_COMPANION_IMAGE_RETENTION_HOURS:-168}
@@ -72,12 +73,19 @@ x-awf-service: &awf-service
     - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
     - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    # Managed OpenRouter keys (opt-in). The management key reaches only the API
+    # and worker; both drop it from their process env after settings resolve, so
+    # agent stacks, Compose interpolation and subprocesses never see it.
+    - OPENROUTER_MANAGEMENT_KEY=${OPENROUTER_MANAGEMENT_KEY:-}
+    - AWF_OPENROUTER_WORKSPACE_LIMIT_USD=${AWF_OPENROUTER_WORKSPACE_LIMIT_USD:-}
     - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
     - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
     - BRAVE_API_KEY=${BRAVE_API_KEY:-}
     - GROQ_API_KEY=${GROQ_API_KEY:-}
     - XAI_API_KEY=${XAI_API_KEY:-}
     - CEREBRAS_API_KEY=${CEREBRAS_API_KEY:-}
+    - AWF_OLLAMA_BASE_URL=${AWF_OLLAMA_BASE_URL:-}
     - AWF_OPENCODE_OLLAMA_BASE_URL=${AWF_OPENCODE_OLLAMA_BASE_URL:-}
     - OLLAMA_HOST=${OLLAMA_HOST:-}
     - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
@@ -148,6 +156,13 @@ services:
 
   migrate:
     <<: *awf-service
+    # Alembic needs only the database URL; it must not inherit control-plane
+    # credentials such as the OpenRouter management key.
+    environment:
+      - AWF_SERVICE_NAME=awf
+      - AWF_ENV=local
+      - AWF_LOG_LEVEL=INFO
+      - AWF_DATABASE_URL=postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:-awf_dev}@postgres:5432/awf
     depends_on:
       postgres:
         condition: service_healthy

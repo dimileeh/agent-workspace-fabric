@@ -133,6 +133,8 @@ any supported provider subset in one scorecard response.
 
 ## Create Workspace
 
+Optional `task.provider` separates agent and model service; `preflight.allow_unverified_model` defaults to false. Third-party Codex/Claude admission remains disabled and unsupported agent-network verification cannot be overridden. Existing responses expose `agent_provider`, `agent_execution`, and `agent_connection_scope`. See [the foundation contract and pending interfaces](AGENT_MODEL_PROVIDERS.md).
+
 ### Create a workspace
 
 Uses the canonical structured workspace request body. Supports idempotency via
@@ -379,6 +381,38 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/guide" \
 ```
 
 Returns a workspace control response.
+
+---
+
+## Provider budget
+
+Set the managed OpenRouter budget (USD) of a live workspace whose OpenRouter
+selection uses AWF-minted keys. Auth required. Requires `Idempotency-Key` and
+supports `If-Match`. `usd` is the new total budget and must exceed the exact
+provider spend already recorded.
+
+The live managed key's limit is updated first; a management-API failure returns
+502 with its reason code and changes nothing. Then the new budget is frozen,
+`provider.budget.raised` is recorded, and a workspace parked with
+`PROVIDER_BUDGET_EXHAUSTED` resumes: a pre-PR park re-invokes the agent, and a
+monitor-origin park returns to `monitoring_pr`. Errors:
+
+- `PROVIDER_BUDGET_INVALID` (422) for an amount at or below the recorded spend;
+- `PROVIDER_BUDGET_UNSUPPORTED` (409) for unmanaged or terminal workspaces;
+- `PROVIDER_MANAGEMENT_KEY_MISSING` or `PROVIDER_MANAGEMENT_API_*` (502).
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/provider-budget" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: budget-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"usd": 25, "reason": "approved larger refactor"}'
+```
+
+Returns a workspace control response. Create requests accept
+`task.provider_budget_usd` (default `AWF_OPENROUTER_WORKSPACE_LIMIT_USD`), and
+workspace, overview and task responses report `provider_spend`. See
+[Managed OpenRouter keys and budgets](AGENT_MODEL_PROVIDERS.md#managed-openrouter-keys-and-budgets).
 
 ---
 
@@ -1013,3 +1047,22 @@ To verify the checked-in artifact has not drifted:
 ```bash
 uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
 ```
+
+## Provider catalog and coding diagnostics
+
+`POST /v1/providers/models/query` accepts `agent` (codex/claude_code), `provider`,
+optional `profile_ref` and inline `profile`. It returns bounded provider claims
+with `models`, `status`, `reason_code`, `checked_at`, `connection_scope`, `cached`,
+`evidence=provider_claim`, `coding_compatible=false`, `manual_entry_allowed=true`.
+Unsupported/failed discovery leaves ordinary manual model entry available.
+
+`POST /v1/providers/connection-tests` adds required `model`, optional `effort` and
+`deadline_seconds` (default 180, maximum 900). A nonempty `Idempotency-Key` is
+required. HTTP 202 returns `workspace_id`, `operation_id`,
+`label=provider_connection_test` and `status`. Identical requests replay the same
+workspace; conflicting payloads return 409 `IDEMPOTENCY_CONFLICT`. Candidate tests
+work while ordinary third-party admission is disabled. They run only the fixed
+internal fixture and never use a project repository, forge credentials or PR.
+Use existing workspace/operation/log/event reads and cancel/stop/destroy controls.
+Retry/refresh/validate/rebase/remonitor/guide are rejected with
+`PROVIDER_DIAGNOSTIC_REPLAY_FORBIDDEN`. See [provider lifecycle and evidence](AGENT_MODEL_PROVIDERS.md#discovery-and-connection-tests).

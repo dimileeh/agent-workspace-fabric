@@ -95,6 +95,7 @@ async def test_resolves_snapshot_once_and_forwards_to_both(
         disk_check=None,
         requested_profile=req_profile,
         resolved_profile=resolved_profile,
+        diagnostic_spec=None,
     )
 
 

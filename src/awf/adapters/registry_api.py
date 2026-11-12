@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from awf.common.agent_execution import ExecutionSelection
 from awf.db.enums import AgentRuntime
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from awf.adapters.base import AgentAdapter, AgentDefaults
+    from awf.adapters.managed_credentials import ProviderCredentialBroker
     from awf.adapters.runtime_executor import AgentRuntimeExecutor
     from awf.adapters.usage import UsageSampler
     from awf.common.commands import AsyncCommandRunner
@@ -42,6 +44,8 @@ def get_adapter(
     usage_sampler: UsageSampler | None = None,
     runtime_executor: AgentRuntimeExecutor | None = None,
     trusted_git_roots: tuple[Path, Path] | None = None,
+    execution: ExecutionSelection | None = None,
+    credential_broker: ProviderCredentialBroker | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime."""
     if isinstance(runtime, str) and not isinstance(runtime, AgentRuntime):
@@ -52,6 +56,12 @@ def get_adapter(
     if defaults is not None:
         default_model = defaults.model
         default_effort = defaults.effort
+        execution = execution or defaults.execution
+    if execution is not None:
+        if execution.agent != str(runtime):
+            raise ValueError("EXECUTION_AGENT_MISMATCH")
+        default_model = execution.model
+        default_effort = execution.effort
     cls: Any = _REGISTRY.get(runtime)  # type: ignore[arg-type]
     if cls is None:
         from awf.adapters.base import RetiredAgentAdapter
@@ -80,5 +90,11 @@ def get_adapter(
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
             trusted_git_roots=trusted_git_roots,
+            execution=execution,
+            compatibility_evidence=defaults.compatibility_evidence if defaults else None,
+            require_compatibility_evidence=defaults.require_compatibility_evidence
+            if defaults
+            else False,
+            credential_broker=credential_broker,
         ),
     )

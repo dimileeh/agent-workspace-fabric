@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+import tomllib
 from collections.abc import Collection, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -190,6 +192,60 @@ class ServiceAuthMountResolver:
             workspace_owner_uid=self.workspace_owner_uid,
             workspace_owner_gid=self.workspace_owner_gid,
             overlay_mounter=self.overlay_mounter,
+        )
+
+    def resolve_diagnostic_auth(self, *, workspace_id: str, agent: str) -> tuple[AuthMount, ...]:
+        """Copy only selected native auth, without tools/config or overlay state."""
+        import os
+        import re
+
+        if not re.fullmatch(r"ws_[A-Za-z0-9_]+", workspace_id):
+            raise ValueError("PROVIDER_DIAGNOSTIC_FIXTURE_FAILED")
+        relative = ".codex/auth.json" if agent == "codex" else ".claude/.credentials.json"
+        source = self.host_home / relative
+        if not source.is_file():
+            return ()
+        directory = self.work_dir / "auth" / workspace_id / "diagnostic" / agent
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = directory / source.name
+        shutil.copyfile(source, target)
+        target.chmod(0o600)
+        owner = source.stat()
+        uid = self.workspace_owner_uid if self.workspace_owner_uid is not None else owner.st_uid
+        gid = self.workspace_owner_gid if self.workspace_owner_gid is not None else owner.st_gid
+        os.chown(target, uid, gid)
+        os.chown(directory, uid, gid)
+        return (
+            AuthMount(
+                source=str(directory), target="/home/agent/" + relative.split("/")[0], mode="rw"
+            ),
+        )
+
+    def resolve_execution_config(self, *, workspace_id: str, agent: str) -> AuthMount:
+        """Read only configuration through the existing declared auth boundary.
+
+        Never copy native auth files into a third-party workspace. The normal
+        workspace auth cleanup owns this sanitized, workspace-specific file.
+        """
+        from awf.adapters.provider_config import safe_provider_config
+
+        source = self.host_home / (
+            ".codex/config.toml" if agent == "codex" else ".claude/settings.json"
+        )
+        config = {}
+        if source.is_file():
+            raw = (
+                tomllib.loads(source.read_text())
+                if agent == "codex"
+                else json.loads(source.read_text())
+            )
+            config = safe_provider_config(agent, raw)
+        target = self.work_dir / "auth" / workspace_id / "selected-provider-source.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(config))
+        target.chmod(0o644)
+        return AuthMount(
+            source=str(target), target="/opt/awf/selected-provider-source.json", mode="ro"
         )
 
 

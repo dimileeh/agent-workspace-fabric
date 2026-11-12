@@ -153,6 +153,8 @@ structured `partial` result with reason codes instead of deleting unsafe paths.
 
 Create a workspace:
 
+Creation accepts `--provider` and `--allow-unverified-model`. Third-party Codex/Claude paths remain admission-disabled; these options do not bypass capability or network checks. See [the provider foundation](AGENT_MODEL_PROVIDERS.md).
+
 ```bash
 uv run --python 3.12 --extra dev awf workspace create \
   --repo git@github.com:example/app.git \
@@ -346,6 +348,20 @@ A nonblank directive is required; a file grant alone cannot resume this pause.
 AWF resumes the same checkout without bypassing validation or merge gates. See
 [Workspace Profiles](CONCEPTS.md#workspace-profiles) for the conformance contract.
 
+Set the managed OpenRouter budget of a workspace and resume a budget park:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace provider-budget ws_123 \
+  --usd 25 --reason "approved larger refactor"
+```
+
+`awf workspace provider-budget` applies only to workspaces whose OpenRouter
+selection uses AWF-minted keys (`OPENROUTER_MANAGEMENT_KEY` configured). `--usd`
+is the new total budget and must exceed the recorded spend. Set the initial
+budget with `awf workspace create --provider-budget-usd N` (default
+`AWF_OPENROUTER_WORKSPACE_LIMIT_USD`). `awf workspace show` and `list` with
+`--format pretty` print an "Exact provider spend" line.
+
 Inspect workspace observability data:
 
 ```bash
@@ -376,3 +392,18 @@ Preview profile resolution:
 ```bash
 uv run --python 3.12 --extra dev awf profile preview ~/Projects/example-repo --profile auto
 ```
+
+## Provider commands
+
+```bash
+awf provider models --agent codex --provider openrouter
+awf provider test --agent claude_code --provider ollama --model kimi-k2.7-code:cloud --deadline-seconds 180 --idempotency-key connection-1
+```
+
+Both commands support `--profile-ref`, `--profile` (a profile YAML file),
+`--base-url`, and `--format json|pretty`. Tests also support `--effort` under the
+selected provider's compatibility rules. The CLI only calls AWF REST; it does
+not invoke a local model. Inspect returned workspace/operation IDs through
+existing workspace show, logs, events and operation commands. Catalog claims
+are separate from coding proof; ordinary third-party admission stays disabled
+until supervisor release gates pass. [Provider contract](AGENT_MODEL_PROVIDERS.md).

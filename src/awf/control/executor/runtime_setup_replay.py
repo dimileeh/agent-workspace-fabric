@@ -15,6 +15,11 @@ resolve, which cannot prove that setup-installed packages survived. One
 ``workspace.runtime_setup_replayed`` event is persisted per recreation, and an
 existing event for the same identity suppresses a second run.
 
+Every replayed command is bounded: a command without its own profile
+``timeout_seconds`` gets ``SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS``, so one hung
+install fails the replay with ``detail="setup_replay_timeout"`` instead of
+stranding the caller (#1218).
+
 This module never transitions the workspace. Callers apply their own failure
 convention to an unsuccessful ``SetupReplayOutcome``.
 """
@@ -36,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
+from awf.common.work_slot import WorkSlot, work_slot_kwargs
 from awf.control.executor.constants import (
     RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
@@ -54,6 +60,7 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.profiles.models import ProfileCommand, WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -68,6 +75,11 @@ _OUTPUT_TAIL_CHARS: Final[int] = 2000
 _MIRROR_HOOKS_PATH_REPAIR_FAILED: Final[str] = "MIRROR_HOOKS_PATH_REPAIR_FAILED"
 IDENTITY_PROBE_TIMEOUT_SECONDS: float = 30.0
 """Upper bound on the ``docker ps``/``docker inspect`` calls behind one identity read."""
+SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS: int = 1800
+"""Per-command bound for a replayed command whose profile sets no ``timeout_seconds``."""
+SETUP_REPLAY_TIMEOUT_DETAIL: Final[str] = "setup_replay_timeout"
+_VALIDATION_RETRY_EXHAUSTED: Final[str] = "VALIDATION_RETRY_EXHAUSTED"
+_TIMEOUT_RETURNCODE: Final[int] = 124
 
 
 @dataclass(frozen=True)
@@ -191,15 +203,19 @@ async def replay_setup_if_recreated(
     workspace_id: str,
     compose_project: str,
     compose_file: Path,
-    profile: Any,
+    profile: WorkspaceProfile,
     worktree_path: Path,
     before: AgentIdentityObservation,
     after: AgentIdentityObservation,
     trigger: str,
     ownership_event_name: str,
     recover_missing_head: MissingHeadRecovery | None = None,
+    work_slot: WorkSlot | None = None,
 ) -> SetupReplayOutcome:
     """Replay ``setup``/``pre_agent`` once when the agent container was recreated.
+
+    ``work_slot`` is the caller's work-slot scope; the replay holds it like any
+    other validation run (slot-release).
 
     Like ``execution_flow``'s profile setup, the replay is bracketed by a mirror
     ``core.hooksPath`` repair before and after the phases, and a Compose exec
@@ -253,9 +269,10 @@ async def replay_setup_if_recreated(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
-            profile=profile,
+            profile=_with_replay_command_timeouts(profile),
             phase_names=SETUP_REPLAY_PHASE_NAMES,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot),
         )
     except ComposeExecCleanupError as exc:
         # A tagged process that outlived its exec can poison the mirror hooks
@@ -325,11 +342,21 @@ async def replay_setup_if_recreated(
         if dependency_details is not None:
             details["setup_dependency_network"] = dependency_details
         command = details.get("command")
+        failure_reason = _failure_reason_for_phase(first_fail)
+        if _is_retry_exhausted_timeout(first_fail):
+            failure_reason = FailureReason.phase_timeout
+        message = f"runtime setup replay failed: {command or 'profile setup failed'}"
+        if failure_reason is FailureReason.phase_timeout:
+            details["detail"] = SETUP_REPLAY_TIMEOUT_DETAIL
+            message = (
+                f"runtime setup replay failed: {SETUP_REPLAY_TIMEOUT_DETAIL}: "
+                f"{details.get('phase')} command {command}"
+            )
         return _failed(
             details,
             workspace_id=workspace_id,
-            failure_reason=_failure_reason_for_phase(first_fail),
-            message=f"runtime setup replay failed: {command or 'profile setup failed'}",
+            failure_reason=failure_reason,
+            message=message,
         )
     await _record_replayed_event(
         session_factory,
@@ -344,6 +371,36 @@ async def replay_setup_if_recreated(
     )
     _log.info("executor.runtime_setup_replayed", workspace_id=workspace_id, **context)
     return SetupReplayOutcome(ok=True, replayed=True)
+
+
+def _with_replay_command_timeouts(profile: WorkspaceProfile) -> WorkspaceProfile:
+    """Copy ``profile`` with every replayed command bounded (#1218).
+
+    Commands that declare their own ``timeout_seconds`` keep it. ``generated_setup``
+    hooks run as part of ``setup`` and are bounded too. The caller's profile is
+    never mutated.
+    """
+
+    def _bounded(commands: list[ProfileCommand]) -> list[ProfileCommand]:
+        return [
+            command
+            if command.timeout_seconds is not None
+            else command.model_copy(
+                update={"timeout_seconds": SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS}
+            )
+            for command in commands
+        ]
+
+    phases = profile.phases.model_copy(
+        update={
+            "setup": _bounded(profile.phases.setup),
+            "pre_agent": _bounded(profile.phases.pre_agent),
+        }
+    )
+    database = profile.database.model_copy(
+        update={"generated_setup": _bounded(profile.database.generated_setup)}
+    )
+    return profile.model_copy(update={"phases": phases, "database": database})
 
 
 @dataclass(frozen=True)
@@ -424,6 +481,7 @@ def _failed(
         phase=details.get("phase"),
         command=details.get("command"),
         returncode=details.get("returncode"),
+        detail=details.get("detail"),
     )
     return SetupReplayOutcome(
         ok=False,
@@ -432,6 +490,19 @@ def _failed(
         failure_reason=failure_reason,
         message=message[:2000],
         details=details,
+    )
+
+
+def _is_retry_exhausted_timeout(first_fail: Any) -> bool:
+    """True when flaky retries of a timed-out command were exhausted.
+
+    With ``validation.retry_budget > 0`` the runner replaces the final attempt's
+    ``PHASE_TIMEOUT`` with ``VALIDATION_RETRY_EXHAUSTED``; the timeout exit code
+    survives, so the replay still reports the timeout.
+    """
+    return (
+        getattr(first_fail, "reason_code", None) == _VALIDATION_RETRY_EXHAUSTED
+        and getattr(first_fail, "returncode", None) == _TIMEOUT_RETURNCODE
     )
 
 

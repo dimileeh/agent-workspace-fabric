@@ -19,6 +19,7 @@ from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.cursor_auto import CursorAutoModeResponseMixin, CursorAutoModeSelectionMixin
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.api.schemas_providers import ProviderBudgetUsd, ProviderSpendResponse
 from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
@@ -186,6 +187,7 @@ class WorkspaceProviderRecoveryPolicy(BaseModel):
 class WorkspaceLaunchPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    allow_unverified_model: bool = False
     provider_readiness_override: bool = False
     provider_readiness_override_reason: Annotated[
         str | None, Field(default=None, max_length=512)
@@ -199,6 +201,7 @@ class WorkspaceTask(CursorAutoModeSelectionMixin):
     prompt: Annotated[str, Field(min_length=1, max_length=16384)]
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
@@ -236,6 +239,7 @@ class WorkspaceTask(CursorAutoModeSelectionMixin):
         le=86400,
     )
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
+    provider_budget_usd: ProviderBudgetUsd = None
 
     @field_validator("task_tag")
     @classmethod
@@ -731,6 +735,7 @@ class FallbackTargetResponse(BaseModel):
 
     agent: str
     provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
     model: str
 
 
@@ -865,6 +870,10 @@ class WorkspaceBlockStateResponse(BaseModel):
     block_epoch: int = 0
     blocked_at: datetime | None = None
     violations: list[WorkspaceBlockViolationResponse] = Field(default_factory=list)
+    # Post-PR protected-scope blocks only: the unpushed commit AWF preserved, and
+    # how to discard it (reset to the published PR head, don't revert on top).
+    preserved_head_sha: str | None = None
+    resolution_hint: str | None = None
 
 
 class WorkspaceResponse(CursorAutoModeResponseMixin):
@@ -911,6 +920,9 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -953,6 +965,7 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
@@ -1088,6 +1101,9 @@ class TaskResponse(CursorAutoModeResponseMixin):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1095,6 +1111,7 @@ class TaskResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     status: WorkspaceStatus
     pr_url: str | None
@@ -1123,6 +1140,11 @@ class TaskAttemptResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
     readiness: MergeCandidateReadinessResponse | None = None
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
+    agent_model: str | None = None
+    agent_effort: str | None = None
     agent: AgentRuntime | str
     status: WorkspaceStatus
     pr_url: str | None
@@ -1161,6 +1183,9 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1170,6 +1195,7 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    provider_spend: ProviderSpendResponse | None = None
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)

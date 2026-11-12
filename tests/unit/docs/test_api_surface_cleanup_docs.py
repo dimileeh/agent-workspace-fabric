@@ -39,6 +39,8 @@ SUPPORTED_SCRIPTS = {
     "generate_openapi.py",
     "generate_reason_catalog.py",
     "release_smoke.py",
+    # Manual slot-release soak (never CI); see docs/CONCEPTS.md "Work slots".
+    "slot_release_soak.py",
 }
 
 

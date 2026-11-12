@@ -159,6 +159,57 @@ async def test_resolver_denies_unsupported_declarations(hosted, engine, change):
         await asyncio.to_thread(resolver.close)
 
 
+@pytest.mark.parametrize("required", [False, True])
+async def test_resolver_skips_optional_and_refuses_required_unsupported_secrets(
+    hosted, engine, required
+):
+    from awf.profiles.resolver import ProfileResolutionError
+
+    client, receiver, _ = hosted
+    binding = await prepare(hosted)
+    assert (
+        await client.post("/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="})
+    ).status_code == 200
+    async with engine.connect() as connection:
+        schema = await connection.scalar(text("select current_schema()"))
+    url = engine.url.update_query_dict({"awf_search_path": schema}).render_as_string(
+        hide_password=False
+    )
+    resolver = ProtectedResolver(
+        url, receiver.config, receiver.identity, {"key": Binding.model_validate(binding)}
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [
+                {"name": "key", "provider": "protected", "target": binding["target"]},
+                {
+                    "name": "local_db_password",
+                    "kind": "env",
+                    "provider": "env",
+                    "ref": "env/LOCAL_DB_PASSWORD",
+                    "target": "LOCAL_DB_PASSWORD",
+                    "required": required,
+                },
+            ],
+        }
+    )
+    try:
+        if required:
+            with pytest.raises(ProfileResolutionError) as caught:
+                await asyncio.to_thread(resolver.resolve, profile, workspace_id="ws")
+            assert isinstance(caught.value, MaterialDeniedError)
+            assert caught.value.reason_code == "PROTECTED_DECLARATION_UNSUPPORTED"
+            assert "local_db_password" in str(caught.value)
+        else:
+            result = await asyncio.to_thread(resolver.resolve, profile, workspace_id="ws")
+            assert [mount.target for mount in result.mounts] == [binding["target"]]
+            assert result.environment == ()
+            assert result.metadata["protected_mount_count"] == 1
+    finally:
+        await asyncio.to_thread(resolver.close)
+
+
 @pytest.mark.parametrize("transition", ["missing", "expired", "restart", "refresh", "shutdown"])
 async def test_resolver_revalidates_receiver_transitions(hosted, engine, transition, monkeypatch):
     from datetime import UTC, datetime, timedelta, tzinfo

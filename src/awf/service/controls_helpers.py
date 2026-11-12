@@ -225,6 +225,7 @@ def default_cleaner(*, settings: Settings | None = None) -> WorkspaceCleaner:
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
+        auth_work_dir=work_dir,
         compose=ComposeManager(
             work_dir=work_dir, template_path=template, command_environment=environment
         ),
@@ -692,6 +693,11 @@ async def _add_control_audit_event(
     extra: Mapping[str, object | None] | None = None,
     evidence: Mapping[str, object | None] | None = None,
 ) -> None:
+    if workspace.status == WorkspaceStatus.destroyed.value:
+        from awf.service.provider_diagnostics import is_diagnostic, settle_quiescent_diagnostic
+
+        if is_diagnostic(workspace.task_policy):
+            await settle_quiescent_diagnostic(repo._session, workspace)
     await repo.add_audit_event(
         workspace,
         event_type=_AUDIT_CONTROL_OPERATION_EVENT,

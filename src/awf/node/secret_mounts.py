@@ -379,6 +379,13 @@ class LocalSecretLeaseMountResolver:
         env_name = _env_ref_name(secret.ref)
         if env_name is None:
             self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        from awf.service.openrouter_management import (
+            PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN,
+            references_management_key,
+        )
+
+        if references_management_key(env_name):
+            self._raise(PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN, secret, provider=provider)
         if not source_env.get(env_name):
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
             return None

@@ -140,6 +140,23 @@ def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime)
     return _initial_review_grace_wall_started_value(started_dt.timestamp())
 
 
+def _needs_human_reason_key(item_id: str) -> str:
+    """Build state key holding a review item's ``needs_human`` / ``defer`` reason."""
+    return f"__needs_human_reason__:{item_id}"
+
+
+def _mutation_park_key(thread_id: str) -> str:
+    """Build state key recording an ``AGENT_NON_FIXED_WITH_MUTATION`` park (#1213).
+
+    The value is JSON ``{"rollback_head": <sha or "">, "outdated": <bool>}``: the
+    commit the refused attempt was rolled back to, and whether the thread was
+    already outdated when it parked. The verdict was rendered on that commit, so
+    ``decide()`` re-evaluates the park once the PR head differs from it or the
+    thread has since become outdated. Any later verdict for the item drops it.
+    """
+    return f"__awf_mutation_park__:{thread_id}"
+
+
 def _item_disposition_key(item_id: str) -> str:
     """Build state key holding a review item's disposition record (#1018).
 
@@ -214,6 +231,17 @@ def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
     then no marker in the thread certifies without a record (PRRT_kwDOSJAM6s6vc8NC).
     """
     return f"__awf_disposition_retired__:{thread_id}:{conversation_digest}"
+
+
+def _preserved_attempt_retired_key(thread_id: str) -> str:
+    """Build state key recording an operator-retired preserved correction attempt (#1189).
+
+    The value is the full preserved tip the operator's disposition rejected. It
+    keeps the retirement's provenance after the ``needs_human`` reason that named
+    the tip is gone, so a repeated guide, or a re-adopted successor's ``--hint``,
+    is recognized as already applied instead of being reported as unapplicable.
+    """
+    return f"__awf_preserved_attempt_retired__:{thread_id}"
 
 
 # Reserved ``MonitorState.threads_addressed_ids`` key holding the summary of the

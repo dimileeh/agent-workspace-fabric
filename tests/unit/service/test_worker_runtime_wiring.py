@@ -17,6 +17,7 @@ import pytest
 import structlog
 
 from awf.common.config import Settings
+from awf.control.worker.work_slot_probe import LocalWorkSlotProcessProbe
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
@@ -105,11 +106,14 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     class _WorkspaceCleaner:
         """Test helper for WorkspaceCleaner."""
 
-        def __init__(self, *, git: object, compose: object) -> None:
+        def __init__(
+            self, *, git: object, compose: object, auth_work_dir: Path | None = None
+        ) -> None:
             """Test helper for  init  ."""
             created["runtime_cleaner"] = self
             created["cleaner_git"] = git
             created["cleaner_compose"] = compose
+            created["cleaner_auth_work_dir"] = auth_work_dir
 
     class _LocalSecretLeaseMountResolver:
         """Test helper for LocalSecretLeaseMountResolver."""
@@ -199,10 +203,17 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["worker_kwargs"]["executor"] is created["executor"]
     assert created["worker_kwargs"]["runtime_cleaner"] is created["runtime_cleaner"]
     assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
+    # Restart adoption and the reconciler probe tagged awf-exec processes (slot-release).
+    assert isinstance(created["worker_kwargs"]["work_slot_probe"], LocalWorkSlotProcessProbe)
     assert created["executor_kwargs"]["compose"] is created["compose"]
     assert created["executor_kwargs"]["validation"] is created["validation"]
     assert created["executor_kwargs"]["agent_runtime_executor"] is None
     assert created["executor_kwargs"]["hosted_validation"] is None
+    from awf.service.provider_managed_keys import ManagedKeyBroker
+
+    # No management key configured: managed rows fail closed, never a static key.
+    broker = created["executor_kwargs"]["credential_broker"]
+    assert isinstance(broker, ManagedKeyBroker) and broker._client is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
     assert (
         created["provisioner_kwargs"]["config"].agent_defaults
@@ -210,6 +221,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     )
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
+    assert created["cleaner_auth_work_dir"] == created["compose_work_dir"]
 
 
 @pytest.mark.unit
@@ -700,6 +712,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -795,6 +808,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -1070,12 +1084,15 @@ def _stub_worker_runtime_dependencies(
             pr_monitor_factory: object,
             log_store: object,
             usage_sampler: object = None,
+            credential_broker: object = None,
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
             worktree_activity_git_roots: object = None,
+            stack_launcher: object = None,
         ) -> None:
             """Test helper for  init  ."""
+            del credential_broker
             del hosted_validation
             del ensure_hosted_monitor_checkout
             del worktree_activity_git_roots
@@ -1097,6 +1114,7 @@ def _stub_worker_runtime_dependencies(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             """Test helper for  init  ."""

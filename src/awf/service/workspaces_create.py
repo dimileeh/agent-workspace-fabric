@@ -6,6 +6,8 @@ import asyncio
 import os
 import re
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
@@ -31,9 +33,7 @@ from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import (
-    CURSOR_AUTO_MODE_POLICY_KEY,
     DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
-    EXPECTED_BASE_SHA_POLICY_KEY,
     canonical_agent_model_for_cursor_auto,
     cursor_auto_mode_from_task_policy,
     expected_base_sha_from_task_policy,
@@ -83,6 +83,15 @@ from awf.service.scheduler import (
 from awf.service.scheduler import (
     task_class_priority as scheduler_task_class_priority,
 )
+from awf.service.workspaces_create_policy import (
+    freeze_diagnostic_policy,
+    freeze_execution_policy,
+    provider_budget_request_matches,
+    required_worker_contract_version,
+)
+from awf.service.workspaces_create_policy import (
+    workspace_create_task_policy_snapshot as workspace_create_task_policy_snapshot,
+)
 
 if TYPE_CHECKING:
     from awf.service.workspaces import ResourceReservationPlan
@@ -120,6 +129,7 @@ async def create_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
+    diagnostic_spec: dict[str, Any] | None = None,
     requested_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
     resolved_profile: dict[str, Any] | None | _ProfileNotProvided = PROFILE_NOT_PROVIDED,
 ) -> Workspace:
@@ -168,6 +178,48 @@ async def create_workspace_row(
             resolved_profile = _resolved
     requested_profile = cast(dict[str, Any] | None, requested_profile)
     resolved_profile = cast(dict[str, Any] | None, resolved_profile)
+    try:
+        base_task_policy = freeze_execution_policy(
+            payload,
+            profile=resolved_profile,
+            enabled=diagnostic_spec is not None
+            or resolved_settings.third_party_agent_providers_enabled,
+            environ=provider_environ if provider_environ is not None else os.environ,
+            settings=resolved_settings,
+            hosted=payload.hosted is not None or isinstance(hosted_authority, WorkspaceAuthority),
+        )
+        if diagnostic_spec is not None:
+            freeze_diagnostic_policy(base_task_policy, diagnostic_spec)
+        from awf.service.provider_compatibility import attach_compatibility
+
+        base_task_policy = await attach_compatibility(session, base_task_policy)
+        from awf.common.agent_execution import execution_from_policy
+
+        selections = [execution_from_policy(base_task_policy)]
+        selections.extend(
+            execution_from_policy(t)
+            for t in base_task_policy.get("provider_recovery", {}).get("fallbacks", [])
+        )
+        if base_task_policy.get("agent_execution_profile_pending") or any(
+            selected is not None and selected.third_party for selected in selections
+        ):
+            from awf.db.repositories import WorkerHeartbeatRepository
+
+            if not await WorkerHeartbeatRepository(session).supports_execution_contract(
+                now=datetime.now(UTC),
+                minimum_version=required_worker_contract_version(base_task_policy),
+            ):
+                raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
+    except ValueError as error:
+        from awf.service.workspaces import WorkspaceProviderReadinessBlockedError
+
+        raise WorkspaceProviderReadinessBlockedError(
+            {
+                "blocks_launch": True,
+                "reason_code": str(error),
+                "override_used": False,
+            }
+        ) from None
     # Overlay the resolved profile's Ollama base URL onto the readiness environ so
     # create-time admission probes the same daemon the executor's pre-agent step
     # targets (which derives its URLs from the same profile env). Without this, an
@@ -189,7 +241,7 @@ async def create_workspace_row(
         and not payload.preflight.provider_readiness_override
     )
     preflight: dict[str, Any] | None = None
-    if not defer_cursor_router_preflight:
+    if not defer_cursor_router_preflight and diagnostic_spec is None:
         preflight_environ = (
             dict(provider_environ or {})
             if payload.hosted
@@ -264,7 +316,7 @@ async def create_workspace_row(
         test_commands=payload.validation.commands,
         requires_database=payload.requires_database,
         idempotency_key=idempotency_key,
-        task_kind=payload.task.kind,
+        task_kind="provider_connection_test" if diagnostic_spec is not None else payload.task.kind,
         workspace_id=workspace_id,
     )
     task = await TaskRepository(session).create_or_get(
@@ -336,6 +388,7 @@ async def create_workspace_row_checked(
     disk_check: DiskCheck | None = None,
     node_id: str | None = None,
     excluding_workspace_id: str | None = None,
+    diagnostic_spec: dict[str, Any] | None = None,
 ) -> Workspace:
     """Resolve profile snapshots once, guard host-port conflicts, and persist the row.
 
@@ -367,6 +420,7 @@ async def create_workspace_row_checked(
         disk_check=disk_check,
         requested_profile=requested_profile,
         resolved_profile=resolved_profile,
+        diagnostic_spec=diagnostic_spec,
     )
 
 
@@ -415,6 +469,9 @@ def workspace_create_payload_matches(
         == _requested_task_provider_recovery_policy(payload)
         and _stored_companions(existing) == _requested_companions(payload)
         and _stored_task_agent_effort(existing) == payload.task.effort
+        and _stored_task_policy(existing).get("agent_provider") == payload.task.provider
+        and bool(_stored_task_policy(existing).get("allow_unverified_model", False))
+        == payload.preflight.allow_unverified_model
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
         and _release_sync_source_branch_matches(existing, payload)
@@ -431,6 +488,7 @@ def workspace_create_payload_matches(
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
+        and provider_budget_request_matches(_stored_task_policy(existing), payload)
     )
 
 
@@ -823,7 +881,14 @@ def _stored_task_provider_recovery_policy(
 ) -> dict[str, object] | None:
     """Return the provider recovery policy dict stored in the workspace's task policy."""
     provider_recovery = _stored_task_policy(existing).get("provider_recovery")
-    return provider_recovery if isinstance(provider_recovery, dict) else None
+    if not isinstance(provider_recovery, dict):
+        return None
+    result = deepcopy(provider_recovery)
+    for target in result.get("fallbacks", []):
+        if isinstance(target, dict):
+            target.pop("agent_execution", None)
+            target.pop("coding_compatibility_evidence", None)
+    return result
 
 
 def _requested_companions(payload: WorkspaceCreateRequest) -> list[dict[str, object]]:
@@ -1402,65 +1467,6 @@ def _assert_supported_agent_runtime(agent: AgentRuntime | str) -> None:
 
     if runtime is None or runtime not in _LAUNCH_PROVIDER_BY_AGENT:
         raise WorkspaceUnsupportedAgentRuntimeError(agent)
-
-
-def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
-    """Build a task policy dictionary from a rich create request."""
-    from awf.service.workspaces import (  # noqa: E402
-        RELEASE_SYNC_POLICY_KEY,
-        RESOURCE_RESERVATION_REQUEST_POLICY_KEY,
-        VALIDATION_POLICY_KEY,
-        VALIDATION_REQUESTED_TIER_POLICY_KEY,
-    )
-
-    policy: dict[str, Any] = {}
-    if payload.hosted is not None:
-        policy[POLICY_KEY] = payload.hosted.model_dump(mode="json")
-    resource_request = _requested_resource_reservation_values(payload)
-    # Persist empty requests so idempotent replays do not re-plan against
-    # mutable default resource settings.
-    policy[RESOURCE_RESERVATION_REQUEST_POLICY_KEY] = resource_request
-    policy[VALIDATION_POLICY_KEY] = {
-        VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
-    }
-    # Persist the raw tri-state auto-merge intent (True/False/None) durably so the
-    # provisioner resolves the final flag from it and idempotent replays compare a
-    # stable snapshot. Always write the key (even for None) to keep the snapshot
-    # stable across replays.
-    policy[AUTO_MERGE_INTENT_POLICY_KEY] = payload.task.auto_merge
-    if payload.repo.expected_base_sha is not None:
-        policy[EXPECTED_BASE_SHA_POLICY_KEY] = payload.repo.expected_base_sha
-    if payload.task.kind == TaskKind.sync_release_pr.value:
-        policy[RELEASE_SYNC_POLICY_KEY] = {
-            "source_branch": payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
-            "target_branch": payload.repo.base_branch,
-        }
-    if payload.task.priority != 0 or payload.task.human_boost != 0:
-        policy["scheduler"] = scheduler_policy_snapshot(
-            base_priority=payload.task.priority,
-            human_boost=payload.task.human_boost,
-        )
-    if payload.task.model is not None:
-        effective_model = canonical_agent_model_for_cursor_auto(
-            model=payload.task.model,
-            cursor_auto_mode=payload.task.cursor_auto_mode,
-        )
-        if effective_model is not None:
-            policy["agent_model"] = effective_model
-    if payload.task.effort is not None:
-        policy["agent_effort"] = payload.task.effort
-    if payload.task.cursor_auto_mode is not None:
-        policy[CURSOR_AUTO_MODE_POLICY_KEY] = payload.task.cursor_auto_mode.value
-    if payload.task.out_of_scope_changes is not None:
-        policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
-    if payload.task.provider_recovery is not None:
-        policy["provider_recovery"] = payload.task.provider_recovery.model_dump(
-            mode="json",
-            exclude_none=True,
-            exclude_unset=True,
-        )
-    policy[COMPANION_POLICY_KEY] = _requested_companions(payload)
-    return policy
 
 
 def profile_with_requested_tier(

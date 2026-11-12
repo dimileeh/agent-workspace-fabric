@@ -24,6 +24,7 @@ from awf.runtime.logs import (
     boundary_aligned_log_text,
     read_log_chunk_bytes,
 )
+from awf.service.workspace_provider_spend import provider_spend_scope
 from awf.service.workspaces import workspace_response
 
 router = APIRouter(tags=["workspace-streams"])
@@ -116,12 +117,9 @@ async def _send_initial_state(
             )
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return False
-        await websocket.send_json(
-            {
-                "type": "snapshot",
-                "workspace": workspace_response(workspace).model_dump(mode="json"),
-            }
-        )
+        async with provider_spend_scope(session, [workspace.id]):
+            snapshot = workspace_response(workspace).model_dump(mode="json")
+        await websocket.send_json({"type": "snapshot", "workspace": snapshot})
         if "events" in selected:
             events = await WorkspaceEventRepository(session).list(
                 workspace_id=workspace_id,

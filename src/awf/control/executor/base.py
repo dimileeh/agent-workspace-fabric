@@ -16,6 +16,7 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,18 +28,22 @@ from sqlalchemy.ext.asyncio import (
 
 from awf.adapters.base import AgentDefaults
 from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS, defaults_with_model_overrides
+from awf.adapters.managed_credentials import ProviderCredentialBroker
 from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
+from awf.common.work_slot import WorkSlot
 from awf.common.workspace_scope import WorkspaceScope, workspace_consumer
 from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import monitor_handoff as _monitor_handoff
+from awf.control.executor import work_slot_binding as _work_slot_binding
 from awf.control.executor.config import ExecutorConfig
 from awf.control.executor.mixins import ExecutorDelegatesMixin  # noqa: E402
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.types import PauseResumeReason
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import ComposeManager
+from awf.node.stack_launcher import ComposeStackLauncher
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
@@ -60,11 +65,13 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
         usage_sampler: UsageSampler | None = None,
+        credential_broker: ProviderCredentialBroker | None = None,
         agent_runtime_executor: AgentRuntimeExecutor | None = None,
         hosted_validation: Any | None = None,
         ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
         worktree_activity_git_roots: Callable[..., tuple[Path, Path]] | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        stack_launcher: ComposeStackLauncher | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -102,6 +109,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._session_factory = session_factory
         self._runner = runner
         self._compose = compose
+        self._stack_launcher = stack_launcher
         self._validation = validation
         self._pr_creator = pr_creator
         self._config = config
@@ -109,11 +117,20 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
         self._usage_sampler = usage_sampler
+        self._credential_broker = credential_broker
         self._agent_runtime_executor = agent_runtime_executor
         self._hosted_validation = hosted_validation
         self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout
         self._worktree_activity_git_roots = worktree_activity_git_roots
         self._workspace_scope = workspace_scope
+        # Work slots bound by the worker per dispatched task (slot-release).
+        self._work_slots: dict[str, WorkSlot] = {}
+
+    def work_slot_binding(
+        self: Any, workspace_id: str, work_slot: WorkSlot | None
+    ) -> AbstractContextManager[None]:
+        """Bind the worker's per-task work slot for agent/validation/monitor runs."""
+        return _work_slot_binding.work_slot_binding(self, workspace_id, work_slot)
 
     @workspace_consumer
     async def execute(

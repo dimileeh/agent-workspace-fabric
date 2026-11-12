@@ -124,6 +124,7 @@ async def _remote_branch_fetch_once(
     worktree_path: Path,
     remote: str,
     remote_branch: str,
+    timeout_seconds: float | None = None,
 ) -> CommandResult:
     result: CommandResult = await self._deps.runner.run(
         [
@@ -134,7 +135,8 @@ async def _remote_branch_fetch_once(
             "fetch",
             remote,
             f"refs/heads/{remote_branch}",
-        ]
+        ],
+        timeout_seconds=timeout_seconds,
     )
     return result
 

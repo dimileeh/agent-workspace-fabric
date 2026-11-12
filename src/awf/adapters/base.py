@@ -30,6 +30,12 @@ from awf.adapters.failure_reasons import (
     _failure_reason_for_result,
     masked_agent_timeout_reason_code,
 )
+from awf.adapters.managed_credentials import (
+    ProviderCredentialBroker,
+    ProviderCredentialLease,
+    exec_environment,
+    managed_credential_scope,
+)
 from awf.adapters.prompt_preamble import _AWF_PROMPT_PREAMBLE
 from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.registry_api import _REGISTRY, get_adapter, register_adapter
@@ -43,6 +49,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.adapters.worktree_activity import make_worktree_activity_probe
+from awf.common.agent_execution import ExecutionSelection
 from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
@@ -60,6 +67,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.work_slot import WorkSlot, hold_work_slot
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough as agent_exec_env_passthrough,
@@ -163,10 +171,15 @@ class AgentDefaults:
 
     model: str
     effort: str | None = None
+    execution: ExecutionSelection | None = None
+    compatibility_evidence: dict[str, Any] | None = None
+    require_compatibility_evidence: bool = False
 
 
 class AgentAdapter(ABC):
     """Shared scaffolding for coding-CLI adapters."""
+
+    diagnostic_events: bool = False
 
     def __init__(
         self,
@@ -180,12 +193,19 @@ class AgentAdapter(ABC):
         usage_sampler: UsageSampler | None = None,
         runtime_executor: AgentRuntimeExecutor | None = None,
         trusted_git_roots: tuple[Path, Path] | None = None,
+        execution: ExecutionSelection | None = None,
+        compatibility_evidence: dict[str, Any] | None = None,
+        require_compatibility_evidence: bool = False,
+        credential_broker: ProviderCredentialBroker | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
             raise ValueError("agent_wall_timeout_seconds must be positive")
         if agent_idle_timeout_seconds <= 0:
             raise ValueError("agent_idle_timeout_seconds must be positive")
+        self.compatibility_evidence = compatibility_evidence
+        self.require_compatibility_evidence = require_compatibility_evidence
+        self.execution = execution
         self._runner = runner
         self._default_model = default_model
         self._default_effort = default_effort
@@ -195,6 +215,7 @@ class AgentAdapter(ABC):
         self._usage_sampler = usage_sampler
         self._runtime_executor = runtime_executor
         self._trusted_git_roots = trusted_git_roots
+        self._credential_broker = credential_broker
 
     @property
     @abstractmethod
@@ -300,10 +321,17 @@ class AgentAdapter(ABC):
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
         workdir: str = DEFAULT_AGENT_WORKDIR,
+        work_slot: WorkSlot | None = None,
+        credential_lease: ProviderCredentialLease | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
         Raises ``AgentRunError`` on non-zero exit.
+
+        ``work_slot`` is the caller-injected work-slot scope (slot-release): the
+        whole run (local or hosted) holds it, and the local ``awf-exec`` is tagged
+        with its invocation so a restarted worker can tell whether the run is
+        still in flight. ``None`` keeps the run byte-identical to an unslotted one.
 
         The user-supplied ``prompt`` is wrapped with an AWF preamble
         that encodes contract invariants the agent must honour — most
@@ -315,10 +343,85 @@ class AgentAdapter(ABC):
         empty. Preamble + post-agent branch-drift recovery in
         ``control/executor.py`` form a belt-and-braces defence.
         """
+        async with (
+            hold_work_slot(work_slot, "agent") as work_slot_invocation_id,
+            managed_credential_scope(
+                self, workspace_id=workspace_id, purpose=log_source, lease=credential_lease
+            ) as lease,
+        ):
+            return await self._run_holding_work_slot(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+                hosted_pr_identity=hosted_pr_identity,
+                git_preparation=git_preparation,
+                profile=profile,
+                worktree_path=worktree_path,
+                workdir=workdir,
+                work_slot_invocation_id=work_slot_invocation_id,
+                credential_env=dict(lease.env) if lease is not None else None,
+            )
+
+    async def _run_holding_work_slot(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+        hosted_pr_identity: dict[str, Any] | None,
+        git_preparation: AgentRuntimeGitPreparation | None,
+        profile: WorkspaceProfile | None,
+        worktree_path: Path | None,
+        workdir: str,
+        work_slot_invocation_id: str | None,
+        credential_env: dict[str, str] | None = None,
+    ) -> AgentRunResult:
+        """Run the agent once the caller's work slot (if any) is held."""
+        from awf.service.provider_compatibility import guard_runtime_compatibility
+
+        await guard_runtime_compatibility(
+            self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            env=credential_env,
+        )
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
         cli_args = self._cli_args(model=model)
+        if self.execution is not None and self.execution.third_party:
+            if (
+                self._runtime_executor is not None
+                and getattr(self._runtime_executor, "execution_contract_version", None) != 1
+            ):
+                raise ValueError("EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED")
+            from awf.adapters.provider_config import RUNTIME_CONFIG_PATH, RUNTIME_PYTHON_PATH
+
+            # An old/custom runtime must fail before the coding CLI starts.
+            bootstrap = (
+                "import pathlib,runpy,sys; p=pathlib.Path(sys.argv[1]); "
+                "p.is_file() or sys.exit('EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED'); "
+                "sys.argv=sys.argv[1:]; runpy.run_path(str(p),run_name='__main__')"
+            )
+            import json
+
+            cli_args = [
+                RUNTIME_PYTHON_PATH,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+                RUNTIME_CONFIG_PATH,
+                json.dumps(self.execution.model_dump(mode="json")),
+                *cli_args,
+            ]
         if self._runtime_executor is not None:
             return await self._run_hosted(
                 compose_project=compose_project,
@@ -338,6 +441,19 @@ class AgentAdapter(ABC):
         env_passthrough = await asyncio.to_thread(
             agent_exec_env_passthrough, compose_file=compose_file
         )
+        if self.execution is not None and self.execution.third_party:
+            env_passthrough = tuple(
+                name
+                for name in env_passthrough
+                if self.execution.provider == "openrouter"
+                and self.execution.credential_ref == "env/OPENROUTER_API_KEY"
+                and name == "OPENROUTER_API_KEY"
+            )
+        if self.diagnostic_events:
+            env_passthrough = ()
+        if credential_env is not None:
+            # A minted managed key is the only selected credential, by name.
+            env_passthrough = tuple(credential_env)
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         masked_reason_code: str | None = None
@@ -351,6 +467,7 @@ class AgentAdapter(ABC):
                 workdir=workdir,
                 preserve_stdin=True,
                 env_passthrough=env_passthrough,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             _log.info(
                 "agent.run.start",
@@ -358,6 +475,8 @@ class AgentAdapter(ABC):
                 compose_project=compose_project,
                 workspace_id=workspace_id,
                 model=selected_model,
+                provider=self.get_provider(selected_model),
+                execution=self.execution.model_dump(mode="json") if self.execution else None,
                 effort=self._default_effort,
                 wall_timeout_seconds=self._agent_wall_timeout_seconds,
                 idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -378,6 +497,7 @@ class AgentAdapter(ABC):
                 log_source=log_source,
                 compose_project=compose_project,
                 worktree_path=worktree_path,
+                env=credential_env,
             )
             final_status = "success"
             return result
@@ -424,7 +544,11 @@ class AgentAdapter(ABC):
         compose_file: Path,
         workspace_id: str | None,
     ) -> UsageSampleContext | None:
-        if self._usage_sampler is None or workspace_id is None:
+        if (
+            self._usage_sampler is None
+            or workspace_id is None
+            or (self.execution is not None and self.execution.third_party)
+        ):
             return None
         try:
             return await self._usage_sampler.start(
@@ -1067,6 +1191,7 @@ class AgentAdapter(ABC):
         log_source: str,
         compose_project: str,
         worktree_path: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> AgentRunResult:
         """Run an agent CLI with streamed logs and tracked cancellation cleanup."""
         sinks = await self._open_command_streams(
@@ -1094,6 +1219,8 @@ class AgentAdapter(ABC):
             probe_kwargs: dict[str, Any] = (
                 {"activity_probe": activity_probe} if activity_probe is not None else {}
             )
+            # Only a managed key needs an exec env; other runs keep the old call.
+            env_kwargs: dict[str, Any] = {"env": exec_environment(env)} if env is not None else {}
             try:
                 if run_streaming is not None:
                     result = await run_streaming(
@@ -1104,6 +1231,7 @@ class AgentAdapter(ABC):
                         wall_timeout_seconds=self._agent_wall_timeout_seconds,
                         idle_timeout_seconds=self._agent_idle_timeout_seconds,
                         **probe_kwargs,
+                        **env_kwargs,
                     )
                 else:
                     _log.warning(
@@ -1113,7 +1241,7 @@ class AgentAdapter(ABC):
                         workspace_id=workspace_id,
                         reason="runner does not support run_streaming",
                     )
-                    result = await self._runner.run(args, input_bytes=prompt_input)
+                    result = await self._runner.run(args, input_bytes=prompt_input, **env_kwargs)
                     if sinks is not None:
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
@@ -1179,6 +1307,23 @@ class AgentAdapter(ABC):
                     workspace_id=workspace_id,
                     compose_project=compose_project,
                     pending_timeout_cleanup=pending_timeout_cleanup,
+                )
+
+        if not result.ok and self.execution is not None and self.execution.third_party:
+            from awf.adapters.provider_config import runtime_failure_reason
+
+            contract_reason = runtime_failure_reason(result.stderr)
+            if contract_reason is not None:
+                raise AgentRunError(
+                    agent=self.name,
+                    result=result,
+                    reason_code=contract_reason,
+                    details={
+                        "provider": self.execution.provider,
+                        "model": self.execution.model,
+                        "execution": self.execution.model_dump(mode="json"),
+                        "retryable": False,
+                    },
                 )
 
         if not result.ok:

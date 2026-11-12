@@ -111,6 +111,8 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             "idle_seconds": None,
         },
     }
+    if request.execution is not None:
+        payload["execution"] = request.execution.model_dump(mode="json")
     pr_identity = _agent_pr_identity_payload(request)
     if pr_identity:
         payload["pr_identity"] = pr_identity

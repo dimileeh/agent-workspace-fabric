@@ -240,6 +240,10 @@ async def resolve_correction_non_fixed_mutation(
         verdict=verdict,
     )
     short_floor = (rollback_floor_head or "")[:12]
+    # A mutation park records the rollback commit it was rendered on, so the
+    # park is re-evaluated once the PR head moves past it (#1213). An
+    # unmeasurable attempt is not tied to any head and stays parked.
+    is_mutation_park = mutation_reason_code == _comment_verdict.AGENT_NON_FIXED_WITH_MUTATION
     return _comment_verdict.VerdictResult(
         verdict="needs_human",
         reason=_bounded(
@@ -248,4 +252,6 @@ async def resolve_correction_non_fixed_mutation(
             f"the item is parked for human review. Agent verdict: {verdict}. "
             f"Agent reason: {agent_reason}"
         ),
+        reason_code=mutation_reason_code if is_mutation_park else None,
+        rollback_head=rollback_floor_head if is_mutation_park else None,
     )

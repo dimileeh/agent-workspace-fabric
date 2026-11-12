@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +16,14 @@ from awf.db.models import Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationResult
+
+
+@pytest.fixture(autouse=True)
+def _allow_circuit_launch_for_isolated_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake executors have no DB; real admission is covered by test_executor_default_circuit.
+    monkeypatch.setattr(
+        execution_flow, "_execution_circuit_allows_launch", AsyncMock(return_value=True)
+    )
 
 
 class _NoTrustedGitRootsExecutor:

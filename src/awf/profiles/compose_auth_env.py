@@ -7,6 +7,7 @@ import re
 AGENT_AUTH_ENV_VARS = (
     # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
     # when present; these keep local shells compatible without writing values.
+    "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
     "CODEX_API_KEY",
@@ -31,6 +32,7 @@ AGENT_AUTH_ENV_VARS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     # OpenCode via Ollama/Ollama Cloud.
+    "AWF_OLLAMA_BASE_URL",
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
     "OLLAMA_API_KEY",
@@ -53,6 +55,7 @@ AGENT_AUTH_ENV_VARS = (
 # carried, matching the ``AgentRuntimeExecRequest`` contract.
 _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
     {
+        "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_API_TOKEN",
         "CODEX_API_KEY",
@@ -274,7 +277,7 @@ _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
 # from the first non-empty key here. Mirrors ``provider_readiness_helpers``'
 # ``_OLLAMA_BASE_URL_ENV_KEYS``; kept local so ``profiles`` does not import the
 # ``service`` layer.
-_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OLLAMA_BASE_URL", "AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 
 # GitHub CLI token aliases in precedence order (highest first). ``gh`` reads
 # ``GH_TOKEN`` before ``GITHUB_TOKEN`` (https://cli.github.com/manual/gh_help_environment),

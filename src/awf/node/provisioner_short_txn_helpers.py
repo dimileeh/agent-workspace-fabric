@@ -5,9 +5,9 @@ first-party line-count guardrail. Behavior is unchanged; the functions take
 ``self`` and are wired back onto :class:`~awf.node.provisioner.Provisioner` via
 :class:`ProvisionerShortTxnHelpersMixin`.
 
-These helpers share one shape: each opens a fresh ``self._session_factory()``
-session, performs a guarded status read or side-effect write, and commits —
-distinct from the main provisioning flow that threads a single claimed session.
+These helpers perform guarded reads and writes around short database sessions,
+including the initial claim and hosted monitor checkout restoration — distinct
+from the main provisioning flow that threads a single claimed session.
 ``self._record_stale_action_skip`` stays on ``Provisioner`` and is reached via
 the combined class.
 """
@@ -17,11 +17,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.common.workspace_scope import workspace_consumer
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     EgressAuditRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+)
+from awf.node.git_manager import GitOperationError, WorktreeLayout
+from awf.node.provisioner_helpers import (
+    _provision_checkout_base_branch,
+    _provision_local_branch_name,
 )
 from awf.service.secret_leases import SecretLeaseService
 
@@ -210,3 +218,109 @@ class ProvisionerShortTxnHelpersMixin:
     _create_egress_audit_record = _create_egress_audit_record
     _issue_secret_leases = _issue_secret_leases
     _recheck_status = _recheck_status
+
+    @workspace_consumer
+    async def ensure_hosted_monitor_worktree(self: Any, workspace_id: str) -> WorktreeLayout:
+        """Restore the managed checkout for a hosted ``monitoring_pr`` resume.
+
+        Loads persisted workspace/adoption fields and recreates the worktree at
+        the current PR head tip via :meth:`GitManager.ensure_worktree` and the
+        shared :func:`_provision_checkout_base_branch` helpers. Callers must
+        only invoke this for hosted adoption workspaces.
+        """
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=f"workspace {workspace_id} not found for checkout restore",
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            if not pr_adoption_is_hosted(ws.task_policy):
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "ensure_hosted_monitor_worktree requires hosted PR adoption "
+                        f"for workspace {workspace_id}"
+                    ),
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            if not ws.repo_url:
+                raise GitOperationError(
+                    operation="hosted_monitor.ensure_worktree",
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "hosted monitor checkout restore missing repo_url for "
+                        f"workspace {workspace_id}"
+                    ),
+                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+                )
+            branch_name = ws.branch_name or _provision_local_branch_name(
+                ws,
+                workspace_id=workspace_id,
+                branch_prefix=self._config.branch_prefix,
+                task_tag=ws.task_tag,
+            )
+            checkout_base = _provision_checkout_base_branch(ws)
+            repo_url = ws.repo_url
+
+        try:
+            layout: WorktreeLayout = await self._git.ensure_worktree(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=checkout_base,
+                new_branch=branch_name,
+            )
+            return layout
+        except GitOperationError as exc:
+            if exc.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED":
+                raise
+            raise GitOperationError(
+                operation="hosted_monitor.ensure_worktree",
+                returncode=exc.returncode,
+                stdout=exc.stdout,
+                stderr=(
+                    "hosted monitor checkout restore failed "
+                    f"(underlying={exc.reason_code}): {exc.stderr or exc.stdout}"
+                ),
+                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
+            ) from exc
+
+    async def _load_and_claim(
+        self: Any, session: AsyncSession, workspace_id: str
+    ) -> Workspace | None:
+        """Transition requested -> provisioning. Returns the loaded workspace or None.
+
+        Returns None (rather than raising) if the workspace isn't in ``requested`` —
+        another worker may have already claimed it. This makes the provisioner safe
+        to call at-least-once from the poll loop. The claim is a conditional
+        ``requested`` -> ``provisioning`` transition, so concurrent workers cannot
+        both commit it.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="WORKER_CLAIMED",
+        )
+        if ws is not None:
+            await session.commit()
+            return ws
+
+        current = await repo.get(workspace_id)
+        if current is None:
+            _log.warning("provisioner.skip_unknown", workspace_id=workspace_id)
+            return None
+        _log.info(
+            "provisioner.skip_not_requested",
+            workspace_id=workspace_id,
+            status=current.status,
+        )
+        return None

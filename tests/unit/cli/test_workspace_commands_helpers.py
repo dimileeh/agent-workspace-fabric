@@ -905,3 +905,113 @@ def test_guide_body_includes_blocked_resume_fields_when_set(
     assert body["grants"] == ["pyproject.toml", "src/awf"]
     assert body["approve_policy_downgrade"] is True
     assert body["operator"] == "op@example.com"
+
+
+def test_workspace_create_forwards_separate_provider_and_experimental_flag(monkeypatch):
+    captured = {}
+
+    def call(_method, _path, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(409, json={"error_code": "PROVIDER_READINESS_PRECHECK_FAILED"})
+
+    monkeypatch.setattr(workspace_commands, "_call", call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        workspace_commands.workspace_app,
+        [
+            "create",
+            "--repo",
+            "https://github.com/example/project",
+            "--title",
+            "task",
+            "--prompt",
+            "fix",
+            "--provider",
+            "ollama",
+            "--model",
+            "coder",
+            "--allow-unverified-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["task"]["provider"] == "ollama"
+    assert captured["json"]["task"]["model"] == "coder"
+    assert captured["json"]["preflight"]["allow_unverified_model"] is True
+
+
+def test_workspace_create_forwards_the_managed_provider_budget(monkeypatch):
+    captured = {}
+
+    def call(_method, _path, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(202, json={})
+
+    monkeypatch.setattr(workspace_commands, "_call", call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+    from typer.testing import CliRunner
+
+    base = ["create", "--repo", "https://github.com/example/project", "--title", "t"]
+    result = CliRunner().invoke(
+        workspace_commands.workspace_app,
+        [*base, "--prompt", "fix", "--provider", "openrouter", "--model", "m/x"]
+        + ["--provider-budget-usd", "2.5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["task"]["provider_budget_usd"] == 2.5
+    captured.clear()
+    result = CliRunner().invoke(workspace_commands.workspace_app, [*base, "--prompt", "fix"])
+    assert result.exit_code == 0, result.output
+    assert "provider_budget_usd" not in captured["json"]["task"]
+
+
+def test_provider_spend_line_formats_exact_spend():
+    from awf.cli.workspace_commands import format_provider_spend_line
+
+    spend = {
+        "status": "available",
+        "spend_usd": 1.25,
+        "budget_usd": 4.0,
+        "remaining_usd": 2.75,
+        "key_count": 2,
+    }
+    assert format_provider_spend_line({"provider_spend": spend}) == (
+        "Exact provider spend: $1.25 of $4.00 (remaining $2.75, 2 keys)"
+    )
+    assert format_provider_spend_line(
+        {"provider_spend": {"status": "unavailable", "reason": "provider_spend_not_loaded"}}
+    ) == ("Exact provider spend: unavailable (provider_spend_not_loaded)")
+    assert format_provider_spend_line({"provider_spend": None}) is None
+    assert format_provider_spend_line({}) is None
+    assert format_provider_spend_line("not-a-mapping") is None
+
+
+def test_pretty_show_and_list_echo_the_provider_spend_line(monkeypatch):
+    from typer.testing import CliRunner
+
+    spend = {
+        "status": "available",
+        "spend_usd": 0.5,
+        "budget_usd": 1.0,
+        "remaining_usd": 0.5,
+        "key_count": 1,
+    }
+    row = {"id": "ws_1", "provider_spend": spend}
+
+    def call(_method, path, **_kwargs):
+        return httpx.Response(
+            200,
+            json=[row, {"id": "ws_2", "provider_spend": None}] if path == "/v1/workspaces" else row,
+            request=httpx.Request("GET", "http://awf" + path),
+        )
+
+    monkeypatch.setattr(workspace_commands, "_call", call)
+    shown = CliRunner().invoke(
+        workspace_commands.workspace_app, ["show", "ws_1", "--format", "pretty"]
+    )
+    listed = CliRunner().invoke(workspace_commands.workspace_app, ["list", "--format", "pretty"])
+
+    assert "Exact provider spend: $0.50 of $1.00 (remaining $0.50, 1 keys)" in shown.output
+    assert "ws_1 exact provider spend: $0.50 of $1.00" in listed.output
+    assert "ws_2 exact provider spend" not in listed.output

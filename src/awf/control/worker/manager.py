@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
 from awf.common.workspace_scope import WorkspaceScope
-from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
@@ -42,6 +41,7 @@ from awf.control.worker.constants import (
     ORDERED_READY_EXECUTION_REASON,
     ORDERED_RECOVERING_RESUME_REASON,
     ORDERED_REQUESTED_PROVISIONING_REASON,
+    RESUME_DISPATCH_PAGE_LIMIT,
 )
 from awf.control.worker.logging import _log
 from awf.control.worker.mixins import WorkerDelegatesMixin  # noqa: E402
@@ -50,6 +50,7 @@ from awf.control.worker.protocols import (
     ProvisionerProtocol,
     RuntimeCleanerProtocol,
     RuntimeInspectorProtocol,
+    WorkSlotProcessProbe,
     WorkspaceExecutorProtocol,
 )
 from awf.control.worker.resource_broker import (
@@ -60,6 +61,7 @@ from awf.control.worker.types import (
     _ExecutionTaskKind,
     _RequestedCapacityQueueSignature,
 )
+from awf.control.worker.work_slot_scope import InvocationWorkSlot, WorkSlotWakeups
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkerHeartbeatRepository, WorkspaceRepository
 from awf.db.resilience import (
@@ -88,6 +90,8 @@ _WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS = 60 * 60
 class ControlWorker(WorkerDelegatesMixin):
     """Reads pending work from the DB and dispatches it to runtime handlers."""
 
+    execution_contract_version = 3  # MANAGED_PROVIDER_KEY_WORKER_VERSION
+
     def __init__(
         self: Any,
         *,
@@ -101,9 +105,12 @@ class ControlWorker(WorkerDelegatesMixin):
         classified_orphan_reaper: Callable[..., Awaitable[OrphanReapResult]] | None = None,
         claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
         terminal_gc_reaper: Callable[..., Awaitable[dict[str, object]]] | None = None,
+        provider_key_reconciler: Callable[[], Awaitable[dict[str, object]]] | None = None,
+        provider_key_finalizer: Callable[[str], Awaitable[dict[str, int]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         admission_check: Callable[[], Awaitable[bool]] | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        work_slot_probe: WorkSlotProcessProbe | None = None,
         config: WorkerConfig,
     ) -> None:
         """Wire dependencies and initialize claim-tracking, dispatch, and cooldown state."""
@@ -128,6 +135,12 @@ class ControlWorker(WorkerDelegatesMixin):
         # ``/v1/service/gc`` path skips every auth dir; this closure (built in
         # ``service/worker.py``) drives the real per-workspace reclaim.
         self._terminal_gc_reaper = terminal_gc_reaper
+        # Managed OpenRouter keys (wired only when a management key is configured):
+        # a bounded periodic reconcile of ``awf-*`` keys and terminal finalization.
+        self._provider_key_reconciler = provider_key_reconciler
+        self._provider_key_finalizer = provider_key_finalizer
+        self._next_provider_key_reconcile_at = 0.0
+        self._provider_key_reconcile_task: asyncio.Task[None] | None = None
         # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
         # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
         # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
@@ -143,6 +156,17 @@ class ControlWorker(WorkerDelegatesMixin):
         # populates this map, so its refresh/release stay epoch-unguarded.
         self._execution_claim_epochs: dict[str, int] = {}
         self._consecutive_saturated_cycles: int = 0
+        self._consecutive_work_slot_waiting_cycles: int = 0
+        # Work-slot leases (slot-release): per-task scopes, the in-process release
+        # event waiters wake on, and the restart/fail-closed state. ``None``
+        # probe means no runtime can be queried, so nothing is adoptable.
+        self._work_slot_probe = work_slot_probe
+        self._work_slot_wakeups = WorkSlotWakeups()
+        self._work_slot_scopes: dict[str, InvocationWorkSlot] = {}
+        self._work_slot_startup_checked = False
+        self._work_slot_admission_blocked = False
+        self._next_work_slot_startup_check_at = 0.0
+        self._next_work_slot_reconcile_at = 0.0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
         # Workspaces whose two-phase monitor handoff succeeded but the remonitor
         # operation finalize write is still pending (see ``_safely_resume_pr_monitor``).
@@ -179,29 +203,21 @@ class ControlWorker(WorkerDelegatesMixin):
         self._stopped.set()
 
     async def _requested_provision_slots(self: Any) -> int:
+        """Requested claims this cycle: provision limit capped by free work slots.
+
+        Waiting monitors and blocked/recovering workspaces hold no work-slot
+        lease, so they no longer starve new work (slot-release). Provision-only
+        workers (no executor) take no leases.
+        """
         provision_limit = int(max(0, self._config.max_concurrent_provisions))
         if provision_limit <= 0:
             return 0
         if self._executor is None:
             return provision_limit
-        task_available = int(self._available_execution_slots())
-        if task_available <= 0:
+        if not self._can_dispatch_execution_when_slot_available():
             return 0
-        row_available = await self._requested_admission_row_slots()
-        return int(min(provision_limit, task_available, row_available))
-
-    async def _requested_admission_row_slots(self: Any) -> int:
-        async def _operation(session: AsyncSession) -> int:
-            return await _requested_admission_row_slots(
-                session,
-                config=self._config,
-            )
-
-        return await run_db_operation_with_retry(
-            self._session_factory,
-            _operation,
-            on_retry=self._log_transient_db_retry,
-        )
+        capacity = await self._new_work_slot_capacity(reserve_leaseless_ready=True)
+        return int(min(provision_limit, capacity))
 
     async def run_once(self: Any) -> int:
         """List + dispatch requested provisioning and workspace runtime tasks.
@@ -214,6 +230,9 @@ class ControlWorker(WorkerDelegatesMixin):
             return 0
         await self._record_heartbeat_safely()
         await self._prune_stale_heartbeats_safely()
+        # Before any dispatch: adopt or release leases left by dead workers, or
+        # fail closed when the runtime cannot be queried (slot-release).
+        await self._ensure_work_slot_startup_check()
 
         dispatched_ids: set[str] = set()
         execution_dispatched_ids: set[str] = set()
@@ -235,6 +254,8 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_reap_classified_orphans()
         await self._maybe_reap_superseded_claude_bases()
         await self._maybe_reap_terminal_workspace_gc()
+        await self._maybe_reconcile_work_slot_leases()
+        await self._maybe_reconcile_openrouter_keys()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery
@@ -280,178 +301,207 @@ class ControlWorker(WorkerDelegatesMixin):
             await asyncio.gather(*provision_tasks, return_exceptions=False)
             dispatched_ids.update(requested_ids)
 
-        if self._executor is not None:
-            execution_slots = self._available_execution_slots()
-            if execution_slots > 0:
-                active_execution_ids = set(self._execution_tasks)
-                await self._record_monitor_recovery_deferred_active_execution_claims(
-                    limit=execution_slots,
-                    exclude_ids=active_execution_ids,
-                )
-                monitoring_ids = await self._list_monitoring_pr(
-                    limit=execution_slots,
-                    exclude_ids=active_execution_ids,
-                )
-                monitoring_ids = await self._filter_current_status(
-                    monitoring_ids,
-                    expected=WorkspaceStatus.monitoring_pr,
-                    action="resume_pr_monitor",
-                )
-                monitoring_ids = await self._claim_monitoring_pr_ids(
-                    monitoring_ids,
-                    limit=execution_slots,
-                )
-                monitor_dispatch_ids = self._dispatchable_execution_ids(
-                    monitoring_ids,
-                    limit=execution_slots,
+        if self._executor is not None and self._can_dispatch_execution_when_slot_available():
+            # Monitor / blocked / recovering resumes start lease-less and wait for
+            # a work slot only when they reach an agent/validation hook (strict
+            # FIFO, ahead of new work), so pure waiting never occupies a slot and
+            # their dispatch is bounded only by per-workspace dedup, one listing
+            # page per cycle (slot-release).
+            resume_page = RESUME_DISPATCH_PAGE_LIMIT
+            active_execution_ids = set(self._execution_tasks)
+            await self._record_monitor_recovery_deferred_active_execution_claims(
+                limit=resume_page,
+                exclude_ids=active_execution_ids,
+            )
+            monitoring_ids = await self._list_monitoring_pr(
+                limit=resume_page,
+                exclude_ids=active_execution_ids,
+            )
+            monitoring_ids = await self._filter_current_status(
+                monitoring_ids,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_pr_monitor",
+            )
+            monitoring_ids = await self._claim_monitoring_pr_ids(
+                monitoring_ids,
+                limit=resume_page,
+            )
+            monitor_dispatch_ids = self._dispatchable_execution_ids(
+                monitoring_ids,
+                limit=resume_page,
+            )
+            await self._record_ordered_decisions(
+                monitor_dispatch_ids,
+                reason_code=ORDERED_MONITOR_RESUME_REASON,
+            )
+            monitor_dispatched = self._dispatch_monitor_resumes(
+                monitor_dispatch_ids,
+                limit=resume_page,
+            )
+            dispatched_ids.update(monitor_dispatched)
+            execution_dispatched_ids.update(monitor_dispatched)
+
+            # Resume pre-PR ``blocked`` workspaces an operator has cleared
+            # (directive armed or active-epoch grant recorded) before fresh ready
+            # work — their hooks queue for a slot ahead of brand-new work. The
+            # repository query already excludes blocked workspaces still awaiting
+            # an operator decision.
+            blocked_ids = await self._list_resumable_blocked(
+                limit=resume_page,
+                exclude_ids=set(self._execution_tasks),
+            )
+            blocked_ids = await self._filter_current_status(
+                blocked_ids,
+                expected=WorkspaceStatus.blocked,
+                action="resume_blocked_execution",
+            )
+            claimed_blocked_ids = await self._claim_blocked_resume_ids(
+                blocked_ids,
+                limit=resume_page,
+            )
+            # The claim CAS above already committed ``blocked -> running`` and
+            # stamped the execution claim. If the fallible ordered-decision
+            # write (or anything else) aborts before a resume task is
+            # dispatched, the claimed-but-undispatched rows would be stranded
+            # in ``running`` with the operator hint/grants still pending, where
+            # stale-active recovery FAILS them as abandoned executions instead
+            # of preserving the paused operator block. Restore any such row to
+            # ``blocked`` and release its claim so the next cycle resumes it.
+            blocked_dispatched: set[str] = set()
+            try:
+                blocked_dispatch_ids = self._dispatchable_execution_ids(
+                    claimed_blocked_ids,
+                    limit=resume_page,
                 )
                 await self._record_ordered_decisions(
-                    monitor_dispatch_ids,
-                    reason_code=ORDERED_MONITOR_RESUME_REASON,
+                    blocked_dispatch_ids,
+                    reason_code=ORDERED_BLOCKED_RESUME_REASON,
                 )
-                monitor_dispatched = self._dispatch_monitor_resumes(
-                    monitor_dispatch_ids,
-                    limit=execution_slots,
+                blocked_dispatched = self._dispatch_blocked_resumes(
+                    blocked_dispatch_ids,
+                    limit=resume_page,
                 )
-                dispatched_ids.update(monitor_dispatched)
-                execution_dispatched_ids.update(monitor_dispatched)
+            finally:
+                for workspace_id in claimed_blocked_ids:
+                    if workspace_id in blocked_dispatched:
+                        continue
+                    await self._restore_blocked_resume_claim(
+                        workspace_id,
+                        reason_code=_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
+                    )
+                    await self._release_execution_claim(workspace_id)
+            dispatched_ids.update(blocked_dispatched)
+            execution_dispatched_ids.update(blocked_dispatched)
 
-            execution_slots = self._available_execution_slots()
-            if execution_slots > 0:
-                # Resume pre-PR ``blocked`` workspaces an operator has cleared
-                # (directive armed or active-epoch grant recorded) before fresh
-                # ready work — in-flight paused executions take priority over
-                # starting brand-new ones. The repository query already excludes
-                # blocked workspaces still awaiting an operator decision.
-                blocked_ids = await self._list_resumable_blocked(
-                    limit=execution_slots,
-                    exclude_ids=set(self._execution_tasks),
+            # Resume ``recovering`` workspaces whose provider cooldown has
+            # elapsed (#612), in place on their warm stack. Like the blocked pass
+            # their hooks queue ahead of fresh ready work. The repository query
+            # already excludes rows still inside the cooldown.
+            recovering_ids = await self._list_resumable_recovering(
+                now=datetime.now(UTC),
+                limit=resume_page,
+                exclude_ids=set(self._execution_tasks),
+            )
+            recovering_ids = await self._filter_current_status(
+                recovering_ids,
+                expected=WorkspaceStatus.recovering,
+                action="resume_recovering_execution",
+            )
+            claimed_recovering_ids = await self._claim_recovering_resume_ids(
+                recovering_ids,
+                limit=resume_page,
+            )
+            # The claim CAS already committed ``recovering -> running`` and
+            # stamped the execution claim. If dispatch is never reached (a
+            # failed ordered-decision write, etc.) the claimed-but-undispatched
+            # rows would be stranded in ``running``, where stale-active recovery
+            # FAILS them instead of preserving the auto-retry pause. Restore any
+            # such row to ``recovering`` and release its claim.
+            recovering_dispatched: set[str] = set()
+            try:
+                recovering_dispatch_ids = self._dispatchable_execution_ids(
+                    claimed_recovering_ids,
+                    limit=resume_page,
                 )
-                blocked_ids = await self._filter_current_status(
-                    blocked_ids,
-                    expected=WorkspaceStatus.blocked,
-                    action="resume_blocked_execution",
+                await self._record_ordered_decisions(
+                    recovering_dispatch_ids,
+                    reason_code=ORDERED_RECOVERING_RESUME_REASON,
                 )
-                claimed_blocked_ids = await self._claim_blocked_resume_ids(
-                    blocked_ids,
-                    limit=execution_slots,
+                recovering_dispatched = self._dispatch_recovering_resumes(
+                    recovering_dispatch_ids,
+                    limit=resume_page,
                 )
-                # The claim CAS above already committed ``blocked -> running`` and
-                # stamped the execution claim. If the fallible ordered-decision
-                # write (or anything else) aborts before a resume task is
-                # dispatched, the claimed-but-undispatched rows would be stranded
-                # in ``running`` with the operator hint/grants still pending, where
-                # stale-active recovery FAILS them as abandoned executions instead
-                # of preserving the paused operator block. Restore any such row to
-                # ``blocked`` and release its claim so the next cycle resumes it.
-                blocked_dispatched: set[str] = set()
-                try:
-                    blocked_dispatch_ids = self._dispatchable_execution_ids(
-                        claimed_blocked_ids,
-                        limit=execution_slots,
+            finally:
+                for workspace_id in claimed_recovering_ids:
+                    if workspace_id in recovering_dispatched:
+                        continue
+                    await self._restore_recovering_resume_claim(
+                        workspace_id,
+                        reason_code=_RECOVERING_RESUME_DISPATCH_ABORTED_REASON_CODE,
                     )
-                    await self._record_ordered_decisions(
-                        blocked_dispatch_ids,
-                        reason_code=ORDERED_BLOCKED_RESUME_REASON,
-                    )
-                    blocked_dispatched = self._dispatch_blocked_resumes(
-                        blocked_dispatch_ids,
-                        limit=execution_slots,
-                    )
-                finally:
-                    for workspace_id in claimed_blocked_ids:
-                        if workspace_id in blocked_dispatched:
-                            continue
-                        await self._restore_blocked_resume_claim(
-                            workspace_id,
-                            reason_code=_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
-                        )
-                        await self._release_execution_claim(workspace_id)
-                dispatched_ids.update(blocked_dispatched)
-                execution_dispatched_ids.update(blocked_dispatched)
+                    await self._release_execution_claim(workspace_id)
+            dispatched_ids.update(recovering_dispatched)
+            execution_dispatched_ids.update(recovering_dispatched)
 
-            execution_slots = self._available_execution_slots()
-            if execution_slots > 0:
-                # Resume ``recovering`` workspaces whose provider cooldown has
-                # elapsed (#612), in place on their warm stack. Like the blocked
-                # pass this takes priority over fresh ready work — an in-flight
-                # auto-retry keeps its slot rather than yielding to a new run. The
-                # repository query already excludes rows still inside the cooldown.
-                recovering_ids = await self._list_resumable_recovering(
-                    now=datetime.now(UTC),
-                    limit=execution_slots,
-                    exclude_ids=set(self._execution_tasks),
-                )
-                recovering_ids = await self._filter_current_status(
-                    recovering_ids,
-                    expected=WorkspaceStatus.recovering,
-                    action="resume_recovering_execution",
-                )
-                claimed_recovering_ids = await self._claim_recovering_resume_ids(
-                    recovering_ids,
-                    limit=execution_slots,
-                )
-                # The claim CAS already committed ``recovering -> running`` and
-                # stamped the execution claim. If dispatch is never reached (a
-                # failed ordered-decision write, etc.) the claimed-but-undispatched
-                # rows would be stranded in ``running``, where stale-active recovery
-                # FAILS them instead of preserving the auto-retry pause. Restore any
-                # such row to ``recovering`` and release its claim.
-                recovering_dispatched: set[str] = set()
-                try:
-                    recovering_dispatch_ids = self._dispatchable_execution_ids(
-                        claimed_recovering_ids,
-                        limit=execution_slots,
-                    )
-                    await self._record_ordered_decisions(
-                        recovering_dispatch_ids,
-                        reason_code=ORDERED_RECOVERING_RESUME_REASON,
-                    )
-                    recovering_dispatched = self._dispatch_recovering_resumes(
-                        recovering_dispatch_ids,
-                        limit=execution_slots,
-                    )
-                finally:
-                    for workspace_id in claimed_recovering_ids:
-                        if workspace_id in recovering_dispatched:
-                            continue
-                        await self._restore_recovering_resume_claim(
-                            workspace_id,
-                            reason_code=_RECOVERING_RESUME_DISPATCH_ABORTED_REASON_CODE,
-                        )
-                        await self._release_execution_claim(workspace_id)
-                dispatched_ids.update(recovering_dispatched)
-                execution_dispatched_ids.update(recovering_dispatched)
-
-            execution_slots = self._available_execution_slots()
-            if execution_slots > 0:
-                ready_ids = await self._list_ready(
-                    limit=execution_slots,
-                    exclude_ids=set(self._execution_tasks),
-                )
+            # READY dispatch stays bounded by work slots: a row is dispatched only
+            # once it holds a lease — the claim lease its provisioning parked
+            # (continued first) or a fresh ``new`` admission, which never jumps a
+            # live reacquire waiter. A refused row (its peak does not fit, or
+            # another worker holds its lease) must not hide feasible rows behind
+            # it: while refusals leave slots free, the next unseen READY page is
+            # admitted too, so the listing limit bounds admissions, not attempts.
+            # Each page is dispatched before the refill read, so a failed read
+            # never strands leases already granted.
+            parked_ready_ids = await self._list_parked_ready_work_slot_ids(
+                exclude_ids=set(self._execution_tasks),
+            )
+            ready_seen_ids = set(self._execution_tasks) | set(parked_ready_ids)
+            listed_ready_ids = await self._list_ready(
+                limit=self._config.max_concurrent_executions,
+                exclude_ids=set(ready_seen_ids),
+            )
+            ready_page_ids = list(dict.fromkeys([*parked_ready_ids, *listed_ready_ids]))
+            while ready_page_ids:
+                ready_seen_ids.update(ready_page_ids)
                 ready_ids = await self._filter_current_status(
-                    ready_ids,
+                    ready_page_ids,
                     expected=WorkspaceStatus.ready,
                     action="execute",
                 )
-                ready_dispatch_ids = self._dispatchable_execution_ids(
+                ready_candidate_ids = self._dispatchable_execution_ids(
                     ready_ids,
-                    limit=execution_slots,
+                    limit=len(ready_ids),
                 )
+                ready_leases = await self._claim_ready_work_slots(ready_candidate_ids)
+                ready_dispatch_ids = [
+                    workspace_id
+                    for workspace_id in ready_candidate_ids
+                    if workspace_id in ready_leases
+                ]
                 await self._record_ordered_decisions(
                     ready_dispatch_ids,
                     reason_code=ORDERED_READY_EXECUTION_REASON,
                 )
                 ready_dispatched = self._dispatch_ready_executions(
                     ready_dispatch_ids,
-                    limit=execution_slots,
+                    limit=len(ready_dispatch_ids),
+                    leases=ready_leases,
                 )
                 dispatched_ids.update(ready_dispatched)
                 execution_dispatched_ids.update(ready_dispatched)
+                if len(ready_dispatch_ids) == len(ready_candidate_ids):
+                    break
+                free_slots = await self._new_work_slot_capacity(reserve_leaseless_ready=False)
+                if free_slots <= 0:
+                    break
+                ready_page_ids = await self._list_ready(
+                    limit=free_slots,
+                    exclude_ids=set(ready_seen_ids),
+                )
 
-        # Saturation reflects execution slots only; provisioning dispatches must
-        # not mask a worker whose execution slots are wedged with stuck tasks.
-        self._update_execution_slot_saturation(dispatched=len(execution_dispatched_ids))
+        # Saturation reflects work slots only; provisioning dispatches must not
+        # mask a worker whose slots are wedged with stuck holders.
+        await self._update_work_slot_saturation(dispatched=len(execution_dispatched_ids))
         return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self: Any) -> None:
@@ -475,7 +525,7 @@ class ControlWorker(WorkerDelegatesMixin):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                await self._record_heartbeat_safely()
+                await self._keep_draining_worker_alive()
                 continue
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task in done:
@@ -488,13 +538,37 @@ class ControlWorker(WorkerDelegatesMixin):
                 if exc is not None:
                     raise exc
             if self._execution_tasks:
-                await self._record_heartbeat_safely()
+                await self._keep_draining_worker_alive()
+
+    async def _keep_draining_worker_alive(self: Any) -> None:
+        """Heartbeat and reconcile work-slot leases while ``once=True`` tasks drain.
+
+        ``run_once`` never runs again, yet a recovery retry left behind a
+        cleanup-unproven lease is granted only after the reconciler released
+        that row (slot-release). Both passes self-throttle to the heartbeat interval.
+        """
+        await self._record_heartbeat_safely()
+        await self._ensure_work_slot_startup_check()
+        await self._maybe_reconcile_work_slot_leases()
+
+    async def run_once_and_drain(self: Any) -> None:
+        """``once=True``: one ``run_once`` pass, then drain its execution tasks.
+
+        The heartbeat loop runs throughout, as under ``run_forever``: ``run_once``
+        awaits provisioning inline, and a stale heartbeat would let a peer's
+        reconciler free this worker's live provisioning lease (slot-release).
+        """
+        heartbeat_task = self._start_heartbeat_task()
+        try:
+            await self.run_once()
+            await self.wait_for_execution_tasks()
+            await self._stop_provider_key_reconcile(drain=True)
+        finally:
+            await self._stop_provider_key_reconcile()
+            await self._stop_heartbeat_task(heartbeat_task)
 
     async def run_forever(self: Any) -> None:
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(),
-            name=f"awf-worker-heartbeat-{self._worker_id}",
-        )
+        heartbeat_task = self._start_heartbeat_task()
         try:
             while not self._stopped.is_set():
                 try:
@@ -511,20 +585,30 @@ class ControlWorker(WorkerDelegatesMixin):
                             timeout=self._config.poll_interval_seconds,
                         )
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                _log.warning(
-                    "worker.heartbeat_task_failed",
-                    reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
-                    worker_id=self._worker_id,
-                    node_id=effective_worker_config_node_id(self._config),
-                    error_type=type(exc).__name__,
-                    error=redact_audit_text(str(exc))[:240],
-                )
+            await self._stop_provider_key_reconcile()
+            await self._stop_heartbeat_task(heartbeat_task)
+
+    def _start_heartbeat_task(self: Any) -> asyncio.Task[None]:
+        return asyncio.create_task(
+            self._heartbeat_loop(),
+            name=f"awf-worker-heartbeat-{self._worker_id}",
+        )
+
+    async def _stop_heartbeat_task(self: Any, heartbeat_task: asyncio.Task[None]) -> None:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            _log.warning(
+                "worker.heartbeat_task_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
 
     async def _heartbeat_loop(self: Any) -> None:
         interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)
@@ -564,6 +648,7 @@ class ControlWorker(WorkerDelegatesMixin):
                 node_id=effective_worker_config_node_id(self._config),
                 started_at=self._worker_started_at,
                 last_heartbeat_at=now,
+                execution_contract_version=self.execution_contract_version,
                 poll_interval_seconds=self._config.poll_interval_seconds,
             )
 

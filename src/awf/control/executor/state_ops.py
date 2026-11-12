@@ -56,6 +56,11 @@ from awf.control.operator_grants import (
     active_operator_grant_specs_in_session,
     consume_active_operator_grants_in_session,
 )
+from awf.control.provider_budget_park import (
+    PROVIDER_BUDGET_BLOCK_TYPE,
+    is_provider_park_reason,
+    park_for_provider_key,
+)
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -71,12 +76,14 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.planning import PLAN_CONFORMANCE_NEEDS_HUMAN
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 from awf.service.provider_recovery import (
+    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+    PROVIDER_RECOVERY_STATE_KEY,
     _policy_model,
     _record_provider_circuit_breaker,
     in_place_recovery_task_policy,
@@ -94,6 +101,117 @@ def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | 
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+async def _freeze_execution_defaults(self: Any, ws: Workspace) -> bool:
+    """Freeze authoritative executor defaults once, before any adapter is built."""
+    from copy import deepcopy
+
+    from awf.common.agent_execution import execution_from_policy
+    from awf.db.enums import AgentRuntime
+
+    if not (ws.task_policy or {}).get("agent_execution_defaults_pending"):
+        return True
+    async with self._session_factory() as session:
+        persisted = await session.scalar(
+            select(Workspace).where(Workspace.id == ws.id).with_for_update()
+        )
+        if (
+            persisted is None
+            or persisted.status != ws.status
+            or persisted.execution_claim_epoch != ws.execution_claim_epoch
+            or persisted.monitor_claimed_by != ws.monitor_claimed_by
+        ):
+            return False
+        policy = deepcopy(persisted.task_policy)
+        if policy.pop("agent_execution_defaults_pending", False):
+            for target in [policy, *policy.get("provider_recovery", {}).get("fallbacks", [])]:
+                selected = execution_from_policy(target)
+                if selected is None or selected.third_party:
+                    continue
+                defaults = self._defaults_for(AgentRuntime(selected.agent))
+                assert defaults is not None  # supported native runtimes have historical defaults
+                selected = selected.model_copy(
+                    update={
+                        "model": selected.model if selected.model_explicit else defaults.model,
+                        "effort": selected.effort if selected.effort_explicit else defaults.effort,
+                    }
+                )
+                if selected.agent == "opencode":
+                    from awf.adapters.opencode import opencode_provider_for_model
+
+                    provider = opencode_provider_for_model(selected.model)
+                    explicit_provider = target.get(
+                        "agent_provider" if target is policy else "provider"
+                    )
+                    if explicit_provider is not None and explicit_provider != provider:
+                        raise ValueError("AGENT_PROVIDER_UNSUPPORTED")
+                    selected = selected.model_copy(update={"provider": provider})
+                target["agent_execution"] = selected.model_dump(mode="json")
+            persisted.task_policy = policy
+            await WorkspaceRepository(session).advance_workspace_version(persisted)
+            await session.commit()
+        ws.task_policy = policy
+    return True
+
+
+async def _execution_circuit_allows_launch(self: Any, ws: Workspace) -> bool:
+    """Enforce the frozen circuit that pending defaults could not identify at dispatch."""
+    from awf.common.agent_execution import circuit_key
+
+    async with self._session_factory() as session:
+        current = await session.scalar(
+            select(Workspace)
+            .where(
+                Workspace.id == ws.id,
+                Workspace.status == WorkspaceStatus.running.value,
+                Workspace.execution_claim_epoch == ws.execution_claim_epoch,
+                Workspace.execution_claimed_by == ws.execution_claimed_by,
+                Workspace.monitor_claimed_by == ws.monitor_claimed_by,
+            )
+            .with_for_update()
+        )
+        if current is None or current.task_policy != ws.task_policy or current.agent != ws.agent:
+            return False
+        key = circuit_key(current.agent, current.task_policy, workspace_id=current.id)
+        if key is None:
+            return True
+        now = datetime.now(UTC)
+        breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
+            provider=key[0],
+            model=key[1],
+            connection_scope=key[2] if len(key) == 3 else "legacy",
+            now=now,
+        )
+        if breaker is None:
+            await session.commit()
+            return True
+        # No invocation failed: preserve all retry counters and fingerprints while
+        # using the existing cooldown/resume lifecycle to retain the warm workspace.
+        policy = dict(current.task_policy or {})
+        raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
+        state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+        state.update(
+            action="retry",
+            decision_reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            not_before=(breaker.cooldown_until or now).isoformat(),
+        )
+        policy[PROVIDER_RECOVERY_STATE_KEY] = state
+        repo = WorkspaceRepository(session)
+        await repo.transition(
+            current,
+            to=WorkspaceStatus.recovering,
+            reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            payload={
+                "provider": key[0],
+                "model": key[1],
+                "connection_scope": key[2] if len(key) == 3 else "legacy",
+                "not_before": state["not_before"],
+            },
+        )
+        current.task_policy = policy
+        await session.commit()
+        return False
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
@@ -419,14 +537,31 @@ async def _mark_failed(
     details: Mapping[str, Any] | None = None,
     salvage: Mapping[str, Any] | None = None,
     monitor_owner_id: str | None = None,
+    execution_owner_id: str | None = None,
 ) -> None:
     """Mark the workspace failed when still in ``from_status``.
 
     ``monitor_owner_id`` optionally fences the transition on
     ``monitor_claimed_by`` so a superseded PR-monitor recovery cannot fail the
     row underneath a replacement claimant that kept ``monitoring_pr``
-    (PRRT_kwDOSJAM6s6dNBTV).
+    (PRRT_kwDOSJAM6s6dNBTV). ``execution_owner_id`` likewise fences both the
+    provider-key park and the failure CAS on ``execution_claimed_by`` so a
+    superseded executor cannot park or fail a replacement claimant's row
+    (PRRT_kwDOSJAM6s615vfG).
     """
+    # A workspace's own managed-key budget/key failure parks for a human; it never
+    # fails, retries blindly or falls back (every agent call site funnels here).
+    if is_provider_park_reason(reason_code) and await park_for_provider_key(
+        self,
+        workspace_id=workspace_id,
+        from_status=from_status,
+        reason_code=str(reason_code),
+        message=message,
+        details=details,
+        monitor_owner_id=monitor_owner_id,
+        execution_owner_id=execution_owner_id,
+    ):
+        return
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         final_reason_code = reason_code or failure_reason.value.upper()
@@ -446,6 +581,8 @@ async def _mark_failed(
         extra_conditions: tuple[Any, ...] = ()
         if monitor_owner_id is not None:
             extra_conditions = (Workspace.monitor_claimed_by == monitor_owner_id,)
+        if execution_owner_id is not None:
+            extra_conditions += (Workspace.execution_claimed_by == execution_owner_id,)
         ws = await repo.transition_if_current(
             workspace_id,
             from_status=from_status,
@@ -1195,6 +1332,8 @@ async def _begin_execution(
             purpose = (
                 "answer the paused plan-conformance decision"
                 if decision_block
+                else "continue after the operator raised the provider budget"
+                if ws.block_type == PROVIDER_BUDGET_BLOCK_TYPE
                 else "resolve the paused protected quality-gate violation"
             )
             ws.task_prompt = (

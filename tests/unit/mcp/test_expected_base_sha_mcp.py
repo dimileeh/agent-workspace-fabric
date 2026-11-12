@@ -71,3 +71,57 @@ async def test_mcp_create_persists_expected_base_sha_and_omits_it_when_absent(
 
     assert (await _policy(factory, pinned_payload))["expected_base_sha"] == _SHA
     assert "expected_base_sha" not in await _policy(factory, omitted_payload)
+
+
+async def test_mcp_provider_selection_reports_disabled_admission(factory):
+    mcp = build_mcp_server(service=WorkspaceService(factory))
+    result = await mcp.call_tool(
+        "awf_create_workspace",
+        {**_args(pin=None), "provider": "ollama", "model": "coder", "allow_unverified_model": True},
+    )
+    payload = result.structuredContent if isinstance(result, CallToolResult) else result[1]
+    assert payload["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+    assert (
+        payload["detail"]["provider_readiness_preflight"]["reason_code"]
+        == "THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED"
+    )
+
+
+async def test_mcp_create_forwards_the_managed_provider_budget(factory, monkeypatch):
+    from datetime import UTC, datetime
+
+    from awf.common.config import Settings
+    from awf.db.repositories import WorkerHeartbeatRepository
+
+    now = datetime.now(UTC)
+    async with factory() as session:
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="managed",
+            node_id="local",
+            started_at=now,
+            last_heartbeat_at=now,
+            poll_interval_seconds=5,
+            execution_contract_version=3,
+        )
+        await session.commit()
+    settings = Settings(
+        _env_file=None,
+        third_party_agent_providers_enabled=True,
+        openrouter_management_key="sk-or-mgmt-mcp-sentinel",
+    )
+    mcp = build_mcp_server(service=WorkspaceService(factory, settings=settings), settings=settings)
+    args = {
+        **_args(pin=None),
+        "provider": "openrouter",
+        "model": "m/x",
+        "allow_unverified_model": True,
+        "provider_budget_usd": 4.5,
+    }
+    args.pop("provider_readiness_override")
+    args.pop("provider_readiness_override_reason")
+
+    result = await mcp.call_tool("awf_create_workspace", args)
+
+    payload = result.structuredContent if isinstance(result, CallToolResult) else result[1]
+    budget = (await _policy(factory, payload))["provider_budget"]
+    assert budget["limit_usd"] == 4.5 and budget["source"] == "task"

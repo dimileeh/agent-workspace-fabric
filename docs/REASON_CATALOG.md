@@ -25,6 +25,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_non_fixed_with_mutation](#agent_non_fixed_with_mutation)
 
+### AGENT_PROVIDER_MODEL_UNVERIFIED
+**Problem:** No current exact coding-cycle proof matches the selected connection/runtime.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_provider_model_unverified](#agent_provider_model_unverified)
+
 ### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
 **Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
 **Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.
@@ -417,6 +424,62 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#duplicate_host_port](#duplicate_host_port)
 
+### EXECUTION_CONTRACT_UNSUPPORTED
+**Problem:** The stored execution snapshot has an unknown version or invalid identity.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_contract_unsupported](#execution_contract_unsupported)
+
+### EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED
+**Problem:** The declared fallback lacks a complete enforceable execution snapshot.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_fallback_contract_unsupported](#execution_fallback_contract_unsupported)
+
+### EXECUTION_NETWORK_PROBE_PENDING
+**Problem:** Actual runtime-network readiness is deferred until invocation.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_pending](#execution_network_probe_pending)
+
+### EXECUTION_NETWORK_PROBE_UNSUPPORTED
+**Problem:** Admission cannot verify the selected connection from the actual agent network.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_unsupported](#execution_network_probe_unsupported)
+
+### EXECUTION_PROFILE_BINDING_REQUIRED
+**Problem:** The selected provider connection must be bound before execution.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_profile_binding_required](#execution_profile_binding_required)
+
+### EXECUTION_PROFILE_CHANGED
+**Problem:** Provisioning retry found a repository profile or credential reference that differs from the frozen execution connection.
+**Likely Cause:** A profile changed after its connection was bound, or credential rehydration resolved a different OpenRouter key alias.
+**Operator Fix:** Restore the bound profile and credential reference before retrying, or create a new attempt with the intended profile. Keep third-party admission disabled until the provider release gates pass.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_profile_changed](#execution_profile_changed)
+
+### EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED
+**Problem:** The runtime cannot enforce the selected provider isolation contract.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_runtime_contract_unsupported](#execution_runtime_contract_unsupported)
+
+### EXECUTION_WORKER_CONTRACT_UNSUPPORTED
+**Problem:** A live queue consumer does not advertise the required execution worker capability (2 for expanded admission, 3 for managed OpenRouter keys).
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_worker_contract_unsupported](#execution_worker_contract_unsupported)
+
 ### FORGE_NOT_SUPPORTED
 **Problem:** AWF detected a code forge it does not support. GitHub and Bitbucket Cloud are implemented; any other forge fails fast.
 **Likely Cause:** The workspace repository URL resolved to an unsupported forge (a host other than github.com or bitbucket.org), or the workspace profile set an unsupported `forge:` value. AWF fails fast instead of mis-routing to GitHub.
@@ -507,6 +570,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Configure the hosted delegation service environment, then retry the adoption request.
 **Related Command:** `awf workspace adopt-pr --execution hosted`
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_delegation_not_configured](#hosted_delegation_not_configured)
+
+### HOSTED_OPTIONAL_SECRET_SKIPPED
+**Problem:** The hosted node skipped optional profile secrets it cannot provide; they were not materialized and no env var was set.
+**Likely Cause:** The profile declares `required: false` secrets (for example for local test containers) that only a local node can resolve.
+**Operator Fix:** No action needed unless the workspace needs these secrets; the event lists the skipped secret names.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_optional_secret_skipped](#hosted_optional_secret_skipped)
 
 ### HOSTED_REMOTE_HEAD_FETCH_FAILED
 **Problem:** AWF could not fetch the hosted PR head after a hosted repair completed.
@@ -725,6 +795,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_runtime_restart_exhausted](#monitor_runtime_restart_exhausted)
 
+### MONITOR_WAITING_FOR_WORK_SLOT
+**Problem:** A workspace is queued for a work slot before running an agent or validation (PR monitor action, blocked/recovering/paused resume).
+**Likely Cause:** Every work slot (`AWF_WORKER_MAX_CONCURRENT_EXECUTIONS`) is held by provisioning, an agent run or a validation run; or a held lease whose `awf-exec` cleanup was never proven is waiting for the reconciler; or the configured local capacity cannot fit the workspace's peak reservation.
+**Operator Fix:** No action is needed for a short wait: queued work is granted the next free slot in strict FIFO order, ahead of new requests. For a sustained wait, inspect `checks.work_slots` in `awf service status` for the slot holders, then raise `AWF_WORKER_MAX_CONCURRENT_EXECUTIONS` if the host has room, or cancel stuck work. An `unsatisfiable` waiter needs a larger `AWF_LOCAL_CAPACITY_*` limit or a smaller workspace resource reservation.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_waiting_for_work_slot](#monitor_waiting_for_work_slot)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.
@@ -773,6 +850,41 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** No repository change is needed — the forge is supported. Adopt the PR monitor explicitly with `awf workspace adopt-pr`, or remonitor once a forge-neutral open-PR resolver lands.
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
+
+### OPERATOR_PARK_DISPOSITION_APPLIED
+**Problem:** An operator guide's AWF-RULING line ruled a review thread parked on a refused correction attempt FIXED by a commit or a false positive, so AWF recorded that disposition, replied in the thread and resolved it.
+**Likely Cause:** The thread was parked needs_human with AGENT_NON_FIXED_WITH_MUTATION. A FIXED ruling is applied only when the cited commit is an ancestor of the PR head. No agent ran and the worktree was not changed.
+**Operator Fix:** No action is required. The event evidence names the thread, the ruling, the cited commit and the PR head it was checked against. The guide's other instructions were not run; send a follow-up guide for them.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_applied](#operator_park_disposition_applied)
+
+### OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED
+**Problem:** AWF applied an operator ruling and posted its disposition reply, but the forge refused to resolve the review thread, so the thread is parked for a human.
+**Likely Cause:** The resolve call failed after the disposition reply landed. AWF keeps the thread open rather than treat an unresolved thread as handled.
+**Operator Fix:** Resolve the thread on the forge, or send the same guide again: AWF reuses the posted reply and retries the resolve. Check the forge reason code in the audit event for permissions or availability problems.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_resolve_failed](#operator_park_disposition_resolve_failed)
+
+### OPERATOR_PARK_DISPOSITION_UNAPPLIED
+**Problem:** An operator guide ruled on a review thread parked on a refused correction attempt, but AWF could not apply the ruling, so every named thread stays parked.
+**Likely Cause:** A thread's AWF-RULING lines disagreed, or a ruled thread was not a mutation park, was no longer open, or had new replies; or the cited commit did not resolve or was not an ancestor of the PR head. AWF does not guess.
+**Operator Fix:** Read the detail in the notice or audit event. Then guide again with one line per parked thread, exactly 'AWF-RULING <thread_id> FIXED <sha>' (a 7-40 hex commit already on the PR head) or 'AWF-RULING <thread_id> FALSE_POSITIVE' (optionally followed by ': <reason>', never posted). Keywords are case-sensitive; any other line, prose included, is not a ruling. Guide without an AWF-RULING line to have the agent re-triage.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_unapplied](#operator_park_disposition_unapplied)
+
+### OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED
+**Problem:** An operator guide asked AWF to reject a preserved correction attempt and resolve its thread, but AWF could not apply it, so the review thread stays parked.
+**Likely Cause:** The ruling matched no parked preserved attempt, matched more than one, named a SHA that is not the thread's preserved attempt, or named a thread that is active, already closed, or has new replies since it was parked. AWF does not guess.
+**Operator Fix:** Read the detail in the notice or audit event. Then guide again, naming the outdated review thread id and the preserved attempt SHA from the park reason. If the thread is still active or gained new replies, guide without the reject wording so the agent re-triages it.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_preserved_attempt_disposition_unapplied](#operator_preserved_attempt_disposition_unapplied)
+
+### OPERATOR_PRESERVED_ATTEMPT_RETIRED
+**Problem:** An operator guide rejected a preserved correction attempt, so AWF retired it as the review thread's evidence and will reply on and resolve the outdated thread.
+**Likely Cause:** The thread was parked needs_human because a correction attempt AWF could not accept was preserved for human review. The guide said to reject that attempt and resolve the thread as obsolete. The preserved commit stays in the branch history.
+**Operator Fix:** No action is required. The next poll posts AWF's disposition reply in the thread and resolves it. The guide's other instructions were not run; send a follow-up guide for them.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_preserved_attempt_retired](#operator_preserved_attempt_retired)
 
 ### ORPHAN_RESOURCES_PRESENT
 **Problem:** Orphan AWF Docker resources were detected.
@@ -844,6 +956,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace guide <workspace_id> --directive '...'`
 **Docs Link:** [docs/REASON_CATALOG.md#pre_push_validation_infrastructure_failure_parked](#pre_push_validation_infrastructure_failure_parked)
 
+### PROTECTED_DECLARATION_MISMATCH
+**Problem:** A protected profile secret declaration does not match the hosted node's protected binding, so the workspace failed at provisioning.
+**Likely Cause:** An `agent`/`github` (or `provider: protected`) declaration uses the wrong provider, kind, mode, ref, or target.
+**Operator Fix:** Declare `agent`/`github` secrets as `provider: protected`, `kind: mount`, `mode: ro`, without `ref`, and with the bound target; then create a new workspace.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_declaration_mismatch](#protected_declaration_mismatch)
+
+### PROTECTED_DECLARATION_UNSUPPORTED
+**Problem:** The hosted node cannot provide a required profile secret, so the workspace failed at provisioning before any agent run.
+**Likely Cause:** The profile declares a required secret other than the protected `agent`/`github` mounts, which are the only secrets a hosted node provides.
+**Operator Fix:** Mark the named secret `required: false` if only local test containers use it, or remove it from the profile; then create a new workspace.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_declaration_unsupported](#protected_declaration_unsupported)
+
 ### PROTECTED_SCOPE_DIFF_UNAVAILABLE
 **Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.
 **Likely Cause:** The PR branch diff baseline could not be fetched because of a GitHub/network failure, a missing remote ref, or delayed ref replication.
@@ -858,12 +984,306 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
 
+### PROVIDER_ACCOUNT_CREDITS_EXHAUSTED
+**Problem:** The OpenRouter account balance ran out of credits while the workspace's managed key still had budget; the workspace is parked (blocked) for a human instead of failing.
+**Likely Cause:** The agent CLI's own error (the tail of its stderr) reported HTTP 402 / insufficient credits while the authoritative key read still showed remaining limit.
+**Operator Fix:** Top up the OpenRouter account (this is the account balance, not the workspace budget), then re-set the provider budget to resume where it stopped. AWF never retries blindly or falls back to another provider for this reason.
+**Related Command:** `awf workspace provider-budget <workspace_id> --usd <amount>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_account_credits_exhausted](#provider_account_credits_exhausted)
+
 ### PROVIDER_AUTH_FAILED
 **Problem:** A workspace agent or PR monitor could not run because the selected LLM provider authentication failed.
 **Likely Cause:** The provider token is expired, reused, missing inside the workspace runtime, or rejected by the provider CLI/API.
 **Operator Fix:** Refresh the provider credentials, restart or rebuild the AWF service/runtime if credentials are mounted into containers, then remonitor or reschedule the workspace.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
+
+### PROVIDER_BUDGET_EXHAUSTED
+**Problem:** The workspace's managed OpenRouter key reached its USD budget; the workspace is parked (blocked) for a human instead of failing.
+**Likely Cause:** The agent's OpenRouter calls returned HTTP 402 / limit reached, or the authoritative key read showed no remaining limit.
+**Operator Fix:** Check the exact provider spend, then raise the budget to resume where it stopped. AWF never retries blindly or falls back to another provider for this reason.
+**Related Command:** `awf workspace provider-budget <workspace_id> --usd <amount>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_exhausted](#provider_budget_exhausted)
+
+### PROVIDER_BUDGET_INVALID
+**Problem:** The requested provider budget is not a USD amount above the recorded spend.
+**Likely Cause:** The amount was zero, negative, non-numeric, too large or at/below the spend AWF already recorded.
+**Operator Fix:** Choose a budget greater than the workspace's exact provider spend and below 1,000,000 USD.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_invalid](#provider_budget_invalid)
+
+### PROVIDER_BUDGET_RAISED
+**Problem:** An operator set a new managed provider budget for the workspace.
+**Likely Cause:** `awf workspace provider-budget` (REST/MCP equivalent) updated the frozen budget and the live key's limit.
+**Operator Fix:** No action is needed; a provider-budget block resumes automatically.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_raised](#provider_budget_raised)
+
+### PROVIDER_BUDGET_UNSUPPORTED
+**Problem:** This workspace has no managed OpenRouter budget to set.
+**Likely Cause:** No management key was configured at creation, the selection is not OpenRouter, or the workspace is already terminal.
+**Operator Fix:** Provider budgets apply only to live workspaces whose OpenRouter selection uses an AWF-minted key; configure OPENROUTER_MANAGEMENT_KEY before creating them.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_budget_unsupported](#provider_budget_unsupported)
+
+### PROVIDER_DIAGNOSTIC_BOOTSTRAP_FAILED
+**Problem:** The isolated diagnostic runtime could not be provisioned.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_bootstrap_failed](#provider_diagnostic_bootstrap_failed)
+
+### PROVIDER_DIAGNOSTIC_CLEANUP_FAILED
+**Problem:** Diagnostic teardown failed; the owned fixture is retained.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_cleanup_failed](#provider_diagnostic_cleanup_failed)
+
+### PROVIDER_DIAGNOSTIC_CONTRACT_UNSUPPORTED
+**Problem:** The diagnostic version, fixture or frozen identity is unsupported.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_contract_unsupported](#provider_diagnostic_contract_unsupported)
+
+### PROVIDER_DIAGNOSTIC_EVIDENCE_MISSING
+**Problem:** Required typed tool evidence is missing, malformed or truncated; result is inconclusive.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_evidence_missing](#provider_diagnostic_evidence_missing)
+
+### PROVIDER_DIAGNOSTIC_EXECUTION_FAILED
+**Problem:** The one-shot diagnostic invocation failed; no replay is scheduled.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_execution_failed](#provider_diagnostic_execution_failed)
+
+### PROVIDER_DIAGNOSTIC_FIXTURE_FAILED
+**Problem:** The fixture does not satisfy the trusted nonce-dependent oracle.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_fixture_failed](#provider_diagnostic_fixture_failed)
+
+### PROVIDER_DIAGNOSTIC_HOSTED_UNSUPPORTED
+**Problem:** Hosted workers cannot enforce the diagnostic contract.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_hosted_unsupported](#provider_diagnostic_hosted_unsupported)
+
+### PROVIDER_DIAGNOSTIC_INTERRUPTED
+**Problem:** Worker ownership was lost; the diagnostic is inconclusive and cannot replay.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_interrupted](#provider_diagnostic_interrupted)
+
+### PROVIDER_DIAGNOSTIC_PASSED
+**Problem:** Ordered dependent CLI tool turns and independent fixture verification passed.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_passed](#provider_diagnostic_passed)
+
+### PROVIDER_DIAGNOSTIC_PROFILE_UNSUPPORTED
+**Problem:** The selected model sidecar depends on project resources or credentials.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_profile_unsupported](#provider_diagnostic_profile_unsupported)
+
+### PROVIDER_DIAGNOSTIC_PROTOCOL_PASSED
+**Problem:** The CLI protocol contains two completed dependent tool turns.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_protocol_passed](#provider_diagnostic_protocol_passed)
+
+### PROVIDER_DIAGNOSTIC_READY
+**Problem:** The isolated fixture workspace is ready.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_ready](#provider_diagnostic_ready)
+
+### PROVIDER_DIAGNOSTIC_REPLAY_FORBIDDEN
+**Problem:** This control could replay diagnostic work; create a new connection test instead.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_replay_forbidden](#provider_diagnostic_replay_forbidden)
+
+### PROVIDER_DIAGNOSTIC_RUNTIME_UNSUPPORTED
+**Problem:** The runtime lacks the immutable diagnostic fixture capability.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_runtime_unsupported](#provider_diagnostic_runtime_unsupported)
+
+### PROVIDER_DIAGNOSTIC_TIMEOUT
+**Problem:** The bounded diagnostic deadline expired.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_timeout](#provider_diagnostic_timeout)
+
+### PROVIDER_DIAGNOSTIC_VERIFYING
+**Problem:** AWF is independently verifying the fixed fixture.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_verifying](#provider_diagnostic_verifying)
+
+### PROVIDER_DIAGNOSTIC_WORKER_UNSUPPORTED
+**Problem:** All live queue consumers must advertise diagnostic worker capability 2.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_diagnostic_worker_unsupported](#provider_diagnostic_worker_unsupported)
+
+### PROVIDER_DISCOVERY_AVAILABLE
+**Problem:** A bounded provider catalog is available; capabilities are provider claims.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_available](#provider_discovery_available)
+
+### PROVIDER_DISCOVERY_NETWORK_UNSUPPORTED
+**Problem:** Catalog discovery cannot reproduce the selected sidecar network.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_network_unsupported](#provider_discovery_network_unsupported)
+
+### PROVIDER_DISCOVERY_RESPONSE_INVALID
+**Problem:** Catalog shape or response bounds are invalid.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_response_invalid](#provider_discovery_response_invalid)
+
+### PROVIDER_DISCOVERY_UNAVAILABLE
+**Problem:** Catalog discovery failed; manual model entry remains available.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_unavailable](#provider_discovery_unavailable)
+
+### PROVIDER_DISCOVERY_UNSUPPORTED
+**Problem:** This provider does not expose supported catalog discovery.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_discovery_unsupported](#provider_discovery_unsupported)
+
+### PROVIDER_MANAGED_KEYS_DOWNGRADE_UNSAFE
+**Problem:** The schema downgrade would drop recorded managed-key spend.
+**Likely Cause:** provider_managed_keys still has rows.
+**Operator Fix:** Keep the compatible code and schema; finalize and archive managed keys before an administrative downgrade.
+**Related Command:** `alembic current`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_keys_downgrade_unsafe](#provider_managed_keys_downgrade_unsafe)
+
+### PROVIDER_MANAGED_KEY_HOSTED_UNSUPPORTED
+**Problem:** Managed OpenRouter keys are not supported on hosted runtimes.
+**Likely Cause:** Hosted execution cannot receive per-invocation exec-time credentials.
+**Operator Fix:** Run managed OpenRouter workspaces on local Core, or create the hosted workspace without a management key configured.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_hosted_unsupported](#provider_managed_key_hosted_unsupported)
+
+### PROVIDER_MANAGED_KEY_NOT_FOUND
+**Problem:** OpenRouter no longer has the managed key AWF recorded.
+**Likely Cause:** The key was already deleted by AWF, the reconciler or an operator.
+**Operator Fix:** No action is needed; AWF treats the key as deleted.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_not_found](#provider_managed_key_not_found)
+
+### PROVIDER_MANAGED_KEY_ORPHAN_DELETED
+**Problem:** The reconciler deleted an AWF-minted OpenRouter key with no live binding.
+**Likely Cause:** A worker restart, crash or terminal transition left the key behind.
+**Operator Fix:** No action is needed; its usage was recorded before deletion.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_orphan_deleted](#provider_managed_key_orphan_deleted)
+
+### PROVIDER_MANAGED_KEY_PERSIST_FAILED
+**Problem:** AWF could not record a managed key update in the database.
+**Likely Cause:** A transient database error during a usage read or key release.
+**Operator Fix:** Check database health; the next finalize or reconcile pass records the usage.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_persist_failed](#provider_managed_key_persist_failed)
+
+### PROVIDER_MANAGED_KEY_RECONCILE_FAILED
+**Problem:** The periodic managed-key reconciliation or terminal finalization failed.
+**Likely Cause:** The OpenRouter management API or the database was unavailable during the sweep.
+**Operator Fix:** Check worker logs for the management reason code; the sweep retries on its next interval and never blocks other work.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_reconcile_failed](#provider_managed_key_reconcile_failed)
+
+### PROVIDER_MANAGED_KEY_UNAVAILABLE
+**Problem:** AWF could not mint a managed OpenRouter key; only this selection is parked.
+**Likely Cause:** The OpenRouter management API rejected or failed the key creation (auth, rate limit, outage), the key could not be recorded, or keys AWF could not finalize yet still hold the budget that spend leaves.
+**Operator Fix:** Inspect the management reason code (or provider_budget.reserved_usd) in the park event, fix the OpenRouter account or management key, then raise or re-set the budget to resume.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_managed_key_unavailable](#provider_managed_key_unavailable)
+
+### PROVIDER_MANAGEMENT_API_RATE_LIMITED
+**Problem:** The OpenRouter management API rate-limited AWF (HTTP 429).
+**Likely Cause:** Many concurrent key mints, reads or deletions.
+**Operator Fix:** Wait and retry; reduce concurrent managed workspaces if this persists.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_rate_limited](#provider_management_api_rate_limited)
+
+### PROVIDER_MANAGEMENT_API_REJECTED
+**Problem:** The OpenRouter management API rejected the request (HTTP 4xx).
+**Likely Cause:** An invalid limit, a conflicting key or an account restriction.
+**Operator Fix:** Inspect the operation and HTTP status; the request shape or account state is invalid.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_rejected](#provider_management_api_rejected)
+
+### PROVIDER_MANAGEMENT_API_RESPONSE_INVALID
+**Problem:** The OpenRouter management API returned an invalid or oversized response.
+**Likely Cause:** Bad JSON, an unexpected shape, a redirect or a response above 2 MB.
+**Operator Fix:** Retry later; report the endpoint behaviour if it persists.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_response_invalid](#provider_management_api_response_invalid)
+
+### PROVIDER_MANAGEMENT_API_UNAUTHORIZED
+**Problem:** OpenRouter rejected the management key (HTTP 401/403).
+**Likely Cause:** The management key expired, was revoked or lacks key-management permission.
+**Operator Fix:** Replace OPENROUTER_MANAGEMENT_KEY with a valid, unexpired management key.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_unauthorized](#provider_management_api_unauthorized)
+
+### PROVIDER_MANAGEMENT_API_UNAVAILABLE
+**Problem:** The OpenRouter management API was unreachable or failed (5xx, timeout).
+**Likely Cause:** An OpenRouter outage, network failure or the 10-second request bound.
+**Operator Fix:** Retry later; affected workspaces park and resume once a budget is re-set.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_api_unavailable](#provider_management_api_unavailable)
+
+### PROVIDER_MANAGEMENT_CREDENTIAL_FORBIDDEN
+**Problem:** A profile tried to reference the OpenRouter management key.
+**Likely Cause:** Workspace stacks must never receive the control-plane management key.
+**Operator Fix:** Remove OPENROUTER_MANAGEMENT_KEY references from runtime/service/companion environment values and env-secret declarations.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_credential_forbidden](#provider_management_credential_forbidden)
+
+### PROVIDER_MANAGEMENT_KEY_MISSING
+**Problem:** A managed OpenRouter workspace ran on an API/worker without a management key.
+**Likely Cause:** The management key was removed after the workspace froze a managed selection.
+**Operator Fix:** Set OPENROUTER_MANAGEMENT_KEY for the API and worker services and restart them; the workspace never falls back to the static OPENROUTER_API_KEY.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_management_key_missing](#provider_management_key_missing)
+
+### PROVIDER_SELECTION_INVALID
+**Problem:** The selected agent/provider/profile is invalid.
+**Likely Cause:** Discovery, coding evidence, runtime capability and endpoint health are separate observations.
+**Operator Fix:** Inspect the diagnostic workspace logs, operation result and selected connection. Keep ordinary admission disabled until all live gates pass. Manual catalog entry still follows ordinary admission policy.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_selection_invalid](#provider_selection_invalid)
 
 ### PROVIDER_SETUP_AUTH_INVALID
 **Problem:** AWF could not authenticate one provider during setup.
@@ -1144,6 +1564,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the listed workspaces before running cleanup or recovery.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#stranded_workspaces_present](#stranded_workspaces_present)
+
+### THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED
+**Problem:** Third-party Codex/Claude admission is disabled by default.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#third_party_agent_provider_admission_disabled](#third_party_agent_provider_admission_disabled)
 
 ### THREAD_DISPOSITION_EVIDENCE_MISSING
 **Problem:** AWF did not resolve a review thread because its FIXED disposition had no fix commit (or its DEFER had no tracking issue) to cite.

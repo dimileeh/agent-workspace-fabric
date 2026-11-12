@@ -359,7 +359,15 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
     python_test_jobs = [
         name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
     ]
-    assert python_test_jobs == ["python-coverage-shards"]
+    assert python_test_jobs == ["python-coverage-shards", "claude-cli-contract"]
+
+    # The pinned Claude CLI contract job is the only non-coverage pytest job: it runs
+    # exactly the real-CLI contract file (skipped in coverage shards) and never measures
+    # coverage, so it cannot become a second coverage gate.
+    contract_run = _step_run(_job(workflow, "claude-cli-contract"), "Run Claude CLI contract")
+    assert "tests/integration/runtime/test_claude_provider_runner_contract.py" in contract_run
+    assert contract_run.count("tests/") == 1
+    assert "--cov" not in _run_steps(_job(workflow, "claude-cli-contract"))
 
 
 @pytest.mark.unit
@@ -435,6 +443,7 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
         "lint-and-type",
         "python-full-coverage",
         "console",
+        "claude-cli-contract",
         "release-artifacts",
     }
 
@@ -534,6 +543,7 @@ _EXPECTED_CI_JOBS = frozenset(
         "python-coverage-shards",
         "python-full-coverage",
         "console",
+        "claude-cli-contract",
         "release-artifacts",
         "ci-required",
     }

@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -548,6 +549,10 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         events.append("repair")
         return False
 
+    # This isolated executor has no DB; admission is covered by test_executor_default_circuit.
+    monkeypatch.setattr(
+        executor_execution_flow, "_execution_circuit_allows_launch", AsyncMock(return_value=True)
+    )
     monkeypatch.setattr(executor_execution_flow, "get_adapter", fake_get_adapter)
     monkeypatch.setattr(
         executor_execution_flow,

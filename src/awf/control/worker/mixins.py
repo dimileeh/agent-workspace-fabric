@@ -8,8 +8,10 @@ from awf.control.worker import cleanup as _cleanup
 from awf.control.worker import cleanup_auth_overlay as _cleanup_auth_overlay
 from awf.control.worker import cleanup_service_gc as _cleanup_service_gc
 from awf.control.worker import dispatch_methods as _dispatch_methods
+from awf.control.worker import provider_keys as _provider_keys
 from awf.control.worker import recovery as _recovery
 from awf.control.worker import scheduler_methods as _scheduler_methods
+from awf.control.worker import work_slots as _work_slots
 
 
 class WorkerDelegatesMixin:
@@ -130,8 +132,6 @@ class WorkerDelegatesMixin:
         _cleanup_auth_overlay._append_terminal_auth_overlay_unmount_pending
     )
 
-    _draining_execution_task_count = _dispatch_methods._draining_execution_task_count
-    _available_execution_slots = _dispatch_methods._available_execution_slots
     _can_dispatch_execution_when_slot_available = (
         _dispatch_methods._can_dispatch_execution_when_slot_available
     )
@@ -156,7 +156,6 @@ class WorkerDelegatesMixin:
     _reconcile_stale_monitor_execution_tasks = (
         _dispatch_methods._reconcile_stale_monitor_execution_tasks
     )
-    _update_execution_slot_saturation = _dispatch_methods._update_execution_slot_saturation
     _safely_provision_claimed = _dispatch_methods._safely_provision_claimed
     _safely_execute = _dispatch_methods._safely_execute
     _safely_execute_claimed = _dispatch_methods._safely_execute_claimed
@@ -272,3 +271,26 @@ class WorkerDelegatesMixin:
     _record_ordered_decisions = _scheduler_methods._record_ordered_decisions
     _load_workspace_statuses = _scheduler_methods._load_workspace_statuses
     _filter_current_status = _scheduler_methods._filter_current_status
+
+    _work_slot_admission_open = _work_slots._work_slot_admission_open
+    _notify_work_slot_released = _work_slots._notify_work_slot_released
+    _new_invocation_work_slot = _work_slots._new_invocation_work_slot
+    _forget_work_slot_scope = _work_slots._forget_work_slot_scope
+    _work_slot_task_scope = _work_slots._work_slot_task_scope
+    _own_parked_work_slot_lease = _work_slots._own_parked_work_slot_lease
+    _start_provision_work_slot = _work_slots._start_provision_work_slot
+    _finish_provision_work_slot = _work_slots._finish_provision_work_slot
+    _new_work_slot_capacity = _work_slots._new_work_slot_capacity
+    _requested_claim_work_slot_refused = _work_slots._requested_claim_work_slot_refused
+    _list_parked_ready_work_slot_ids = _work_slots._list_parked_ready_work_slot_ids
+    _claim_ready_work_slots = _work_slots._claim_ready_work_slots
+    _ensure_work_slot_startup_check = _work_slots._ensure_work_slot_startup_check
+    _maybe_reconcile_work_slot_leases = _work_slots._maybe_reconcile_work_slot_leases
+    _maybe_reconcile_openrouter_keys = _provider_keys._maybe_reconcile_openrouter_keys
+    _finalize_terminal_provider_keys = _provider_keys._finalize_terminal_provider_keys
+    _stop_provider_key_reconcile = _provider_keys._stop_provider_key_reconcile
+    _load_work_slot_leases_for_reconcile = _work_slots._load_work_slot_leases_for_reconcile
+    _probe_work_slot_lease = _work_slots._probe_work_slot_lease
+    _apply_work_slot_reconcile_action = _work_slots._apply_work_slot_reconcile_action
+    _work_slot_snapshot = _work_slots._work_slot_snapshot
+    _update_work_slot_saturation = _work_slots._update_work_slot_saturation

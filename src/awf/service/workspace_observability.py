@@ -66,6 +66,11 @@ from awf.service.workspace_observability_types import (
     LifecycleStageStatus as LifecycleStageStatus,
 )
 from awf.service.workspace_observability_types import LlmUsageStatus as LlmUsageStatus
+from awf.service.workspace_provider_spend import (
+    apply_exact_spend,
+    provider_spend_payload,
+    provider_spend_scope,
+)
 
 InvalidWorkspaceOverviewCursorError = _overview_pagination.InvalidWorkspaceOverviewCursorError
 _WorkspaceOverviewCursor = _overview_pagination._WorkspaceOverviewCursor
@@ -163,8 +168,9 @@ async def list_workspace_overview_response(
     page_rows = rows[:limit]
     has_more = len(rows) > limit
     snapshots = await asyncio.to_thread(read_latest_usage_snapshots, [ws.id for ws in page_rows])
-    with prefetched_usage_snapshots(snapshots):
-        items = [_workspace_overview_item(ws) for ws in page_rows]
+    async with provider_spend_scope(session, [ws.id for ws in page_rows]):
+        with prefetched_usage_snapshots(snapshots):
+            items = [_workspace_overview_item(ws) for ws in page_rows]
     return WorkspaceOverviewListResponse(
         items=items,
         next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
@@ -187,8 +193,9 @@ async def batch_workspace_overview_response(
         workspace_id for workspace_id in workspace_ids if workspace_id not in by_id
     ]
     snapshots = await asyncio.to_thread(read_latest_usage_snapshots, found_ids)
-    with prefetched_usage_snapshots(snapshots):
-        items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
+    async with provider_spend_scope(session, found_ids):
+        with prefetched_usage_snapshots(snapshots):
+            items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
     return WorkspaceOverviewBatchResponse(
         items=items,
         missing_workspace_ids=missing_workspace_ids,
@@ -343,6 +350,9 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         task_class=ws.task_class,
         owned_paths=list(ws.owned_paths),
         agent=parse_agent_runtime(ws.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],
@@ -353,6 +363,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
+        provider_spend=observability["provider_spend"],
         pricing=_overview_pricing_metadata(ws),
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
@@ -412,6 +423,29 @@ def effective_agent_identity(
     agent: AgentRuntime | str,
     task_policy: Mapping[str, object] | None,
 ) -> AgentIdentity:
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(task_policy)
+    if selection is not None:
+        return AgentIdentity(
+            model=selection.model,
+            effort=selection.effort,
+            model_source="task_policy" if selection.model_explicit else "default",
+            effort_source=("task_policy" if selection.effort_explicit else "default")
+            if selection.effort is not None
+            else "unavailable",
+        )
+    if (
+        task_policy
+        and task_policy.get("agent_execution_profile_pending")
+        and task_policy.get("agent_provider") in {"ollama", "openrouter"}
+    ):
+        return AgentIdentity(
+            model=_nonblank_policy_string(task_policy, "agent_model"),
+            effort=None,
+            model_source="task_policy",
+            effort_source="unavailable",
+        )
     runtime = _coerce_agent_runtime(agent)
     # Live projections use current defaults; historical fills retired runtimes
     # (e.g. gemini) and must not override live Cursor's no-effort Auto default.
@@ -761,6 +795,18 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
     inner = pricing_stanza.get("pricing")
     if not isinstance(inner, dict):
         return None
+    from awf.common.agent_execution import execution_from_policy
+
+    try:
+        selection = execution_from_policy(getattr(workspace, "task_policy", None))
+    except ValueError:
+        return None
+    if (
+        selection is not None
+        and selection.third_party
+        and (inner.get("provider"), inner.get("model")) != (selection.provider, selection.model)
+    ):
+        return None
     try:
         return PricingMetadata.model_validate(inner)
     except Exception:
@@ -823,9 +869,32 @@ def compute_cost_estimate(
 
 
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
+    from awf.common.agent_execution import execution_from_policy, provider_for_agent_model
+
+    try:
+        selection = execution_from_policy(workspace.task_policy)
+    except ValueError:
+        # Report an explicit contract error, without echoing untrusted snapshot
+        # data or inventing a native identity for this row.
+        return {
+            "agent_provider": None,
+            "agent_execution": {"reason_code": "EXECUTION_CONTRACT_UNSUPPORTED"},
+            "agent_connection_scope": None,
+            "agent_model": None,
+            "agent_effort": None,
+            "cursor_auto_mode": None,
+            "agent_model_source": "unavailable",
+            "agent_effort_source": "unavailable",
+        }
     identity = effective_agent_identity_for_workspace(workspace)
     cursor_auto_mode = cursor_auto_mode_from_task_policy(workspace.task_policy)
     return {
+        "agent_provider": selection.provider
+        if selection
+        else (workspace.task_policy or {}).get("agent_provider")
+        or provider_for_agent_model(workspace.agent, identity.model),
+        "agent_execution": selection.model_dump(mode="json") if selection else None,
+        "agent_connection_scope": selection.connection_scope(workspace.id) if selection else None,
         "agent_model": identity.model,
         "agent_effort": identity.effort,
         "cursor_auto_mode": cursor_auto_mode.value if cursor_auto_mode is not None else None,
@@ -1027,6 +1096,7 @@ def workspace_observability_payload(
     now: datetime | None = None,
     ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> WorkspaceObservabilityPayload:
+    spend = provider_spend_payload(workspace)
     return {
         **agent_identity_payload(workspace),
         "lifecycle": lifecycle_payload(
@@ -1034,7 +1104,8 @@ def workspace_observability_payload(
             now=now,
             ordered_events=ordered_events,
         ),
-        "llm_usage": usage_payload(workspace),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend, workspace.task_policy),
+        "provider_spend": spend,
         "recovery": recovery_payload(
             workspace,
             ordered_events=ordered_events,
@@ -1043,9 +1114,11 @@ def workspace_observability_payload(
 
 
 def workspace_identity_usage_payload(workspace: Workspace) -> WorkspaceIdentityUsagePayload:
+    spend = provider_spend_payload(workspace)
     return {
         **agent_identity_payload(workspace),
-        "llm_usage": usage_payload(workspace),
+        "llm_usage": apply_exact_spend(usage_payload(workspace), spend, workspace.task_policy),
+        "provider_spend": spend,
     }
 
 

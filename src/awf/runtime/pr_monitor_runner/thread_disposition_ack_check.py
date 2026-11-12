@@ -38,6 +38,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedThreadComment
 from awf.common.github_client import RepoRef
+from awf.common.work_slot import hold_work_slot
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.git_index_hide_flags import clear_index_hide_flags_via_run_git
 from awf.runtime.logs import WorkspaceLogSink
@@ -253,7 +254,11 @@ async def _judge(
     worktree = self._worktrees_root / workspace_id
     # One writer-lock section from the snapshot through the rollback: another
     # writer's commit in between would otherwise read as the agent's and be undone.
-    async with hold_exclusive_worktree_writer_lock(worktree):
+    # The work slot is taken first, so the run never queues for one under the lock.
+    async with (
+        hold_work_slot(getattr(self, "_work_slot", None), "agent"),
+        hold_exclusive_worktree_writer_lock(worktree),
+    ):
         before = await _worktree_fingerprint(self, worktree)
         ignored = await _snapshot_ignored_files(self, worktree) if before is not None else None
         if before is None or ignored is None:

@@ -57,6 +57,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.logging import get_logger
+from awf.common.work_slot import WorkSlot, hold_work_slot
 from awf.profiles.models import ProfileCoverage, WorkspaceProfile
 from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_COMMAND,
@@ -326,8 +327,13 @@ class HostedValidationDelegate:
         worktree_path: Path | None = None,
         include_coverage: bool = True,
         pr_identity: Mapping[str, Any] | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> ValidationResult:
-        """Delegate selected profile phases to the hosting control plane."""
+        """Delegate selected profile phases to the hosting control plane.
+
+        ``work_slot`` gates the delegated run like local validation; hosted Jobs
+        have no local ``awf-exec`` to tag, so no marker is sent (slot-release).
+        """
 
         # Hosted Jobs use their own /workspace/repo checkout; never send a
         # Core-local filesystem path (Cloud rejects non-null worktree_path).
@@ -364,20 +370,21 @@ class HostedValidationDelegate:
             omit_credential_env_keys=True,
             env_file_base_path=worktree_path,
         )
-        terminal = await self._run_operation(
-            workspace_id=workspace_id,
-            start_path="/v1/validation-runs",
-            payload=payload,
-            poll_response_max_bytes=_response_json_max_bytes(
-                self._config.max_output_bytes,
-                output_slots=_hosted_validation_poll_output_slots(
-                    profile,
-                    phase_names,
-                    include_coverage=include_coverage,
-                    expected_command_count=expected_command_count,
+        async with hold_work_slot(work_slot, "validation"):
+            terminal = await self._run_operation(
+                workspace_id=workspace_id,
+                start_path="/v1/validation-runs",
+                payload=payload,
+                poll_response_max_bytes=_response_json_max_bytes(
+                    self._config.max_output_bytes,
+                    output_slots=_hosted_validation_poll_output_slots(
+                        profile,
+                        phase_names,
+                        include_coverage=include_coverage,
+                        expected_command_count=expected_command_count,
+                    ),
                 ),
-            ),
-        )
+            )
         # Match ValidationRunner / poll-slot eligibility: coverage evidence is
         # only required when include_coverage and validate were both requested.
         requested_phases = set(phase_names)
@@ -405,8 +412,9 @@ class HostedValidationDelegate:
         parallel_worker_cpu_limit: int | None = None,
         worktree_path: Path | None = None,
         pr_identity: Mapping[str, Any] | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> ValidationCoverageResult | None:
-        """Delegate a hosted coverage-only operation."""
+        """Delegate a hosted coverage-only operation (gated by ``work_slot``)."""
 
         # Same env_file base as run_profile_phases: repo-relative paths resolve
         # from the worktree so Postgres trust injection matches phase validation.
@@ -432,15 +440,16 @@ class HostedValidationDelegate:
             omit_credential_env_keys=True,
             env_file_base_path=worktree_path,
         )
-        terminal = await self._run_operation(
-            workspace_id=workspace_id,
-            start_path="/v1/validation-runs",
-            payload=payload,
-            poll_response_max_bytes=_response_json_max_bytes(
-                self._config.max_output_bytes,
-                output_slots=1,
-            ),
-        )
+        async with hold_work_slot(work_slot, "validation"):
+            terminal = await self._run_operation(
+                workspace_id=workspace_id,
+                start_path="/v1/validation-runs",
+                payload=payload,
+                poll_response_max_bytes=_response_json_max_bytes(
+                    self._config.max_output_bytes,
+                    output_slots=1,
+                ),
+            )
         state = _operation_state(terminal)
         if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
             return _coverage_terminal_failure_result(

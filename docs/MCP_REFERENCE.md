@@ -52,6 +52,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
 | `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
 | `awf_guide_workspace` | Operator control: guide a live monitor or supply a decision to a blocked workspace. |
+| `awf_set_workspace_provider_budget` | Operator control: set a managed OpenRouter budget (USD) and resume a provider-budget park. |
 | `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
 | `awf_refresh_workspace` | Operator control: refresh workspace state after upstream changes. |
 | `awf_rebase_workspace` | Operator control: rebase workspace work onto the current base. |
@@ -75,8 +76,9 @@ the effective retry request for that key returns `IDEMPOTENCY_CONFLICT`.
 
 **MCP control migration note:** The control tools `awf_cancel_workspace`,
 `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
-`awf_guide_workspace`, `awf_request_workspace_validation`,
-`awf_refresh_workspace`, and `awf_rebase_workspace` have a required
+`awf_guide_workspace`, `awf_set_workspace_provider_budget`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required
 `idempotency_key` argument. Existing MCP
 clients that omitted this argument or sent `null` must pass a stable non-empty
 key for each operator action. This mirrors the REST `Idempotency-Key`
@@ -115,6 +117,8 @@ branch must resolve to the commit at the initial checkout. It is not
 `base_commit` and does not move later commits.
 
 Example `awf_create_workspace` arguments:
+
+`awf_create_workspace` also accepts `provider` and `allow_unverified_model` (default false). Third-party Codex/Claude paths remain admission-disabled, with explicit capability/network rejection. Discovery and diagnostic tools are pending T4–T6. See [the provider foundation](AGENT_MODEL_PROVIDERS.md).
 
 ```json
 {
@@ -224,3 +228,19 @@ must read operation rows from `items` and handle the pagination fields:
   "cursor": null
 }
 ```
+
+## Provider tools
+
+- `awf_query_provider_models(agent, provider, profile_ref?, profile?)` queries
+  only the selected provider's bounded catalog. Results label capabilities as
+  provider claims and retain manual entry on discovery failure.
+- `awf_test_provider_connection(agent, provider, model, idempotency_key,
+  deadline_seconds=180, effort?, profile_ref?, profile?)` creates the same
+  isolated diagnostic workspace as REST. The deadline cannot exceed 900 seconds.
+
+The diagnostic response contains workspace/operation IDs and
+`label=provider_connection_test`. Existing workspace, log, event, operation and
+cancel/stop/destroy tools manage its lifecycle. A request itself authorizes a
+candidate-model test; ordinary third-party admission remains separately gated.
+No user prompt/repository/phase/PR parameters are accepted. Worker loss marks a
+test inconclusive without paid replay. [Evidence and limitations](AGENT_MODEL_PROVIDERS.md).

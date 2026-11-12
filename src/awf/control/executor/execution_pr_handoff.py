@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
@@ -15,6 +16,7 @@ from awf.control.executor.helpers import (
     _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.quality_gates import _log
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
@@ -149,6 +151,7 @@ async def persist_pr_and_handoff(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
+            **work_slot_kwargs(work_slot_for(self, workspace_id)),
         )
         return
     _log.info(

@@ -240,6 +240,17 @@ def register_workspace_tools(
             default=AgentRuntime.codex,
             description="Which coding CLI to run inside the container.",
         ),
+        provider: str | None = Field(default=None, description="Selected model-service provider."),
+        allow_unverified_model: bool = Field(
+            default=False, description="Allow experimental unverified models."
+        ),
+        provider_budget_usd: float | None = Field(
+            default=None,
+            description=(
+                "USD budget for managed OpenRouter keys; defaults to "
+                "AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection."
+            ),
+        ),
         model: str | None = Field(
             default=None,
             min_length=1,
@@ -444,6 +455,8 @@ def register_workspace_tools(
                         "prompt": task_prompt,
                         "kind": task_kind,
                         "agent": agent,
+                        "provider": provider,
+                        "provider_budget_usd": provider_budget_usd,
                         "model": model,
                         "effort": effort,
                         "cursor_auto_mode": cursor_auto_mode,
@@ -479,6 +492,7 @@ def register_workspace_tools(
                     if v is not None
                 },
                 preflight={
+                    "allow_unverified_model": allow_unverified_model,
                     "provider_readiness_override": provider_readiness_override,
                     "provider_readiness_override_reason": provider_readiness_override_reason,
                 },

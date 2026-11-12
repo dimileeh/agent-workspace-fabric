@@ -44,6 +44,9 @@ from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _settle_pending_item_commit_provenance,
     chain_from_state,
 )
+from awf.runtime.pr_monitor_runner.comment_repair_provenance_retirement import (
+    retire_orphaned_item_commit_records,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
@@ -212,6 +215,10 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # Records citing a commit the branch dropped (a rejected protected-scope commit
+    # reset away) are retired with an audit event before this batch links onto the
+    # chain or cites them as FIXED evidence (#1200).
+    await retire_orphaned_item_commit_records(self, workspace_id=workspace_id, state=state)
     operation_start_head, abandoned_result = await self._abandon_unpublished_comment_repairs(
         workspace_id=workspace_id,
         worktree_path=worktree_path,

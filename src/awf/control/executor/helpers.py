@@ -539,6 +539,11 @@ def _agent_identity_model_and_effort(
     ws: Workspace,
     defaults: AgentDefaults | None,
 ) -> tuple[str | None, str | None]:
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(ws.task_policy)
+    if selection is not None:
+        return selection.model, selection.effort
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
     explicit_model = (
@@ -572,6 +577,11 @@ def _agent_runtime_or_none(agent: object) -> AgentRuntime | None:
 
 def _agent_run_model_for_workspace(ws: Workspace) -> str | None:
     """Return only the workspace's explicit model override for adapter.run()."""
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(ws.task_policy)
+    if selection is not None:
+        return selection.model
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
     if (
@@ -595,7 +605,25 @@ def _agent_defaults_for_workspace(
     drift back to AWF's opencode default (currently Kimi) while resolving
     PR comments.
     """
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(ws.task_policy)
+    if selection is not None:
+        return AgentDefaults(
+            model=selection.model or "",
+            effort=selection.effort,
+            execution=selection,
+            compatibility_evidence=(ws.task_policy or {}).get("coding_compatibility_evidence"),
+            require_compatibility_evidence=bool(
+                (ws.task_policy or {}).get("require_compatibility_evidence")
+            ),
+        )
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    if policy.get("agent_execution_profile_pending") and policy.get("agent_provider") in {
+        "ollama",
+        "openrouter",
+    }:
+        raise ValueError("EXECUTION_PROFILE_BINDING_REQUIRED")
     model = _nonblank_policy_string(policy, "agent_model")
     effort = _nonblank_policy_string(policy, "agent_effort")
     cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)

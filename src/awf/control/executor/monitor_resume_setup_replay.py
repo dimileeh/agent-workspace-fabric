@@ -9,6 +9,8 @@ validation, or any agent run continues. A failed replay parks the workspace in
 ``blocked`` with ``RUNTIME_SETUP_REPLAY_FAILED`` (#743) instead of failing it, so a
 transient setup failure cannot kill a healthy monitor; the worker finalizes the
 recovery from that reason code without a retry, and a later ``guide`` resumes.
+Each replayed command is time-bounded, so a hung one ends in that same park
+with ``detail="setup_replay_timeout"`` instead of holding the claim (#1218).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CO
 from awf.control.executor.helpers import _profile_for_workspace
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.state_ops import enter_blocked_for_monitor_setup_replay_failure
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import MergeCandidateRepository
@@ -102,6 +105,7 @@ async def replay_setup_on_monitor_resume(
             after=identity_after,
             trigger=MONITOR_RESUME_TRIGGER,
             ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            work_slot=work_slot_for(self, workspace_id),
             recover_missing_head=partial(
                 _recover_pr_head_after_cleanup_failure,
                 self,

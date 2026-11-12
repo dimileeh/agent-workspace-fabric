@@ -26,7 +26,7 @@ Deliberately never copied: protected-block state, awaiting-required-checks
 timestamps, operator-hint *cycle* bookkeeping (the pending-hint record and its
 processed markers -- as opposed to the per-thread operator decision below),
 awaiting-workflow-scope / merge-block markers, notify/settle/grace bookkeeping,
-and defer/needs-human reason text.
+and defer/needs-human reason text (except a preserved correction attempt's, below).
 Those describe the *previous run's* position on a PR that has since moved; the
 fresh monitor must re-derive them from the live PR.
 """
@@ -253,6 +253,14 @@ _DISPOSITION_BASELINE_KEY = "__awf_review_thread_disposition_baseline__"
 # ``__awf_review_thread_disposition_baseline_conversations__`` ties each of those
 # exemptions to the conversation it covered, so it crosses verbatim with them.
 _DISPOSITION_BASELINE_CONVERSATIONS_KEY = "__awf_review_thread_disposition_baseline_conversations__"
+# ``__awf_preserved_attempt_retired__:<thread id>`` (#1189) is the tip of a
+# preserved correction attempt an operator disposition rejected. It records the
+# ruling, not code, so it crosses regardless of head continuity: a successor's
+# repeated ``--hint`` then reads as already applied instead of unapplicable. Like
+# the other per-thread records it needs a verdict-key thread id, and its value
+# must be a hex tip.
+_PRESERVED_ATTEMPT_RETIRED_PREFIX = "__awf_preserved_attempt_retired__:"
+_PRESERVED_ATTEMPT_RETIRED_TIP_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
@@ -261,6 +269,25 @@ _COPIED_MARKER_PREFIXES = (
     _OPERATOR_DECISION_ISSUED_AT_PREFIX,
     _RETIRED_OPERATOR_DECISION_PREFIX,
 )
+
+# ``__needs_human_reason__:<item id>`` is dropped -- except when it parks the item
+# on a preserved correction attempt (#1189). That reason is the only record of
+# which commit the park preserved, and the ``needs_human`` verdict it explains
+# crosses regardless of head continuity; without it a successor could neither show
+# the park nor apply an operator ``--hint`` rejecting that attempt. The text is
+# AWF's own sanitized, bounded verdict reason. The signature mirrors
+# ``awf.runtime.pr_monitor_runner.operator_preserved_attempt.preserved_attempt_tip``.
+_NEEDS_HUMAN_REASON_PREFIX = "__needs_human_reason__:"
+_PRESERVED_ATTEMPT_TIP_RE = re.compile(r"(?:attempt tip|own commit) [0-9a-f]{7,40}\b")
+# An ``AGENT_NON_FIXED_WITH_MUTATION`` park (#1213) crosses too: its reason and its
+# ``__awf_mutation_park__:<thread id>`` record are what let ``decide()`` see the
+# park go stale once the head moves past the rollback commit. Without them the
+# crossed ``needs_human`` verdict is sticky and the successor loops on
+# NotifyHuman. The prefix mirrors ``awf.runtime.feedback_policy``. The record
+# crosses verbatim, because the runtime reads a malformed record fail-closed
+# (the park stays) and dropping it would instead fall back to the reason text.
+_MUTATION_PARK_REASON_PREFIX = "AGENT_NON_FIXED_WITH_MUTATION:"
+_MUTATION_PARK_PREFIX = "__awf_mutation_park__:"
 
 # A head SHA counts as continuity evidence only in its full 40-hex form. An
 # abbreviation is a prefix, not a commit identity: two equal abbreviations can
@@ -332,6 +359,7 @@ def seedable_monitor_state(
         and (
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
+            or _is_preserved_attempt_record(key, value)
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
             or _is_disposition_retired_tombstone(key)
             or _is_disposition_unverified_flag(key, value)
@@ -560,6 +588,24 @@ def _is_disposition_readopt_pending(key: str, value: str) -> bool:
         and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_READOPT_PENDING_PREFIX) :]) is not None
         and _FULL_COMMIT_SHA_RE.match(value) is not None
     )
+
+
+def _is_preserved_attempt_record(key: str, value: str) -> bool:
+    if key.startswith(_NEEDS_HUMAN_REASON_PREFIX):
+        item_id = key[len(_NEEDS_HUMAN_REASON_PREFIX) :]
+        return _VERDICT_KEY_RE.match(item_id) is not None and (
+            ("preserved" in value and _PRESERVED_ATTEMPT_TIP_RE.search(value) is not None)
+            or value.startswith(_MUTATION_PARK_REASON_PREFIX)
+        )
+    if key.startswith(_MUTATION_PARK_PREFIX):
+        return bool(value) and _VERDICT_KEY_RE.match(key[len(_MUTATION_PARK_PREFIX) :]) is not None
+    if key.startswith(_PRESERVED_ATTEMPT_RETIRED_PREFIX):
+        thread_id = key[len(_PRESERVED_ATTEMPT_RETIRED_PREFIX) :]
+        return (
+            _VERDICT_KEY_RE.match(thread_id) is not None
+            and _PRESERVED_ATTEMPT_RETIRED_TIP_RE.match(value) is not None
+        )
+    return False
 
 
 def _is_copied_marker(key: str, value: str) -> bool:

@@ -41,6 +41,7 @@ from awf.common.forge import ForgeClient
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.common.github_retry import GitHubRetryContext, github_retry_context
+from awf.common.work_slot import WorkSlot
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
@@ -60,6 +61,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    record_provider_park_stranded_edits_evidence,
+)
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
 from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
@@ -71,6 +75,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_readopt import (
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
+    ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -143,6 +148,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         # ``None`` on the inline initial handoff, where the executor still holds
         # the execution claim rather than a monitor claim.
         self._monitor_owner_id: str | None = None
+        # Work slot injected by the worker task driving this run (slot-release):
+        # agent and validation runs hold it, and every pure wait releases it.
+        self._work_slot: WorkSlot | None = None
 
     # ── Entry point ────────────────────────────────────────────────────────
 
@@ -153,10 +161,17 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         compose_project: str,
         compose_file: Path,
         monitor_owner_id: str | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> None:
-        """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
+        """Drive the monitor phase until a terminal ``MonitorAction`` fires.
+
+        ``work_slot`` is the worker task's work-slot scope: monitor actions that
+        run an agent or validation hold it; every other action first releases a
+        retained lease (``release_idle``), so pure waiting holds no slot.
+        """
 
         self._monitor_owner_id = monitor_owner_id
+        self._work_slot = work_slot
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
         # ``run()`` is awaited inline on the executor's initial handoff and on the
@@ -245,6 +260,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         base_branch=ws.branch_base,
                     )
                 except BaseFetchError as exc:
+                    # No action runs before this backoff, so ``_execute`` never
+                    # releases a retained work slot; free it here (slot-release).
+                    await self._release_work_slot_before_retry_wait()
                     base_fetch_result = await self._wait_after_transient_base_fetch_error(
                         exc,
                         workspace_id=workspace_id,
@@ -298,6 +316,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # reason code); Bitbucket propagates its specific ``reason_code``
                     # end-to-end. ``str(exc)`` already redacts, so it is safe to
                     # log/persist.
+                    await self._release_work_slot_before_retry_wait()
                     if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
@@ -522,6 +541,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # in-flight markers.
                     execute_retry_ws = await self._load_workspace(workspace_id)
                     execute_retry_state = self._load_state(execute_retry_ws)
+                    # The fault ended the action's repair cycle; the next poll's
+                    # work action reacquires, so the backoff holds no work slot.
+                    await self._release_work_slot_before_retry_wait()
                     if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
@@ -633,21 +655,37 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 reason_code="PROVIDER_FALLBACK",
             )
             return
-        except ProviderRecoveryAuthError:
+        except ProviderRecoveryAuthError as exc:
+            # A managed-key park reuses this unwind; its sink parks, never fails.
+            parked_reason = (
+                exc.reason_code if isinstance(exc, ProviderManagedKeyParkedError) else None
+            )
             await self._write_monitor_log(
                 monitor_log,
                 {
                     "event": "monitor.provider_auth_failed",
                     "workspace_id": workspace_id,
-                    "reason_code": PROVIDER_AUTH_FAILED,
+                    "reason_code": parked_reason or PROVIDER_AUTH_FAILED,
                 },
             )
             if state is not None:
+                if parked_reason:
+                    # Record what a marked park leaves dirty, so the budget-raise
+                    # resume commits nothing else (PRRT_kwDOSJAM6s61_WVy).
+                    await record_provider_park_stranded_edits_evidence(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=self._worktrees_root / workspace_id,
+                        state=state,
+                    )
                 await self._persist_state(workspace_id, state)
             await self._terminate_failed(
                 workspace_id,
-                message="monitor: provider authentication failed",
-                reason_code=PROVIDER_AUTH_FAILED,
+                message=f"monitor: managed provider key unavailable ({parked_reason})"
+                if parked_reason
+                else "monitor: provider authentication failed",
+                reason_code=parked_reason or PROVIDER_AUTH_FAILED,
+                details=exc.details if parked_reason else None,
             )
             return
         finally:

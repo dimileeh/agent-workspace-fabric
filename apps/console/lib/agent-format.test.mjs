@@ -8,6 +8,49 @@ import {
   formatAgentTitle,
 } from "./agent-format.ts";
 
+test("agent labels distinguish the same model served by OpenRouter or Ollama", () => {
+  const workspace = {
+    agent: "codex",
+    agent_model: "moonshotai/kimi-k2.7-code",
+    agent_effort: null,
+  };
+  assert.equal(
+    formatAgentLabel({ ...workspace, agent_provider: "openrouter" }),
+    "codex · OpenRouter · moonshotai/kimi-k2.7-code",
+  );
+  assert.equal(
+    formatAgentLabel({ ...workspace, agent_provider: "ollama" }),
+    "codex · Ollama · moonshotai/kimi-k2.7-code",
+  );
+  assert.equal(
+    formatAgentTitle({ ...workspace, agent_provider: "openrouter" }),
+    "codex / provider OpenRouter / moonshotai/kimi-k2.7-code",
+  );
+});
+
+test("native provider names and inspector identity preserve effort semantics", () => {
+  assert.equal(
+    formatAgentLabel({ agent: "codex", agent_provider: "openai", agent_model: "gpt-5.5", agent_effort: "xhigh" }),
+    "codex · OpenAI · gpt-5.5 · xhigh",
+  );
+  assert.equal(
+    formatAgentIdentityLabel({ agent: "claude_code", agent_provider: "anthropic", agent_model: "claude-opus-5-5", agent_effort: "high" }),
+    "claude_code · Anthropic · claude-opus-5-5",
+  );
+});
+
+test("provider labels preserve unknown services and never infer missing providers", () => {
+  const workspace = { agent: "codex", agent_model: "ollama/shared-model", agent_effort: null };
+  for (const agent_provider of [undefined, null, "", "  "]) {
+    assert.equal(formatAgentLabel({ ...workspace, agent_provider }), "codex · shared-model");
+    assert.equal(formatAgentTitle({ ...workspace, agent_provider }), "codex / shared-model");
+  }
+  assert.equal(
+    formatAgentLabel({ ...workspace, agent_provider: "custom-service" }),
+    "codex · custom-service · shared-model",
+  );
+});
+
 test("formatAgentLabel includes compact model and effort", () => {
   assert.equal(
     formatAgentLabel({

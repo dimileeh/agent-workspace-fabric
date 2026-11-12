@@ -57,6 +57,7 @@ from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
+    _preserved_attempt_retired_key,
     _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor_actions import (
@@ -690,8 +691,12 @@ def _mark_review_thread_addressed(
         # retire-for-good on the poll boundary, but a fix-cycle settle pass
         # re-addresses a thread on fresh feedback without it — so drop the stale
         # sidecar here too, or a rollback of THIS verdict would restore the
-        # previous body's ruling into the repair prompt.
+        # previous body's ruling into the repair prompt. The same holds for an
+        # operator's preserved-attempt retirement (#1189), which outdated-only
+        # re-triage never reaches that clear for: a repeated ruling must not read
+        # its tombstone and close this new conversation on the old attempt.
         state.threads_addressed_ids.pop(_retired_operator_decision_key(thread.thread_id), None)
+        state.threads_addressed_ids.pop(_preserved_attempt_retired_key(thread.thread_id), None)
     if verdict != "agent_failed":
         # The operator ruling that un-parked this thread (issue #939) has now
         # been answered by a real verdict, so retire it. ``agent_failed`` is not
@@ -711,8 +716,10 @@ def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) ->
     return thread_needs_attention(state.threads_addressed_ids, thread)
 
 
-def _thread_enters_address_comments(state: MonitorState, thread: ReviewThread) -> bool:
-    return thread_enters_address_comments(state.threads_addressed_ids, thread)
+def _thread_enters_address_comments(
+    state: MonitorState, thread: ReviewThread, head_sha: str | None
+) -> bool:
+    return thread_enters_address_comments(state.threads_addressed_ids, thread, head_sha=head_sha)
 
 
 def _outdated_thread_has_fresh_feedback(state: MonitorState, thread: ReviewThread) -> bool:
@@ -814,6 +821,15 @@ def _ci_transient_infra_wait_state_key(
         _CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX,
         1,
     )
+
+
+_CI_REPAIR_ATTEMPTED_KEY_PREFIX = "__awf_ci_repair_attempted:"
+
+
+def _ci_repair_attempted_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    """Marker that a CI repair already ran for this head/failing-run signature (#1216)."""
+    rerun_key = _ci_transient_rerun_state_key(head_sha, failures)
+    return rerun_key.replace(_CI_TRANSIENT_RERUN_KEY_PREFIX, _CI_REPAIR_ATTEMPTED_KEY_PREFIX, 1)
 
 
 def _ci_transient_infra_wait_started_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
@@ -1063,7 +1079,11 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         Runs after SyncBase because hint repair commits also need to
         push; on a stale head they would be rejected non-fast-forward
         and loop without ever integrating the base update.
-    3.  Unresolved comments (inline + review) → AddressComments.
+    3a. New review items + concluded CI failure on this head (no runs in
+        progress) → ReportCiFailure once per head/failing-run signature, only
+        when gate 5 would pick an agent repair (#1216). Transient/infra/no-log
+        CI and parked comment repairs fall through; threads stay queued.
+    3.  Unresolved comments (inline + review) → AddressComments (incl. PENDING CI).
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
@@ -1073,7 +1093,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         Review comments are routed to the coding agent so it can record a
         fix, false-positive, or defer verdict against the current evidence.
     4.  Effective blocking reviews → NotifyHuman.
-    5.  CI FAILURE → ReportCiFailure.
+    5.  CI FAILURE (no new review items, or 3a already attempted) → ReportCiFailure.
     6.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
     7.  Legacy ``mergeable == CONFLICTING`` (without the richer
@@ -1155,7 +1175,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             status.outdated_unresolved_inline_threads,
             state.threads_addressed_ids,
         )
-        if _thread_enters_address_comments(state, t)
+        if _thread_enters_address_comments(state, t, status.head_sha)
     )
     new_reviews = tuple(
         c
@@ -1251,6 +1271,22 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         if hint.status == "pending":
             return AddressOperatorHint(hint=hint)
         return _operator_hint_needs_human_notice(hint)
+
+    # 3a. (#1216) A comment push would discard concluded CI evidence on this head,
+    # so an agent-actionable failure outranks a new review wave once per head.
+    if (
+        (new_threads or new_reviews)
+        and status.check_state == CheckState.FAILURE
+        and status.ci_failures
+        and not status.ci_runs_in_progress
+        and not (state.awaiting_workflow_scope or state.parked_unpublished_repair)
+    ):
+        ci_action = _ci_failure_action(status, state, config)
+        if isinstance(ci_action, ReportCiFailure) and (
+            _ci_repair_attempted_state_key(status.head_sha, ci_action.failures)
+            not in state.threads_addressed_ids
+        ):
+            return ci_action
 
     # 3. Unresolved comments, filtered to those we haven't handled yet.
     # Review comments get one agent pass so the monitor records whether the

@@ -23,6 +23,7 @@ class WorkerConfig:
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
     orphan_reconcile_scan_interval_seconds: float = 3600.0
+    provider_key_reconcile_interval_seconds: float = 900.0
     classified_orphan_reap_scan_interval_seconds: float = 3600.0
     # Kill-switch for the worker-side superseded-Claude-base reaper sweep, sourced
     # from ``settings.claude_base_gc_enabled`` (the same flag the API ``/v1/service/gc``

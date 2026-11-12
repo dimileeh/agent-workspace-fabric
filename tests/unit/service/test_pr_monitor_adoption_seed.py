@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from awf.runtime.feedback_policy import mutation_park_is_stale
+from awf.runtime.pr_monitor_models import ReviewThread
 from awf.service.pr_monitor_adoption_seed import (
     PR_ADOPTION_OPERATOR_HINT_REASON,
     PR_ADOPTION_SEEDED_EVENT_TYPE,
@@ -54,6 +56,25 @@ _COPIED_CASES: list[tuple[str, str]] = [
     # ruling has to cross with it or the successor re-prompts without it.
     ("__operator_decision__:PRRT_kwDOSJAM6s6fNhZo", "take the anchored fix, not the rename"),
     ("__operator_decision__:bb:acme/widgets#12:99", "ship the guard, skip the refactor"),
+    # A park on a preserved correction attempt keeps the reason naming its tip, and
+    # an operator's retirement of that attempt keeps its tombstone (#1189).
+    (
+        "__needs_human_reason__:PRRT_kwDOSJAM6s6fNhZo",
+        "FIXED claimed on the correction attempt, but this item's commit (attempt tip "
+        "d5889e51aaaa) carries no item-scoped evidence for src/a.py; the commit is "
+        "preserved for human review.",
+    ),
+    ("__awf_preserved_attempt_retired__:PRRT_kwDOSJAM6s6fNhZo", "d5889e51aaaa"),
+    # A mutation park keeps its reason and rollback record so the successor can
+    # re-evaluate it once the head moves (#1213); the record crosses verbatim.
+    (
+        "__needs_human_reason__:PRRT_kwDOSJAM6s6fNhZr",
+        "AGENT_NON_FIXED_WITH_MUTATION: Correction attempt mutated the worktree then "
+        "reported a non-FIXED verdict. The correction attempt's edits were rolled back "
+        "to d5889e51aaaa; the item is parked for human review.",
+    ),
+    ("__awf_mutation_park__:PRRT_kwDOSJAM6s6fNhZr", '{"rollback_head":"d5889e51aaaa"}'),
+    ("__awf_mutation_park__:bb:acme/widgets#12:99", "not json"),
 ]
 
 # ``fix_committed`` asserts the fix is in the branch and ``false_positive`` asserts
@@ -96,6 +117,15 @@ _DROPPED_CASES: list[tuple[str, str]] = [
     ("__awf_protected_history_directive_reblocked__", "reblocked"),
     ("__defer_reason__:PRRT_kwDOSJAM6s6fNhZo", "waiting on reviewer"),
     ("__needs_human_reason__:5120013294", "ambiguous"),
+    # Preserved-attempt records only cross under a verdict-key id with a well-formed value.
+    ("__needs_human_reason__:not-a-key", "attempt tip d5889e51aaaa is preserved"),
+    ("__needs_human_reason__:5120013296", "(attempt tip d5889e51aaaa) carries no evidence"),
+    ("__awf_preserved_attempt_retired__:not-a-thread", "d5889e51aaaa"),
+    ("__awf_preserved_attempt_retired__:PRRT_kwDOSJAM6s6fNhZq", "not a sha"),
+    ("__needs_human_reason__:not-a-key", "AGENT_NON_FIXED_WITH_MUTATION: rolled back"),
+    ("__needs_human_reason__:5120013297", "parked: AGENT_NON_FIXED_WITH_MUTATION: x"),
+    ("__awf_mutation_park__:not-a-thread", '{"rollback_head":"d5889e51aaaa"}'),
+    ("__awf_mutation_park__:PRRT_kwDOSJAM6s6fNhZs", ""),
     ("__truncated__", "true"),
 ]
 
@@ -136,6 +166,36 @@ def test_never_copied_marker_classes_are_dropped(
     head_continuity: bool,
 ) -> None:
     assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_crossed_mutation_park_goes_stale_once_the_head_moves(head_continuity: bool) -> None:
+    # #1213: the crossed ``needs_human`` verdict must stay re-evaluable, or the
+    # successor loops on NotifyHuman after the head moves past the rollback commit.
+    previous = {
+        "PRRT_kwDOSJAM6s6fNhZr": "needs_human",
+        "__needs_human_reason__:PRRT_kwDOSJAM6s6fNhZr": (
+            "AGENT_NON_FIXED_WITH_MUTATION: Correction attempt mutated the worktree. The "
+            "correction attempt's edits were rolled back to abc123def456; parked."
+        ),
+        "__awf_mutation_park__:PRRT_kwDOSJAM6s6fNhZr": (
+            '{"rollback_head": "abc123def456", "outdated": false}'
+        ),
+    }
+    seeded = seedable_monitor_state(previous, head_continuity=head_continuity)
+    thread = ReviewThread(
+        thread_id="PRRT_kwDOSJAM6s6fNhZr",
+        path="src/x.py",
+        line=10,
+        body_excerpt="fix this",
+        author=None,
+        is_outdated=False,
+    )
+
+    assert seeded == previous
+    assert not mutation_park_is_stale(seeded, thread, "abc123def456" + "0" * 28)
+    assert mutation_park_is_stale(seeded, thread, "fedcba987654" + "0" * 28)
 
 
 @pytest.mark.unit

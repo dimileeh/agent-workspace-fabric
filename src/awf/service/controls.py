@@ -85,6 +85,7 @@ from awf.service.failure_causality import (
     restore_primary_failure_row_fields,
 )
 from awf.service.gc_companions import companion_worktree_remove_targets
+from awf.service.provider_diagnostics import is_diagnostic, reject_diagnostic_control
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
     SecretLeaseService,
@@ -216,7 +217,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         )
         # ``stop_stack=True`` runs a FULL compose down (containers + network +
         # host port freed), not a bare ``docker stop`` (issue #588 / #583).
-        cleanup_result = await self._release_runtime_stack(workspace) if stop_stack else None
+        cleanup_result = (
+            await self._release_runtime_stack(workspace)
+            if stop_stack or is_diagnostic(workspace.task_policy)
+            else None
+        )
         leaving_blocked = workspace.status == WorkspaceStatus.blocked.value
         if (
             workspace.status != WorkspaceStatus.cancelled.value
@@ -1015,8 +1020,8 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 Path(workspace.compose_file_path) if workspace.compose_file_path else None
             ),
             "worktree_host_path": None,
-            "remove_volumes": remove_volumes,
-            "remove_worktree": remove_worktree,
+            "remove_volumes": remove_volumes or is_diagnostic(workspace.task_policy),
+            "remove_worktree": remove_worktree or is_diagnostic(workspace.task_policy),
         }
         if pr_adoption_is_hosted(workspace.task_policy):
             cleanup_kwargs["skip_compose"] = True
@@ -1367,6 +1372,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 )
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
+        reject_diagnostic_control(workspace.task_policy, operation_type.value)
         if expected_version is not None and workspace.version != expected_version:
             raise VersionConflictError(
                 expected_version=expected_version,

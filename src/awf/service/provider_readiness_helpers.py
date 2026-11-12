@@ -25,7 +25,7 @@ from awf.service.environment import ComposeEnvInterpolationError, compose_expand
 # value wins over the worker-env placeholder (``merge_agent_environment`` is
 # first-writer-wins). Mirror that resolution wherever a probe/pull must target the
 # same daemon the agent will reach.
-_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OLLAMA_BASE_URL", "AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 
 
 def _credential_source(
@@ -711,7 +711,8 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
     """
 
     raw = (
-        environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
+        environ.get("AWF_OLLAMA_BASE_URL")
+        or environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
         or DEFAULT_OLLAMA_OPENAI_BASE_URL
     ).strip()
@@ -777,7 +778,11 @@ def _ollama_base_url_malformed(environ: Mapping[str, str]) -> bool:
     than swallowing it into the default.
     """
 
-    raw = environ.get("AWF_OPENCODE_OLLAMA_BASE_URL") or environ.get("OLLAMA_HOST")
+    raw = (
+        environ.get("AWF_OLLAMA_BASE_URL")
+        or environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
+        or environ.get("OLLAMA_HOST")
+    )
     if raw is None or not raw.strip():
         return False
     candidate = raw.strip()

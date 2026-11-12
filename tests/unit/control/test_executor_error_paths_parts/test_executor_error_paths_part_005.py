@@ -1199,17 +1199,24 @@ class TestExecutorCoverageEdgesPart001:
             pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
         )
 
-        async def _ensure_available(**_kwargs: Any) -> bool:
+        build_monitor = executor._build_handoff_pr_monitor
+
+        async def _lose_metadata_after_monitor_build(**kwargs: Any) -> object:
+            # Inject loss after the real circuit/stale-snapshot guard, before the handoff re-read.
+            monitor = await build_monitor(**kwargs)
+            assert monitor is not None
             async with factory() as s:
                 ws = await WorkspaceRepository(s).get(ws_id)
                 assert ws is not None
                 metadata = dict(ws.task_policy["pr_adoption"])
                 metadata.pop("base_sha")
-                ws.task_policy = {"pr_adoption": metadata}
+                ws.task_policy = {**ws.task_policy, "pr_adoption": metadata}
                 await s.commit()
-            return True
+            return monitor
 
-        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+        monkeypatch.setattr(
+            executor, "_build_handoff_pr_monitor", _lose_metadata_after_monitor_build
+        )
 
         await executor.execute(ws_id)
 

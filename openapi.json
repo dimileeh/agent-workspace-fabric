@@ -2860,6 +2860,18 @@
             "title": "Agent",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "model": {
             "title": "Model",
             "type": "string"
@@ -4324,7 +4336,8 @@
           "human_wait",
           "monitor_state",
           "adopt_pr",
-          "destroy"
+          "destroy",
+          "provider_budget"
         ],
         "title": "OperationType",
         "type": "string"
@@ -5916,8 +5929,101 @@
         "title": "ProfileValidationStrategy",
         "type": "object"
       },
+      "ProviderCatalogResponse": {
+        "properties": {
+          "cached": {
+            "default": false,
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "checked_at": {
+            "title": "Checked At",
+            "type": "string"
+          },
+          "coding_compatible": {
+            "const": false,
+            "default": false,
+            "title": "Coding Compatible",
+            "type": "boolean"
+          },
+          "connection_scope": {
+            "title": "Connection Scope",
+            "type": "string"
+          },
+          "evidence": {
+            "const": "provider_claim",
+            "default": "provider_claim",
+            "title": "Evidence",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "manual_entry_allowed": {
+            "const": true,
+            "default": true,
+            "title": "Manual Entry Allowed",
+            "type": "boolean"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderModel"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "checked_at",
+          "connection_scope"
+        ],
+        "title": "ProviderCatalogResponse",
+        "type": "object"
+      },
       "ProviderCircuitBreakerSummaryResponse": {
         "properties": {
+          "connection_scope": {
+            "default": "legacy",
+            "title": "Connection Scope",
+            "type": "string"
+          },
           "cooldown_until": {
             "anyOf": [
               {
@@ -5976,6 +6082,224 @@
           "failure_count"
         ],
         "title": "ProviderCircuitBreakerSummaryResponse",
+        "type": "object"
+      },
+      "ProviderConnectionTestRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "enum": [
+              "codex",
+              "claude_code"
+            ],
+            "title": "Agent",
+            "type": "string"
+          },
+          "deadline_seconds": {
+            "default": 180,
+            "maximum": 900.0,
+            "minimum": 1.0,
+            "title": "Deadline Seconds",
+            "type": "integer"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
+          "model": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "profile_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Ref"
+          },
+          "provider": {
+            "enum": [
+              "openai",
+              "anthropic",
+              "ollama",
+              "openrouter"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "provider",
+          "model"
+        ],
+        "title": "ProviderConnectionTestRequest",
+        "type": "object"
+      },
+      "ProviderConnectionTestResponse": {
+        "properties": {
+          "label": {
+            "const": "provider_connection_test",
+            "default": "provider_connection_test",
+            "title": "Label",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "operation_id",
+          "status"
+        ],
+        "title": "ProviderConnectionTestResponse",
+        "type": "object"
+      },
+      "ProviderModel": {
+        "properties": {
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "pricing": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricing"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ProviderModel",
+        "type": "object"
+      },
+      "ProviderQueryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "enum": [
+              "codex",
+              "claude_code"
+            ],
+            "title": "Agent",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "profile_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Ref"
+          },
+          "provider": {
+            "enum": [
+              "openai",
+              "anthropic",
+              "ollama",
+              "openrouter"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "provider"
+        ],
+        "title": "ProviderQueryRequest",
         "type": "object"
       },
       "ProviderReadinessCredentialSourceResponse": {
@@ -6396,6 +6720,113 @@
           "circuit_breakers_open"
         ],
         "title": "ProviderRecoveryStateSummaryResponse",
+        "type": "object"
+      },
+      "ProviderSpendResponse": {
+        "description": "Exact provider spend of a managed OpenRouter workspace (USD).\n\nSummed from the usage counters of the workspace's AWF-minted keys\n(``usage + byok_usage``); ``unavailable`` when the spend was not loaded.",
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "currency": {
+            "const": "USD",
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "key_count": {
+            "default": 0,
+            "title": "Key Count",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "exact_provider_spend",
+            "default": "exact_provider_spend",
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_read_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Read At"
+          },
+          "live_key_count": {
+            "default": 0,
+            "title": "Live Key Count",
+            "type": "integer"
+          },
+          "provider": {
+            "default": "openrouter",
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "remaining_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usd"
+          },
+          "source": {
+            "const": "openrouter_key_usage",
+            "default": "openrouter_key_usage",
+            "title": "Source",
+            "type": "string"
+          },
+          "spend_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend Usd"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProviderSpendResponse",
         "type": "object"
       },
       "PullRequestMonitorAdoptionRequest": {
@@ -7465,7 +7896,7 @@
           },
           "concurrency": {
             "$ref": "#/components/schemas/ResourceConcurrencyResponse",
-            "description": "Provisioning and execution worker lane saturation."
+            "description": "Provisioning and execution worker lane saturation. The execution lane counts work-slot leases; queued includes ready rows and queued work-slot invocations."
           },
           "disk": {
             "$ref": "#/components/schemas/DiskCheckResponse",
@@ -7523,6 +7954,10 @@
             "$ref": "#/components/schemas/RuntimeHealthSummaryResponse",
             "description": "Read-only active workspace runtime health and recovery-decision counts."
           },
+          "work_slots": {
+            "$ref": "#/components/schemas/WorkSlotSummaryResponse",
+            "description": "Work-slot usage: slots in use, queued and unsatisfiable waiters. Waiting PR monitors and blocked/recovering workspaces hold no work slot."
+          },
           "worker": {
             "$ref": "#/components/schemas/WorkerConcurrencySettingsResponse",
             "description": "Configured local worker concurrency limits."
@@ -7544,6 +7979,7 @@
           "allocated_capacity",
           "capacity_queue",
           "concurrency",
+          "work_slots",
           "disk",
           "orphan_resources",
           "runtime_health",
@@ -8409,6 +8845,62 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
+          "agent_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Effort"
+          },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
+          "agent_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Model"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
+          },
           "attempt_id": {
             "title": "Attempt Id",
             "type": "string"
@@ -8629,6 +9121,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -8650,6 +9153,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -8670,6 +9185,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "attempt_id": {
             "anyOf": [
@@ -8808,6 +9334,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WorkspacePricingMetadataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"
@@ -9810,6 +10346,80 @@
         "title": "ValidationRunSummaryResponse",
         "type": "object"
       },
+      "WorkSlotSummaryResponse": {
+        "properties": {
+          "adopted": {
+            "description": "Leases a restarted worker adopted from a dead holder.",
+            "title": "Adopted",
+            "type": "integer"
+          },
+          "available": {
+            "description": "Free work slots.",
+            "title": "Available",
+            "type": "integer"
+          },
+          "cleanup_unproven": {
+            "description": "Held leases kept until their awf-exec process is proven gone.",
+            "title": "Cleanup Unproven",
+            "type": "integer"
+          },
+          "in_use": {
+            "description": "Held work-slot leases: provisioning, agent or validation runs in flight.",
+            "title": "In Use",
+            "type": "integer"
+          },
+          "limit": {
+            "description": "Configured work slots (AWF_WORKER_MAX_CONCURRENT_EXECUTIONS).",
+            "title": "Limit",
+            "type": "integer"
+          },
+          "oldest_wait_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Age of the oldest queued work-slot ticket.",
+            "title": "Oldest Wait Seconds"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "MONITOR_WAITING_FOR_WORK_SLOT while any invocation is queued.",
+            "title": "Reason Code"
+          },
+          "unsatisfiable": {
+            "description": "Queued invocations whose peak can never fit the configured local capacity.",
+            "title": "Unsatisfiable",
+            "type": "integer"
+          },
+          "waiting": {
+            "description": "Invocations queued (FIFO) for a work slot.",
+            "title": "Waiting",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "in_use",
+          "available",
+          "waiting",
+          "unsatisfiable",
+          "adopted",
+          "cleanup_unproven"
+        ],
+        "title": "WorkSlotSummaryResponse",
+        "type": "object"
+      },
       "WorkerConcurrencySettingsResponse": {
         "properties": {
           "max_concurrent_executions": {
@@ -10127,6 +10737,28 @@
               }
             ],
             "title": "Blocked At"
+          },
+          "preserved_head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preserved Head Sha"
+          },
+          "resolution_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Hint"
           },
           "violations": {
             "items": {
@@ -11302,6 +11934,11 @@
       "WorkspaceLaunchPreflight": {
         "additionalProperties": false,
         "properties": {
+          "allow_unverified_model": {
+            "default": false,
+            "title": "Allow Unverified Model",
+            "type": "boolean"
+          },
           "provider_readiness_override": {
             "default": false,
             "title": "Provider Readiness Override",
@@ -12213,6 +12850,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -12234,6 +12882,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -12254,6 +12914,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "attention_required": {
             "default": false,
@@ -12496,6 +13167,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ProviderReadinessPreflightResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"
@@ -12831,6 +13512,43 @@
           }
         },
         "title": "WorkspaceProfileSelection",
+        "type": "object"
+      },
+      "WorkspaceProviderBudgetRequest": {
+        "additionalProperties": false,
+        "description": "Set a managed OpenRouter workspace budget (USD); resumes a provider-budget block.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "New total workspace budget in USD.",
+            "gt": 0,
+            "lt": 1000000,
+            "title": "Usd"
+          }
+        },
+        "required": [
+          "usd"
+        ],
+        "title": "WorkspaceProviderBudgetRequest",
         "type": "object"
       },
       "WorkspaceProviderFallbackTarget": {
@@ -13499,6 +14217,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -13520,6 +14249,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -13540,6 +14281,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "app_endpoints": {
             "items": {
@@ -13883,6 +14635,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ProviderRecoveryStateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSpendResponse"
               },
               {
                 "type": "null"
@@ -14626,6 +15388,40 @@
             "minLength": 1,
             "title": "Prompt",
             "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "provider_budget_usd": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "gt": 0,
+                "lt": 1000000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "USD budget for managed OpenRouter keys; defaults to AWF_OPENROUTER_WORKSPACE_LIMIT_USD. Requires a managed OpenRouter selection.",
+            "title": "Provider Budget Usd"
           },
           "provider_recovery": {
             "anyOf": [
@@ -18457,6 +19253,172 @@
         ]
       }
     },
+    "/v1/providers/connection-tests": {
+      "post": {
+        "operationId": "test_provider_connection_v1_providers_connection_tests_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderConnectionTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderConnectionTestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Test Provider Connection",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
+    "/v1/providers/models/query": {
+      "post": {
+        "operationId": "query_provider_models_v1_providers_models_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderCatalogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Query Provider Models",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
     "/v1/service/gc": {
       "post": {
         "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.\n\nThin translation: forward the request fields to the service-layer\norchestration and wrap its payload in ``ServiceGCResponse``.",
@@ -20445,6 +21407,154 @@
         "summary": "List Workspace Operations",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}/provider-budget": {
+      "post": {
+        "description": "Set the managed OpenRouter budget (USD) of a workspace.\n\nThe live managed key's limit is updated first; the new budget, the audit\nevent and a resume of a provider-budget block follow. ``usd`` must exceed\nthe exact provider spend already recorded.",
+        "operationId": "set_workspace_provider_budget_v1_workspaces__workspace_id__provider_budget_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceProviderBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Management API failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Set Workspace Provider Budget",
+        "tags": [
+          "workspace-controls"
         ]
       }
     },

@@ -3,7 +3,14 @@
 import pytest
 from sqlalchemy import insert, select, text, update
 
-from awf.db.models import CallbackDelivery, Operation, ResourceReservation, Task, ValidationRun
+from awf.db.models import (
+    CallbackDelivery,
+    Operation,
+    ResourceReservation,
+    Task,
+    TaskAttempt,
+    ValidationRun,
+)
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.lifecycle_models import NodeLifecycleRow
 from awf.hosted_node.lifecycle_schemas import RecoveryAcknowledgement
@@ -15,6 +22,72 @@ from tests.integration.test_node_idle_gate import node as node
 from tests.integration.test_node_maintenance import ready_node as ready_node
 from tests.integration.test_restore_quarantine import restore
 from tests.integration.test_restore_row_families import seed_rows
+
+
+async def test_inventory_projects_tasks_by_their_distinct_attempt_workspaces(ready_node):
+    _, receiver, _ = ready_node
+    workspaces = [await create(receiver.factory) for _ in range(4)]
+    task_workspaces = {
+        "unattempted": [],
+        "single": [workspaces[0].id],
+        "multiple": [workspaces[1].id, workspaces[2].id],
+        "unrelated": [workspaces[3].id],
+    }
+    async with receiver.factory.begin() as session:
+        await session.execute(
+            insert(Task),
+            [
+                {
+                    "id": task_id,
+                    "repo_url": "https://example.invalid/repo",
+                    "base_branch": "main",
+                    "title": "Retained",
+                    "prompt": "Never execute",
+                }
+                for task_id in task_workspaces
+            ],
+        )
+        session.add_all(
+            TaskAttempt(
+                id=f"{task_id}-{number}",
+                task_id=task_id,
+                workspace_id=workspace_id,
+                attempt_number=number,
+                agent="codex",
+                status="requested",
+                title="Retained",
+                repo_url="https://example.invalid/repo",
+                base_branch="main",
+            )
+            for task_id, workspace_ids in task_workspaces.items()
+            for number, workspace_id in enumerate(workspace_ids, start=1)
+        )
+    client, receiver, _, binding = await restore(ready_node)
+    accepted = await client.post(
+        PREFIX + "/recovery/acknowledge",
+        json={"idempotency_key": binding.restore_id, "receipt_ref": "current"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    async with receiver.factory() as session:
+        gate = await session.get(NodeLifecycleRow, 1)
+        proposal, _ = await inventory(
+            session,
+            gate,
+            RecoveryAcknowledgement(idempotency_key="task-workspaces", receipt_ref="current"),
+        )
+    assert {row.row_id: row.workspace_id for row in proposal.rows if row.family == "tasks"} == {
+        "unattempted": None,
+        "single": workspaces[0].id,
+        "multiple": None,
+        "unrelated": workspaces[3].id,
+    }
+    assert {
+        (row.task_id, row.workspace_id) for row in proposal.rows if row.family == "task_attempts"
+    } == {
+        (task_id, workspace_id)
+        for task_id, workspace_ids in task_workspaces.items()
+        for workspace_id in workspace_ids
+    }
 
 
 @pytest.mark.parametrize("fault", ["callback_parents", "foreign_reservation", "attempt_workspace"])

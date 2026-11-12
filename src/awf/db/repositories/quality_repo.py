@@ -158,6 +158,25 @@ class ResourceReservationRepository:
             for reservation in (await self._session.execute(stmt)).scalars()
         }
 
+    async def set_active_phase_for_workspace(self, workspace_id: str, *, phase: str) -> int:
+        """Set ``phase`` on every unreleased reservation of ``workspace_id``.
+
+        The work-slot broker flips steady<->peak in the same transaction that takes
+        or deletes the workspace's work-slot lease.
+        """
+        result = await self._session.execute(
+            update(ResourceReservation)
+            .where(
+                ResourceReservation.workspace_id == workspace_id,
+                ResourceReservation.released_at.is_(None),
+                ResourceReservation.phase != phase,
+            )
+            .values(phase=phase)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.flush()
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def release_active_for_workspace(
         self,
         workspace_id: str,

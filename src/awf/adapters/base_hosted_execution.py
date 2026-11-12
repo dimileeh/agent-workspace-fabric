@@ -130,9 +130,44 @@ async def build_hosted_exec_request(
             compose_env=compose_env,
         )
 
+    if adapter.execution is not None and adapter.execution.third_party:
+        from awf.adapters.provider_config import competing_provider_env
+
+        credential_ref = (
+            adapter.execution.credential_ref if adapter.execution.provider == "openrouter" else None
+        )
+        env_passthrough_names = tuple(
+            n for n in env_passthrough_names if not competing_provider_env(n)
+        )
+        env_passthrough_aliases = tuple(
+            (t, s) for t, s in env_passthrough_aliases if not competing_provider_env(t)
+        )
+        if credential_ref is not None and compose_env is not None:
+            source_name = credential_ref.removeprefix("env/")
+            if source_name == "OPENROUTER_API_KEY":
+                env_passthrough_names += (source_name,)
+            else:
+                env_passthrough_aliases += (("OPENROUTER_API_KEY", source_name),)
+        profile_env = tuple((n, v) for n, v in profile_env if not competing_provider_env(n))
+        if profile is not None:
+            profile = profile.model_copy(deep=True)
+            profile.runtime.environment = {
+                k: v
+                for k, v in profile.runtime.environment.items()
+                if not competing_provider_env(k)
+            }
+            if credential_ref is not None:
+                source_name = credential_ref.removeprefix("env/")
+                profile.runtime.environment["OPENROUTER_API_KEY"] = f"${{{source_name}}}"
+        file_auth_mount_targets = tuple(
+            t
+            for t in file_auth_mount_targets
+            if not any(p in t for p in ("/.codex", "/.claude", "/.ollama", "/opencode"))
+        )
     request = AgentRuntimeExecRequest(
         workspace_id=workspace_id,
         agent_runtime=adapter.name,
+        execution=adapter.execution,
         cli_args=tuple(cli_args),
         prompt_stdin=prompt_input,
         log_source=log_source,
@@ -215,6 +250,22 @@ def classify_hosted_result(
             stderr=command_result.stderr,
             terminal_head_sha=hosted_result.terminal_head_sha,
         )
+    if adapter.execution is not None and adapter.execution.third_party:
+        from awf.adapters.provider_config import runtime_failure_reason
+
+        contract_reason = runtime_failure_reason(command_result.stderr)
+        if contract_reason is not None:
+            raise AgentRunError(
+                agent=adapter.name,
+                result=command_result,
+                reason_code=contract_reason,
+                details={
+                    "provider": adapter.execution.provider,
+                    "model": adapter.execution.model,
+                    "execution": adapter.execution.model_dump(mode="json"),
+                    "retryable": False,
+                },
+            )
     provider = adapter.get_provider(model)
     selected_model = adapter._selected_model_for_run(model=model)
     reported_model = selected_model or "unknown"

@@ -12,10 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.control.worker import claims as worker_claims
-from awf.control.worker.admission import (
-    _acquire_requested_admission_lock,
-    _requested_admission_row_slots,
-)
+from awf.control.worker.admission import _acquire_requested_admission_lock
 from awf.control.worker.claims import _requested_claim_admission_slots
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import WorkspaceStatus
@@ -34,6 +31,7 @@ from tests.unit.control._worker_admission_support import (
     _EpochCapturingProvisioner,
     _FenceThenBlockProvisioner,
     _gate_admission_prechecks,
+    _keep_claim_leases_in_flight,
     _never_finishes,
     _NonPostgresSession,
     _raises_execution_failure,
@@ -69,16 +67,20 @@ async def test_requested_admission_lock_is_noop_for_non_postgres() -> None:
 
 
 @pytest.mark.unit
-async def test_requested_admission_row_slots_zero_when_execution_limit_disabled(
+async def test_requested_admission_slots_zero_when_execution_limit_disabled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=3, max_concurrent_executions=0),
+    )
     async with session_factory() as session:
-        slots = await _requested_admission_row_slots(
-            session,
-            config=WorkerConfig(max_concurrent_executions=0),
-        )
+        slots = await _requested_claim_admission_slots(worker, session, claim_limit=3)
 
     assert slots == 0
+    assert await worker._requested_provision_slots() == 0  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -881,6 +883,7 @@ async def test_concurrent_requested_claims_recheck_admission_slots_atomically(
         monkeypatch,
         [worker_a, worker_b],
     )
+    _keep_claim_leases_in_flight(monkeypatch, [worker_a, worker_b], provisioner)
 
     async def _list_first() -> list[str]:
         return [first_id]
@@ -949,6 +952,7 @@ async def test_concurrent_local_capacity_claims_recheck_admission_slots_atomical
         monkeypatch,
         [worker_a, worker_b],
     )
+    _keep_claim_leases_in_flight(monkeypatch, [worker_a, worker_b], provisioner)
 
     runs = [
         asyncio.create_task(worker_a.run_once()),

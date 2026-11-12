@@ -21,6 +21,7 @@ from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.service import status as status_mod
 from awf.service.config import ServiceSettings
+from awf.service.metrics_types import WorkSlotSummary
 from awf.service.status import (
     WorkspaceIdView,
     WorkspaceLifecycleSnapshot,
@@ -308,6 +309,46 @@ def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path)
     assert disk["free_bytes"] == 300
     assert disk["percent_free"] == 30.0
     assert disk["threshold_bytes"] == 200
+
+
+@pytest.mark.unit
+def test_service_status_reports_work_slots_without_affecting_overall_status(
+    tmp_path: Path,
+) -> None:
+    # Queued work is informational (slot-release): the check is always ok.
+    async def _waiting_slots(_settings: ServiceSettings) -> WorkSlotSummary:
+        return WorkSlotSummary(
+            limit=1,
+            in_use=1,
+            available=0,
+            waiting=2,
+            unsatisfiable=0,
+            adopted=0,
+            cleanup_unproven=0,
+            oldest_wait_seconds=12.5,
+            reason_code="MONITOR_WAITING_FOR_WORK_SLOT",
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+            work_slot_summary_lookup=_waiting_slots,
+        )
+    )
+
+    assert status["status"] == "ok"
+    work_slots = status["checks"]["work_slots"]
+    assert work_slots["ok"] is True
+    assert work_slots["status"] == "waiting"
+    assert work_slots["reason"] == "MONITOR_WAITING_FOR_WORK_SLOT"
+    assert (work_slots["in_use"], work_slots["waiting"]) == (1, 2)
 
 
 @pytest.mark.unit

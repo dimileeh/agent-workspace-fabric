@@ -31,6 +31,7 @@ from awf.common.workspace_scope import WorkspaceScope
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.work_slot_probe import LocalWorkSlotProcessProbe
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -272,13 +273,25 @@ def build_worker_runtime(
         template_path=template,
         **compose_options,
     )
-    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
+    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose, auth_work_dir=work_dir)
     runner = (
         HostedCommandRunner(hosted, AsyncioSubprocessRunner())
         if hosted is not None
         else AsyncioSubprocessRunner()
     )
     usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
+    from awf.service.provider_managed_keys import (
+        build_managed_key_broker,
+        provider_key_maintenance,
+    )
+
+    # Always built: a frozen managed selection on a worker without a management
+    # key must park with PROVIDER_MANAGEMENT_KEY_MISSING, never use a static key.
+    managed_key_broker = build_managed_key_broker(
+        session_factory=session_factory,
+        management_key=settings.openrouter_management_key,
+        usage_poll_interval_seconds=settings.openrouter_usage_poll_interval_seconds,
+    )
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
@@ -594,6 +607,7 @@ def build_worker_runtime(
         await provisioner.ensure_hosted_monitor_worktree(workspace_id)
 
     executor = WorkspaceExecutor(
+        stack_launcher=stack_launcher,
         session_factory=session_factory,
         runner=runner,
         compose=compose,
@@ -603,6 +617,7 @@ def build_worker_runtime(
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,
+        credential_broker=managed_key_broker,
         # Cloud-neutral hosted execution seam. None in Core: local AWF keeps
         # the exact tracked docker compose exec path. A hosted AWF Cloud
         # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)
@@ -860,16 +875,30 @@ def build_worker_runtime(
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,
         terminal_gc_reaper=_reap_terminal_workspace_gc,
+        **provider_key_maintenance(
+            session_factory=session_factory,
+            broker=managed_key_broker,
+            management_key=settings.openrouter_management_key,
+        ),
         # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
         # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
         # workspace's overlay on terminal-runtime-release before GC removes the dir.
         auth_overlay_work_dir=work_dir,
+        # Restart adoption / reconciler probe for work-slot leases (slot-release):
+        # is a lease's tagged ``awf-exec`` still running in the agent container?
+        work_slot_probe=LocalWorkSlotProcessProbe(
+            runner=runner,
+            runtime_inspector=worker_options.get("runtime_inspector") or RuntimeInspector(),
+        ),
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
             max_concurrent_executions=settings.worker_max_concurrent_executions,
             orphan_reconcile_scan_interval_seconds=(
                 settings.orphan_reconcile_scan_interval_seconds
+            ),
+            provider_key_reconcile_interval_seconds=(
+                settings.openrouter_key_reconcile_interval_seconds
             ),
             classified_orphan_reap_scan_interval_seconds=(
                 settings.classified_orphan_reap_scan_interval_seconds
@@ -1101,13 +1130,15 @@ async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
 
     if get_settings().hosted_node is not None:
         raise ValueError("HOSTED_RUNTIME_INTEGRATION_REQUIRED")
+    from awf.service.openrouter_management import scrub_openrouter_management_environ
 
+    # Settings already hold the key; compose/git/agent subprocesses must not.
+    scrub_openrouter_management_environ()
     runtime = build_worker_runtime(settings)
     try:
         await verify_database_schema_not_ahead(runtime.engine)
         if once:
-            await runtime.worker.run_once()
-            await runtime.worker.wait_for_execution_tasks()
+            await runtime.worker.run_once_and_drain()
             return
         await runtime.worker.run_forever()
     finally:

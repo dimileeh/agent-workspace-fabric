@@ -422,6 +422,60 @@ async def test_park_keeps_one_attention_episode_across_polls(
     assert second.awaiting_human_since == first.awaiting_human_since
 
 
+class _SlotTimeline(RecordedSleep):
+    """Sleep shim and injected work slot sharing one ordered event log."""
+
+    def __init__(self) -> None:
+        """Start with an empty timeline."""
+        super().__init__()
+        self.timeline: list[str] = []
+
+    async def __call__(self, seconds: float) -> None:
+        """Record the parked wait's sleep in the shared timeline."""
+        self.timeline.append("sleep")
+        await super().__call__(seconds)
+
+    async def release_idle(self) -> None:
+        """Record a retained work-slot release in the shared timeline."""
+        self.timeline.append("release_idle")
+
+
+@pytest.mark.unit
+async def test_parked_human_wait_releases_the_retained_work_slot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A park keeps ``decide()`` on a work action, so the park itself must free the slot.
+
+    ``AddressComments`` keeps a retained lease for its agent/validation hooks, but the
+    parked poll launches neither and then sleeps for a human: holding the slot there
+    would starve every other workspace for as long as the human takes.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    timeline = _SlotTimeline()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=timeline,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._work_slot = timeline
+    mocker.patch.object(
+        runner, "_pre_existing_dirty_repair_worktree_result", _CycleBody(_fix_failed())
+    )
+    state = MonitorState(started_at=0.0)
+
+    await _park(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    # The retries before the cap keep the slot; the poll that parks frees it first.
+    assert timeline.timeline == ["release_idle", "sleep"]
+
+    await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+
+    assert timeline.timeline == ["release_idle", "sleep", "release_idle", "sleep"]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("returncode", [1, 139])
 async def test_repeated_genuine_fix_failed_keeps_retrying(

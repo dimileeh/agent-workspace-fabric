@@ -17,3 +17,10 @@ surfaces: `POST /v1/workspaces/adopt-pr`, `awf workspace adopt-pr`, and
 `awf_adopt_pull_request_monitor`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for the operator runbook and
 mocked-local demo path.
+
+Provider model discovery and isolated coding-cycle diagnostics are available
+through `POST /v1/providers/models/query` / `awf provider models` /
+`awf_query_provider_models` and `POST /v1/providers/connection-tests` /
+`awf provider test` / `awf_test_provider_connection`. Diagnostics use existing
+workspace read/log/control surfaces and require an idempotency key. No console
+interface is introduced. See [provider selection](AGENT_MODEL_PROVIDERS.md).

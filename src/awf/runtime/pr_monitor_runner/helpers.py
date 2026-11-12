@@ -53,7 +53,11 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
 )
-from awf.runtime.monitor_state_keys import _item_disposition_key
+from awf.runtime.monitor_state_keys import (
+    _item_disposition_key,
+    _mutation_park_key,
+    _preserved_attempt_retired_key,
+)
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
 )
@@ -76,6 +80,7 @@ from awf.runtime.monitor_state_keys import (
     _retired_operator_decision_key as _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor import (
+    _CI_REPAIR_ATTEMPTED_KEY_PREFIX,
     CheckFailure,
     CheckFailureLogResult,
     CheckTiming,
@@ -87,6 +92,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewComment,
     _agent_can_triage_review_comment,
+    _ci_repair_attempted_state_key,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
     _is_bot_author,
@@ -95,6 +101,9 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.runtime.pr_monitor_runner import reviewer_settle as _reviewer_settle
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_NON_FIXED_WITH_MUTATION,
+)
 from awf.runtime.pr_monitor_runner.comments import (
     MonitorVerdictResult,
     Verdict,
@@ -284,8 +293,16 @@ def _sync_needs_human_reason(
     state: MonitorState,
     item_id: str,
     result: VerdictResult,
+    *,
+    is_outdated: bool = False,
 ) -> None:
-    """Persist or clear the agent's blocking-verdict reason for a review item."""
+    """Persist or clear the agent's blocking-verdict reason for a review item.
+
+    An ``AGENT_NON_FIXED_WITH_MUTATION`` park also records the rollback commit it
+    was rendered on and whether the thread was outdated then (#1213), so
+    ``decide()`` re-evaluates it once either no longer holds. Every other result
+    drops that record: the item's latest verdict is the one that counts.
+    """
     reason_key = _needs_human_reason_state_key(item_id)
     if result.verdict in {"defer", "needs_human"} and (
         reason := _sanitize_verdict_reason(result.reason)
@@ -293,6 +310,16 @@ def _sync_needs_human_reason(
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
+    if result.verdict == "needs_human" and result.reason_code == AGENT_NON_FIXED_WITH_MUTATION:
+        state.mark_addressed(
+            _mutation_park_key(item_id),
+            json.dumps(
+                {"rollback_head": result.rollback_head or "", "outdated": is_outdated},
+                sort_keys=True,
+            ),
+        )
+    else:
+        state.threads_addressed_ids.pop(_mutation_park_key(item_id), None)
 
 
 def _sync_agent_failed_reason(
@@ -364,6 +391,9 @@ def _clear_addressed_state_by_id(
     rollback re-queues the item, and the retried resolve must reuse that reply,
     never post a second one. Pass ``keep_posted_reply=False`` only where fresh
     reviewer feedback supersedes it — that feedback is owed its own reply.
+    The fresh feedback likewise ends an operator's preserved-attempt retirement
+    (#1189): its tombstone is dropped so a repeated ruling is never consumed as
+    already applied while the thread stays open for the new conversation.
     """
     from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 
@@ -376,8 +406,11 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_agent_failed_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+    state.threads_addressed_ids.pop(_mutation_park_key(item_id), None)
     if posted is None or posted.reply_comment_id is None:
         state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
+    if not restore_operator_decision:
+        state.threads_addressed_ids.pop(_preserved_attempt_retired_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )
@@ -1025,6 +1058,30 @@ def _ci_transient_rerun_attempt(
         legacy_key = _ci_transient_rerun_state_key(head_sha, legacy_failures)
         state.threads_addressed_ids.pop(legacy_key, None)
     return attempt
+
+
+def _record_ci_repair_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> None:
+    """Mark a dispatched CI repair for this head/failing-run (#1216); drop older heads."""
+    for key in [
+        k for k in state.threads_addressed_ids if k.startswith(_CI_REPAIR_ATTEMPTED_KEY_PREFIX)
+    ]:
+        state.threads_addressed_ids.pop(key)
+    state.threads_addressed_ids[_ci_repair_attempted_state_key(head_sha, failures)] = "1"
+
+
+def _discard_ci_repair_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> None:
+    """Undo the #1216 marker when a provider unwind or park left the CI repair unlanded."""
+    state.threads_addressed_ids.pop(_ci_repair_attempted_state_key(head_sha, failures), None)
 
 
 def _ci_failure_payload(failure: CheckFailure) -> dict[str, object]:

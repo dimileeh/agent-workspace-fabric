@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
+from awf.common.work_slot import WorkSlot
+
 
 class _MonitorRunnerProto(Protocol):
     """Minimum surface the executor needs from a PR monitor runner.
@@ -21,4 +23,5 @@ class _MonitorRunnerProto(Protocol):
         compose_project: str,
         compose_file: Path,
         monitor_owner_id: str | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> None: ...

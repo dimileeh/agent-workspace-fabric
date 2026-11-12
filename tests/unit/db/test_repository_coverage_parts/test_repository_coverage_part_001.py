@@ -242,7 +242,7 @@ def test_repository_time_helpers_normalize_circuit_breaker_expiry() -> None:
         ),
         (
             _provider_model_circuit_breaker_insert_if_absent_stmt,
-            "provider, model",
+            "provider, model, connection_scope",
         ),
     ],
 )

@@ -43,6 +43,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
 )
@@ -339,6 +340,7 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "protected_scope_push_blocked"
     if push_result.reason_code in {
         _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
         _REPAIR_START_HEAD_UNAVAILABLE_REASON,
         _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     }:

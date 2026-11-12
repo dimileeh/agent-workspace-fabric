@@ -23,6 +23,11 @@ from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.operator_grants import (
     consume_active_operator_grants_in_session,
 )
+from awf.control.provider_budget_park import (
+    is_provider_park_reason,
+    park_monitor_in_session,
+    park_payload,
+)
 from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
@@ -1307,6 +1312,19 @@ async def _terminate_failed(
             )
             await s.commit()
             return False
+        if is_provider_park_reason(rc):
+            # A managed-key budget/key failure parks for a human (never fails).
+            parked = await park_monitor_in_session(
+                s,
+                repo,
+                workspace_id=workspace_id,
+                reason_code=rc,
+                payload=park_payload(rc, message, details),
+                monitor_owner_id=self._monitor_owner_id,
+            )
+            if parked is not None:
+                await s.commit()
+                return False
         safe_message = redact_audit_text(message, limit=2000)
         ws.failure_reason = failure_reason.value
         ws.failure_message = safe_message

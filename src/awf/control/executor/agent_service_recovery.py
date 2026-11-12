@@ -22,12 +22,15 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.work_slot import hold_work_slot
 from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.git_ops import GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
 from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
+from awf.control.executor.work_slot_binding import work_slot_for
+from awf.control.provider_budget_park import is_provider_park_reason
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
@@ -210,23 +213,43 @@ async def _run_agent_task_with_service_recovery(
             planning_retry_scope_baseline=planning_retry_scope_baseline,
         )
 
-    return await _run_agent_callable_with_service_recovery(
-        self,
-        run_agent=_run_initial_agent,
-        adapter=adapter,
-        workspace=workspace,
-        profile=profile,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        model=model,
-        command_evidence=command_evidence,
-        workspace_id=workspace_id,
-        execution_owner_id=execution_owner_id,
-        before_mark_failed=before_mark_failed,
-        before_agent_retry=before_agent_retry,
-        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
-        hold_writer_lock=hold_writer_lock,
-    )
+    try:
+        return await _run_agent_callable_with_service_recovery(
+            self,
+            run_agent=_run_initial_agent,
+            adapter=adapter,
+            workspace=workspace,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            model=model,
+            command_evidence=command_evidence,
+            workspace_id=workspace_id,
+            execution_owner_id=execution_owner_id,
+            before_mark_failed=before_mark_failed,
+            before_agent_retry=before_agent_retry,
+            after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+            hold_writer_lock=hold_writer_lock,
+        )
+    except AgentRunError as exc:
+        if not is_provider_park_reason(exc.reason_code):
+            raise
+        # The workspace's own managed-key budget/key stopped an unfinished task.
+        # The caller's non-zero-exit salvage would carry partial edits into
+        # validation and a PR once HEAD advanced, never reaching the park sink:
+        # park now (``_mark_failed`` diverts park codes) with the worktree intact
+        # (PRRT_kwDOSJAM6s613nGw).
+        await _run_before_mark_failed(before_mark_failed, reason_code=exc.reason_code)
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.agent_failure,
+            message=f"agent run stopped by the managed provider key ({exc.reason_code})",
+            reason_code=exc.reason_code,
+            details=exc.details,
+            execution_owner_id=execution_owner_id,
+        )
+        return False, None
 
 
 async def _run_agent_callable_with_service_recovery(
@@ -255,6 +278,12 @@ async def _run_agent_callable_with_service_recovery(
     worktree_path = _executor_worktree_path(self, workspace_id)
     async with AsyncExitStack() as stack:
         if hold_writer_lock and worktree_path is not None:
+            # Take the work slot before the writer lock: a run queued for a slot
+            # must not hold the lock GC and recovery git ops wait on. The agent run
+            # (and a setup replay after a service restart) then nests in this hold.
+            await stack.enter_async_context(
+                hold_work_slot(work_slot_for(self, workspace_id), "agent")
+            )
             await stack.enter_async_context(hold_exclusive_worktree_writer_lock(worktree_path))
         else:
             stack.enter_context(nullcontext())
@@ -818,6 +847,7 @@ async def _replay_setup_after_agent_service_restart(
             after=identity_after,
             trigger=_EXECUTOR_RECOVERY_TRIGGER,
             ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            work_slot=work_slot_for(self, workspace_id),
             recover_missing_head=partial(
                 _recover_head_after_setup_replay_cleanup_failure,
                 self,

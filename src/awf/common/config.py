@@ -19,7 +19,7 @@ from functools import lru_cache
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from awf.hosted_node.config import HostedSettings
@@ -38,6 +38,7 @@ DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS = 3600.0
 DEFAULT_ORPHAN_RECONCILE_LIMIT = 50
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
+DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD = 10.0
 _MIN_PRODUCTION_API_TOKEN_LENGTH = 24
 _WEAK_API_TOKEN_SEPARATORS = ("", "-", "_", ".")
 _WEAK_API_TOKEN_VALUES = frozenset(
@@ -344,6 +345,20 @@ class Settings(BaseSettings):
 
     # Docker
     docker_host: str = Field(default="unix:///var/run/docker.sock")
+    third_party_agent_providers_enabled: bool = False
+    # Managed OpenRouter keys are opt-in: with a management key configured, each
+    # OpenRouter selection runs under its own AWF-minted, budget-limited key. The
+    # unprefixed service variable reaches only the API and worker processes.
+    openrouter_management_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENROUTER_MANAGEMENT_KEY", "openrouter_management_key"),
+        repr=False,
+    )
+    openrouter_workspace_limit_usd: float = Field(
+        default=DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD, gt=0, lt=1_000_000
+    )
+    openrouter_usage_poll_interval_seconds: float = Field(default=120.0, ge=30, le=3600)
+    openrouter_key_reconcile_interval_seconds: float = Field(default=900.0, gt=0)
     agent_runtime_image: str = Field(default="awf-agent-runtime:latest")
     companion_image_cache_enabled: bool = Field(
         default=True,
@@ -653,6 +668,22 @@ class Settings(BaseSettings):
         """Treat blank optional hosted delegation settings as unset."""
         if isinstance(value, str) and value.strip() == "":
             return None
+        return value
+
+    @field_validator("openrouter_management_key", mode="before")
+    @classmethod
+    def _blank_openrouter_management_key_is_unset(cls, value: Any) -> Any:
+        """Treat a blank Compose-forwarded management key as unconfigured."""
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("openrouter_workspace_limit_usd", mode="before")
+    @classmethod
+    def _blank_openrouter_limit_uses_default(cls, value: Any) -> Any:
+        """Compose forwards an empty default; keep the documented 10 USD limit."""
+        if isinstance(value, str) and value.strip() == "":
+            return DEFAULT_OPENROUTER_WORKSPACE_LIMIT_USD
         return value
 
     @field_validator("network_posture_open_legacy_cutoff", mode="before")

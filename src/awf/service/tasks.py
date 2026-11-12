@@ -22,6 +22,7 @@ from awf.service.workspace_observability import (
     workspace_identity_usage_payload,
     workspace_pricing_metadata,
 )
+from awf.service.workspace_provider_spend import provider_spend_scope
 
 
 def _readiness_from_candidate(
@@ -83,12 +84,16 @@ def _task_from_attempt(
         task_class=attempt.task_class,
         owned_paths=list(attempt.owned_paths),
         agent=parse_agent_runtime(attempt.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
         llm_usage=observability["llm_usage"],
+        provider_spend=observability["provider_spend"],
         pricing=_pricing_from_workspace(workspace),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
@@ -99,7 +104,10 @@ def _task_from_attempt(
 
 
 def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
+    from awf.service.workspace_observability import agent_identity_payload
+
     workspace = attempt.workspace
+    identity = agent_identity_payload(workspace)
     candidate = attempt.merge_candidate
     return TaskAttemptResponse(
         attempt_id=attempt.id,
@@ -113,6 +121,11 @@ def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
         candidate_id=candidate.id if candidate is not None else None,
         candidate_status=candidate.status if candidate is not None else None,
         readiness=_readiness_from_candidate(candidate),
+        agent_provider=identity["agent_provider"],
+        agent_execution=identity["agent_execution"],
+        agent_connection_scope=identity["agent_connection_scope"],
+        agent_model=identity["agent_model"],
+        agent_effort=identity["agent_effort"],
         agent=parse_agent_runtime(attempt.agent),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
@@ -143,12 +156,16 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         task_class=row.task_class,
         owned_paths=list(row.owned_paths),
         agent=parse_agent_runtime(row.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
         llm_usage=observability["llm_usage"],
+        provider_spend=observability["provider_spend"],
         pricing=_pricing_from_workspace(row),
         status=WorkspaceStatus(row.status),
         pr_url=row.pr_url,
@@ -187,15 +204,16 @@ async def build_task_list_response(
     workspace_ids.extend(row.id for row in legacy_rows)
     snapshots = await asyncio.to_thread(read_latest_usage_snapshots, workspace_ids)
     items: list[TaskResponse] = []
-    with prefetched_usage_snapshots(snapshots):
-        for row in attempt_rows:
-            items.append(
-                _task_from_attempt(
-                    row,
-                    canonical_attempt_id=canonical_attempt_ids.get(row.task_id),
+    async with provider_spend_scope(session, workspace_ids):
+        with prefetched_usage_snapshots(snapshots):
+            for row in attempt_rows:
+                items.append(
+                    _task_from_attempt(
+                        row,
+                        canonical_attempt_id=canonical_attempt_ids.get(row.task_id),
+                    )
                 )
-            )
-        items.extend(_task_from_workspace(row) for row in legacy_rows)
+            items.extend(_task_from_workspace(row) for row in legacy_rows)
     items.sort(key=lambda item: (item.created_at, item.workspace_id), reverse=True)
     return TaskListResponse(
         items=items[:limit],

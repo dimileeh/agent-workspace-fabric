@@ -164,6 +164,7 @@ def _patch_record_released_deps(
 ) -> Any:
     class _Workspace:
         status = WorkspaceStatus.failed.value
+        task_policy: dict[str, Any] = {}
 
     class _WorkspaceRepo:
         def __init__(self, session: object) -> None:

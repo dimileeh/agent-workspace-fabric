@@ -22,6 +22,7 @@ from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
+from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
@@ -57,7 +58,12 @@ from awf.control.executor.quality_gates import (
     _log,
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import (
+    _execution_circuit_allows_launch,
+    _freeze_execution_defaults,
+    _sync_resolved_profile,
+)
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
@@ -72,7 +78,9 @@ from awf.node.companion_services import (
     companion_specs_from_task_policy,
 )
 from awf.node.git_manager import GitOperationError
-from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.node.stack_launcher import (
+    effective_compose_up_timeout_seconds,
+)
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
@@ -103,6 +111,7 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+_refresh_selected_agent_material = _companion_env._refresh_selected_agent_material
 _companions_with_set_env_secrets_for_resume = (
     _companion_env._companions_with_set_env_secrets_for_resume
 )
@@ -205,6 +214,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         )
         if recovered_remote_push_branch:
             ws.remote_push_branch = recovered_remote_push_branch
+
+    if not await _freeze_execution_defaults(self, ws):
+        return None
 
     workspace_is_hosted = pr_adoption_is_hosted(ws.task_policy)
     missing = _missing_monitor_recovery_metadata(ws)
@@ -363,8 +375,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         await pace_monitor_resume_restart(self, workspace_id=workspace_id)
         # Monitor agent-service recovery replays setup under this lock; holding it
         # across identity capture, restart and replay keeps a reclaimed lease's
-        # resume from replaying concurrently with the old runner's recovery.
-        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+        # resume from replaying concurrently with the old runner's recovery. The
+        # replay is a validation run: take its work slot before the lock, so it
+        # never queues for one while GC and recovery git ops wait on the lock.
+        async with (
+            hold_work_slot(work_slot_for(self, workspace_id), "validation"),
+            hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id),
+        ):
             # The claim may have been reclaimed while waiting for the lock; fence
             # again so a superseded resume cannot force-recreate the new owner's runtime.
             if not await self._recheck_status(
@@ -377,6 +394,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             await lock_resumed_worktree_registration(
                 self, workspace_id=workspace_id, repo_url=ws.repo_url
             )
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
+            ):
+                return None
             identity_before = await _runtime_setup_replay.capture_agent_container_identity(
                 compose_project
             )
@@ -401,6 +422,20 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             ):
                 return None
 
+    if workspace_is_hosted:
+        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_hosted_material",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
+            ):
+                return None
+
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
         if monitor is None and self._pr_monitor_factory is not None:
@@ -419,6 +454,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(
                     self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
                 ),
@@ -587,6 +623,7 @@ async def run_resumed_pr_monitor(
         compose_project=handoff.compose_project,
         compose_file=handoff.compose_file,
         **handoff.run_kwargs,
+        **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )
     return True
 
@@ -833,6 +870,14 @@ async def _reject_unsupported_task_kind(
     go terminal while the recovery operation lingered unresolved.
     """
     task_kind = workspace.task_kind
+    from awf.service.provider_diagnostics import is_diagnostic
+
+    if (
+        task_kind == "provider_connection_test"
+        and is_diagnostic(workspace.task_policy)
+        and from_status == WorkspaceStatus.running
+    ):
+        return False
     if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
         message = (
             "task kind 'monitor_release_pr' is deprecated; monitor an existing "
@@ -1329,6 +1374,10 @@ async def _build_handoff_pr_monitor(
             action=stale_action,
         ):
             return None
+        if not await _freeze_execution_defaults(self, workspace):
+            return None
+        if not await _execution_circuit_allows_launch(self, workspace):
+            return None
         if monitor is None and self._pr_monitor_factory is not None:
             agent: AgentRuntime | str
             try:
@@ -1345,6 +1394,7 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                credential_broker=getattr(self, "_credential_broker", None),
                 runtime_executor=(
                     self._agent_runtime_executor
                     if pr_adoption_is_hosted(workspace.task_policy)

@@ -22,6 +22,7 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor import validation_fix_helpers as _validation_fix_helpers
 from awf.control.executor.agent_service_recovery import _run_agent_callable_with_service_recovery
 from awf.control.executor.git_ops import _git_name_lines
@@ -32,6 +33,8 @@ from awf.control.executor.hosted_validation_sync import (
 )
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.validation_cleanup_guards import ExecutionValidationResult
+from awf.control.executor.work_slot_binding import work_slot_for
+from awf.control.provider_budget_park import is_provider_park_reason
 from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.control.validation_fix_cycle import ValidationFixContext, build_fix_prompt
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
@@ -145,6 +148,7 @@ async def run_validation_fix_pass(
                 hosted_pr_identity=_hosted_pr_identity,
                 profile=profile,
                 worktree_path=worktree_path,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
 
         async def _finish_fix_recovery_failure(
@@ -249,6 +253,54 @@ async def run_validation_fix_pass(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+        if is_provider_park_reason(exc.reason_code):
+            # The workspace's own managed-key budget/key: later passes could only
+            # fail to mint and then fail validation, so park now (the failure
+            # sink diverts park codes) with the worktree and its work intact.
+            message = f"validation fix pass stopped by the managed provider key ({exc.reason_code})"
+            # Fence on the execution owner before finishing operations too: a
+            # superseded executor's park no-ops on the fenced CAS below, so it must
+            # not first fail the replacement claimant's validate ops
+            # (PRRT_kwDOSJAM6s616TNZ).
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_provider_park",
+                owner_id=execution_owner_id,
+            ) or not await self._finish_pending_validate_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+                reason_code=exc.reason_code,
+                coverage=_validation_run_coverage_metadata(
+                    val_result,
+                    baseline_coverage=baseline_coverage,
+                ),
+                error_message=message,
+                # Re-fenced under the row lock: the claim may move after the recheck.
+                execution_owner_id=execution_owner_id,
+            ):
+                deposit_planning_artifacts_if_required()
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
+            await mark_failed_preserving_planning_artifacts(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.validating,
+                failure_reason=FailureReason.agent_failure,
+                message=message,
+                reason_code=exc.reason_code,
+                details=exc.details,
+                execution_owner_id=execution_owner_id,
+            )
+            return ExecutionValidationResult(
+                stop=True,
+                successful_validation_run_id=successful_validation_run_id,
+                successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+            )
         if getattr(adapter, "is_hosted", False):
             fix_result = AgentRunResult(
                 returncode=exc.result.returncode,

@@ -161,6 +161,12 @@ _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING = "COMMENT_REPAIR_UNPUBLISHED_PRO
 # commit-sink failure. See PRRT_kwDOSJAM6s6KY4Wi.
 _REPAIR_DIRTY_COMMIT_FAILED_REASON = "REPAIR_DIRTY_COMMIT_FAILED"
 
+# A managed-key park's resume found the repair worktree holding dirt the park did
+# not record, or a recorded path whose content changed while parked. Nothing of it
+# is committed or discarded: the operator hint parks for a human (non-terminal)
+# naming those paths. See PRRT_kwDOSJAM6s61_WVy.
+_PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON = "PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES"
+
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 
 _VALIDATION_MISSING_CURRENT_HEAD_STALE_REASON = "validation_missing_for_current_head"

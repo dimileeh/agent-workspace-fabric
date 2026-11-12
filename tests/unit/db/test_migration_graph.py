@@ -54,8 +54,12 @@ _RETAINED_ACCEPTANCE_REVISION = "ec19f5061728"
 # Checkpoint intent followed by exact restore reconciliation.
 _CHECKPOINT_REVISION = "fd2af6172839"
 _RESTORE_RECONCILIATION_REVISION = "b830e6d9a142"
-# Current head: guarded writes rewrite the lifecycle gate only to clear idle.
+# Guarded writes rewrite the lifecycle gate only to clear idle.
 _BARRIER_IDLE_CLEAR_ONLY_REVISION = "b555242e9032"
+# Current head: broker-owned work-slot leases (slot-release).
+_WORK_SLOT_LEASES_REVISION = "c6d7e8f9a0b1"
+_PROVIDER_CONNECTIONS_REVISION = "85ce3f9b2a61"
+_PROVIDER_MANAGED_KEYS_REVISION = "9e3b7c41d2a6"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -123,12 +127,21 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_BARRIER_IDLE_CLEAR_ONLY_REVISION]
+    assert script.get_heads() == [_PROVIDER_MANAGED_KEYS_REVISION]
+    managed_keys = script.get_revision(_PROVIDER_MANAGED_KEYS_REVISION)
+    assert managed_keys is not None
+    assert managed_keys.down_revision == _PROVIDER_CONNECTIONS_REVISION
+    provider_connections = script.get_revision(_PROVIDER_CONNECTIONS_REVISION)
+    assert provider_connections is not None
+    assert provider_connections.down_revision == _WORK_SLOT_LEASES_REVISION
+    work_slot_leases = script.get_revision(_WORK_SLOT_LEASES_REVISION)
+    assert work_slot_leases is not None
+    assert work_slot_leases.down_revision == _BARRIER_IDLE_CLEAR_ONLY_REVISION
     clear_only = script.get_revision(_BARRIER_IDLE_CLEAR_ONLY_REVISION)
     assert clear_only is not None
     assert clear_only.down_revision == _RESTORE_RECONCILIATION_REVISION
     # Checkpoint cut and restore require the database to sit at exactly this head.
-    assert CHECKPOINT_SCHEMA_REVISION == _BARRIER_IDLE_CLEAR_ONLY_REVISION
+    assert CHECKPOINT_SCHEMA_REVISION == _PROVIDER_MANAGED_KEYS_REVISION
     restored_head = script.get_revision(_RESTORE_RECONCILIATION_REVISION)
     assert restored_head is not None
     assert restored_head.down_revision == _CHECKPOINT_REVISION

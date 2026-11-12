@@ -39,7 +39,10 @@ worktree its pre-existing-dirty guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE``
 — the sink failure masked and the preserved work stranded. That case escalates as
 ``REPAIR_DIRTY_COMMIT_FAILED`` instead, exactly as the CI-repair commit sink
 already does, and still without a rollback (PRRT_kwDOSJAM6s6fwr71,
-PRRT_kwDOSJAM6s6fxp82).
+PRRT_kwDOSJAM6s6fxp82). A managed-key park still parks, carrying that sink
+failure as details, so raising the budget can resume it (PRRT_kwDOSJAM6s618cN-);
+the resumed hint cycle commits the stranded edits before its dirty guard runs
+(``provider_park_stranded_edits``, PRRT_kwDOSJAM6s618pY4).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working. The
@@ -57,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.managed_credentials import PROVIDER_PARK_REASON_CODES
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
@@ -105,6 +109,9 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    mark_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.types import SINK_INFRASTRUCTURE_ERRORS
 
 if TYPE_CHECKING:
@@ -134,6 +141,16 @@ _TIMEOUT_BASELINE_UNSET = _TimeoutBaselineUnset()
 
 AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 """Reason codes that mean "the watchdog fired", not "the agent's work is junk"."""
+
+_WORK_PRESERVING_REASON_CODES = AGENT_TIMEOUT_REASON_CODES | PROVIDER_PARK_REASON_CODES
+"""Run errors that cut a repair short rather than judge it: preserve, never roll back.
+
+A managed-key park stops the agent mid-repair exactly as the watchdog does, and
+the monitor resumes the same item once a human raises the budget. Rolling back
+first would make that resume restart the repair from scratch, so the park takes
+the timeout's preserve path and its error unwinds from the provider-recovery
+record at the end of it (PRRT_kwDOSJAM6s61592n).
+"""
 
 
 class TimeoutSinkOutcome(Enum):
@@ -215,6 +232,8 @@ async def handle_agent_run_error(
 ) -> NoReturn:
     """Classify an ``AgentRunError``: roll back a provider failure, preserve a timeout.
 
+    A managed-key park is preserved like a timeout (``_WORK_PRESERVING_REASON_CODES``).
+
     ``item_start_head`` is the item's evidence anchor (restored to the original
     start on a re-attempt after a preserved timeout) and stays the sink anchor and
     the value remembered for the next attempt, bound to ``item_body_hash`` so an
@@ -252,7 +271,7 @@ async def handle_agent_run_error(
         AgentVerdictProtocolError,
     )
 
-    if exc.reason_code not in AGENT_TIMEOUT_REASON_CODES:
+    if exc.reason_code not in _WORK_PRESERVING_REASON_CODES:
         rollback_ok = await _rollback_or_classify_failure(
             runner,
             workspace_id=workspace_id,
@@ -545,6 +564,13 @@ async def _finish_timeout_preservation[PreserveOutcomeT](
     raise cancelled
 
 
+def _preserved_commit_note(reason_code: str) -> str:
+    """Name what stopped the agent in the preserving sink commit's message."""
+    if reason_code in PROVIDER_PARK_REASON_CODES:
+        return "preserved after managed provider key park"
+    return "preserved after agent timeout"
+
+
 async def _sink_timeout_dirty_changes(
     runner: PullRequestMonitorRunner,
     *,
@@ -565,7 +591,7 @@ async def _sink_timeout_dirty_changes(
     try:
         committed = await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
-            message=f"{commit_message} (preserved after agent timeout)",
+            message=f"{commit_message} ({_preserved_commit_note(reason_code)})",
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
@@ -685,9 +711,23 @@ async def _raise_stranded_timeout_sink_failure(
     answered "nothing to commit" or one whose exception was swallowed to keep the
     timeout's reason code — so the escalation stays attributable to the sink's own
     logged failure (PRRT_kwDOSJAM6s6fxp82).
+
+    A managed-key park is the one recovery exception that is *not* suppressed. It
+    sends no next pass anywhere — it blocks the workspace until a human raises the
+    budget — and replacing it with ``REPAIR_DIRTY_COMMIT_FAILED`` would fail the
+    workspace instead, so raising the budget could no longer resume the repair. The
+    park propagates with the sink failure attached as ``dirty_commit_error``
+    details, so the stranded edits are still attributable when it resumes
+    (PRRT_kwDOSJAM6s618cN-). It also marks the monitor state, so the resumed hint
+    cycle finishes this sink before its pre-existing-dirty guard can reject the
+    edits and wedge the resume (PRRT_kwDOSJAM6s618pY4).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
+    from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
+        _attach_provider_recovery_details,
+    )
     from awf.runtime.pr_monitor_runner.types import (
+        ProviderManagedKeyParkedError,
         ProviderRecoveryAuthError,
         ProviderRecoveryFallbackError,
         ProviderRecoveryRetryError,
@@ -714,6 +754,24 @@ async def _raise_stranded_timeout_sink_failure(
             type(provider_recovery_exc).__name__ if provider_recovery_exc is not None else None
         ),
     )
+    if isinstance(provider_recovery_exc, ProviderManagedKeyParkedError):
+        mark_provider_park_stranded_edits(state, preserved_head)
+        _attach_provider_recovery_details(
+            provider_recovery_exc,
+            {
+                "dirty_commit_error": {
+                    "reason_code": _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                    "sink_outcome": sink_outcome.value,
+                    "preserved_head": preserved_head,
+                    "message": (
+                        f"Managed provider key parked the repair ({exc.reason_code}) and the "
+                        "dirty-worktree sink could not commit the edits it left behind; they "
+                        "are stranded in the repair worktree."
+                    ),
+                },
+            },
+        )
+        raise provider_recovery_exc
     raise AgentVerdictProtocolError(
         reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
         message=(

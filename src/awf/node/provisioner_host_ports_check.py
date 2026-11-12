@@ -8,9 +8,11 @@ first-party line-count guardrail. Behavior is unchanged; the functions take
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from awf.common.agent_execution import bind_execution_profile
 from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
@@ -20,7 +22,9 @@ from awf.db.repositories.base import (
     host_ports_from_task_policy_companions,
 )
 from awf.node.provisioner_helpers import (
+    _resolved_profile_requires_credential_rehydration,
     _stamp_trusted_base_provenance_for_persisted_profile,
+    _validate_bound_execution_profile,
 )
 from awf.service.workspaces import (
     WorkspaceCreateDuplicateHostPortError,
@@ -56,7 +60,8 @@ async def _check_auto_resolved_profile_host_ports(
     resolved_profile_dict: dict[str, Any] | None = None,
     execution_claim_epoch: int | None = None,
     trusted_base_profile_sha: str | None = None,
-) -> None:
+    bind_execution: bool = False,
+) -> tuple[WorkspaceProfile, dict[str, Any]] | None:
     """Check auto-resolved profile service ports for admission after provision-time resolution.
 
     When ``profile_ref`` is ``"auto"`` (the default), the create-path admission
@@ -113,12 +118,16 @@ async def _check_auto_resolved_profile_host_ports(
     duplicates or :class:`WorkspaceCreateHostPortConflictError` for
     cross-workspace conflicts so the caller can mark the workspace as
     failed.
+
+    Deferred execution bindings freeze with their resolved profile in this same
+    transaction, including profiles without host ports. Return the winning pair
+    so a concurrent resolver cannot render a different profile with the binding.
     """
     if resolved_profile_dict is None:
         resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
     auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
-    if not auto_profile_host_ports:
-        return
+    if not auto_profile_host_ports and not bind_execution:
+        return None
     seen_profile: set[int] = set()
     for hp in auto_profile_host_ports:
         if hp in seen_profile:
@@ -144,6 +153,41 @@ async def _check_auto_resolved_profile_host_ports(
         # ``provisioning`` from the host-port visibility filter, this
         # two-commit gap would silently reopen a TOCTOU window.
         await repo.acquire_host_port_admission_lock(host_ports=auto_profile_host_ports)
+        ws = await repo.get_for_update(workspace_id) if bind_execution else None
+        if bind_execution:
+            if (
+                ws is None
+                or ws.status != WorkspaceStatus.provisioning.value
+                or (
+                    execution_claim_epoch is not None
+                    and ws.execution_claim_epoch != execution_claim_epoch
+                )
+            ):
+                return None
+            if (
+                ws.resolved_profile is not None
+                and not _resolved_profile_requires_credential_rehydration(ws.resolved_profile)
+                and trusted_base_profile_sha is None
+            ):
+                from awf.profiles.models import WorkspaceProfile
+
+                profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
+                resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
+            if ws.resolved_profile is not None:
+                from awf.profiles.resolver import ProfileResolutionError
+
+                try:
+                    _validate_bound_execution_profile(ws, profile)
+                except ProfileResolutionError as exc:
+                    # Another resolver committed the pair while we were resolving.
+                    # Stop the loser without failing the winner's workspace.
+                    _log.info(
+                        "provisioner.execution_profile_binding_superseded",
+                        workspace_id=workspace_id,
+                        reason_code=exc.reason_code,
+                    )
+                    return None
         conflicts = await repo.find_host_port_conflicts(
             host_ports=auto_profile_host_ports,
             excluding_workspace_id=excluding_workspace_id,
@@ -154,10 +198,11 @@ async def _check_auto_resolved_profile_host_ports(
                 host_port=conflicts[0].host_port,
                 conflicting_workspace_id=conflicts[0].workspace_id,
             )
-        ws = await repo.get_for_update(workspace_id)
+        if not bind_execution:
+            ws = await repo.get_for_update(workspace_id)
         if (
             ws is not None
-            and profile_resolution is not None
+            and (profile_resolution is not None or bind_execution)
             and ws.status == WorkspaceStatus.provisioning.value
         ):
             # Fence (row-locked): a later claimant that superseded us after
@@ -174,6 +219,17 @@ async def _check_auto_resolved_profile_host_ports(
             # commit guard in ``provisioner.provision_claimed``.
             if execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch:
                 ws.resolved_profile = redact_audit_value(resolved_profile_dict)
+                if bind_execution:
+                    ws.task_policy = bind_execution_profile(
+                        ws.task_policy,
+                        agent=ws.agent,
+                        profile=resolved_profile_dict,
+                        environ=os.environ,
+                    )
+                    from awf.service.provider_compatibility import attach_compatibility
+
+                    ws.task_policy = await attach_compatibility(session, ws.task_policy)
+                    await repo.advance_workspace_version(ws)
                 # Trusted-base resolve may have already succeeded; stamp now so a
                 # later pre-launch/stack failure cannot leave an unstamped freeze
                 # that retry would treat as legacy and force auto_merge=False.
@@ -197,6 +253,9 @@ async def _check_auto_resolved_profile_host_ports(
                     current_epoch=ws.execution_claim_epoch,
                 )
         await session.commit()
+        if bind_execution and ws is not None:
+            return profile, ws.task_policy
+    return None
 
 
 async def _check_companion_host_ports(
