@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor import runtime_setup_replay
 from awf.control.executor.constants import (
@@ -35,6 +36,14 @@ from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError
+from awf.profiles.models import (
+    ProfileCommand,
+    ProfileDatabase,
+    ProfilePhaseSet,
+    ProfileValidation,
+    WorkspaceProfile,
+)
+from awf.runtime import validation_runner
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -48,6 +57,7 @@ from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationResult,
 )
+from awf.runtime.validation_runner import ValidationRunner
 from awf.runtime.validation_types import ValidationCoverageResult
 from tests.postgres import postgres_test_engine
 from tests.unit.control.runtime_setup_replay_fakes import (
@@ -102,6 +112,7 @@ async def _replay(
     before: Any,
     after: Any,
     recover_missing_head: Any = None,
+    profile: WorkspaceProfile | None = None,
 ) -> runtime_setup_replay.SetupReplayOutcome:
     return await replay_setup_if_recreated(
         session_factory=factory,
@@ -109,7 +120,7 @@ async def _replay(
         workspace_id=workspace_id,
         compose_project="awf_x",
         compose_file=tmp_path / "compose.yml",
-        profile=object(),
+        profile=profile or WorkspaceProfile(name="replay"),
         worktree_path=tmp_path / "worktree",
         before=before,
         after=after,
@@ -276,6 +287,7 @@ class TestReplaySetupIfRecreated:
         outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
 
         assert outcome.ok and outcome.replayed
+        assert outcome.reason_code is None and outcome.details is None
         assert validation.phase_calls == [("setup", "pre_agent")]
         assert TOOL_PATH in container.tmp
         events = await _replay_events(factory, ws_id)
@@ -399,6 +411,8 @@ class TestReplaySetupIfRecreated:
         assert details["phase"] == "setup"
         assert details["command"] == SETUP_COMMAND
         assert details["returncode"] == 2
+        assert "detail" not in details
+        assert outcome.message == f"runtime setup replay failed: {SETUP_COMMAND}"
         assert "checksum mismatch" in details["stdout_tail"]
         assert _SECRET not in repr(details)
         assert _SECRET not in outcome.message
@@ -484,6 +498,220 @@ class TestReplaySetupIfRecreated:
 
         assert outcome.ok and outcome.replayed
         assert validation.setup_runs() == 1
+
+
+class _HangingRunner:
+    """Command runner whose profile command never exits (#1218).
+
+    It has no ``run_streaming``, so ``ValidationRunner._exec`` bounds the run
+    with ``asyncio.wait_for``. The timeout cleanup exec (``awf-cleanup``) is
+    recorded and succeeds.
+    """
+
+    def __init__(self) -> None:
+        self.hung: list[list[str]] = []
+        self.cleanups: list[list[str]] = []
+        self._never = asyncio.Event()
+
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        if "awf-cleanup" in args:
+            self.cleanups.append(args)
+            return CommandResult(returncode=0, stdout="awf cleanup: killed", stderr="")
+        self.hung.append(args)
+        await self._never.wait()
+        raise AssertionError("unreachable")  # pragma: no cover - the event is never set
+
+
+class _HangingCleanupRunner(_HangingRunner):
+    """``_HangingRunner`` whose timeout cleanup exec never returns either (#1218)."""
+
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        if "awf-cleanup" in args:
+            self.cleanups.append(args)
+            await self._never.wait()
+        return await super().run(args)
+
+
+class _ProfileCapturingValidation:
+    """Validation double recording the profile handed to ``run_profile_phases``."""
+
+    def __init__(self) -> None:
+        self.profiles: list[WorkspaceProfile] = []
+
+    async def run_profile_phases(self, *, profile: WorkspaceProfile, **_kwargs: Any) -> Any:
+        self.profiles.append(profile)
+        return ValidationResult(commands=[])
+
+
+class TestReplayCommandTimeout:
+    """Every replayed setup/pre_agent command is bounded (#1218)."""
+
+    @pytest.mark.unit
+    async def test_hung_setup_command_fails_replay_with_timeout_detail(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(runtime_setup_replay, "SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS", 0.05)
+        ws_id = await _seed_monitoring_pr(factory)
+        runner = _HangingRunner()
+        validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(setup=[ProfileCommand(command="sleep-forever-install")]),
+        )
+
+        with capture_logs() as logs:
+            outcome = await asyncio.wait_for(
+                _replay(
+                    factory,
+                    validation,
+                    ws_id,
+                    tmp_path,
+                    before=_OLD,
+                    after=_NEW,
+                    profile=profile,
+                ),
+                timeout=10,
+            )
+
+        assert not outcome.ok and outcome.replayed
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason is FailureReason.phase_timeout
+        details = outcome.details
+        assert details is not None
+        assert details["detail"] == "setup_replay_timeout"
+        assert details["phase"] == "setup"
+        assert "sleep-forever-install" in details["command"]
+        assert details["phase_reason_code"] == "PHASE_TIMEOUT"
+        assert details["returncode"] == 124
+        assert "command timed out" in details["stderr_tail"]
+        assert outcome.message is not None
+        assert outcome.message.startswith(
+            "runtime setup replay failed: setup_replay_timeout: setup command "
+        )
+        assert "sleep-forever-install" in outcome.message
+        # The timed-out exec was killed exactly once and nothing was retried.
+        assert len(runner.hung) == 1
+        assert len(runner.cleanups) == 1
+        failed_logs = [
+            log for log in logs if log["event"] == "executor.runtime_setup_replay_failed"
+        ]
+        assert len(failed_logs) == 1
+        assert failed_logs[0]["detail"] == "setup_replay_timeout"
+        assert failed_logs[0]["reason_code"] == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert await _replay_events(factory, ws_id) == []
+
+    @pytest.mark.unit
+    async def test_timeout_detail_survives_exhausted_validation_retries(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A retried hung command keeps the timeout diagnosis after retry exhaustion."""
+        monkeypatch.setattr(runtime_setup_replay, "SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS", 0.05)
+        ws_id = await _seed_monitoring_pr(factory)
+        runner = _HangingRunner()
+        validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(setup=[ProfileCommand(command="sleep-forever-install")]),
+            validation=ProfileValidation(retry_budget=1),
+        )
+
+        outcome = await asyncio.wait_for(
+            _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW, profile=profile),
+            timeout=10,
+        )
+
+        assert not outcome.ok and outcome.replayed
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason is FailureReason.phase_timeout
+        details = outcome.details
+        assert details is not None
+        assert details["detail"] == "setup_replay_timeout"
+        # The runner's own retry-exhaustion reason code is preserved, not rewritten.
+        assert details["phase_reason_code"] == "VALIDATION_RETRY_EXHAUSTED"
+        assert details["returncode"] == 124
+        assert outcome.message is not None
+        assert outcome.message.startswith(
+            "runtime setup replay failed: setup_replay_timeout: setup command "
+        )
+        assert len(runner.hung) == 2
+        assert len(runner.cleanups) == 2
+
+    @pytest.mark.unit
+    async def test_hung_cleanup_after_command_timeout_fails_replay_as_cleanup_failure(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A wedged cleanup exec is bounded and reported as the cleanup failure."""
+        monkeypatch.setattr(runtime_setup_replay, "SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(validation_runner, "_PHASE_TIMEOUT_CLEANUP_TIMEOUT_SECONDS", 0.05)
+        ws_id = await _seed_monitoring_pr(factory)
+        runner = _HangingCleanupRunner()
+        validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(setup=[ProfileCommand(command="sleep-forever-install")]),
+        )
+
+        outcome = await asyncio.wait_for(
+            _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW, profile=profile),
+            timeout=10,
+        )
+
+        assert not outcome.ok and outcome.replayed
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason is FailureReason.infrastructure_failure
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert outcome.message is not None
+        assert "cleanup timed out after 0.05s" in outcome.message
+        assert len(runner.hung) == 1
+        assert len(runner.cleanups) == 1
+        assert await _replay_events(factory, ws_id) == []
+
+    @pytest.mark.unit
+    async def test_profile_timeout_wins_and_unbounded_commands_get_the_default(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = _ProfileCapturingValidation()
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(
+                setup=[ProfileCommand(command="bounded-install", timeout_seconds=42)],
+                pre_agent=[ProfileCommand(command="warm-cache")],
+                validate=[ProfileCommand(command="pytest")],
+            ),
+            database=ProfileDatabase(generated_setup=[ProfileCommand(command="db-setup")]),
+        )
+
+        outcome = await _replay(
+            factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW, profile=profile
+        )
+
+        assert outcome.ok and outcome.replayed
+        (bounded,) = validation.profiles
+        default = runtime_setup_replay.SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS
+        assert [c.timeout_seconds for c in bounded.phases.setup] == [42]
+        assert [c.timeout_seconds for c in bounded.phases.pre_agent] == [default]
+        assert [c.timeout_seconds for c in bounded.database.generated_setup] == [default]
+        assert [c.command for c in bounded.phases.pre_agent] == ["warm-cache"]
+        # Only the replayed phases are bounded, and the caller's profile is untouched.
+        assert [c.timeout_seconds for c in bounded.phases.validate_commands] == [None]
+        assert profile.phases.pre_agent[0].timeout_seconds is None
+        assert profile.database.generated_setup[0].timeout_seconds is None
+
+    @pytest.mark.unit
+    def test_default_bound_fits_the_profile_command_timeout_range(self) -> None:
+        default = runtime_setup_replay.SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS
+        assert ProfileCommand(command="x", timeout_seconds=default).timeout_seconds == default
 
 
 class _FixedResultValidation:

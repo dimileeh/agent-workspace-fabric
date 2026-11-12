@@ -41,6 +41,7 @@ from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.resolver import ProfileResolutionError
+from awf.runtime.validation import ValidationCommandResult, ValidationResult
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 from tests.unit.control._work_slot_support import LockProbeWorkSlot
 from tests.unit.control.runtime_setup_replay_fakes import (
@@ -494,6 +495,74 @@ async def test_failed_replay_parks_monitor_blocked_and_preserves_worktree(
     )
     assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
     assert message.startswith("monitor recovery: runtime setup replay failed")
+
+
+class _TimedOutSetupValidation(FakeToolValidation):
+    """Setup returns the real runner's wall-timeout result (rc 124, ``PHASE_TIMEOUT``)."""
+
+    async def run_profile_phases(
+        self, *, phase_names: tuple[str, ...], **kwargs: Any
+    ) -> ValidationResult:
+        if "setup" not in phase_names:
+            return await super().run_profile_phases(phase_names=phase_names, **kwargs)
+        self.phase_calls.append(tuple(phase_names))
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="uv sync --extra dev",
+                    returncode=124,
+                    duration_seconds=1800.0,
+                    stdout_path=Path("/nonexistent/stdout"),
+                    stderr_path=Path("/nonexistent/stderr"),
+                    phase="setup",
+                    reason_code="PHASE_TIMEOUT",
+                    captured_stdout="",
+                    captured_stderr="command timed out after 1800s",
+                )
+            ]
+        )
+
+
+@pytest.mark.unit
+async def test_timed_out_replay_parks_monitor_blocked_with_timeout_detail(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung replayed setup command ends in the #743 park, not a stranded monitor (#1218)."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = _TimedOutSetupValidation(container)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    worktree = executor._config.worktrees_root / ws_id
+    worktree.mkdir(parents=True)
+    (worktree / "unpushed.txt").write_text("keep me\n", encoding="utf-8")
+
+    handoff = await executor.resume_pr_monitor_handoff(ws_id)
+
+    assert handoff is None
+    assert validation.setup_runs() == 1
+    assert monitor.validate_returncodes == []
+    event = await _assert_parked_blocked(factory, ws_id)
+    payload = event.payload
+    assert payload is not None
+    assert payload["failure_reason"] == FailureReason.phase_timeout.value
+    assert payload["details"]["detail"] == "setup_replay_timeout"
+    assert payload["details"]["phase"] == "setup"
+    assert payload["details"]["command"] == "uv sync --extra dev"
+    assert payload["details"]["phase_reason_code"] == "PHASE_TIMEOUT"
+    assert "setup_replay_timeout: setup command uv sync --extra dev" in payload["message"]
+    assert (worktree / "unpushed.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert await _events(factory, ws_id, RUNTIME_SETUP_REPLAYED_EVENT_TYPE) == []
+    error_code, _message = await _monitor_recovery_handoff_failure_error(
+        SimpleNamespace(_session_factory=factory), ws_id
+    )
+    assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 
 
 @pytest.mark.unit

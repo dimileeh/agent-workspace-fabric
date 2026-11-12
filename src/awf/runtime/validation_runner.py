@@ -145,6 +145,11 @@ _TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30.0
 # timeout, so a wedged Docker daemon would let the cleanup itself hang the probe
 # (and the handoff) forever — bound it too, and give up cleanup rather than block.
 _TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS = 30.0
+# Wall timeout for the cleanup exec after a phase command times out. The cleanup
+# is another unbounded ``docker compose exec``; a wedged daemon must surface as
+# the existing cleanup failure instead of hanging the phase (and, on monitor
+# resume, the setup replay that holds the claim) forever (#1218).
+_PHASE_TIMEOUT_CLEANUP_TIMEOUT_SECONDS = 60.0
 # One ``sh -lc`` reachability probe over the ``validate``-tool list (login shell,
 # so ``_VENV_ACTIVATE_PREAMBLE`` runs first — see ``probe_validate_command_tools``).
 # ``command -v``
@@ -1311,11 +1316,24 @@ class ValidationRunner:
                 raise
             if timed_out or _compose_exec_timed_out(result):
                 reason_code = "PHASE_TIMEOUT"
-                await cleanup_compose_exec_invocation(
-                    self._runner,
-                    invocation,
-                    workspace_id=artifacts_dir.name,
-                )
+                try:
+                    await asyncio.wait_for(
+                        cleanup_compose_exec_invocation(
+                            self._runner,
+                            invocation,
+                            workspace_id=artifacts_dir.name,
+                        ),
+                        timeout=_PHASE_TIMEOUT_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError as exc:
+                    raise ComposeExecCleanupError(
+                        invocation_id=invocation.invocation_id,
+                        source=invocation.source,
+                        label=invocation.label,
+                        message=(
+                            f"cleanup timed out after {_PHASE_TIMEOUT_CLEANUP_TIMEOUT_SECONDS}s"
+                        ),
+                    ) from exc
         finally:
             if sinks is not None:
                 await sinks.close()

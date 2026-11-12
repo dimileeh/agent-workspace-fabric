@@ -9,6 +9,8 @@ validation, or any agent run continues. A failed replay parks the workspace in
 ``blocked`` with ``RUNTIME_SETUP_REPLAY_FAILED`` (#743) instead of failing it, so a
 transient setup failure cannot kill a healthy monitor; the worker finalizes the
 recovery from that reason code without a retry, and a later ``guide`` resumes.
+Each replayed command is time-bounded, so a hung one ends in that same park
+with ``detail="setup_replay_timeout"`` instead of holding the claim (#1218).
 """
 
 from __future__ import annotations
