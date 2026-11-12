@@ -385,6 +385,11 @@ async def _validated_git_push_result(
                     resume_phase=protected_scope_resume_phase,
                     message=validation_result.message,
                     details=details,
+                    # Re-arm the #910 recheck: the stranded-edits evidence and
+                    # persist above run after the post-validation guard
+                    # (PRRT_kwDOSJAM6s622SF6).
+                    pr_number=pr_number,
+                    repo=repo,
                 ),
             )
         return _GitPushResult(

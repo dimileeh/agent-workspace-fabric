@@ -1106,6 +1106,67 @@ async def test_validated_push_park_persists_stranded_edits_evidence_before_block
 
 
 @pytest.mark.unit
+async def test_validated_push_park_rechecks_terminal_pr_after_stranded_edits_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s622SF6: a PR merged during the pre-park evidence work is not parked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    runner._deps.validation = object()  # type: ignore[assignment]
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _REPAIR_COMMIT_SHA)
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_run_pre_push_validation_with_fix_passes",
+        AsyncMock(
+            return_value=_PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=_REPAIR_COMMIT_SHA,
+                reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+                message="protected-scope diff unavailable",
+                extra_details={"transient_baseline_unavailable": True},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "record_provider_park_stranded_edits_evidence",
+        AsyncMock(return_value=None),
+    )
+    moot = _GitPushResult(pushed=False, failed=False, returncode=0)
+    terminal_check = AsyncMock(side_effect=[None, moot])
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", terminal_check)
+    repo = RepoRef(owner="dimileeh", name="aira-web")
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        pr_number=42,
+        pr_terminal_context="fix_cycle",
+        repo=repo,
+    )
+
+    assert result is moot
+    assert terminal_check.await_count == 2
+    assert terminal_check.await_args_list[1].kwargs["pr_number"] == 42
+    assert terminal_check.await_args_list[1].kwargs["repo"] == repo
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert not await _events(
+        factory, workspace_id, "workspace.monitor_protected_scope_diff_unavailable_parked"
+    )
+
+
+@pytest.mark.unit
 async def test_ci_repair_sink_baseline_outage_records_stranded_edits_before_parking(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
