@@ -80,6 +80,7 @@ from awf.runtime.monitor_state_keys import (
     _retired_operator_decision_key as _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor import (
+    _CI_REPAIR_ATTEMPTED_KEY_PREFIX,
     CheckFailure,
     CheckFailureLogResult,
     CheckTiming,
@@ -91,6 +92,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewComment,
     _agent_can_triage_review_comment,
+    _ci_repair_attempted_state_key,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
     _is_bot_author,
@@ -1056,6 +1058,30 @@ def _ci_transient_rerun_attempt(
         legacy_key = _ci_transient_rerun_state_key(head_sha, legacy_failures)
         state.threads_addressed_ids.pop(legacy_key, None)
     return attempt
+
+
+def _record_ci_repair_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> None:
+    """Mark a dispatched CI repair for this head/failing-run (#1216); drop older heads."""
+    for key in [
+        k for k in state.threads_addressed_ids if k.startswith(_CI_REPAIR_ATTEMPTED_KEY_PREFIX)
+    ]:
+        state.threads_addressed_ids.pop(key)
+    state.threads_addressed_ids[_ci_repair_attempted_state_key(head_sha, failures)] = "1"
+
+
+def _discard_ci_repair_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> None:
+    """Undo the #1216 marker when a provider unwind or park left the CI repair unlanded."""
+    state.threads_addressed_ids.pop(_ci_repair_attempted_state_key(head_sha, failures), None)
 
 
 def _ci_failure_payload(failure: CheckFailure) -> dict[str, object]:
