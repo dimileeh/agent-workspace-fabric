@@ -1097,3 +1097,110 @@ async def test_operator_hint_commit_sink_park_clears_hint_instead_of_needs_human
 
     assert result.paused_into_blocked is True
     assert state.pending_operator_hint is None
+
+
+async def _mark_baseline_parked(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str, *, resume_phase: str | None
+) -> None:
+    async with factory() as s:
+        await s.execute(
+            sa_update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(
+                block_reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+                block_resume_phase=resume_phase,
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.unit
+async def test_baseline_park_resume_pending_tracks_unsettled_park_only(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+
+    assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is False
+    await _mark_baseline_parked(
+        factory, workspace_id, resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+    )
+    assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True
+    # A finalized resume clears the phase: the kept commit was published or dropped.
+    await _mark_baseline_parked(factory, workspace_id, resume_phase=None)
+    assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is False
+    assert await runner._protected_scope_baseline_park_resume_pending("ws_missing") is False
+
+
+@pytest.mark.unit
+async def test_operator_hint_resume_of_baseline_park_keeps_commit_on_rejected_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grantless guide resuming a baseline park must not reset --hard its commit.
+
+    The PR branch advanced while the workspace was blocked, so the push is rejected
+    non-fast-forward. The default resync would fetch the remote and reset the kept
+    repair away; the resume suppresses it and parks the hint for a human instead.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_baseline_parked(
+        factory, workspace_id, resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+    )
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_rejected",
+        requested_at="2026-11-12T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    captured: dict[str, object] = {}
+
+    async def _none(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _rejected(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="! [rejected] HEAD -> awf/x (non-fast-forward)",
+            reason_code="GIT_PUSH_REJECTED_NON_FAST_FORWARD",
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _none)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _none)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _none)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _rejected)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert captured["allow_resync_on_rejection"] is False
+    assert result.failed is False
+    assert result.returncode == 1
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "kept" in (state.pending_operator_hint.status_reason or "")
+    # The park stays unsettled, so a follow-up guide keeps suppressing the reset.
+    assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True

@@ -581,6 +581,7 @@ async def _run_operator_hint_cycle(
     # the recorded resume phase and fall back to the generic unpushed-commit
     # validator otherwise (PRRT_kwDOSJAM6s6KFZN_).
     block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
+    baseline_park_pending = await self._protected_scope_baseline_park_resume_pending(workspace_id)
     protected_scope_base_branch = (
         base_branch
         if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
@@ -828,8 +829,12 @@ async def _run_operator_hint_cycle(
             # (PRRT_kwDOSJAM6s6KZK1v). A parked hint's push suppresses it too: the
             # reset would drop the kept commit its ``needs_human`` reason promises
             # to preserve, so the rejection surfaces with the commit intact
-            # (PRRT_kwDOSJAM6s6uPSzO).
-            allow_resync_on_rejection=not active_grant_specs and not hint_parked,
+            # (PRRT_kwDOSJAM6s6uPSzO). A resume of a baseline-outage park suppresses
+            # it as well: the park kept the unpushed repair commit, and the reset would
+            # drop it if the PR branch advanced while blocked (PRRT_kwDOSJAM6s621cKV).
+            allow_resync_on_rejection=(
+                not active_grant_specs and not hint_parked and not baseline_park_pending
+            ),
             # Re-arm the terminal guard AFTER pre-push validation: the check above
             # ran before a validation suite (plus its fix passes) that can take
             # minutes, so the PR can go terminal in between
@@ -893,6 +898,24 @@ async def _run_operator_hint_cycle(
             # for a grant-active resume, which always followed a genuine block). Park
             # needs_human with a NON-failed result so the recoverable workspace stays
             # at ``monitoring_pr`` rather than being terminally failed.
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+        if (
+            push_result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
+            and baseline_park_pending
+            and not hint_parked
+        ):
+            # The baseline-outage park's kept repair commit diverged from a PR branch
+            # advanced while blocked; the resync was suppressed so the commit is still
+            # HEAD. Park needs_human (non-failed, so the workspace is not terminally
+            # failed and cleaned up) until an operator directive rebases or drops it
+            # (PRRT_kwDOSJAM6s621cKV).
+            reason = (
+                "the PR branch advanced while the workspace was parked for a protected-"
+                "scope baseline outage, so the kept repair commit was rejected "
+                "non-fast-forward; it was kept (not reset to the remote head). Resume "
+                "with a directive that rebases it onto the PR branch or drops it."
+            )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         if (

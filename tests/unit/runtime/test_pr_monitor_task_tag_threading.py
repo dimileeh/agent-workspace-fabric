@@ -944,6 +944,9 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
     async def _resolve_block_resume_phase(_workspace_id: str) -> str | None:
         return None
 
+    async def _baseline_park_resume_pending(_workspace_id: str) -> bool:
+        return False
+
     async def _preserved_commit_already_on_remote(**_kwargs: object) -> bool:
         return False
 
@@ -973,6 +976,7 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _repair_operation_start_head_result=_head,
         _active_operator_grant_specs=_grant_specs,
         _resolve_block_resume_phase=_resolve_block_resume_phase,
+        _protected_scope_baseline_park_resume_pending=_baseline_park_resume_pending,
         _preserved_commit_already_on_remote=_preserved_commit_already_on_remote,
         _clear_preserved_marker_and_consume_grants_durably=_clear_marker_and_consume_grants,
         _clear_block_resume_phase=_clear_block_resume_phase,

@@ -29,6 +29,26 @@ from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
 
+async def _protected_scope_baseline_park_resume_pending(self: Any, workspace_id: str) -> bool:
+    """Return True while a baseline-outage park's kept commit is still unsettled.
+
+    The park is the only block recording ``PROTECTED_SCOPE_DIFF_UNAVAILABLE`` as its
+    ``block_reason_code``, and ``block_resume_phase`` stays set until a resume is
+    finalized (the kept commit published, or explicitly dropped by a directive). The
+    two columns are written in the block-transition commit itself, so this durable
+    marker survives restarts and the loop's later ``_persist_state``. The operator-hint
+    resume uses it to suppress the non-fast-forward ``reset --hard`` resync, which
+    would otherwise drop the commit this park promised to keep.
+    """
+    async with self._deps.session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    return (
+        ws is not None
+        and ws.block_reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+        and ws.block_resume_phase is not None
+    )
+
+
 async def _park_for_protected_scope_baseline_unavailable(
     self: Any,
     *,
@@ -47,7 +67,8 @@ async def _park_for_protected_scope_baseline_unavailable(
     ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` marker: that marker means "an
     ungranted protected commit is preserved", and the directive-resume leak guard
     would then refuse to push this legitimate repair commit. The preserved HEAD is
-    recorded only in the transition/event payload for the operator.
+    recorded in the transition/event payload for the operator; the resume keeps the
+    commit through ``_protected_scope_baseline_park_resume_pending``.
 
     ``pr_number`` re-arms the #910 terminal-PR guard: the bounded fetch retries can
     outlast the seam's own check, and a moot PR must not be parked. A lost CAS (the
