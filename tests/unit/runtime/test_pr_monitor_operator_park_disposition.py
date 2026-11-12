@@ -302,6 +302,11 @@ def _assert_untouched(state: MonitorState, thread_id: str = _THREAD) -> None:
             f"Do not change code and {_THREAD} is FIXED by abc1234",
             {_THREAD: ParkRuling("fixed", "abc1234")},
         ),
+        # So does an "only" there: it scopes that sub-clause, not the ruling.
+        (
+            f"Make only doc edits, {_THREAD} is a false positive",
+            {_THREAD: ParkRuling("false_positive")},
+        ),
     ],
 )
 def test_park_dispositions_parses_per_thread_rulings(
@@ -329,6 +334,8 @@ def test_park_dispositions_parses_per_thread_rulings(
         f"Do not mark {_OTHER} and {_THREAD} as a false positive",
         # A negation left dangling before a break still governs what follows it.
         f"Do not, under any circumstances, mark {_THREAD} as a false positive",
+        # "only" in the ruling's own sub-clause still scopes the ruling.
+        f"Make edits, only {_THREAD} is a false positive",
         f"Once CI is green: ok. Never call {_THREAD} FIXED by abc1234",
         # A question or an investigation request is not a ruling.
         f"{_THREAD}: investigate whether this is a false positive",

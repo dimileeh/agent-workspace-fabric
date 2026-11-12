@@ -122,6 +122,12 @@ _QUESTION_LEAD_RE = re.compile(
 # unless it dangles with nothing after it ("Do not, ever, mark PRRT_x ...").
 _SUBCLAUSE_BREAK_RE = re.compile(r",|\b(?:and|but)\b", re.IGNORECASE)
 _DANGLING_NEGATION_RE = re.compile(r"\b(?:not|never|no|\w+n['’]t)\W*$", re.IGNORECASE)
+# ``_CONDITION_RE`` without "only": like a negation, an "only" scopes just its own
+# sub-clause ("make only doc edits, PRRT_x is ..."), so only the ruling's sub-clause
+# is scanned for it; a real condition anywhere in the lead-in still governs.
+_LEAD_IN_CONDITION_RE = re.compile(
+    r"\b(?:if|unless|once|when|whenever|until|after|before|provided)\b", re.IGNORECASE
+)
 
 # ``git merge-base --is-ancestor`` answers "no", and ``git rev-parse --verify
 # --quiet`` answers "no such commit", with exit 1. Any other non-zero exit is no
@@ -178,7 +184,7 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
     question or hedge is anywhere in it, counting the clause lead-in before the
     thread id ("If CI passes, PRRT_x ...", "Do not mark PRRT_x ..."). A negation in
     an earlier comma or "and" sub-clause of the lead-in rules on something else
-    ("make no code changes, PRRT_x ...") and does not count. A thread whose segments carry no usable
+    ("make no code changes, PRRT_x ...") and does not count; nor does an "only". A thread whose segments carry no usable
     ruling, or disagree, maps to ``None`` so the guide fails closed rather than
     guessing.
     """
@@ -215,7 +221,7 @@ def _segment_rulings(segment: str, lead_in: str, negation_lead_in: str) -> set[P
 
     ``lead_in`` is the clause text before the segment's thread id, so a condition
     written ahead of the id still voids the ruling; ``negation_lead_in`` is the
-    part of it a negation must sit in to do the same.
+    part of it a negation or an "only" must sit in to do the same.
     """
     matches: list[tuple[re.Match[str], ParkRuling]] = [
         (match, ParkRuling("fixed", match.group("sha").lower()))
@@ -227,7 +233,8 @@ def _segment_rulings(segment: str, lead_in: str, negation_lead_in: str) -> set[P
     if not matches:
         return set()
     if (
-        _CONDITION_RE.search(lead_in + segment)
+        _LEAD_IN_CONDITION_RE.search(lead_in)
+        or _CONDITION_RE.search(negation_lead_in + segment)
         or _TENTATIVE_RE.search(lead_in + segment)
         or _QUESTION_LEAD_RE.search(lead_in)
         or any(
