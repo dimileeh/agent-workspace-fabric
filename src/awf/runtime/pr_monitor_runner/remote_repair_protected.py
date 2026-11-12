@@ -1405,43 +1405,6 @@ async def _protected_scope_diff_unavailable_block(
     )
 
 
-async def _protected_scope_diff_unavailable_push_result(
-    self: Any,
-    *,
-    workspace_id: str,
-    remote_branch: str,
-    exc: ProtectedScopeDiffError,
-    pr_number: int | None = None,
-    repo: RepoRef | None = None,
-    resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
-) -> _GitPushResult:
-    block = await self._protected_scope_diff_unavailable_block(
-        workspace_id=workspace_id,
-        remote_branch=remote_branch,
-        exc=exc,
-    )
-    if block.transient_baseline_unavailable:  # commit-sink baseline outage: park (#1221)
-        return cast(
-            _GitPushResult,
-            await self._park_for_protected_scope_baseline_unavailable(
-                workspace_id=workspace_id,
-                worktree_path=self._worktrees_root / workspace_id,
-                remote_branch=remote_branch,
-                resume_phase=resume_phase,
-                message=block.message,
-                pr_number=pr_number,
-                repo=repo,
-            ),
-        )
-    return _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=1,
-        stderr=block.message,
-        reason_code=block.reason_code,
-    )
-
-
 async def _protected_scope_push_block(
     self: Any,
     *,

@@ -240,7 +240,7 @@ class RunnerDelegatesMixin:
         _remote_repair_protected._protected_scope_diff_unavailable_block
     )
     _protected_scope_diff_unavailable_push_result = (
-        _remote_repair_protected._protected_scope_diff_unavailable_push_result
+        _protected_scope_baseline_park._protected_scope_diff_unavailable_push_result
     )
     _protected_scope_push_block = _remote_repair_protected._protected_scope_push_block
     _protected_scope_repair_prompt = _remote_prompt_ops._protected_scope_repair_prompt

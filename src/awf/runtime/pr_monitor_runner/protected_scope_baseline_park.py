@@ -20,13 +20,17 @@ from typing import Any, cast
 
 from awf.common.audit import redact_audit_text
 from awf.common.github_client import RepoRef
-from awf.control.blocked_transition import enter_blocked_for_protected_violation_in_session
+from awf.control.blocked_transition import (
+    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    enter_blocked_for_protected_violation_in_session,
+)
 from awf.control.quality_gates import PROTECTED_QUALITY_GATE_BLOCK_TYPE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 
 async def _protected_scope_baseline_park_resume_pending(self: Any, workspace_id: str) -> bool:
@@ -165,4 +169,41 @@ async def _park_for_protected_scope_baseline_unavailable(
         reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
         details=park_details,
         paused_into_blocked=True,
+    )
+
+
+async def _protected_scope_diff_unavailable_push_result(
+    self: Any,
+    *,
+    workspace_id: str,
+    remote_branch: str,
+    exc: ProtectedScopeDiffError,
+    pr_number: int | None = None,
+    repo: RepoRef | None = None,
+    resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+) -> _GitPushResult:
+    block = await self._protected_scope_diff_unavailable_block(
+        workspace_id=workspace_id,
+        remote_branch=remote_branch,
+        exc=exc,
+    )
+    if block.transient_baseline_unavailable:  # commit-sink baseline outage: park (#1221)
+        return cast(
+            _GitPushResult,
+            await self._park_for_protected_scope_baseline_unavailable(
+                workspace_id=workspace_id,
+                worktree_path=self._worktrees_root / workspace_id,
+                remote_branch=remote_branch,
+                resume_phase=resume_phase,
+                message=block.message,
+                pr_number=pr_number,
+                repo=repo,
+            ),
+        )
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=block.message,
+        reason_code=block.reason_code,
     )

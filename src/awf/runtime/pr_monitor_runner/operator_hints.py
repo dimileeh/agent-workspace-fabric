@@ -9,8 +9,8 @@ from typing import Any, cast
 
 from awf.common.github_client import RepoRef
 from awf.control.blocked_transition import (
-    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+    monitor_protected_scope_resume_origin,
 )
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import WorkspaceRepository
@@ -606,11 +606,7 @@ async def _run_operator_hint_cycle(
         # unpushed-commit validator and re-block on a target-branch-owned protected
         # change the base merge pulled in, even after the agent-authored protected
         # edit was correctly reverted (PRRT_kwDOSJAM6s6KGCXl).
-        reblock_resume_phase = (
-            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-        )
+        reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
         reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
@@ -793,11 +789,7 @@ async def _run_operator_hint_cycle(
             source_head_sha=operation_start_head,
             # A transient baseline outage parks under the resume's ORIGIN, like the
             # violation re-block above (#1221).
-            resume_phase=(
-                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-            ),
+            resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
             repo=repo,
         )
         if protected_scope_block is not None
@@ -845,11 +837,7 @@ async def _run_operator_hint_cycle(
             operation_id=_operation_id,
             operation_type=_operation_type,
             # A fix-pass baseline outage parks under the resume's ORIGIN (#1221).
-            protected_scope_resume_phase=(
-                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-            ),
+            protected_scope_resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
         )
     )
     if push_result.pr_terminal is not None:
@@ -1059,11 +1047,7 @@ async def _operator_hint_agent_error_result(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
-                resume_phase=(
-                    MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                    if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                    else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-                ),
+                resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
             ),
         )
         if push_result.paused_into_blocked:
@@ -1152,11 +1136,7 @@ async def _reblock_preserved_protected_leak(
         self, workspace_id=workspace_id, message=reason
     )
     if leak_block is not None:
-        reblock_resume_phase = (
-            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-        )
+        reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
         reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
@@ -1365,11 +1345,7 @@ async def _terminal_directive_grant_reblock(
         return None
     # Preserve the resume ORIGIN exactly as the net-diff / leak re-block branches.
     block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
-    reblock_resume_phase = (
-        MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-        if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-        else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-    )
+    reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
     reblock_result = cast(
         _GitPushResult,
         await self._pause_monitor_for_protected_scope_block(
