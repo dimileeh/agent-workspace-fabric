@@ -12,6 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import raiseload
 
+from awf.common.logging import get_logger
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
@@ -19,6 +20,12 @@ from awf.db.repositories import ResourceReservationRepository
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Grant, Receipt
+from awf.hosted_node.profile_secrets import (
+    HOSTED_OPTIONAL_SECRET_SKIPPED,
+    PROTECTED_DECLARATION_MISMATCH,
+    HostedProfileSecretError,
+    partition_hosted_profile_secrets,
+)
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
 from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace
@@ -31,6 +38,8 @@ from awf.profiles.models import WorkspaceProfile
 
 if TYPE_CHECKING:
     from awf.api.schemas import WorkspaceCreateRequest
+
+_log = get_logger(__name__)
 
 SESSION_KEY = "awf_hosted_runtime"
 AGENT_TARGETS = {
@@ -248,7 +257,8 @@ class WorkspaceAuthority:
         }
         if set(profile.runtime.environment) & set(AGENT_AUTH_ENV_VARS):
             raise MaterialDeniedError("HOSTED_PROFILE_AUTH_OVERRIDE", 422)
-        for secret in profile.secrets:
+        claims, skipped = partition_hosted_profile_secrets(profile.secrets, bindings)
+        for secret in claims:
             binding = bindings.get(secret.name)
             if binding is None or (
                 secret.provider != "protected"
@@ -257,14 +267,28 @@ class WorkspaceAuthority:
                 or secret.ref is not None
                 or secret.target != binding.target
             ):
-                raise MaterialDeniedError("PROTECTED_DECLARATION_MISMATCH", 422)
+                raise HostedProfileSecretError(PROTECTED_DECLARATION_MISMATCH, secret.name)
         # Targets are immutable in the association. Resolve actual current
         # material through the same bounded snapshot reader as every consumer.
         material = await self.workspace(workspace_id)
         path = self.receiver.store.root / self.views._key(workspace_id) / "view"
+        metadata: dict[str, object] = {
+            "protected_mount_count": 2,
+            "expires_at": material.expires_at.isoformat(),
+        }
+        if skipped:
+            # Optional secrets the node cannot provide are never materialized.
+            # Record names only; refs, targets and values stay out of evidence.
+            metadata["hosted_skipped_optional_secrets"] = list(skipped)
+            _log.info(
+                "hosted_node.profile_secret_skipped",
+                reason_code=HOSTED_OPTIONAL_SECRET_SKIPPED,
+                workspace_id=workspace_id,
+                secret_names=list(skipped),
+            )
         return LocalSecretLeaseResolution(
             mounts=(AuthMount(source=str(path), target="/run/awf/secrets", mode="ro"),),
-            metadata={"protected_mount_count": 2, "expires_at": material.expires_at.isoformat()},
+            metadata=metadata,
         )
 
     async def _current(self, anchor: Binding) -> Binding:

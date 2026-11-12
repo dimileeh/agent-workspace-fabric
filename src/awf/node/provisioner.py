@@ -111,6 +111,9 @@ _release_sync_source_branch = _provisioner_helpers._release_sync_source_branch
 _stack_companion_env_secret_event_payload = (
     _provisioner_helpers._stack_companion_env_secret_event_payload
 )
+_stack_hosted_skipped_secret_event_payload = (
+    _provisioner_helpers._stack_hosted_skipped_secret_event_payload
+)
 _stack_secret_lease_mount_metadata = _provisioner_helpers._stack_secret_lease_mount_metadata
 _sync_feature_pr_adoption = _provisioner_helpers._sync_feature_pr_adoption
 _sync_feature_pr_head_ref = _provisioner_helpers._sync_feature_pr_head_ref
@@ -1080,6 +1083,16 @@ class Provisioner(
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
+                hosted_skipped_secrets = _stack_hosted_skipped_secret_event_payload(
+                    stack_paths=stack_paths
+                )
+                if hosted_skipped_secrets is not None:
+                    await repo.add_event(
+                        persisted,
+                        event_type="workspace.hosted_profile_secret_skipped",
+                        reason_code="HOSTED_OPTIONAL_SECRET_SKIPPED",
+                        payload=hosted_skipped_secrets,
+                    )
                 if not hosted_pr_adoption:
                     companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,

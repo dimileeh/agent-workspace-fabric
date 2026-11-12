@@ -115,6 +115,22 @@ def _stack_companion_env_secret_event_payload(
     return metadata
 
 
+def _stack_hosted_skipped_secret_event_payload(
+    *,
+    stack_paths: ComposeProjectPaths,
+) -> dict[str, Any] | None:
+    """Build the hosted skipped-optional-secret payload (names only), or None."""
+    names = stack_paths.secret_lease_mount_metadata.get("hosted_skipped_optional_secrets")
+    if not names:
+        return None
+    secret_names = [str(name) for name in names]
+    return {
+        "schema": "hosted_profile_secret_skipped.v1",
+        "secret_names": secret_names,
+        "count": len(secret_names),
+    }
+
+
 def _provision_local_branch_name(
     ws: Workspace,
     *,
