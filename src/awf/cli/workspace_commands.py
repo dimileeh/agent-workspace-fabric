@@ -608,6 +608,13 @@ def workspace_guide(
     APPROVE-AND-KEEP, ``--approve-policy-downgrade`` to acknowledge a weakening
     edit, or a ``--directive`` to REVERT/REDO. At least one of directive/grant is
     required.
+
+    To rule on a review thread parked on a refused correction attempt
+    (AGENT_NON_FIXED_WITH_MUTATION) without running the agent, put one line per
+    thread in the directive, exactly ``AWF-RULING <thread_id> FIXED <sha>`` (a
+    commit already on the PR head) or ``AWF-RULING <thread_id>
+    FALSE_POSITIVE[: <reason>]``. Keywords are case-sensitive; any other line,
+    prose included, is not a ruling and goes to the agent.
     """
     _guide_workspace_impl(
         workspace_id=workspace_id,

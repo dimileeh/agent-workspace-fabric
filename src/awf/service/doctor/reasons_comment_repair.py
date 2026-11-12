@@ -454,4 +454,61 @@ def get_comment_repair_reasons(
             "awf workspace events <workspace_id>",
             reason_catalog_link("OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED"),
         ),
+        "OPERATOR_PARK_DISPOSITION_APPLIED": reason_text_cls(
+            (
+                "An operator guide's AWF-RULING line ruled a review thread parked on a refused "
+                "correction attempt FIXED by a commit or a false positive, so AWF recorded that "
+                "disposition, replied in the thread and resolved it."
+            ),
+            (
+                "No action is required. The event evidence names the thread, the ruling, the "
+                "cited commit and the PR head it was checked against. The guide's other "
+                "instructions were not run; send a follow-up guide for them."
+            ),
+            (
+                "The thread was parked needs_human with AGENT_NON_FIXED_WITH_MUTATION. A FIXED "
+                "ruling is applied only when the cited commit is an ancestor of the PR head. No "
+                "agent ran and the worktree was not changed."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("OPERATOR_PARK_DISPOSITION_APPLIED"),
+        ),
+        "OPERATOR_PARK_DISPOSITION_UNAPPLIED": reason_text_cls(
+            (
+                "An operator guide ruled on a review thread parked on a refused correction "
+                "attempt, but AWF could not apply the ruling, so every named thread stays parked."
+            ),
+            (
+                "Read the detail in the notice or audit event. Then guide again with one line "
+                "per parked thread, exactly 'AWF-RULING <thread_id> FIXED <sha>' (a 7-40 hex "
+                "commit already on the PR head) or 'AWF-RULING <thread_id> FALSE_POSITIVE' "
+                "(optionally followed by ': <reason>', never posted). Keywords are "
+                "case-sensitive; any other line, prose included, is not a ruling. Guide without "
+                "an AWF-RULING line to have the agent re-triage."
+            ),
+            (
+                "A thread's AWF-RULING lines disagreed, or a ruled thread was not a mutation "
+                "park, was no longer open, or had new replies; or the cited commit did not "
+                "resolve or was not an ancestor of the PR head. AWF does not guess."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("OPERATOR_PARK_DISPOSITION_UNAPPLIED"),
+        ),
+        "OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED": reason_text_cls(
+            (
+                "AWF applied an operator ruling and posted its disposition reply, but the forge "
+                "refused to resolve the review thread, so the thread is parked for a human."
+            ),
+            (
+                "Resolve the thread on the forge, or send the same guide again: AWF reuses the "
+                "posted reply and retries the resolve. Check the forge reason code in the audit "
+                "event for permissions or availability problems."
+            ),
+            (
+                "The resolve call failed after the disposition reply landed. AWF keeps the thread "
+                "open rather than treat an unresolved thread as handled."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED"),
+        ),
     }

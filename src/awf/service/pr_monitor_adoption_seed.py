@@ -279,6 +279,15 @@ _COPIED_MARKER_PREFIXES = (
 # ``awf.runtime.pr_monitor_runner.operator_preserved_attempt.preserved_attempt_tip``.
 _NEEDS_HUMAN_REASON_PREFIX = "__needs_human_reason__:"
 _PRESERVED_ATTEMPT_TIP_RE = re.compile(r"(?:attempt tip|own commit) [0-9a-f]{7,40}\b")
+# An ``AGENT_NON_FIXED_WITH_MUTATION`` park (#1213) crosses too: its reason and its
+# ``__awf_mutation_park__:<thread id>`` record are what let ``decide()`` see the
+# park go stale once the head moves past the rollback commit. Without them the
+# crossed ``needs_human`` verdict is sticky and the successor loops on
+# NotifyHuman. The prefix mirrors ``awf.runtime.feedback_policy``. The record
+# crosses verbatim, because the runtime reads a malformed record fail-closed
+# (the park stays) and dropping it would instead fall back to the reason text.
+_MUTATION_PARK_REASON_PREFIX = "AGENT_NON_FIXED_WITH_MUTATION:"
+_MUTATION_PARK_PREFIX = "__awf_mutation_park__:"
 
 # A head SHA counts as continuity evidence only in its full 40-hex form. An
 # abbreviation is a prefix, not a commit identity: two equal abbreviations can
@@ -584,11 +593,12 @@ def _is_disposition_readopt_pending(key: str, value: str) -> bool:
 def _is_preserved_attempt_record(key: str, value: str) -> bool:
     if key.startswith(_NEEDS_HUMAN_REASON_PREFIX):
         item_id = key[len(_NEEDS_HUMAN_REASON_PREFIX) :]
-        return (
-            _VERDICT_KEY_RE.match(item_id) is not None
-            and "preserved" in value
-            and _PRESERVED_ATTEMPT_TIP_RE.search(value) is not None
+        return _VERDICT_KEY_RE.match(item_id) is not None and (
+            ("preserved" in value and _PRESERVED_ATTEMPT_TIP_RE.search(value) is not None)
+            or value.startswith(_MUTATION_PARK_REASON_PREFIX)
         )
+    if key.startswith(_MUTATION_PARK_PREFIX):
+        return bool(value) and _VERDICT_KEY_RE.match(key[len(_MUTATION_PARK_PREFIX) :]) is not None
     if key.startswith(_PRESERVED_ATTEMPT_RETIRED_PREFIX):
         thread_id = key[len(_PRESERVED_ATTEMPT_RETIRED_PREFIX) :]
         return (

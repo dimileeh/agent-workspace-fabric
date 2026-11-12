@@ -473,8 +473,15 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
             input_bytes: bytes | None = None,
             cwd: str | None = None,
             env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
         ) -> CommandResult:
-            await super().run(args, input_bytes=input_bytes, cwd=cwd, env=env)
+            await super().run(
+                args,
+                input_bytes=input_bytes,
+                cwd=cwd,
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
             if args[-1:] == [f"refs/heads/awf/{workspace_id}"]:
                 return CommandResult(returncode=0, stdout="", stderr="")
             if args[-2:] == ["FETCH_HEAD", "HEAD"]:

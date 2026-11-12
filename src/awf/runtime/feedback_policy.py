@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
+from awf.runtime.monitor_state_keys import _mutation_park_key, _needs_human_reason_key
 from awf.runtime.pr_monitor_models import ReviewThread
 
 _FRESHNESS_EPOCH = datetime.min.replace(tzinfo=UTC)
@@ -200,7 +202,71 @@ def thread_needs_attention(state_map: Mapping[str, str], thread: ReviewThread) -
     return not recorded_review_thread_body_matches(recorded, thread)
 
 
-def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
+# The reason code a refused, rolled-back correction attempt parks under, and the
+# rollback commit as its reason template cites it
+# (``comment_verdict_correction_mutation``). Kept as literals: runtime policy must
+# not import runner modules.
+_MUTATION_PARK_REASON_PREFIX = "AGENT_NON_FIXED_WITH_MUTATION:"
+_MUTATION_PARK_ROLLBACK_RE = re.compile(r"rolled back to ([0-9a-f]{7,40})\b", re.IGNORECASE)
+
+
+def mutation_park_record(state_map: Mapping[str, str], thread_id: str) -> tuple[str, bool] | None:
+    """The ``(rollback_head, outdated_at_park)`` of a live mutation park, else ``None``.
+
+    Only a ``needs_human`` thread whose recorded reason is still an
+    ``AGENT_NON_FIXED_WITH_MUTATION`` park qualifies, so a record left behind by
+    a later park of another kind never un-sticks a genuine human gate. The
+    structured ``__awf_mutation_park__`` record wins; a park persisted before it
+    existed falls back to the rollback commit its reason cites. A malformed
+    record reads as none (fail closed: the park stays). ``rollback_head`` is
+    ``""`` when unknown.
+    """
+    if state_map.get(thread_id) != "needs_human":
+        return None
+    reason = state_map.get(_needs_human_reason_key(thread_id)) or ""
+    if not reason.startswith(_MUTATION_PARK_REASON_PREFIX):
+        return None
+    raw = state_map.get(_mutation_park_key(thread_id))
+    if raw is None:
+        match = _MUTATION_PARK_ROLLBACK_RE.search(reason)
+        return (match.group(1) if match else "", False)
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    rollback_head = record.get("rollback_head")
+    return (rollback_head if isinstance(rollback_head, str) else "", record.get("outdated") is True)
+
+
+def mutation_park_is_stale(
+    state_map: Mapping[str, str], thread: ReviewThread, head_sha: str | None
+) -> bool:
+    """True when a mutation park's verdict no longer speaks to the live PR (#1213).
+
+    The refused verdict was rendered on the rollback commit. It is stale once the
+    thread became outdated after it parked, or once the PR head is no longer that
+    commit. ``decide()`` cannot run git, so "moved past" is "differs": a
+    force-push re-evaluates too, which can only park again or reach an evidenced
+    verdict. An unknown rollback commit or head never counts as moved.
+    """
+    record = mutation_park_record(state_map, thread.thread_id)
+    if record is None:
+        return False
+    rollback_head, outdated_at_park = record
+    if thread.is_outdated and not outdated_at_park:
+        return True
+    rollback = rollback_head.strip().lower()
+    head = (head_sha or "").strip().lower()
+    if not rollback or not head:
+        return False
+    return not (head.startswith(rollback) or rollback.startswith(head))
+
+
+def thread_enters_address_comments(
+    state_map: Mapping[str, str], thread: ReviewThread, *, head_sha: str | None = None
+) -> bool:
     """True when ``decide`` should batch this thread into ``AddressComments``.
 
     Never-addressed / ``agent_failed`` always enter repair. A closed disposition
@@ -209,10 +275,13 @@ def thread_enters_address_comments(state_map: Mapping[str, str], thread: ReviewT
     reviewer replies are re-triaged. Unchanged ``defer`` and ``needs_human`` stay
     on the NotifyHuman merge gate; a requeue-eligible verdict without any body
     snapshot does not re-queue (legacy / incomplete state falls through to
-    existing gates).
+    existing gates). The exception is a stale mutation park
+    (:func:`mutation_park_is_stale`), re-evaluated against ``head_sha`` (#1213).
     """
     verdict = state_map.get(thread.thread_id)
     if needs_comment_attention(verdict):
+        return True
+    if mutation_park_is_stale(state_map, thread, head_sha):
         return True
     if verdict not in _REQUEUE_ON_BODY_CHANGE_VERDICTS:
         return False

@@ -82,6 +82,11 @@ class VerdictResult:
     # that commit through its guarded push, as a comment batch does, instead of
     # leaving it local behind ``NotifyHuman`` (#1074).
     kept_commit: bool = False
+    # Set on an ``AGENT_NON_FIXED_WITH_MUTATION`` park (#1213): the code, and the
+    # commit the attempt was rolled back to. The park's verdict was rendered on
+    # that commit, so ``decide()`` re-evaluates it once the PR head moves on.
+    reason_code: str | None = None
+    rollback_head: str | None = None
 
 
 @dataclass(frozen=True)

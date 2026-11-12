@@ -96,6 +96,9 @@ _CONDITION_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_BREAK = ".;:\n"
+# An ``AWF-RULING`` line belongs to the strict #1215 grammar; its free-text note
+# must never be read as prose, or it could pick a different action for the guide.
+_RULING_LINE_PREFIX_RE = re.compile(r"^[ \t]*AWF-RULING\b.*$", re.MULTILINE)
 # A standalone 7-40 hex token with at least one digit and one letter: an all-digit
 # token is a comment id far more often than a SHA, and an all-letter one is a word
 # ("defaced"). Either would otherwise fail a named thread closed as a mismatch.
@@ -169,7 +172,9 @@ def preserved_attempt_disposition(text: str | None) -> PreservedAttemptDispositi
     affirmatively asks for the thread to be resolved / called obsolete (no
     negated or conditional resolve word anywhere). Thread ids and SHA
     tokens are returned deduplicated in first-occurrence order, SHAs lowercased.
+    ``AWF-RULING`` lines are not prose and are ignored.
     """
+    text = _RULING_LINE_PREFIX_RE.sub("", text or "")
     if not text:
         return None
     # A condition anywhere in the reject's clause ("reject ... if the reviewer agrees",

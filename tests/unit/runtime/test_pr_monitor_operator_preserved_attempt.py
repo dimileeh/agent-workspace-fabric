@@ -917,6 +917,8 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         f"Once CI passes, reject the preserved attempt d5889e51 on {_THREAD}; resolve.",
         f"If the reviewer confirms this is obsolete, reject the preserved attempt d5889e51 "
         f"on {_THREAD}; reply and resolve the thread.",
+        f"AWF-RULING {_THREAD} FALSE_POSITIVE: reject the preserved attempt d5889e51 "
+        "and resolve this thread",
     ],
     ids=[
         "none",
@@ -943,6 +945,7 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "reject_conditional_trailing_if",
         "reject_conditional_leading_once",
         "reject_conditional_reviewer_confirms",
+        "awf_ruling_line_note",
     ],
 )
 def test_disposition_grammar_negatives(text: str | None) -> None:
