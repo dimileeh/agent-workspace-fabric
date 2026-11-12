@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,6 +185,54 @@ async def test_stranded_edits_are_committed_on_the_preserved_head(tmp_path: Path
     assert sink["only_paths"] == ("stranded_fix.py",)
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
     assert PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY not in state.threads_addressed_ids
+
+
+class _RecordedWorkSlot:
+    """A work slot that records when it is held, next to the writer lock."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    @asynccontextmanager
+    async def hold(self, phase: str) -> AsyncIterator[SimpleNamespace]:
+        self.events.append(f"slot:{phase}")
+        try:
+            yield SimpleNamespace(invocation_id="inv_park_stranded")
+        finally:
+            self.events.append("slot_released")
+
+
+@pytest.mark.unit
+async def test_the_resume_takes_its_work_slot_before_the_writer_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sink's protected-scope repair can run an agent, which queues for a work
+    # slot; queued under the writer lock, it would block GC and recovery git ops.
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def _lock(_worktree_path: Path) -> AsyncIterator[None]:
+        events.append("lock")
+        try:
+            yield
+        finally:
+            events.append("lock_released")
+
+    monkeypatch.setattr(provider_park_stranded_edits, "hold_exclusive_worktree_writer_lock", _lock)
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path)
+    runner = _FakeRunner([_dirty(["stranded_fix.py"]), None], commits=True)
+    runner._work_slot = _RecordedWorkSlot(events)  # type: ignore[attr-defined]
+    sink = runner._commit_dirty_worktree
+
+    async def _recorded_sink(**kwargs: object) -> bool:
+        events.append("sink")
+        return await sink(**kwargs)
+
+    runner._commit_dirty_worktree = _recorded_sink  # type: ignore[method-assign]
+
+    assert await _resume(runner, state, tmp_path) is None
+    assert events == ["slot:agent", "lock", "sink", "lock_released", "slot_released"]
 
 
 @pytest.mark.unit

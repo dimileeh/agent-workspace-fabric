@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from awf.common.logging import get_logger
+from awf.common.work_slot import hold_work_slot
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
@@ -172,8 +173,13 @@ async def commit_provider_park_stranded_edits(
     if preserved_head is None:
         return None
     # The writer lock spans the evidence check and the commit, so no other AWF
-    # writer can change the worktree between the two.
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
+    # writer can change the worktree between the two. The work slot is taken
+    # first: the sink's protected-scope repair can run an agent, and one queued for
+    # a slot must not hold the lock GC and recovery git ops wait on.
+    async with (
+        hold_work_slot(getattr(runner, "_work_slot", None), "agent"),
+        hold_exclusive_worktree_writer_lock(worktree_path),
+    ):
         dirty = await runner._pre_existing_dirty_repair_worktree_result(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
