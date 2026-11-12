@@ -110,6 +110,11 @@ _TENTATIVE_RE = re.compile(
     r"|maybe|perhaps|possibly|probably|likely|might|could)\b",
     re.IGNORECASE,
 )
+# A clause that opens on an auxiliary verb asks rather than rules, even without a
+# "?": "Is PRRT_x a false positive", "Do you think PRRT_x is ...".
+_QUESTION_LEAD_RE = re.compile(
+    r"^\W*(?:is|are|was|were|do|does|did|can|should|would|will)\b", re.IGNORECASE
+)
 
 # ``git merge-base --is-ancestor`` answers "no", and ``git rev-parse --verify
 # --quiet`` answers "no such commit", with exit 1. Any other non-zero exit is no
@@ -213,6 +218,7 @@ def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
     if (
         _CONDITION_RE.search(lead_in + segment)
         or _TENTATIVE_RE.search(lead_in + segment)
+        or _QUESTION_LEAD_RE.search(lead_in)
         or any(
             _REJECT_NEGATED_RE.search(lead_in + segment[: match.start()]) for match, _ in matches
         )

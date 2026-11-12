@@ -322,6 +322,10 @@ def test_park_dispositions_parses_per_thread_rulings(
         f"{_THREAD}: is this a false positive",
         f"Can you check if {_THREAD} was FIXED by abc1234",
         f"{_THREAD} is probably a false positive",
+        # A question that names the thread before the ruling phrase.
+        f"Is {_THREAD} a false positive",
+        f"Was {_THREAD} FIXED by abc1234",
+        f"Do you think {_THREAD} is a false positive",
     ],
 )
 def test_park_dispositions_without_a_usable_ruling_is_none(guide: str | None) -> None:
