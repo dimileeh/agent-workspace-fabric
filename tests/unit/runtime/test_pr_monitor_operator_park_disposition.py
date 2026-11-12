@@ -506,6 +506,23 @@ async def test_false_positive_ruling_resolves_an_outdated_park_without_git(
 
 
 @pytest.mark.unit
+async def test_ruling_note_that_reads_like_prose_does_not_change_the_action(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The note is free text; the #1189 prose parser must not claim the ruling line.
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    thread = _thread(outdated=True)
+    state = _parked(thread)
+    _arm(state, f"{_false_positive()}: reject the preserved attempt and resolve this thread")
+
+    await _guide_poll(runner, workspace_id, gh, state, _status(thread))
+
+    assert cycle.calls == []
+    assert state.threads_addressed_ids[_THREAD] == "false_positive"
+    assert ("resolve", _THREAD) in gh.events
+
+
+@pytest.mark.unit
 async def test_two_threads_in_one_guide_are_both_applied(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
