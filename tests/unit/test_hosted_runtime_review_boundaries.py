@@ -211,6 +211,8 @@ async def test_required_unsupported_profile_secret_fails_as_profile_resolution(w
     assert caught.value.status == 422
     assert "'local_db_password'" in str(caught.value)
     assert "env/LOCAL_DB_PASSWORD" not in str(caught.value)
+    # The refusal is classified before any protected material is read or published.
+    assert await runtime.publication(association.workspace_id) is None
 
 
 @pytest.mark.parametrize("required", [True, False])
@@ -236,6 +238,7 @@ async def test_mismatched_protected_declaration_is_profile_resolution_failure(wo
     assert isinstance(caught.value, MaterialDeniedError)
     assert caught.value.reason == caught.value.reason_code == "PROTECTED_DECLARATION_MISMATCH"
     assert "'agent'" in str(caught.value)
+    assert await runtime.publication(association.workspace_id) is None
 
 
 @pytest.mark.parametrize("fault", ["absent_anchor", "pending_anchor", "absent_current"])

@@ -713,11 +713,12 @@ async def test_profile_mount_reader_uses_the_same_cutover_validation(
     workspace = runtime.workspace
 
     async def first_validated(*args):
+        # profile_mounts classifies declarations without reading material, so
+        # its only material read is the one held across the refresh.
         nonlocal ready
-        value = await workspace(*args)
         if asyncio.current_task() is selected and scope.workspace_id.get() is not None:
             ready = True
-        return value
+        return await workspace(*args)
 
     monkeypatch.setattr(runtime, "workspace", first_validated)
     entered, release, _, _ = hold_boundary(

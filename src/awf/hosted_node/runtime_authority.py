@@ -250,7 +250,8 @@ class WorkspaceAuthority:
         workspace_id: str,
     ) -> LocalSecretLeaseResolution:
         association, _ = await self.association(workspace_id)
-        await self.workspace(workspace_id)
+        # Classify the declarations before any material read or view
+        # publication, so a configuration error never touches protected material.
         bindings = {
             "agent": association.credentials.agent,
             "github": association.credentials.github,
