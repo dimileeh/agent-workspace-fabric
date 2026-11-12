@@ -274,9 +274,16 @@ def remove_diagnostic_auth(work_dir: Path, workspace_id: str) -> None:
     import re
     import shutil
 
-    if not re.fullmatch(r"ws_[A-Za-z0-9_]+", workspace_id):
+    # Normalize (without following symlinks, which the checks below reject) and
+    # require containment under the auth root so the path is provably bounded
+    # (CodeQL py/path-injection does not treat the regex alone as a sanitizer).
+    auth_root = os.path.normpath(os.fspath(work_dir / "auth"))
+    root_path = os.path.normpath(Path(auth_root) / workspace_id)
+    if not re.fullmatch(r"ws_[A-Za-z0-9_]+", workspace_id) or not root_path.startswith(
+        f"{auth_root.rstrip(os.sep)}{os.sep}"
+    ):
         raise ValueError("PROVIDER_DIAGNOSTIC_FIXTURE_FAILED")
-    root = work_dir / "auth" / workspace_id
+    root = Path(root_path)
     directory = root / "diagnostic"
     if root.is_symlink() or directory.is_symlink():
         raise ValueError("PROVIDER_DIAGNOSTIC_FIXTURE_FAILED")
