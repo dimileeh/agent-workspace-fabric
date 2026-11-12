@@ -108,6 +108,9 @@ _RULING_LINE_RE = re.compile(
 # --quiet`` answers "no such commit", with exit 1. Any other non-zero exit is no
 # answer at all (a command-runner timeout is 124, a git fatal 128).
 _GIT_NO_RETURN_CODE = 1
+# Bounds the pre-probe PR-branch fetch: a stalled remote times out into the
+# same fall-through as a failed fetch instead of wedging the ruling.
+_PR_BRANCH_FETCH_TIMEOUT_SECONDS = 60.0
 
 _UNAPPLIED_EXPLANATION: dict[str, str] = {
     "thread_without_disposition": (
@@ -284,6 +287,7 @@ async def _ancestor_commit(
                 worktree_path=worktree_path,
                 remote=remote_push_url or "origin",
                 remote_branch=remote_branch,
+                timeout_seconds=_PR_BRANCH_FETCH_TIMEOUT_SECONDS,
             )
             if not fetched.ok:
                 # Objects already local may still prove the claim; the probe
@@ -293,6 +297,7 @@ async def _ancestor_commit(
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
                     returncode=fetched.returncode,
+                    reason_code=fetched.reason_code,
                 )
         resolved = await self._deps.runner.run(
             git_worktree_command(

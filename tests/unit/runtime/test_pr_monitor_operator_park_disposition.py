@@ -13,6 +13,7 @@ closed with a distinct reason code.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -451,6 +452,39 @@ async def test_failed_pr_branch_fetch_still_probes_local_objects(
     await _guide_poll(runner, workspace_id, gh, state, _status(thread))
 
     assert len(_fetches(cmd)) == 1
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_stalled_pr_branch_fetch_is_bounded_and_still_probes_local_objects(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A remote that accepts the connection and then goes silent must not wedge
+    # the ruling: the fetch is bounded, and its timeout falls through to the
+    # local ancestry probe exactly like a failed fetch.
+    runner, workspace_id, gh, _cycle, _cmd = await _runner(factory, tmp_path)
+
+    class _StalledFetch(FakeCommandRunner):
+        async def run(self, args: list[str], **kwargs: Any) -> Any:
+            if "fetch" not in args:
+                return await super().run(args, **kwargs)
+            await super().run(args, **kwargs)
+            if kwargs.get("timeout_seconds") is None:
+                await asyncio.sleep(3600.0)
+            return CommandResult(124, "", "timed out", COMMAND_TIMEOUT_REASON)
+
+    stalled = _StalledFetch()
+    _git(stalled)
+    runner._deps.runner = stalled
+    thread = _thread()
+    state = _parked(thread)
+    _arm(state, _fixed())
+
+    await asyncio.wait_for(_guide_poll(runner, workspace_id, gh, state, _status(thread)), 5.0)
+
+    fetch_calls = [call for call in stalled.calls if "fetch" in call.args]
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0].timeout_seconds is not None
     assert state.threads_addressed_ids[_THREAD] == "fix_committed"
 
 
