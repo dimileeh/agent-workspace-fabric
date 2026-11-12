@@ -17,7 +17,7 @@ from awf.common.workspace_policy import (
 )
 from awf.db.enums import EgressDecision
 from awf.db.models import Workspace
-from awf.db.repositories import ResourceReservationRepository
+from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.node.compose_manager import ComposeProjectPaths
 from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.models import WorkspaceProfile
@@ -129,6 +129,24 @@ def _stack_hosted_skipped_secret_event_payload(
         "secret_names": secret_names,
         "count": len(secret_names),
     }
+
+
+async def _record_hosted_skipped_secret_event(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    stack_paths: ComposeProjectPaths,
+) -> None:
+    """Append the names-only hosted skipped-optional-secret event, when any were skipped."""
+    payload = _stack_hosted_skipped_secret_event_payload(stack_paths=stack_paths)
+    if payload is None:
+        return
+    await repo.add_event(
+        workspace,
+        event_type="workspace.hosted_profile_secret_skipped",
+        reason_code="HOSTED_OPTIONAL_SECRET_SKIPPED",
+        payload=payload,
+    )
 
 
 def _provision_local_branch_name(
