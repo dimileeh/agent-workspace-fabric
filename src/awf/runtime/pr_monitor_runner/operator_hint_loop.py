@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
 )
+from awf.runtime.pr_monitor_runner.operator_park_disposition import apply_park_disposition
 from awf.runtime.pr_monitor_runner.operator_preserved_attempt import (
     apply_preserved_attempt_disposition,
 )
@@ -116,6 +117,22 @@ async def handle_operator_hint_action(
         operation_id=operation.operation_id if operation is not None else None,
         monitor_log=monitor_log,
     )
+    if disposition is None:
+        # So is a "<thread> FIXED by <sha>" / "false positive" ruling on a
+        # mutation-parked thread (#1213): it needs evidence, not a worktree change.
+        disposition = await apply_park_disposition(
+            self,
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+            hint=action.hint,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation.operation_id if operation is not None else None,
+            monitor_log=monitor_log,
+        )
     if disposition is not None:
         await self._persist_state(workspace_id, state)
         await self._finish_monitor_operation(

@@ -844,6 +844,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
 
+### OPERATOR_PARK_DISPOSITION_APPLIED
+**Problem:** An operator guide ruled a review thread parked on a refused correction attempt FIXED by a commit or a false positive, so AWF recorded that disposition, replied in the thread and resolved it.
+**Likely Cause:** The thread was parked needs_human with AGENT_NON_FIXED_WITH_MUTATION. A FIXED ruling is applied only when the cited commit is an ancestor of the PR head. No agent ran and the worktree was not changed.
+**Operator Fix:** No action is required. The event evidence names the thread, the ruling, the cited commit and the PR head it was checked against. The guide's other instructions were not run; send a follow-up guide for them.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_applied](#operator_park_disposition_applied)
+
+### OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED
+**Problem:** AWF applied an operator ruling and posted its disposition reply, but the forge refused to resolve the review thread, so the thread is parked for a human.
+**Likely Cause:** The resolve call failed after the disposition reply landed. AWF keeps the thread open rather than treat an unresolved thread as handled.
+**Operator Fix:** Resolve the thread on the forge, or send the same guide again: AWF reuses the posted reply and retries the resolve. Check the forge reason code in the audit event for permissions or availability problems.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_resolve_failed](#operator_park_disposition_resolve_failed)
+
+### OPERATOR_PARK_DISPOSITION_UNAPPLIED
+**Problem:** An operator guide ruled on a review thread parked on a refused correction attempt, but AWF could not apply the ruling, so every named thread stays parked.
+**Likely Cause:** A named thread had no single unconditional ruling, was not a mutation park, was no longer open, or had new replies; or the cited commit did not resolve or was not an ancestor of the PR head. AWF does not guess.
+**Operator Fix:** Read the detail in the notice or audit event. Then guide again, naming each parked thread id followed by 'FIXED by <sha>' (a commit already on the PR head) or 'false positive'. Guide without that wording to have the agent re-triage.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_park_disposition_unapplied](#operator_park_disposition_unapplied)
+
 ### OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED
 **Problem:** An operator guide asked AWF to reject a preserved correction attempt and resolve its thread, but AWF could not apply it, so the review thread stays parked.
 **Likely Cause:** The ruling matched no parked preserved attempt, matched more than one, named a SHA that is not the thread's preserved attempt, or named a thread that is active, already closed, or has new replies since it was parked. AWF does not guess.
