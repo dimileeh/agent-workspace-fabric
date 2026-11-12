@@ -571,6 +571,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace adopt-pr --execution hosted`
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_delegation_not_configured](#hosted_delegation_not_configured)
 
+### HOSTED_OPTIONAL_SECRET_SKIPPED
+**Problem:** The hosted node skipped optional profile secrets it cannot provide; they were not materialized and no env var was set.
+**Likely Cause:** The profile declares `required: false` secrets (for example for local test containers) that only a local node can resolve.
+**Operator Fix:** No action needed unless the workspace needs these secrets; the event lists the skipped secret names.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_optional_secret_skipped](#hosted_optional_secret_skipped)
+
 ### HOSTED_REMOTE_HEAD_FETCH_FAILED
 **Problem:** AWF could not fetch the hosted PR head after a hosted repair completed.
 **Likely Cause:** Git fetch of the PR head repository/ref failed due to credentials, network availability, a deleted branch, or remote rejection.
@@ -927,6 +934,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Read the workspace event for the failing command, return code and validation run id, and that run's logs. Fix the validation environment (for example git ownership or a missing work tree). Then push to the PR, or guide the workspace so the monitor retries; a guide or a new PR head lifts the park.
 **Related Command:** `awf workspace guide <workspace_id> --directive '...'`
 **Docs Link:** [docs/REASON_CATALOG.md#pre_push_validation_infrastructure_failure_parked](#pre_push_validation_infrastructure_failure_parked)
+
+### PROTECTED_DECLARATION_MISMATCH
+**Problem:** A protected profile secret declaration does not match the hosted node's protected binding, so the workspace failed at provisioning.
+**Likely Cause:** An `agent`/`github` (or `provider: protected`) declaration uses the wrong provider, kind, mode, ref, or target.
+**Operator Fix:** Declare `agent`/`github` secrets as `provider: protected`, `kind: mount`, `mode: ro`, without `ref`, and with the bound target; then create a new workspace.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_declaration_mismatch](#protected_declaration_mismatch)
+
+### PROTECTED_DECLARATION_UNSUPPORTED
+**Problem:** The hosted node cannot provide a required profile secret, so the workspace failed at provisioning before any agent run.
+**Likely Cause:** The profile declares a required secret other than the protected `agent`/`github` mounts, which are the only secrets a hosted node provides.
+**Operator Fix:** Mark the named secret `required: false` if only local test containers use it, or remove it from the profile; then create a new workspace.
+**Related Command:** `awf profile preview . --profile auto`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_declaration_unsupported](#protected_declaration_unsupported)
 
 ### PROTECTED_SCOPE_DIFF_UNAVAILABLE
 **Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.

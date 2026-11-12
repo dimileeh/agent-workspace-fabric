@@ -828,6 +828,9 @@ class Provisioner(
                 from_status=WorkspaceStatus.provisioning,
                 execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
+                # Launch-time profile refusals (e.g. hosted secret declarations)
+                # run after the pre-launch commit but before Compose I/O.
+                clear_unlaunched_compose_project=not stack_launch_started,
                 # Deferred Cursor ready-path skips publishing resolved_profile;
                 # companion graph failures after that probe still need the
                 # snapshot so retry overlays profile-only CURSOR_API_KEY.
@@ -1080,6 +1083,9 @@ class Provisioner(
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
+                await _provisioner_helpers._record_hosted_skipped_secret_event(
+                    repo, persisted, stack_paths=stack_paths
+                )
                 if not hosted_pr_adoption:
                     companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,
