@@ -710,6 +710,101 @@ async def test_resolve_fault_re_parks_with_the_forge_reason_and_a_repeat_reuses_
 
 
 @pytest.mark.unit
+async def test_repeat_guide_retries_only_the_thread_whose_resolve_failed(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    forge_resolve = gh.resolve_thread
+
+    async def _resolve_fails_for_other(*, thread_id: str) -> None:
+        if thread_id == _OTHER:
+            gh.events.append(("resolve_failed", thread_id))
+            raise GitHubClientError(
+                operation="resolve_thread", returncode=1, stderr="HTTP 502: bad gateway"
+            )
+        await forge_resolve(thread_id=thread_id)
+
+    gh.resolve_thread = _resolve_fails_for_other  # type: ignore[method-assign]
+    first, second = _thread(), _thread(_OTHER, body="other finding")
+    state = _parked(first, second)
+    guide = f"{_fixed()}\n{_false_positive(_OTHER)}"
+    _arm(state, guide)
+
+    await _guide_poll(runner, workspace_id, gh, state, _status(first, second))
+
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+    assert state.threads_addressed_ids[_OTHER] == "needs_human"
+    assert state.threads_addressed_ids[_reason_key(_OTHER)].startswith(
+        f"{OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED}:"
+    )
+
+    # The resolved thread is off the PR; the same guide finishes the other one.
+    gh.resolve_thread = forge_resolve  # type: ignore[method-assign]
+    gh.events.clear()
+    _arm(state, guide, operation_id="op_guide_1213_retry")
+    await _guide_poll(runner, workspace_id, gh, state, _status(second))
+
+    assert cycle.calls == []
+    assert gh.replies() == []
+    assert gh.events == [("resolve", _OTHER)]
+    assert state.threads_addressed_ids[_OTHER] == "false_positive"
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+    events = await _disposition_events(factory, workspace_id)
+    assert OPERATOR_PARK_DISPOSITION_UNAPPLIED not in [event.reason_code for event in events]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "closed_ruling",
+    [_false_positive(), _fixed(sha="abc1234")],
+    ids=["other-kind", "other-sha"],
+)
+async def test_repeat_guide_with_another_ruling_on_a_closed_thread_is_refused(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, closed_ruling: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    first, second = _thread(), _thread(_OTHER, body="other finding")
+    state = _parked(first, second)
+    _arm(state, _fixed())
+    await _guide_poll(runner, workspace_id, gh, state, _status(first, second))
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+
+    # A ruling the closed thread never got is no retry of it: fail closed.
+    gh.events.clear()
+    _arm(state, f"{closed_ruling}\n{_false_positive(_OTHER)}", operation_id="op_2")
+    await _guide_poll(runner, workspace_id, gh, state, _status(second))
+
+    assert cycle.calls == []
+    assert gh.events == []
+    _assert_untouched(state, _OTHER)
+    events = await _disposition_events(factory, workspace_id)
+    assert events[-1].reason_code == OPERATOR_PARK_DISPOSITION_UNAPPLIED
+    assert events[-1].payload["evidence"]["detail"] == "not_mutation_park"
+
+
+@pytest.mark.unit
+async def test_repeat_guide_on_a_reopened_closed_thread_is_refused(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    first, second = _thread(), _thread(_OTHER, body="other finding")
+    state = _parked(first, second)
+    _arm(state, _fixed())
+    await _guide_poll(runner, workspace_id, gh, state, _status(first, second))
+
+    # The ruled thread is open again: the earlier ruling no longer covers it.
+    gh.events.clear()
+    _arm(state, f"{_fixed()}\n{_false_positive(_OTHER)}", operation_id="op_2")
+    await _guide_poll(runner, workspace_id, gh, state, _status(first, second))
+
+    assert cycle.calls == []
+    assert gh.events == []
+    _assert_untouched(state, _OTHER)
+    events = await _disposition_events(factory, workspace_id)
+    assert events[-1].payload["evidence"]["detail"] == "not_mutation_park"
+
+
+@pytest.mark.unit
 async def test_reply_fault_re_parks_and_a_repeat_guide_retries_the_reply(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

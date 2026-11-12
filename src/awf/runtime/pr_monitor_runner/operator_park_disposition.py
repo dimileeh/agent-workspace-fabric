@@ -17,7 +17,9 @@ a strict, machine-readable grammar (#1215), never English prose:
 The whole guide is checked before anything changes. Every ruled thread must be
 a live mutation park, open on the PR, with the conversation the park answered
 unchanged. A FIXED claim needs evidence: the cited commit must resolve and be
-an ancestor of the PR head. Each thread then records the operator-sourced
+an ancestor of the PR head. A thread the same ruling already resolved is
+satisfied, so a repeated guide retries only the threads still parked. Each
+thread then records the operator-sourced
 disposition, gets AWF's disposition reply, and is resolved. Each step is
 audited under its reason code.
 
@@ -196,6 +198,33 @@ def _is_ruleable_park(state: MonitorState, thread_id: str) -> bool:
     )
 
 
+def _ruling_already_applied(
+    state: MonitorState, status: PRStatus, thread_id: str, ruling: ParkRuling
+) -> bool:
+    """This same ruling already replied to and resolved the thread, and it stays resolved.
+
+    A guide whose other thread failed to resolve is retried by sending it again
+    (PRRT_kwDOSJAM6s62f9ot): the thread it did close is satisfied, not refused as
+    ``not_mutation_park``. A different ruling, or a reopened thread, is not.
+    """
+    disposition = read_item_disposition(state, thread_id)
+    if disposition is None or disposition.source != _DISPOSITION_SOURCE:
+        return False
+    if not disposition.resolved or any(
+        thread.thread_id == thread_id
+        for thread in (
+            *status.unresolved_inline_threads,
+            *status.outdated_unresolved_inline_threads,
+        )
+    ):
+        return False
+    if ruling.sha is None:
+        return disposition.disposition_class == "false_positive"
+    return disposition.disposition_class == "fixed" and any(
+        commit.startswith(ruling.sha) for commit in disposition.commits
+    )
+
+
 def _live_thread(
     state: MonitorState, status: PRStatus, thread_id: str
 ) -> tuple[ReviewThread | None, str | None]:
@@ -290,6 +319,8 @@ async def _stage(
     for thread_id, ruling in rulings.items():
         if ruling is None:
             return [], "thread_without_disposition"
+        if _ruling_already_applied(state, status, thread_id, ruling):
+            continue
         if not _is_ruleable_park(state, thread_id):
             return [], "not_mutation_park"
         thread, detail = _live_thread(state, status, thread_id)
