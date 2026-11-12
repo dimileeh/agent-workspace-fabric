@@ -18,8 +18,9 @@ disposition reply, and is resolved. Each step is audited under its reason code.
 
 Anything short of that fails closed: no thread changes, and the hint parks
 ``needs_human`` with ``OPERATOR_PARK_DISPOSITION_UNAPPLIED`` and a detail. A
-guide that carries no ruling phrase never reaches any of this, so the agent
-cycle (and the #938 clear-and-retriage path) runs as before.
+guide that carries no ruling phrase, or rules on no mutation park, never reaches
+any of this, so the agent cycle (and the #938 clear-and-retriage path) runs as
+before.
 """
 
 from __future__ import annotations
@@ -390,14 +391,20 @@ async def apply_park_disposition(
     """Apply an operator ruling on mutation-parked threads before the hint's agent cycle.
 
     Returns ``None`` (the agent cycle runs as before) when the directive carries
-    no ruling, or when a protected-scope block is pending: that resume is owned
-    by the grant/directive protocol. Otherwise the hint is finalized (each
+    no ruling, when none of its rulings names a mutation park (an ordinary
+    thread's ruling is the agent's to act on), or when a protected-scope block
+    is pending: that resume is owned by the grant/directive protocol. Otherwise the hint is finalized (each
     thread replied to and resolved, or re-parked under its own reason code) or
     parked ``needs_human`` with the UNAPPLIED reason code, and the caller
     persists state and skips the agent.
     """
     rulings = park_dispositions(hint.directive)
     if rulings is None or state.has_preserved_protected_block:
+        return None
+    if not any(
+        ruling is not None and _is_ruleable_park(state, thread_id)
+        for thread_id, ruling in rulings.items()
+    ):
         return None
     staged, detail = await _stage(
         self, workspace_id=workspace_id, status=status, state=state, rulings=rulings

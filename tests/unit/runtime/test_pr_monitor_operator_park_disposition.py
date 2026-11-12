@@ -540,8 +540,10 @@ async def test_guide_that_cannot_be_applied_fails_closed_and_changes_nothing(
     if setup == "bare_second_thread":
         guide += f". Also look at {_OTHER}."
     elif setup == "not_mutation_park":
+        # A guide that rules on a mutation park takes over every thread it rules on.
+        guide += f". {_OTHER} is a false positive."
         _sync_needs_human_reason(
-            state, _THREAD, VerdictResult(verdict="needs_human", reason="needs a product call")
+            state, _OTHER, VerdictResult(verdict="needs_human", reason="needs a product call")
         )
     elif setup == "thread_closed":
         live = ()
@@ -576,6 +578,32 @@ async def test_guide_without_a_ruling_still_runs_the_agent(
 
     assert len(cycle.calls) == 1
     assert await _disposition_events(factory, workspace_id) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "guide",
+    [
+        f"{_THREAD} is a false positive.",
+        f"Please take another look at {_OTHER}. {_THREAD} FIXED by {_FIX[:8]}.",
+    ],
+)
+async def test_ruling_on_no_mutation_park_still_runs_the_agent(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, guide: str
+) -> None:
+    runner, workspace_id, _gh, cycle, cmd = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked(_thread(_OTHER))
+    _sync_needs_human_reason(
+        state, _THREAD, VerdictResult(verdict="needs_human", reason="needs a product call")
+    )
+    _arm(state, guide)
+
+    await _guide_poll(runner, workspace_id, _gh, state, _status(thread, _thread(_OTHER)))
+
+    assert len(cycle.calls) == 1
+    assert await _disposition_events(factory, workspace_id) == []
+    assert _git_calls(cmd) == []
 
 
 @pytest.mark.unit
