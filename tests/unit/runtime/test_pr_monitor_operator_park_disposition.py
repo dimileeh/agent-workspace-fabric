@@ -293,6 +293,15 @@ def _assert_untouched(state: MonitorState, thread_id: str = _THREAD) -> None:
             f"Only rule what is listed. {_THREAD} is a false positive",
             {_THREAD: ParkRuling("false_positive")},
         ),
+        # A negation in an earlier comma or "and" sub-clause rules on something else.
+        (
+            f"Make no code changes, {_THREAD} is a false positive",
+            {_THREAD: ParkRuling("false_positive")},
+        ),
+        (
+            f"Do not change code and {_THREAD} is FIXED by abc1234",
+            {_THREAD: ParkRuling("fixed", "abc1234")},
+        ),
     ],
 )
 def test_park_dispositions_parses_per_thread_rulings(
@@ -315,6 +324,11 @@ def test_park_dispositions_parses_per_thread_rulings(
         # A condition or negation earlier in the clause, before the thread id.
         f"If CI passes, {_THREAD} is a false positive",
         f"Do not mark {_THREAD} as a false positive",
+        # A list of thread ids does not split a negation off the later ids.
+        f"Do not mark {_OTHER}, {_THREAD} as a false positive",
+        f"Do not mark {_OTHER} and {_THREAD} as a false positive",
+        # A negation left dangling before a break still governs what follows it.
+        f"Do not, under any circumstances, mark {_THREAD} as a false positive",
         f"Once CI is green: ok. Never call {_THREAD} FIXED by abc1234",
         # A question or an investigation request is not a ruling.
         f"{_THREAD}: investigate whether this is a false positive",

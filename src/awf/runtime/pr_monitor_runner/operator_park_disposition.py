@@ -111,10 +111,17 @@ _TENTATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 # A clause that opens on an auxiliary verb asks rather than rules, even without a
-# "?": "Is PRRT_x a false positive", "Do you think PRRT_x is ...".
+# "?": "Is PRRT_x a false positive", "Do you think PRRT_x is ...". "Do not ..."
+# is an instruction, not a question.
 _QUESTION_LEAD_RE = re.compile(
-    r"^\W*(?:is|are|was|were|do|does|did|can|should|would|will)\b", re.IGNORECASE
+    r"^\W*(?:is|are|was|were|do(?!\s+not\b)|does|did|can|should|would|will)\b",
+    re.IGNORECASE,
 )
+# A comma or "and"/"but" opens a sub-clause in the lead-in; a negation in an
+# earlier one governs that sub-clause ("make no code changes, PRRT_x is ..."),
+# unless it dangles with nothing after it ("Do not, ever, mark PRRT_x ...").
+_SUBCLAUSE_BREAK_RE = re.compile(r",|\b(?:and|but)\b", re.IGNORECASE)
+_DANGLING_NEGATION_RE = re.compile(r"\b(?:not|never|no|\w+n['’]t)\W*$", re.IGNORECASE)
 
 # ``git merge-base --is-ancestor`` answers "no", and ``git rev-parse --verify
 # --quiet`` answers "no such commit", with exit 1. Any other non-zero exit is no
@@ -169,7 +176,9 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
     id or the next ``.``, ``;`` or newline. A segment rules "fixed" or "false
     positive" only when no negation precedes the phrase and no condition word,
     question or hedge is anywhere in it, counting the clause lead-in before the
-    thread id ("If CI passes, PRRT_x ...", "Do not mark PRRT_x ..."). A thread whose segments carry no usable
+    thread id ("If CI passes, PRRT_x ...", "Do not mark PRRT_x ..."). A negation in
+    an earlier comma or "and" sub-clause of the lead-in rules on something else
+    ("make no code changes, PRRT_x ...") and does not count. A thread whose segments carry no usable
     ruling, or disagree, maps to ``None`` so the guide fails closed rather than
     guessing.
     """
@@ -187,7 +196,8 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         segment_break = _SEGMENT_BREAK_RE.search(text, start, end)
         segment = text[start : segment_break.start() if segment_break else end]
-        rulings = _segment_rulings(segment, text[_clause_start(text, start) : start])
+        lead_in = text[_clause_start(text, start) : start]
+        rulings = _segment_rulings(segment, lead_in, _negation_lead_in(lead_in, thread_ids))
         if rulings is None:
             voided.add(thread_id)
         else:
@@ -200,11 +210,12 @@ def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
     }
 
 
-def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
+def _segment_rulings(segment: str, lead_in: str, negation_lead_in: str) -> set[ParkRuling] | None:
     """The rulings one segment carries; ``None`` when a phrase in it is voided.
 
     ``lead_in`` is the clause text before the segment's thread id, so a condition
-    or negation written ahead of the id still voids the ruling.
+    written ahead of the id still voids the ruling; ``negation_lead_in`` is the
+    part of it a negation must sit in to do the same.
     """
     matches: list[tuple[re.Match[str], ParkRuling]] = [
         (match, ParkRuling("fixed", match.group("sha").lower()))
@@ -220,11 +231,29 @@ def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
         or _TENTATIVE_RE.search(lead_in + segment)
         or _QUESTION_LEAD_RE.search(lead_in)
         or any(
-            _REJECT_NEGATED_RE.search(lead_in + segment[: match.start()]) for match, _ in matches
+            _REJECT_NEGATED_RE.search(negation_lead_in + segment[: match.start()])
+            for match, _ in matches
         )
     ):
         return None
     return {ruling for _, ruling in matches}
+
+
+def _negation_lead_in(lead_in: str, thread_ids: tuple[str, ...]) -> str:
+    """The lead-in's last sub-clause, plus any earlier one ending on a dangling negation.
+
+    A break right after another thread id only continues a list ("Do not mark
+    PRRT_x, PRRT_y ...") and splits nothing.
+    """
+    pieces: list[str] = []
+    piece_start = 0
+    for match in _SUBCLAUSE_BREAK_RE.finditer(lead_in):
+        if lead_in[: match.start()].rstrip(" \t`*'\"").endswith(thread_ids):
+            continue
+        pieces.append(lead_in[piece_start : match.start()])
+        piece_start = match.end()
+    dangling = [piece for piece in pieces if _DANGLING_NEGATION_RE.search(piece)]
+    return " ".join([*dangling, lead_in[piece_start:]])
 
 
 def _is_ruleable_park(state: MonitorState, thread_id: str) -> bool:
