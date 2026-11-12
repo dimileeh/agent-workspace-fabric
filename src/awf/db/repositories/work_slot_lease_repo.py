@@ -327,17 +327,22 @@ class WorkSlotLeaseRepository:
             WorkSlotLease.expires_at <= now,
         )
         invocation_ids = sorted((await self._session.execute(stmt)).scalars().all())
-        if invocation_ids:
-            await self._session.execute(
-                delete(WorkSlotLease)
-                .where(
-                    WorkSlotLease.invocation_id.in_(invocation_ids),
-                    WorkSlotLease.acquired_at.is_(None),
-                )
-                .execution_options(synchronize_session=False)
+        if not invocation_ids:
+            return []
+        # Re-check expiry: this runs without the capacity lock, so a waiter may have
+        # renewed since the scan and must keep its row (and its FIFO ticket).
+        result = await self._session.execute(
+            delete(WorkSlotLease)
+            .where(
+                WorkSlotLease.invocation_id.in_(invocation_ids),
+                WorkSlotLease.acquired_at.is_(None),
+                WorkSlotLease.expires_at <= now,
             )
-            await self._session.flush()
-        return invocation_ids
+            .returning(WorkSlotLease.invocation_id)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.flush()
+        return sorted(result.scalars().all())
 
 
 def _node_scoped(stmt: Select[Any], *, node_id: str | None) -> Select[Any]:

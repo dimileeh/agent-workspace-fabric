@@ -239,6 +239,50 @@ async def test_fifo_waiters_skip_expired_and_unsatisfiable_rows() -> None:
             assert await repo.get(tail.invocation_id) is not None
 
 
+async def test_delete_expired_waiters_keeps_ticket_renewed_after_the_scan() -> None:
+    # The reconciler scans without the capacity lock: a waiter renewed between the
+    # scan and the delete keeps its row and its original FIFO ticket.
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        workspace_id = await _create_workspace(factory)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            renewed = await WorkSlotLeaseRepository(session).add(
+                _lease(workspace_id, phase=WorkSlotLeasePhase.waiting, now=now, expires_in=-1)
+            )
+            await session.commit()
+        ticket_at = renewed.ticket_at
+        async with factory() as session:
+            original_execute = session.execute
+            calls = 0
+
+            async def _renew_after_scan(*args: object, **kwargs: object) -> object:
+                nonlocal calls
+                result = await original_execute(*args, **kwargs)  # type: ignore[arg-type]
+                calls += 1
+                if calls == 1:
+                    async with factory() as other:
+                        assert await WorkSlotLeaseRepository(other).update_fenced(
+                            renewed.invocation_id,
+                            holder_worker_id="control-worker-a",
+                            holder_epoch=1,
+                            values={"expires_at": now + timedelta(seconds=300)},
+                        )
+                        await other.commit()
+                return result
+
+            session.execute = _renew_after_scan  # type: ignore[method-assign]
+            deleted = await WorkSlotLeaseRepository(session).delete_expired_waiters(
+                node_id="local", now=now
+            )
+            await session.commit()
+        assert deleted == []
+        async with factory() as session:
+            kept = await WorkSlotLeaseRepository(session).get(renewed.invocation_id)
+            assert kept is not None
+            assert kept.ticket_at == ticket_at
+
+
 def test_lease_phase_vocabulary_is_not_a_workspace_status() -> None:
     # The lease phase is a lease-lifecycle vocabulary, never a workspace status.
     assert {phase.value for phase in WorkSlotLeasePhase} == {
