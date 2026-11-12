@@ -40,6 +40,7 @@ from awf.profiles.models import (
     ProfileCommand,
     ProfileDatabase,
     ProfilePhaseSet,
+    ProfileValidation,
     WorkspaceProfile,
 )
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
@@ -590,6 +591,45 @@ class TestReplayCommandTimeout:
         assert failed_logs[0]["detail"] == "setup_replay_timeout"
         assert failed_logs[0]["reason_code"] == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
         assert await _replay_events(factory, ws_id) == []
+
+    @pytest.mark.unit
+    async def test_timeout_detail_survives_exhausted_validation_retries(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A retried hung command keeps the timeout diagnosis after retry exhaustion."""
+        monkeypatch.setattr(runtime_setup_replay, "SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS", 0.05)
+        ws_id = await _seed_monitoring_pr(factory)
+        runner = _HangingRunner()
+        validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile(
+            name="replay",
+            phases=ProfilePhaseSet(setup=[ProfileCommand(command="sleep-forever-install")]),
+            validation=ProfileValidation(retry_budget=1),
+        )
+
+        outcome = await asyncio.wait_for(
+            _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW, profile=profile),
+            timeout=10,
+        )
+
+        assert not outcome.ok and outcome.replayed
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason is FailureReason.phase_timeout
+        details = outcome.details
+        assert details is not None
+        assert details["detail"] == "setup_replay_timeout"
+        # The runner's own retry-exhaustion reason code is preserved, not rewritten.
+        assert details["phase_reason_code"] == "VALIDATION_RETRY_EXHAUSTED"
+        assert details["returncode"] == 124
+        assert outcome.message is not None
+        assert outcome.message.startswith(
+            "runtime setup replay failed: setup_replay_timeout: setup command "
+        )
+        assert len(runner.hung) == 2
+        assert len(runner.cleanups) == 2
 
     @pytest.mark.unit
     async def test_profile_timeout_wins_and_unbounded_commands_get_the_default(

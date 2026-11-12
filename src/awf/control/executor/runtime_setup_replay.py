@@ -78,6 +78,8 @@ IDENTITY_PROBE_TIMEOUT_SECONDS: float = 30.0
 SETUP_REPLAY_COMMAND_TIMEOUT_SECONDS: int = 1800
 """Per-command bound for a replayed command whose profile sets no ``timeout_seconds``."""
 SETUP_REPLAY_TIMEOUT_DETAIL: Final[str] = "setup_replay_timeout"
+_VALIDATION_RETRY_EXHAUSTED: Final[str] = "VALIDATION_RETRY_EXHAUSTED"
+_TIMEOUT_RETURNCODE: Final[int] = 124
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,8 @@ async def replay_setup_if_recreated(
             details["setup_dependency_network"] = dependency_details
         command = details.get("command")
         failure_reason = _failure_reason_for_phase(first_fail)
+        if _is_retry_exhausted_timeout(first_fail):
+            failure_reason = FailureReason.phase_timeout
         message = f"runtime setup replay failed: {command or 'profile setup failed'}"
         if failure_reason is FailureReason.phase_timeout:
             details["detail"] = SETUP_REPLAY_TIMEOUT_DETAIL
@@ -486,6 +490,19 @@ def _failed(
         failure_reason=failure_reason,
         message=message[:2000],
         details=details,
+    )
+
+
+def _is_retry_exhausted_timeout(first_fail: Any) -> bool:
+    """True when flaky retries of a timed-out command were exhausted.
+
+    With ``validation.retry_budget > 0`` the runner replaces the final attempt's
+    ``PHASE_TIMEOUT`` with ``VALIDATION_RETRY_EXHAUSTED``; the timeout exit code
+    survives, so the replay still reports the timeout.
+    """
+    return (
+        getattr(first_fail, "reason_code", None) == _VALIDATION_RETRY_EXHAUSTED
+        and getattr(first_fail, "returncode", None) == _TIMEOUT_RETURNCODE
     )
 
 
