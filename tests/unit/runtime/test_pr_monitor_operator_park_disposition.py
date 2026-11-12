@@ -684,6 +684,64 @@ async def test_resolve_fault_re_parks_with_the_forge_reason_and_a_repeat_reuses_
 
 
 @pytest.mark.unit
+async def test_reply_fault_re_parks_and_a_repeat_guide_retries_the_reply(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    gh.reply_error = GitHubClientError(
+        operation="reply_to_thread", returncode=1, stderr="HTTP 502: bad gateway"
+    )
+    thread = _thread()
+    state = _parked(thread)
+    status = _status(thread)
+    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}")
+
+    await _guide_poll(runner, workspace_id, gh, state, status)
+
+    assert state.threads_addressed_ids[_THREAD] == "needs_human"
+    assert state.threads_addressed_ids[_reason_key()].startswith("THREAD_DISPOSITION_REPLY_FAILED:")
+    assert _park_key() not in state.threads_addressed_ids
+
+    gh.reply_error = None
+    gh.events.clear()
+    _arm(state, f"{_THREAD} FIXED by {_FIX[:8]}", operation_id="op_guide_1213_retry")
+    await _guide_poll(runner, workspace_id, gh, state, status)
+
+    assert cycle.calls == []
+    assert [reply_thread for reply_thread, _body in gh.replies()] == [_THREAD]
+    assert ("resolve", _THREAD) in gh.events
+    assert state.threads_addressed_ids[_THREAD] == "fix_committed"
+    events = await _disposition_events(factory, workspace_id)
+    assert OPERATOR_PARK_DISPOSITION_UNAPPLIED not in [event.reason_code for event in events]
+
+
+@pytest.mark.unit
+async def test_reply_fault_park_left_by_another_source_is_not_ruleable(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "needs_human")
+    state.mark_addressed(_reason_key(), "THREAD_DISPOSITION_REPLY_FAILED: x")
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=_THREAD,
+            disposition_class="false_positive",
+            verdict="false_positive",
+            reason="agent triage",
+        ),
+    )
+    _arm(state, f"{_THREAD} is a false positive")
+
+    await _guide_poll(runner, workspace_id, gh, state, _status(thread))
+
+    assert len(cycle.calls) == 1
+    assert gh.events == []
+
+
+@pytest.mark.unit
 async def test_ruling_retires_a_reply_posted_for_an_earlier_verdict(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

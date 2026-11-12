@@ -65,6 +65,8 @@ from awf.runtime.pr_monitor_runner.operator_preserved_attempt import (
     _clause_start,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import (
+    REVIEW_THREAD_AUDIT_UNAVAILABLE,
+    THREAD_DISPOSITION_REPLY_FAILED,
     ThreadDisposition,
     read_item_disposition,
     record_item_disposition,
@@ -83,6 +85,12 @@ _AUDIT_EVENT = "workspace.audit.operator_disposition"
 _AUDIT_ACTION = "apply_park_disposition"
 _DISPOSITION_SOURCE = "operator_disposition"
 _RESOLVE_FAILED_REASON_PREFIX = f"{OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED}:"
+# The forge faults ``reply_before_resolve`` parks a ruled thread under: the reply
+# never posted, or its post-reply re-read failed. Either way a repeat may retry it.
+_REPLY_FAULT_REASON_PREFIXES = (
+    f"{THREAD_DISPOSITION_REPLY_FAILED}:",
+    f"{REVIEW_THREAD_AUDIT_UNAVAILABLE}:",
+)
 
 # "FIXED by|in [commit] <sha>", the SHA a standalone 7-40 hex token with at least
 # one digit and one letter (the #1189 shape: an all-digit token is a comment id,
@@ -202,12 +210,24 @@ def _segment_rulings(segment: str, lead_in: str) -> set[ParkRuling] | None:
 
 
 def _is_ruleable_park(state: MonitorState, thread_id: str) -> bool:
-    """A live mutation park, or one whose operator-ruled resolve failed earlier."""
+    """A live mutation park, or one an operator ruling re-parked on a forge fault.
+
+    The ruling drops the mutation-park record before its reply, so a refused reply
+    or a failed resolve leaves the thread parked under another code; a repeated
+    guide retries it instead of being refused as ``not_mutation_park``.
+    """
     if mutation_park_record(state.threads_addressed_ids, thread_id) is not None:
         return True
+    if state.threads_addressed_ids.get(thread_id) != "needs_human":
+        return False
     reason = state.threads_addressed_ids.get(_needs_human_reason_state_key(thread_id)) or ""
-    return state.threads_addressed_ids.get(thread_id) == "needs_human" and reason.startswith(
-        _RESOLVE_FAILED_REASON_PREFIX
+    if reason.startswith(_RESOLVE_FAILED_REASON_PREFIX):
+        return True
+    disposition = read_item_disposition(state, thread_id)
+    return (
+        disposition is not None
+        and disposition.source == _DISPOSITION_SOURCE
+        and reason.startswith(_REPLY_FAULT_REASON_PREFIXES)
     )
 
 
