@@ -69,7 +69,7 @@ def test_record_ci_repair_attempt_sets_current_head_and_prunes_older_heads() -> 
 
 
 @pytest.mark.unit
-async def test_ci_repair_dispatch_records_attempt_before_running_fix(
+async def test_ci_repair_dispatch_records_attempt_and_drops_it_on_provider_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
@@ -110,6 +110,8 @@ async def test_ci_repair_dispatch_records_attempt_before_running_fix(
         )
 
     assert seen_at_dispatch == [True]
+    # Provider recovery skipped the repair, so the next pass must retry CI first.
+    assert marker not in state.threads_addressed_ids
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
     assert [(op.type, op.error_code) for op in operations] == [("ci_repair", "PROVIDER_OUTAGE")]

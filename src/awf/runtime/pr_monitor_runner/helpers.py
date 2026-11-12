@@ -1074,6 +1074,16 @@ def _record_ci_repair_attempt(
     state.threads_addressed_ids[_ci_repair_attempted_state_key(head_sha, failures)] = "1"
 
 
+def _discard_ci_repair_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> None:
+    """Undo the #1216 marker when provider recovery skipped the CI repair."""
+    state.threads_addressed_ids.pop(_ci_repair_attempted_state_key(head_sha, failures), None)
+
+
 def _ci_failure_payload(failure: CheckFailure) -> dict[str, object]:
     return {
         "name": failure.name,

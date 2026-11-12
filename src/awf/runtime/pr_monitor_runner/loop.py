@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
+    _discard_ci_repair_attempt,
     _pending_review_feedback_count,
     _record_ci_repair_attempt,
     _redact_and_truncate_forge_error,
@@ -815,6 +816,8 @@ async def _execute(
             )
             raise
         except ProviderRecoveryRetryError as exc:
+            # No repair ran; keep CI priority over review waves on the next pass.
+            _discard_ci_repair_attempt(state, head_sha=status.head_sha, failures=action.failures)
             retry_result: dict[str, object] = {
                 "status": "failed",
                 "outcome": "provider_retry",
