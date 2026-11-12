@@ -140,6 +140,23 @@ def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime)
     return _initial_review_grace_wall_started_value(started_dt.timestamp())
 
 
+def _needs_human_reason_key(item_id: str) -> str:
+    """Build state key holding a review item's ``needs_human`` / ``defer`` reason."""
+    return f"__needs_human_reason__:{item_id}"
+
+
+def _mutation_park_key(thread_id: str) -> str:
+    """Build state key recording an ``AGENT_NON_FIXED_WITH_MUTATION`` park (#1213).
+
+    The value is JSON ``{"rollback_head": <sha or "">, "outdated": <bool>}``: the
+    commit the refused attempt was rolled back to, and whether the thread was
+    already outdated when it parked. The verdict was rendered on that commit, so
+    ``decide()`` re-evaluates the park once the PR head differs from it or the
+    thread has since become outdated. Any later verdict for the item drops it.
+    """
+    return f"__awf_mutation_park__:{thread_id}"
+
+
 def _item_disposition_key(item_id: str) -> str:
     """Build state key holding a review item's disposition record (#1018).
 

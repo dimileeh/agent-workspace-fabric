@@ -716,8 +716,10 @@ def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) ->
     return thread_needs_attention(state.threads_addressed_ids, thread)
 
 
-def _thread_enters_address_comments(state: MonitorState, thread: ReviewThread) -> bool:
-    return thread_enters_address_comments(state.threads_addressed_ids, thread)
+def _thread_enters_address_comments(
+    state: MonitorState, thread: ReviewThread, head_sha: str | None
+) -> bool:
+    return thread_enters_address_comments(state.threads_addressed_ids, thread, head_sha=head_sha)
 
 
 def _outdated_thread_has_fresh_feedback(state: MonitorState, thread: ReviewThread) -> bool:
@@ -1160,7 +1162,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             status.outdated_unresolved_inline_threads,
             state.threads_addressed_ids,
         )
-        if _thread_enters_address_comments(state, t)
+        if _thread_enters_address_comments(state, t, status.head_sha)
     )
     new_reviews = tuple(
         c

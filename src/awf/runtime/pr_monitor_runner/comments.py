@@ -263,7 +263,7 @@ async def _address_thread(
     # On any defer, overwrite/clear the stored reason so a re-triage with a bare
     # DEFER (no reason) can't leave a stale reason from a prior pass.
     if state is not None:
-        _sync_needs_human_reason(state, thread.thread_id, result)
+        _sync_needs_human_reason(state, thread.thread_id, result, is_outdated=thread.is_outdated)
         if result.verdict == "defer":
             reason_key = _defer_reason_state_key(thread.thread_id)
             if result.reason:

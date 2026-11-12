@@ -9,6 +9,8 @@ from awf.runtime.feedback_policy import (
     RESOLVABLE_THREAD_VERDICTS,
     _legacy_review_thread_body_hash,
     canonical_unresolved_inline_threads,
+    mutation_park_is_stale,
+    mutation_park_record,
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
     prefer_duplicate_review_thread,
@@ -807,3 +809,89 @@ def test_thread_resolution_pending_accepts_legacy_body_hash() -> None:
         review_thread_body_state_key("PRRT_legacy"): legacy,
     }
     assert thread_resolution_pending(state_map, thread)
+
+
+_MUTATION_REASON = (
+    "AGENT_NON_FIXED_WITH_MUTATION: Correction attempt mutated the worktree then reported "
+    "a non-FIXED verdict. The correction attempt's edits were rolled back to {floor}; the "
+    "item is parked for human review."
+)
+
+
+def _mutation_parked(sidecar: str | None, *, floor: str = "abc123def456") -> dict[str, str]:
+    state_map = {
+        "PRRT_mp": "needs_human",
+        "__needs_human_reason__:PRRT_mp": _MUTATION_REASON.format(floor=floor),
+    }
+    if sidecar is not None:
+        state_map["__awf_mutation_park__:PRRT_mp"] = sidecar
+    return state_map
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("head", "stale"),
+    [
+        ("abc123def456" + "0" * 28, False),  # same commit, full vs short form
+        ("ABC123DEF456", False),  # case-insensitive
+        ("abc123d", False),  # head is a prefix of the rollback commit
+        ("fedcba987654" + "0" * 28, True),
+        (None, False),  # unknown head never counts as moved
+        ("  ", False),
+    ],
+)
+def test_mutation_park_is_stale_compares_head_by_prefix(head: str | None, stale: bool) -> None:
+    state_map = _mutation_parked('{"rollback_head": "abc123def456", "outdated": false}')
+    assert mutation_park_is_stale(state_map, _thread("PRRT_mp"), head) is stale
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "sidecar",
+    ["{not json", "[1, 2]", '"abc123def456"'],
+    ids=["malformed", "list", "string"],
+)
+def test_malformed_mutation_park_record_fails_closed(sidecar: str) -> None:
+    state_map = _mutation_parked(sidecar)
+    assert mutation_park_record(state_map, "PRRT_mp") is None
+    assert not mutation_park_is_stale(state_map, _thread("PRRT_mp", is_outdated=True), "f" * 40)
+
+
+@pytest.mark.unit
+def test_mutation_park_record_tolerates_a_non_string_rollback_head() -> None:
+    state_map = _mutation_parked('{"rollback_head": 7, "outdated": true}')
+    assert mutation_park_record(state_map, "PRRT_mp") == ("", True)
+    assert not mutation_park_is_stale(state_map, _thread("PRRT_mp", is_outdated=True), "f" * 40)
+
+
+@pytest.mark.unit
+def test_mutation_park_record_requires_a_live_mutation_park() -> None:
+    sidecar = '{"rollback_head": "abc123def456", "outdated": false}'
+    # The verdict moved on: a stale record never re-queues a closed thread.
+    closed = {**_mutation_parked(sidecar), "PRRT_mp": "fix_committed"}
+    assert mutation_park_record(closed, "PRRT_mp") is None
+    # Re-parked for another reason without the record being dropped: still sticky.
+    other = {**_mutation_parked(sidecar), "__needs_human_reason__:PRRT_mp": "needs a decision"}
+    assert mutation_park_record(other, "PRRT_mp") is None
+    assert not mutation_park_is_stale(other, _thread("PRRT_mp"), "f" * 40)
+
+
+@pytest.mark.unit
+def test_legacy_mutation_park_reads_the_rollback_commit_from_its_reason() -> None:
+    assert mutation_park_record(_mutation_parked(None), "PRRT_mp") == ("abc123def456", False)
+    assert mutation_park_record(_mutation_parked(None, floor="<unknown>"), "PRRT_mp") == (
+        "",
+        False,
+    )
+
+
+@pytest.mark.unit
+def test_thread_enters_address_comments_re_queues_a_stale_mutation_park() -> None:
+    thread = _thread("PRRT_mp")
+    state_map = {
+        **_mutation_parked('{"rollback_head": "abc123def456", "outdated": false}'),
+        review_thread_body_state_key("PRRT_mp"): review_thread_body_hash(thread),
+    }
+    assert thread_enters_address_comments(state_map, thread) is False
+    assert thread_enters_address_comments(state_map, thread, head_sha="abc123def456") is False
+    assert thread_enters_address_comments(state_map, thread, head_sha="f" * 40) is True

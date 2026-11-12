@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 from awf.runtime.feedback_policy import preferred_duplicate_review_thread
-from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+from awf.runtime.monitor_state_keys import _needs_human_reason_key, _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
@@ -20,7 +20,7 @@ from awf.runtime.pr_monitor import (
 
 def _needs_human_reason_state_key(item_id: str) -> str:
     """Return the persisted state key for a blocker item's human reason."""
-    return f"__needs_human_reason__:{item_id}"
+    return _needs_human_reason_key(item_id)
 
 
 def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -> str | None:
