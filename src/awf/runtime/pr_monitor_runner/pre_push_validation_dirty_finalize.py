@@ -786,7 +786,13 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``. A
         # transient baseline outage that outlived its bounded retries is marked so
         # ``_validated_git_push_result`` parks the workspace in ``blocked`` with the
-        # worktree kept instead of failing it terminally (#1221).
+        # worktree kept instead of failing it terminally (#1221); the sink failed
+        # before ``git commit``, so mark the repair output it was committing for
+        # the guide resume's hint cycle (``provider_park_stranded_edits``).
+        transient = isinstance(exc, ProtectedScopeBaselineUnavailableError)
+        if transient:
+            preserved_head = await self._rev_parse_head(worktree_path)
+            mark_provider_park_stranded_edits(cast("MonitorState", state), preserved_head)
         _log.warning(
             "monitor.pre_push_dirty_finalize_protected_scope_diff_unavailable",
             workspace_id=workspace_id,
@@ -798,11 +804,7 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=check.paths,
             reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
             message=str(exc) or "protected-scope diff unavailable before pre-push dirty finalize",
-            extra_details=(
-                {"transient_baseline_unavailable": True}
-                if isinstance(exc, ProtectedScopeBaselineUnavailableError)
-                else None
-            ),
+            extra_details={"transient_baseline_unavailable": True} if transient else None,
         )
     except ProviderRecoveryRetryError:
         # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``

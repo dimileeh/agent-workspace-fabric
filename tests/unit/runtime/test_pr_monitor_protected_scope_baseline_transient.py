@@ -12,6 +12,7 @@ behave exactly as before.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -50,8 +51,14 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
+from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass as fix_pass_module
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.pre_push_validation import _PrePushValidationResult
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+    mark_provider_park_stranded_edits,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeBaselineUnavailableError,
@@ -65,6 +72,10 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+)
+from tests.unit.runtime._pre_push_validation_helpers import (
+    _mark_git_worktree,
+    _validation_result,
 )
 
 _DNS_STDERR = (
@@ -819,6 +830,132 @@ async def test_fix_pass_baseline_unavailable_marks_validation_result_transient(
         assert result.extra_details is not None
         assert result.extra_details["existing"] == "kept"
         assert result.extra_details.get("transient_baseline_unavailable", False) is transient
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("transient", [False, True])
+async def test_fix_pass_sink_baseline_unavailable_marks_stranded_edits_only_when_transient(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transient: bool,
+) -> None:
+    """The park keeps the fix pass's uncommitted edits, so the resume must commit them.
+
+    The commit sink fails before ``git commit``; without the stranded-edits marker the
+    guide resume's repair-start guard rejects that dirt as ``PRE_EXISTING_DIRTY_WORKTREE``
+    (PRRT_kwDOSJAM6s621aJ-). A non-transient failure stays terminal and unmarked.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    _mark_git_worktree(tmp_path / "worktrees" / workspace_id)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    error_type = ProtectedScopeBaselineUnavailableError if transient else ProtectedScopeDiffError
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=_REPAIR_COMMIT_SHA))
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=error_type("dns")))
+    monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(fix_pass_module, "verify_head_object_exists", AsyncMock(return_value=True))
+    state = MonitorState()
+
+    with pytest.raises(error_type):
+        await pre_push_validation_module._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch=f"awf/{workspace_id}",
+            remote_url=None,
+            state=state,
+            validation_result=_PrePushValidationResult(
+                passed=False,
+                validation_run_id="vr_failed",
+                workspace_head_sha=_REPAIR_COMMIT_SHA,
+                reason_code="PRE_PUSH_VALIDATION_FAILED",
+                message="PR monitor pre-push validation failed: COMMAND_FAILED",
+                validation_reason_code="COMMAND_FAILED",
+                result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+            ),
+            pass_number=1,
+            total_passes=3,
+            validation_commands=("pytest -q",),
+        )
+
+    if transient:
+        assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+            _REPAIR_COMMIT_SHA
+        )
+    else:
+        assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_validated_push_park_persists_stranded_edits_evidence_before_blocking(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marked park records what it left dirty and persists it with the marker.
+
+    The guide resume reloads the row and commits exactly the recorded edits before
+    its pre-existing-dirty guard runs (PRRT_kwDOSJAM6s621aJ-).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    (worktree_path / "src").mkdir(parents=True)
+    (worktree_path / "src" / "fix.py").write_text("fixed\n")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")  # preserved HEAD
+    runner = _runner(factory, tmp_path, cmd)
+    runner._deps.validation = object()  # type: ignore[assignment]
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _REPAIR_COMMIT_SHA)
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_run_pre_push_validation_with_fix_passes",
+        AsyncMock(
+            return_value=_PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=_REPAIR_COMMIT_SHA,
+                reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+                message="protected-scope diff unavailable",
+                extra_details={"transient_baseline_unavailable": True},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        AsyncMock(
+            return_value=_GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                reason_code="PRE_EXISTING_DIRTY_WORKTREE",
+                details={"paths": ["src/fix.py"]},
+            )
+        ),
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+
+    assert result.paused_into_blocked is True
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.blocked.value
+    persisted = workspace.monitor_threads_addressed or {}
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _REPAIR_COMMIT_SHA
+    evidence = json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])
+    assert list(evidence) == ["src/fix.py"]
+    assert evidence["src/fix.py"].startswith("file:")
 
 
 @pytest.mark.unit

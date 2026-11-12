@@ -93,6 +93,10 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _run_pre_push_validation_fix_pass,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+    record_provider_park_stranded_edits_evidence,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
@@ -126,6 +130,7 @@ from awf.runtime.validation_worktree_constants import (
 )
 
 if TYPE_CHECKING:
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
         ValidationWorktreeCleanup,
@@ -350,6 +355,21 @@ async def _validated_git_push_result(
             # A fix-pass or dirty-finalize commit hit a protected-scope baseline
             # outage that outlived its bounded retries (#1221): park with the
             # worktree and unpushed commit kept instead of failing terminally.
+            # The raising sink marked its uncommitted edits as stranded: record
+            # what it left dirty and persist both ahead of the park, so the guide
+            # resume commits exactly those edits before its pre-existing-dirty
+            # guard runs (``provider_park_stranded_edits``).
+            if PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in getattr(
+                state, "threads_addressed_ids", {}
+            ):
+                monitor_state = cast("MonitorState", state)
+                await record_provider_park_stranded_edits_evidence(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    state=monitor_state,
+                )
+                await self._persist_state(workspace_id, monitor_state)
             return cast(
                 _GitPushResult,
                 await self._park_for_protected_scope_baseline_unavailable(
