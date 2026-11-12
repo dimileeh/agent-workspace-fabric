@@ -275,6 +275,7 @@ async def _validated_git_push_result(
     repo: RepoRef | None = None,
     operation_id: str | None = None,
     operation_type: str | None = None,
+    protected_scope_resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
 ) -> _GitPushResult:
     """Run pre-push validation with optional fix passes before pushing.
 
@@ -310,6 +311,11 @@ async def _validated_git_push_result(
     tests that exercise validation alone) omit ``pr_number``/``pr_terminal_context``
     and keep the previous behavior; the no-validation early return below skips the
     recheck because no time elapses between the seam's guard and that push.
+
+    ``protected_scope_resume_phase`` is the resume phase recorded when a fix-pass
+    protected-scope baseline outage parks (#1221). Sync-base callers pass the
+    sync-base phase so the guide resume keeps the base-aware validator instead of
+    re-blocking on protected changes the base merge pulled in (PRRT_kwDOSJAM6s621cKd).
     """
     if self._deps.validation is None:
         return cast(
@@ -376,7 +382,7 @@ async def _validated_git_push_result(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     remote_branch=remote_branch,
-                    resume_phase=MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+                    resume_phase=protected_scope_resume_phase,
                     message=validation_result.message,
                     details=details,
                 ),

@@ -1422,6 +1422,8 @@ async def _run_sync_base(
         repo=repo,
         operation_id=operation_id,
         operation_type=operation_type,
+        # A fix-pass baseline outage parks under the sync-base origin (#1221).
+        protected_scope_resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
     )
     # Fail-closed outcomes (toolchain missing, ownership repair, unowned dirty
     # delta, ...) keep their terminal reason instead of being masked by the park.

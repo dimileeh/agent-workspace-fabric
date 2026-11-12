@@ -844,6 +844,12 @@ async def _run_operator_hint_cycle(
             repo=repo,
             operation_id=_operation_id,
             operation_type=_operation_type,
+            # A fix-pass baseline outage parks under the resume's ORIGIN (#1221).
+            protected_scope_resume_phase=(
+                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+            ),
         )
     )
     if push_result.pr_terminal is not None:

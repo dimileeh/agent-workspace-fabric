@@ -781,6 +781,82 @@ async def test_validated_push_parks_when_validation_carries_transient_marker(
 
 
 @pytest.mark.unit
+async def test_validated_push_park_keeps_caller_sync_base_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync-base validation park must not fall back to the push phase.
+
+    Otherwise the guide resume selects the ordinary protected-scope check, which
+    re-blocks on protected changes the base merge legitimately pulled in.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")  # preserved HEAD
+    runner = _runner(factory, tmp_path, cmd)
+    runner._deps.validation = object()  # type: ignore[assignment]
+
+    async def _validation(*_args: object, **_kwargs: object) -> _PrePushValidationResult:
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=None,
+            workspace_head_sha=_REPAIR_COMMIT_SHA,
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            message="protected-scope diff unavailable",
+            extra_details={"transient_baseline_unavailable": True},
+        )
+
+    monkeypatch.setattr(
+        pre_push_validation_module, "_run_pre_push_validation_with_fix_passes", _validation
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / "worktrees" / workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        protected_scope_resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+    )
+
+    assert result.paused_into_blocked is True
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert workspace.block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+
+
+@pytest.mark.unit
+async def test_sync_base_validated_push_requests_sync_base_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    _queue_sync_base_until_baseline_fetch(cmd)
+    runner = _runner(factory, tmp_path, cmd)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    captured: dict[str, object] = {}
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _pushed(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
+
+    await _run_sync_base(runner, workspace_id, tmp_path)
+
+    assert captured["protected_scope_resume_phase"] == (
+        MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+    )
+
+
+@pytest.mark.unit
 async def test_fix_pass_baseline_unavailable_marks_validation_result_transient(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1043,6 +1119,66 @@ async def test_operator_hint_resume_park_keeps_original_phase_and_clears_hint(
     assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
     # The park bumps the block epoch, superseding this hint (like a re-block).
     assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "block_phase",
+    [MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE, MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE],
+)
+async def test_operator_hint_validated_push_requests_original_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    block_phase: str,
+) -> None:
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_phase",
+        requested_at="2026-11-12T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    captured: dict[str, object] = {}
+
+    async def _none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _block_phase(_workspace_id: str) -> str:
+        return block_phase
+
+    async def _pushed(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(pushed=False, failed=True, returncode=1, stderr="stop")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _none)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _none)
+    monkeypatch.setattr(runner, "_resolve_block_resume_phase", _block_phase)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _none)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
+
+    await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_phase",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_phase",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        base_branch="development",
+    )
+
+    assert captured["protected_scope_resume_phase"] == block_phase
 
 
 @pytest.mark.unit
