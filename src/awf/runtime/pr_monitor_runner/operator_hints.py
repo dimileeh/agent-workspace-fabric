@@ -1050,12 +1050,20 @@ async def _operator_hint_agent_error_result(
         # Nothing was pushed, so the envelope must not say ``git push`` (#1074).
         return _agent_verdict_protocol_failure_result(exc)
     if isinstance(exc, ProtectedScopeDiffError):
+        # Keep a sync-base origin on a re-park so the next resume still selects the
+        # sync-base-aware validator (PRRT_kwDOSJAM6s622NyQ).
+        block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
         push_result = cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+                resume_phase=(
+                    MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                    if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                    else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+                ),
             ),
         )
         if push_result.paused_into_blocked:

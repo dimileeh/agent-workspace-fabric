@@ -52,6 +52,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+from awf.runtime.pr_monitor_runner import operator_hints as operator_hints_module
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass as fix_pass_module
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -670,6 +671,28 @@ async def test_commit_sink_baseline_unavailable_parks_instead_of_failing(
     )
     assert plain.paused_into_blocked is False
     assert plain.terminal_monitor_failure is True
+
+
+@pytest.mark.unit
+async def test_commit_sink_baseline_park_records_caller_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")  # preserved HEAD
+    runner = _runner(factory, tmp_path, cmd)
+
+    parked = await runner._protected_scope_diff_unavailable_push_result(
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        exc=ProtectedScopeBaselineUnavailableError("fetch failed: Could not resolve host"),
+        resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+    )
+
+    assert parked.paused_into_blocked is True
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 
 
 @pytest.mark.unit
@@ -1463,3 +1486,79 @@ async def test_operator_hint_resume_of_baseline_park_keeps_commit_on_rejected_pu
     assert "kept" in (state.pending_operator_hint.status_reason or "")
     # The park stays unsettled, so a follow-up guide keeps suppressing the reset.
     assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("block_phase", "expected_phase"),
+    [
+        (
+            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+        ),
+        (MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE, MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE),
+        (None, MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE),
+    ],
+)
+async def test_operator_hint_stranded_sink_park_keeps_original_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    block_phase: str | None,
+    expected_phase: str,
+) -> None:
+    # A resume whose stranded-edits commit sink still cannot fetch the baseline
+    # re-parks; it must keep a sync-base origin so the next resume selects the
+    # sync-base-aware validator (PRRT_kwDOSJAM6s622NyQ).
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_stranded",
+        requested_at="2026-11-12T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    captured: dict[str, object] = {}
+
+    async def _raise_baseline(*_args: object, **_kwargs: object) -> None:
+        raise ProtectedScopeBaselineUnavailableError("dns")
+
+    async def _not_moot(**_kwargs: object) -> None:
+        return None
+
+    async def _recorded_phase(_workspace_id: str) -> str | None:
+        return block_phase
+
+    async def _parked(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="parked",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            paused_into_blocked=True,
+        )
+
+    monkeypatch.setattr(
+        operator_hints_module, "commit_provider_park_stranded_edits", _raise_baseline
+    )
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _not_moot)
+    monkeypatch.setattr(runner, "_resolve_block_resume_phase", _recorded_phase)
+    monkeypatch.setattr(runner, "_protected_scope_diff_unavailable_push_result", _parked)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_stranded_park",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_stranded_park",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        base_branch="development",
+    )
+
+    assert result.paused_into_blocked is True
+    assert captured["resume_phase"] == expected_phase
+    assert state.pending_operator_hint is None
