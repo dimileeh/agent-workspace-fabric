@@ -942,6 +942,11 @@ async def _run_ci_fix(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+                # Re-arm the #910 recheck: the stranded-edits evidence and
+                # persist above run after the terminal-PR guard
+                # (PRRT_kwDOSJAM6s622tsK).
+                pr_number=pr_number,
+                repo=repo,
             ),
         )
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:

@@ -52,6 +52,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+from awf.runtime.pr_monitor_runner import ci_ops as ci_ops_module
 from awf.runtime.pr_monitor_runner import operator_hints as operator_hints_module
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass as fix_pass_module
@@ -1239,6 +1240,76 @@ async def test_ci_repair_sink_baseline_outage_records_stranded_edits_before_park
     evidence = json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])
     assert list(evidence) == ["src/fix.py"]
     assert evidence["src/fix.py"].startswith("file:")
+
+
+@pytest.mark.unit
+async def test_ci_repair_sink_baseline_park_rechecks_terminal_pr_after_stranded_edits_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s622tsK: a PR merged during the pre-park evidence work is not parked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    monkeypatch.setattr(
+        runner, "_pre_existing_dirty_repair_worktree_result", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        AsyncMock(return_value=("abc1234567890def", None)),
+    )
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=_REPAIR_COMMIT_SHA))
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProtectedScopeBaselineUnavailableError("dns")),
+    )
+    evidence_recorded = False
+
+    async def _record_evidence(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal evidence_recorded
+        evidence_recorded = True
+
+    monkeypatch.setattr(
+        ci_ops_module, "record_provider_park_stranded_edits_evidence", _record_evidence
+    )
+    moot = _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _terminal_check(**_kwargs: Any) -> _GitPushResult | None:
+        # The PR merges while the stranded-edits evidence is being recorded.
+        return moot if evidence_recorded else None
+
+    terminal_check = AsyncMock(side_effect=_terminal_check)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", terminal_check)
+    repo = RepoRef(owner="dimileeh", name="aira-web")
+
+    result = await runner._run_ci_fix(
+        repo=repo,
+        pr_number=42,
+        failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+        status=_status(),
+        state=MonitorState(),
+    )
+
+    assert result is moot
+    assert evidence_recorded
+    assert terminal_check.await_args_list[-1].kwargs["pr_number"] == 42
+    assert terminal_check.await_args_list[-1].kwargs["repo"] == repo
+    workspace = await _workspace(factory, workspace_id)
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert not await _events(
+        factory, workspace_id, "workspace.monitor_protected_scope_diff_unavailable_parked"
+    )
 
 
 @pytest.mark.unit
