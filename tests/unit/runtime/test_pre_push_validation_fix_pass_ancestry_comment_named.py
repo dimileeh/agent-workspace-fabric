@@ -563,6 +563,37 @@ async def test_added_lines_outside_the_right_side_definition_are_not_evidence() 
         assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a type")
 
 
+@pytest.mark.parametrize(
+    ("left_text", "right_text", "diff"),
+    [
+        pytest.param(
+            "def _TASK_INBOUND_TYPES():\n    return ()\n\n\ndef other():\n    return 0\n",
+            "def _TASK_INBOUND_TYPES():\n    return ()\n# note\n\n\ndef other():\n    return 0\n",
+            _diff(_INBOUND, "@@ -2,0 +3 @@", "+# note"),
+            id="comment-after-def",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\nVALUE = 1\n',
+            '_TASK_INBOUND_TYPES = ("a",)\n\n    # note\nVALUE = 1\n',
+            _diff(_INBOUND, "@@ -1,0 +2,2 @@", "+", "+    # note"),
+            id="gap-after-assignment",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_gap_inserts_trailing_a_right_side_definition_are_not_evidence(
+    left_text: str, right_text: str, diff: str
+) -> None:
+    """Trailing blank/comment gaps are not the definition (PRRT_kwDOSJAM6s63LtTS)."""
+    runner = _Probe(
+        texts={(_LEFT, _INBOUND): left_text, (_RIGHT, _INBOUND): right_text},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a type")
+
+
 @pytest.mark.unit
 async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     moved = "src/app/messaging/inbound_kinds.py"

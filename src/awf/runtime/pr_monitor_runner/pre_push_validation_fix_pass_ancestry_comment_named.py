@@ -206,6 +206,25 @@ def _module_level_assignment_spans(
     ]
 
 
+def _without_trailing_gaps(
+    file_text: str | None, spans: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """``spans`` ending at their last non-blank, non-comment line of ``file_text``.
+
+    Definition spans keep the blank/comment gap before the next statement, but a
+    new-side hunk there adds no definition line, so it is dropped before the
+    overlap check — as the old-side rule rejects those inserts
+    (PRRT_kwDOSJAM6s63LtTS).
+    """
+    lines = (file_text or "").splitlines()
+    trimmed: list[tuple[int, int]] = []
+    for start, end in spans:
+        while end > start and _is_ignorable_span_gap_line(lines[end - 1]):
+            end -= 1
+        trimmed.append((start, end))
+    return trimmed
+
+
 def _diff_new_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:
     """True when a new-side hunk of ``diff_text`` overlaps the inclusive ``[start, end]``.
 
@@ -333,7 +352,9 @@ async def _commit_range_changes_comment_named_target(
                 self, worktree_path=worktree_path, ref=right, path=candidate
             )
         )
-        right_spans = _named_definition_spans(right_text, names, path=candidate)
+        right_spans = _without_trailing_gaps(
+            right_text, _named_definition_spans(right_text, names, path=candidate)
+        )
         if not (spans or right_spans):
             continue
         source = renamed_from.get(candidate)
