@@ -14,7 +14,12 @@ from awf.hosted_node.host_database import no_work_history, validate_database
 from awf.hosted_node.host_docker import DockerObservation
 from awf.hosted_node.host_linux import LinuxObservation, LinuxSnapshot
 from awf.hosted_node.lifecycle import fresh
-from awf.hosted_node.lifecycle_schemas import HostBootObservation, HostObservation, RecoveryEvidence
+from awf.hosted_node.lifecycle_schemas import (
+    HostBootObservation,
+    HostObservation,
+    QuiescenceBlockerName,
+    RecoveryEvidence,
+)
 from awf.hosted_node.lifecycle_store import database_quiescent, locked
 from awf.hosted_node.schemas import Identity
 
@@ -147,12 +152,15 @@ class HostRuntime:
             if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            return replace(
-                after,
-                execution_quiescent=(
-                    before.execution_quiescent and after.execution_quiescent and docker_idle
+            blockers: tuple[QuiescenceBlockerName, ...] = (
+                *(() if docker_idle else ("DOCKER_UNEXPECTED_CONTAINER",)),
+                *(
+                    ()
+                    if before.execution_quiescent and after.execution_quiescent
+                    else ("CGROUP_POPULATED",)
                 ),
             )
+            return replace(after, execution_quiescent=not blockers, blockers=blockers)
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:
@@ -170,6 +178,7 @@ class HostRuntime:
                         datetime.now(UTC) + timedelta(seconds=30),
                         sample.execution_quiescent,
                         True,
+                        sample.blockers,
                     )
         except Exception as exc:
             _log_denial("observe", exc)

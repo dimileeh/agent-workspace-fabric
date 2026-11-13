@@ -375,3 +375,17 @@ def test_provider_foundation_contract_rejections_have_rollout_guidance():
         assert reason is not None
         assert "compatible" in reason.action.lower()
         assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "code",
+    ["HOSTED_RUNTIME_STOPPED", "TERMINAL_OWNED_ROW_REAPED", "TERMINAL_OWNED_ROW_REAP_FAILED"],
+)
+def test_hosted_quiescence_reasons_are_cataloged(code: str) -> None:
+    text = _REASON_TEXT[code]
+    catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
+
+    assert text.message and text.action and text.likely_cause
+    assert text.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+    assert f"### {code}\n" in catalog

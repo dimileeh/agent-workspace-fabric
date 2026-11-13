@@ -248,3 +248,15 @@ async def test_hosted_stop_without_activity_writes_no_settlement_event(authority
                 WorkspaceEvent.event_type == "workspace.hosted_stop_activity_settled"
             )
         )
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_terminal_owned_row_reaper_runs_only_in_hosted_workers(authority, tmp_path, hosted):
+    runtime, _, factory = authority
+    settings = await settings_for(factory, tmp_path)
+    scope = WorkspaceConsumers(runtime, Path(settings.work_dir)) if hosted else None
+    built = worker.build_worker_runtime(settings, hosted=scope)
+    try:
+        assert built.worker._config.terminal_owned_row_reaper_enabled is hosted
+    finally:
+        await built.engine.dispose()

@@ -17,10 +17,11 @@ from awf.hosted_node.lifecycle_schemas import (
     HostBootObservation,
     HostObservation,
     LifecycleStatus,
+    QuiescenceBlocker,
     RecoveryAcknowledgement,
     RecoveryEvidence,
 )
-from awf.hosted_node.lifecycle_store import database_quiescent, locked
+from awf.hosted_node.lifecycle_store import database_quiescent, locked, quiescence_blockers
 from awf.hosted_node.restore_quarantine import accept_restore
 from awf.hosted_node.restore_reconciliation_schemas import VerifyRestoreReconciliation
 from awf.hosted_node.restore_schemas import RestoreEvidence
@@ -106,9 +107,16 @@ class NodeLifecycle:
             )
 
     def status(
-        self, row: NodeLifecycleRow, db_idle: bool, host: HostObservation | None
+        self,
+        row: NodeLifecycleRow,
+        db_blockers: list[QuiescenceBlocker],
+        host: HostObservation | None,
     ) -> LifecycleStatus:
         valid = host is not None and host.identity == self.identity and fresh(host.expires_at)
+        db_idle = not db_blockers
+        blockers = list(db_blockers)
+        if valid and host:
+            blockers += [QuiescenceBlocker(name=name, count=1) for name in host.blockers]
         healthy = bool(valid and host and host.retained_state_verified)
         idle = bool(
             healthy
@@ -134,6 +142,7 @@ class NodeLifecycle:
             maintenance_released_through=row.maintenance_released_through,
             recovery_acceptance=row.recovery_acceptance,
             expires_at=host.expires_at if valid and host else None,
+            blockers=blockers,
         )
 
     async def readiness(self) -> LifecycleStatus:
@@ -141,7 +150,7 @@ class NodeLifecycle:
         runtime = await _bounded(self.observe_runtime(self.identity))
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
-            status = self.status(row, await database_quiescent(session), host)
+            status = self.status(row, await quiescence_blockers(session), host)
             return status.model_copy(
                 update={
                     "runtime_ready": runtime is True
@@ -330,14 +339,14 @@ class NodeLifecycle:
                 raise MaterialDeniedError("RECOVERY_REQUIRED")
             if row.restore_quarantine is not None:
                 raise MaterialDeniedError("RESTORE_QUARANTINED")
-            idle = await database_quiescent(session)
-            if not idle:
-                return self.status(row, False, None)
+            db_blockers = await quiescence_blockers(session)
+            if db_blockers:
+                return self.status(row, db_blockers, None)
             row.phase, row.drain_generation = "draining", generation
         host = await _bounded(self.observe_host(self.identity))
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
-            result = self.status(row, await database_quiescent(session), host)
+            result = self.status(row, await quiescence_blockers(session), host)
             if row.drain_generation == generation and row.phase == "draining" and result.quiescent:
                 row.phase = "drained"
                 result = result.model_copy(update={"state": "drained"})
@@ -350,4 +359,4 @@ class NodeLifecycle:
             if row.drain_generation is None or generation >= row.drain_generation:
                 row.drain_generation, row.idle_since = None, None
                 row.phase = "ready" if row.recovery_key else "recovering"
-            return self.status(row, await database_quiescent(session), None)
+            return self.status(row, await quiescence_blockers(session), None)

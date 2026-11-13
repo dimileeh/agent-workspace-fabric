@@ -613,6 +613,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_sync_failed](#hosted_remote_head_sync_failed)
 
+### HOSTED_RUNTIME_STOPPED
+**Problem:** The hosted node stopped this workspace because its consumer authority (credential binding or grant) was revoked or expired.
+**Likely Cause:** Credential material renewal was denied while the workspace was executing or monitoring its PR, so the hosted runtime tore down its stack.
+**Operator Fix:** Renew or re-bind the workspace credentials from the controller and create a new workspace; unfinished monitor operations and validations were settled as failed, never as succeeded.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_runtime_stopped](#hosted_runtime_stopped)
+
 ### HOST_PORT_CONFLICT
 **Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
 **Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists). For auto-resolved profiles, the conflict may also be detected at provision time by the provisioner's host-port re-check (``_check_auto_resolved_profile_host_ports``) rather than at dispatch, surfacing as an ``INFRASTRUCTURE_FAILURE`` instead of a 409.
@@ -1564,6 +1571,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the listed workspaces before running cleanup or recovery.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#stranded_workspaces_present](#stranded_workspaces_present)
+
+### TERMINAL_OWNED_ROW_REAPED
+**Problem:** A row still open for a workspace that finished on this node at least ten minutes ago was closed so the idle node can park.
+**Likely Cause:** A terminal transition left an expired claim, operation, validation, secret lease, reservation, task attempt or overdue callback behind.
+**Operator Fix:** No action is required. The workspace event lists the row kind, action and ids; inspect them if the leftover row points at a lifecycle bug.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#terminal_owned_row_reaped](#terminal_owned_row_reaped)
+
+### TERMINAL_OWNED_ROW_REAP_FAILED
+**Problem:** The hosted worker's terminal-owned-row reaper failed unexpectedly.
+**Likely Cause:** An unexpected database or programming error occurred during the sweep.
+**Operator Fix:** Inspect the worker logs for the failure; the reaper retries on its next interval and leaves the node non-quiescent until the rows are closed.
+**Related Command:** `awf service logs --follow --service worker`
+**Docs Link:** [docs/REASON_CATALOG.md#terminal_owned_row_reap_failed](#terminal_owned_row_reap_failed)
 
 ### THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED
 **Problem:** Third-party Codex/Claude admission is disabled by default.

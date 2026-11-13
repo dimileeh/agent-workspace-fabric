@@ -923,6 +923,8 @@ def build_worker_runtime(
             workspace_steady_memory_gb=settings.workspace_steady_memory_gb,
             workspace_peak_cpu=settings.workspace_peak_cpu,
             workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
+            # Runs inside the hosted lifespan's worker loop; never on local nodes.
+            terminal_owned_row_reaper_enabled=hosted is not None,
         ),
     )
     if hosted is not None:

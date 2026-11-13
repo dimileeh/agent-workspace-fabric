@@ -183,6 +183,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
+        self._next_terminal_owned_row_reap_at = 0.0
         self._next_terminal_runtime_release_scan_at = 0.0
         self._next_orphan_reconcile_scan_at = 0.0
         self._next_classified_orphan_reap_scan_at = 0.0
@@ -250,6 +251,7 @@ class ControlWorker(WorkerDelegatesMixin):
 
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
+        await self._maybe_reap_terminal_owned_rows()
         await self._maybe_reconcile_orphan_dirs()
         await self._maybe_reap_classified_orphans()
         await self._maybe_reap_superseded_claude_bases()
