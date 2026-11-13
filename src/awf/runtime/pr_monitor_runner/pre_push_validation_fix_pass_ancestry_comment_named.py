@@ -183,12 +183,18 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
     """Whether the JS/TS ``raw`` line (masked as ``scan``) can end its statement.
 
     A line whose code is followed by a masked literal ends on that operand; one
-    followed only by a comment ends on its last code token.
+    followed only by a comment ends on its last code token. A trailing ``!``
+    right after a masked string, template or regex literal is a TS non-null
+    assertion on that operand, not a unary ``!`` (PRRT_kwDOSJAM6s63S15a).
     """
     code = scan.rstrip()
     tail = raw[len(code) :].lstrip()
     if tail and not tail.startswith(("//", "/*")):
         return True
+    if code.endswith("!"):
+        operand = raw[: len(code.rstrip("!"))].rstrip()
+        if operand and scan[len(operand) - 1] != operand[-1] and not operand.endswith("*/"):
+            return True
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
 
 

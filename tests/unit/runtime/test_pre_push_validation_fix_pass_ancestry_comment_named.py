@@ -993,6 +993,24 @@ async def test_js_ts_label_binds_nothing(
             False,
             id="spaced-non-null-assertion-after-asi",
         ),
+        pytest.param(
+            'export const LIMIT = "a"!\nrun1();\n', 2, False, id="string-non-null-assertion"
+        ),
+        pytest.param(
+            "export const LIMIT = `a${b}` !\nrun1();\n",
+            2,
+            False,
+            id="template-non-null-assertion",
+        ),
+        pytest.param(
+            "export const LIMIT = /a/g!\nrun1();\n", 2, False, id="regex-non-null-assertion"
+        ),
+        pytest.param(
+            "export const LIMIT = /* why */ !\n    Boolean(10);\n",
+            2,
+            True,
+            id="comment-then-unary-negation-continuation",
+        ),
         pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
         pytest.param(
             "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",
