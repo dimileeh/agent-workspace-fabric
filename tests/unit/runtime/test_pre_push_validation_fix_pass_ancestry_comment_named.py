@@ -730,6 +730,36 @@ async def test_js_ts_binding_ends_at_its_statement_boundary(
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_WEB, "  export const LIMIT = 1;\n", 1, True, id="js-ts-indented-module"),
+        pytest.param(
+            _WEB, "const a = 0;\n    LIMIT = 1;\n", 2, True, id="js-ts-indented-reassignment"
+        ),
+        pytest.param(
+            _WEB,
+            "export function f() {\n  const LIMIT = 1;\n}\n",
+            2,
+            False,
+            id="js-ts-function-body",
+        ),
+        pytest.param(_WEB, "if (on) {\n  LIMIT = 1;\n}\n", 2, False, id="js-ts-block-body"),
+        pytest.param(_INBOUND, "if on:\n    LIMIT = 1\n", 2, False, id="python-indented"),
+    ],
+)
+@pytest.mark.unit
+async def test_indented_binding_counts_only_at_js_ts_module_scope(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """Leading whitespace is valid at JS/TS module scope (PRRT_kwDOSJAM6s63P5Zi)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff", "expected"),
     [
         pytest.param(
