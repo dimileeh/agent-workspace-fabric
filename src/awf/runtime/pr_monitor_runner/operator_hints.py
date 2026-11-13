@@ -153,6 +153,8 @@ async def _run_operator_hint_cycle(
             workspace_id=workspace_id,
             remote_branch=remote_branch,
             state=state,
+            pr_number=pr_number,
+            repo=repo,
         )
     if stranded_result is not None:
         if stranded_result.reason_code == _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON:
@@ -415,6 +417,8 @@ async def _run_operator_hint_cycle(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 state=state,
+                pr_number=pr_number,
+                repo=repo,
             )
         # The directive agent is told to reset a preserved protected commit away,
         # so it can orphan item records the pre-agent pass above still saw as
@@ -1025,6 +1029,8 @@ async def _operator_hint_agent_error_result(
     workspace_id: str,
     remote_branch: str,
     state: MonitorState,
+    pr_number: int,
+    repo: RepoRef,
 ) -> _GitPushResult:
     """Build the terminal push result for a CLI error raised by an operator-hint resume.
 
@@ -1047,6 +1053,11 @@ async def _operator_hint_agent_error_result(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+                # Re-arm the #910 recheck: the resume-phase read and diff probe
+                # above run after the caller's terminal-PR guard
+                # (PRRT_kwDOSJAM6s63MpIE).
+                pr_number=pr_number,
+                repo=repo,
                 resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
             ),
         )

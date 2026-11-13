@@ -217,7 +217,10 @@ async def test_operator_hint_commit_sink_park_clears_hint_instead_of_needs_human
     async def _raise_baseline(**_kwargs: object) -> None:
         raise ProtectedScopeBaselineUnavailableError("dns")
 
-    async def _parked(**_kwargs: object) -> _GitPushResult:
+    captured: dict[str, object] = {}
+
+    async def _parked(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -246,6 +249,9 @@ async def test_operator_hint_commit_sink_park_clears_hint_instead_of_needs_human
 
     assert result.paused_into_blocked is True
     assert state.pending_operator_hint is None
+    # The park re-arms the #910 terminal-PR recheck (PRRT_kwDOSJAM6s63MpIE).
+    assert captured["pr_number"] == 42
+    assert captured["repo"] == RepoRef(owner="dimileeh", name="aira-web")
 
 
 async def _mark_baseline_parked(
@@ -429,3 +435,5 @@ async def test_operator_hint_stranded_sink_park_keeps_original_resume_phase(
     assert result.paused_into_blocked is True
     assert captured["resume_phase"] == expected_phase
     assert state.pending_operator_hint is None
+    assert captured["pr_number"] == 42
+    assert captured["repo"] == RepoRef(owner="dimileeh", name="aira-web")
