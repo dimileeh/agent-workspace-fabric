@@ -215,8 +215,8 @@ async def _reap_workspace(session: Any, ws: Workspace, *, now: datetime, budget:
             ("monitor", ws.monitor_claimed_by, ws.monitor_claim_expires_at),
         )
         if holder is not None and expiry is not None and expiry < now
-    ]
-    if claims and len(claims) <= budget:
+    ][: max(budget, 0)]
+    if claims:
         values: dict[str, Any] = {"updated_at": Workspace.updated_at}
         if "execution" in claims:
             # Fence any stale execution holder exactly as a hosted stop does.

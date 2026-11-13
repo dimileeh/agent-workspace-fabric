@@ -364,6 +364,38 @@ async def test_only_the_stale_claim_is_released_and_only_execution_is_fenced(fac
         assert event == {"kind": "claim", "action": "released", "ids": [claim]}
 
 
+async def test_both_stale_claims_are_released_across_runs_with_a_budget_of_one(factory):
+    await seed(factory, rows=False)
+    async with factory.begin() as session:
+        expired = datetime.now(UTC) - timedelta(minutes=1)
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == "ws_reap")
+            .values(
+                execution_claimed_by="dead-worker",
+                execution_claim_expires_at=expired,
+                monitor_claimed_by="dead-monitor",
+                monitor_claim_expires_at=expired,
+                updated_at=Workspace.updated_at,
+            )
+        )
+
+    async def claims():
+        async with factory() as session:
+            ws = await session.get(Workspace, "ws_reap")
+            return ws.execution_claimed_by, ws.monitor_claimed_by, ws.execution_claim_epoch
+
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=1)
+    assert await claims() == (None, "dead-monitor", 4)
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=1)
+    assert await claims() == (None, None, 4)
+    async with factory() as session:
+        events = await session.scalars(
+            select(WorkspaceEvent.payload).where(WorkspaceEvent.event_type == REAPED_EVENT)
+        )
+        assert sorted(event["ids"] for event in events) == [["execution"], ["monitor"]]
+
+
 async def test_each_run_acts_on_at_most_its_row_budget(factory):
     for index in range(3):
         await seed(factory, f"ws_bound_{index}", rows=False)
