@@ -223,9 +223,9 @@ def _without_trailing_gaps(
     """``spans`` ending at their last non-blank, non-comment line of ``file_text``.
 
     Definition spans keep the blank/comment gap before the next statement, but a
-    new-side hunk there adds no definition line, so it is dropped before the
-    overlap check — as the old-side rule rejects those inserts
-    (PRRT_kwDOSJAM6s63LtTS).
+    hunk there changes no definition line, so it is dropped before the overlap
+    check on either side (PRRT_kwDOSJAM6s63LtTS, PRRT_kwDOSJAM6s63L_5C). An
+    insert in the gap that does extend a body shows up in the right-side span.
     """
     lines = (file_text or "").splitlines()
     trimmed: list[tuple[int, int]] = []
@@ -354,7 +354,9 @@ async def _commit_range_changes_comment_named_target(
         file_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
-        spans = _named_definition_spans(file_text, names, path=candidate)
+        spans = _without_trailing_gaps(
+            file_text, _named_definition_spans(file_text, names, path=candidate)
+        )
         # A rename source's right-side text is read under its target, itself a candidate.
         right_text = (
             None
