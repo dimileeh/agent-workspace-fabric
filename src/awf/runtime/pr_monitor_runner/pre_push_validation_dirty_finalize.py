@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from awf.common.logging import get_logger
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
 )
@@ -436,12 +437,15 @@ async def _committed_delta_paths(
     ``PRRT_kwDOSJAM6s6Ka0aO``).
 
     Returns ``None`` when the committed delta cannot be resolved so the caller
-    can keep the fail-closed dirty path instead of trusting the commit.
+    can keep the fail-closed dirty path instead of trusting the commit. Like the
+    provider-park resume's re-parent reset this gate guards, the diff ignores
+    process object-lookup overrides (PRRT_kwDOSJAM6s63O2c-).
     """
     committed_result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
-        )
+        ),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not committed_result.ok:
         _log.warning(

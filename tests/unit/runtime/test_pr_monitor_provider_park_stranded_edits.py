@@ -617,7 +617,12 @@ async def test_a_settled_resume_drops_the_delta_anchor(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(tmp_path: Path) -> None:
+async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Like the re-parent reset it gates, the delta diff ignores process
+    # object-lookup overrides (PRRT_kwDOSJAM6s63O2c-).
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/elsewhere/objects")
     state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
     cmd = FakeCommandRunner()
     cmd.queue_result(stdout="M\0stranded_fix.py\0")
@@ -627,6 +632,9 @@ async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(tmp_path
 
     assert runner.sink_calls == []
     assert len(cmd.calls) == 1
+    delta_env = cmd.calls[0].env
+    assert delta_env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in delta_env
     assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
 
 
