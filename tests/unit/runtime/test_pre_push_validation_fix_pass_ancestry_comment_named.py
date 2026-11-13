@@ -819,6 +819,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             False,
             id="semicolon-free-multiline-template-ends-declaration",
         ),
+        pytest.param(
+            "const LIMIT = `a\n// cleanup`\nconst OTHER = 1;\n",
+            2,
+            "// teardown`",
+            "LIMIT",
+            True,
+            id="semicolon-free-multiline-template-closing-comment-marker",
+        ),
+        pytest.param(
+            "const LIMIT =\n`a\n// cleanup`\nconst OTHER = 1;\n",
+            3,
+            "// teardown`",
+            "LIMIT",
+            True,
+            id="wrapped-semicolon-free-multiline-template-closing-comment-marker",
+        ),
     ],
 )
 @pytest.mark.unit

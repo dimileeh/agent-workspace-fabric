@@ -387,7 +387,13 @@ def _assignment_span_end_line(
             and not scan.strip()
             and (raw.lstrip().startswith("/*") if starts_in_code[index - start + 1] else in_comment)
         )
-        gap = in_comment or _is_ignorable_span_gap_line(raw)
+        # A literal's line spelling ``// ...`` is its contents, not a comment
+        # gap (PRRT_kwDOSJAM6s63UG07).
+        gap = (
+            in_comment
+            or not raw.strip()
+            or (starts_in_code[index - start + 1] and _is_ignorable_span_gap_line(raw))
+        )
         if (
             index >= start
             and depth == 0
