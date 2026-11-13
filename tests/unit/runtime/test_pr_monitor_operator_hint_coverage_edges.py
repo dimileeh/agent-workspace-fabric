@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _is_manual_ready_handoff,
@@ -116,6 +117,7 @@ def _ready_status(
         blocking_reviews=blocking_reviews,
         base_behind_count=0,
         merge_state_status=merge_state_status,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

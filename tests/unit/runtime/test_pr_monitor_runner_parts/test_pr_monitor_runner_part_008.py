@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
 )
@@ -75,6 +76,13 @@ class _CapturingGH:
         self.posted_comments: list[tuple[RepoRef, int, str]] = []
         self.post_errors: list[GitHubClientError] = []
         self.closed = False
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Report every GitHub Actions run for the head completed (#1230)."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def fetch_pr_status(
         self,

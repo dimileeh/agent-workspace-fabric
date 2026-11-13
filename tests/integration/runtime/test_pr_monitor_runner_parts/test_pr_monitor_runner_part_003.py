@@ -411,6 +411,7 @@ class TestMaxOuterIterationsSafetyNet:
                 # PENDING status so decide() returns WaitForCI forever.
                 stdout=_pr_payload(check_state="PENDING"),
             )
+            cmd.queue_result(returncode=0, stdout="[]")  # gh run list (#1230)
 
         runner = PullRequestMonitorRunner(
             session_factory=factory,

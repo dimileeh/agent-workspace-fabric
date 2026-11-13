@@ -24,6 +24,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _ProtectedScopePushBlock,
 )
@@ -69,6 +70,13 @@ class _ScriptedGh:
         self.posts: list[dict[str, object]] = []
         self.fetches: list[dict[str, object]] = []
         self.resolves: list[str] = []
+
+    async def fetch_actions_runs_state(
+        self, *, repo: object, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Report every GitHub Actions run for the head completed (#1230)."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def fetch_pr_status(
         self,
