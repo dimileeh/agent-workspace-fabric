@@ -26,6 +26,9 @@ from awf.runtime.ownership import (
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership as repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_baseline_park import (
+    keep_repair_for_baseline_park,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_compose_cleanup import (
     sink_and_raise_compose_cleanup_error as sink_and_raise_compose_cleanup_error,
 )
@@ -1007,7 +1010,18 @@ async def _run_item_verdict_protocol(
                 # nested protected-scope repair, supply-chain policy blocks the commit
                 # before ``git commit``, or the protected-scope diff cannot be verified.
                 # Roll back before propagating so unaccepted residue does not wedge
-                # remonitor or get pushed later.
+                # remonitor or get pushed later — except a transient baseline
+                # outage, whose park keeps the repair for the resume
+                # (PRRT_kwDOSJAM6s63N-C1).
+                if await keep_repair_for_baseline_park(
+                    runner,
+                    exc=exc,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    state=state,
+                    rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+                ):
+                    raise
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
