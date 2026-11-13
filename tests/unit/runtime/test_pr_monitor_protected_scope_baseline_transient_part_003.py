@@ -370,10 +370,14 @@ async def _run_pushed_baseline_park_resume(
     monkeypatch: pytest.MonkeyPatch,
     *,
     kept_commit_on_remote_after_push: bool,
+    park_head_resolves: bool = True,
 ) -> tuple[object, MonitorState, list[str | None], _GitPushResult]:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")
+    if park_head_resolves:
+        cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")
+    else:
+        cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
     await _park(factory, tmp_path, workspace_id, cmd)
     runner = _runner(factory, tmp_path, FakeCommandRunner())
     hint = OperatorHint(
@@ -472,3 +476,31 @@ async def test_baseline_park_resume_push_finalizes_when_kept_commit_landed(
     assert result.pushed is True
     assert state.pending_operator_hint is None
     assert pending is False
+
+
+@pytest.mark.unit
+async def test_baseline_park_resume_push_refuses_without_a_recorded_kept_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pushed NEW commit cannot finalize a park whose HEAD was never recorded.
+
+    With no kept SHA there is nothing to prove on the remote, so the successful push
+    of the repair agent's commit must not clear the park (PRRT_kwDOSJAM6s63QAPz).
+    """
+    pending, state, containment_checks, result = await _run_pushed_baseline_park_resume(
+        factory,
+        tmp_path,
+        monkeypatch,
+        kept_commit_on_remote_after_push=True,
+        park_head_resolves=False,
+    )
+
+    assert containment_checks == [None]
+    assert result.pushed is True
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "no preserved HEAD" in (state.pending_operator_hint.status_reason or "")
+    # Not finalized: the park stays unsettled for the operator.
+    assert pending is True
