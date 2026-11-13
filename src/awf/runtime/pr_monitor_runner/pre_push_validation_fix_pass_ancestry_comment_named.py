@@ -423,9 +423,19 @@ def _module_level_assignment_spans(
             base = lead + begin + len(text) - len(segment)
             stop = begin + len(text)
             begin = stop + 1
+            declares = js_ts and _JS_TS_DECLARATION_RE.match(segment) is not None
             first = _MODULE_LEVEL_ASSIGNMENT_RE.match(segment)
+            # A JS/TS ``name: ... =`` outside a declaration is a labelled
+            # statement, which binds no ``name`` (PRRT_kwDOSJAM6s63SzHq).
+            if (
+                js_ts
+                and not declares
+                and first is not None
+                and ":" in segment[first.end(1) : first.end()]
+            ):
+                first = None
             heads = [first] if first is not None else []
-            if js_ts and _JS_TS_DECLARATION_RE.match(segment):
+            if declares:
                 heads += _js_ts_secondary_declarators(segment)
             for position, head in enumerate(heads):
                 start_index = _statement_line_index(statement, base + head.start(1))

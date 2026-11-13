@@ -850,6 +850,35 @@ async def test_semicolon_separated_statements_each_bind(
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(
+            _WEB,
+            "export const LIMIT = 10;\nlet unrelated;\nLIMIT: unrelated = (\n  1\n);\n",
+            4,
+            False,
+            id="js-ts-label",
+        ),
+        pytest.param(_WEB, "export const LIMIT: number = (\n  1\n);\n", 2, True, id="js-ts-typed"),
+        pytest.param(_INBOUND, "LIMIT: int = (\n    1\n)\n", 2, True, id="python-annotated"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_label_binds_nothing(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A JS/TS ``LIMIT: target = ...`` labels a statement and binds no ``LIMIT``.
+
+    (PRRT_kwDOSJAM6s63SzHq)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "expected"),
     [
         pytest.param(
