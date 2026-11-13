@@ -26,6 +26,7 @@ from awf.runtime.ownership import (
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership as repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_attempt_tip import probe_post_attempt_tip
 from awf.runtime.pr_monitor_runner.comment_verdict_baseline_park import (
     keep_repair_for_baseline_park,
 )
@@ -1375,42 +1376,19 @@ async def _run_item_verdict_protocol(
             # catches only CancelledError). Prefer trusted item-start configs +
             # timeout so include.path → FIFO cannot hang (PRRT_kwDOSJAM6s6e4egQ);
             # same helper as pre-sink and correction-end post-agent probes.
-            if worktree_path.exists():
-                try:
-                    tip_after_attempt = await read_protocol_attempt_start_head(
-                        runner,
-                        worktree_path=worktree_path,
-                        rev_parse_head=(rev_parse_head if callable(rev_parse_head) else None),
-                    )
-                except Exception as tip_exc:
-                    rollback_ok = await _rollback_or_classify_failure(
-                        runner,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                        item_start_head=rollback_floor_head,
-                        item_start_last_push_sha=item_start_last_push_sha,
-                        state=state,
-                    )
-                    if not rollback_ok:
-                        _log.warning(
-                            "monitor.agent_verdict_post_attempt_tip_rollback_failed",
-                            workspace_id=workspace_id,
-                            item_start_head=item_start_head,
-                            protocol_attempt=protocol_attempt,
-                            exc_type=type(tip_exc).__name__,
-                        )
-                        raise AgentVerdictProtocolError(
-                            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                            message=(
-                                "Could not roll back unaccepted edits after "
-                                "post-attempt tip probe failure."
-                            ),
-                        ) from tip_exc
-                    reraise_or_park_item(
-                        tip_exc, "post_attempt_tip_probe", rollback_floor_head, worktree_path
-                    )
-                if tip_after_attempt:
-                    verified_attempt_tip = tip_after_attempt
+            tip_after_attempt = await probe_post_attempt_tip(
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                rollback_floor_head=rollback_floor_head,
+                item_start_head=item_start_head,
+                item_start_last_push_sha=item_start_last_push_sha,
+                state=state,
+                protocol_attempt=protocol_attempt,
+                rev_parse_head=rev_parse_head,
+            )
+            if tip_after_attempt:
+                verified_attempt_tip = tip_after_attempt
             _log.warning(
                 "monitor.agent_verdict_protocol_retry",
                 workspace_id=workspace_id,
