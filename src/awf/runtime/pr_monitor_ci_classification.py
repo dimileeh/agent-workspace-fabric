@@ -4,12 +4,15 @@ Extracted from :mod:`awf.runtime.pr_monitor` so that module stays within the
 first-party file-line guardrail
 (``tests/unit/test_core_decomposition_maintainability.py``). Behavior is
 unchanged: these are pure predicates over :class:`CheckFailure` / :class:`PRStatus`
-wire shapes with no dependency on ``MonitorState`` or ``MonitorConfig``, and the
-symbols are re-exported from ``pr_monitor`` for existing import sites.
+wire shapes (plus the pure CI retry-budget state-key builders) with no dependency
+on ``MonitorState`` or ``MonitorConfig``, and the symbols are re-exported from
+``pr_monitor`` for existing import sites.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
@@ -180,3 +183,55 @@ def _non_candidate_carries_fixable_code_evidence(status: PRStatus) -> bool:
         if _log_shows_code_failure(failure.log_excerpt.lower()):
             return True
     return False
+
+
+_CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
+_CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX = "__awf_ci_infra_wait:"
+
+
+def _ci_transient_rerun_state_key(
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> str:
+    """Stable retry-budget key for one PR head/failing-run signature.
+
+    The key deliberately excludes free-form log text. A rerun can produce
+    slightly different infrastructure wording while still representing the
+    same failing workflow run on the same PR head.
+    """
+
+    signature = json.dumps(
+        sorted(_ci_failure_identity(failure) for failure in failures),
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    return f"{_CI_TRANSIENT_RERUN_KEY_PREFIX}{head_sha}:{digest}"
+
+
+def _ci_transient_infra_wait_state_key(
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> str:
+    rerun_key = _ci_transient_rerun_state_key(head_sha, failures)
+    return rerun_key.replace(
+        _CI_TRANSIENT_RERUN_KEY_PREFIX,
+        _CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX,
+        1,
+    )
+
+
+_CI_REPAIR_ATTEMPTED_KEY_PREFIX = "__awf_ci_repair_attempted:"
+
+
+def _ci_repair_attempted_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    """Marker that a CI repair already ran for this head/failing-run signature (#1216)."""
+    rerun_key = _ci_transient_rerun_state_key(head_sha, failures)
+    return rerun_key.replace(_CI_TRANSIENT_RERUN_KEY_PREFIX, _CI_REPAIR_ATTEMPTED_KEY_PREFIX, 1)
+
+
+def _ci_transient_infra_wait_started_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    return f"{_ci_transient_infra_wait_state_key(head_sha, failures)}:started"
+
+
+def _ci_transient_infra_wait_count_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    return f"{_ci_transient_infra_wait_state_key(head_sha, failures)}:count"

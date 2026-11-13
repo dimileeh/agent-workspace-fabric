@@ -258,7 +258,15 @@ async def path_level_item_fix_evidence(
     dropped: the range must still be a contentful descendant of the item's own
     start that changes the reviewed path. Callers must gate this on the
     correction attempt — it is the answer to "the agent was told its FIXED had
-    no line evidence and re-affirmed FIXED", never the first evidence check.
+    no line evidence and re-affirmed FIXED", never the first evidence check. A
+    re-affirmed FIXED whose contentful commit changes the anchored *path* is an
+    honest off-anchor fix (helper above the caller, guard at the call site), not
+    an unsupported claim, so escalating it to a human is the unnecessary
+    escalation. The caller also requires a positive ``item_line``: ``<= 0`` is
+    the unmappable-anchor sentinel and stays fail-closed on both attempts
+    (PRRT_kwDOSJAM6s6dFLGV), and ``None`` means the first check was already
+    path-level. The caller runs it inside the commit-sink ``try`` so it shares
+    the rollback / reason-code handlers.
 
     Resolved through ``comment_verdict`` at call time, like the rest of the
     split-out verdict helpers, so monkeypatches on that module still reach the

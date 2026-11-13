@@ -913,21 +913,8 @@ async def _run_item_verdict_protocol(
                     and item_line is not None
                     and item_line > 0
                 ):
-                    # Path-level evidence on the correction (#925 D1, restored on
-                    # top of #928). Attempt 0 already failed the strict
-                    # line-anchored gate and the agent was told so; a re-affirmed
-                    # FIXED whose contentful commit changes the anchored *path*
-                    # is an honest off-anchor fix (helper above the caller, guard
-                    # at the call site), not an unsupported claim, and escalating
-                    # it to a human is the unnecessary escalation. Safe because
-                    # this is never the first gate and the probe runs over the
-                    # item's own ``item_start_head``..HEAD range, so the commit
-                    # cannot be stale or foreign. ``item_line <= 0`` is the
-                    # unmappable-anchor sentinel from the path/line remap above:
-                    # those stay fail-closed on both attempts
-                    # (PRRT_kwDOSJAM6s6dFLGV); ``item_line is None`` means the
-                    # check above was already path-level. Inside the commit-sink
-                    # ``try`` so it shares the rollback / reason-code handlers.
+                    # Path-level evidence on the correction (#925 D1); rationale and
+                    # the ``item_line`` sentinels live in the helper docstring.
                     logical_fix_evidence = await path_level_item_fix_evidence(
                         runner,
                         worktree_path=worktree_path,
@@ -942,24 +929,8 @@ async def _run_item_verdict_protocol(
                     and item_path is not None
                     and (item_line is None or item_line > 0)
                 ):
-                    # Package-level evidence on the correction (#952). Both
-                    # checks above have failed, so the item's own commit range
-                    # changes neither the anchored line nor the reviewed file.
-                    # Accept it when it changes any file in the reviewed file's
-                    # *package* (the bundle-scope rule: same parent directory,
-                    # or descendant paths). That is the normal shape of a
-                    # callee-anchored review — "honour the ownership result in
-                    # that caller" is anchored on the callee and fixed in the
-                    # caller — and of a line-limit split that moved the reviewed
-                    # code into a sibling module, which makes every correct fix
-                    # off-path by construction. Eight escalations on 2026-09-07
-                    # (PRs #922, #934, #939) were exactly those shapes. Same
-                    # guards as above: correction attempt only, the item's own
-                    # ``item_start_head``..HEAD range, contentful + descendant,
-                    # and the ``item_line <= 0`` unmappable-anchor sentinel
-                    # stays fail-closed. Cross-package commits keep escalating.
-                    # Inside the commit-sink ``try`` so it shares the rollback /
-                    # reason-code handlers.
+                    # Same-package evidence on the correction (#952); rationale,
+                    # limits and fail-closed cases live in the helper docstring.
                     logical_fix_evidence = await package_level_item_fix_evidence(
                         runner,
                         worktree_path=worktree_path,
