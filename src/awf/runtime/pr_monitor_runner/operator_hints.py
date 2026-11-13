@@ -1060,6 +1060,28 @@ async def _run_operator_hint_cycle(
     pushed_head_sha = await self._rev_parse_head(worktree_path)
     if pushed_head_sha:
         state.last_push_sha = pushed_head_sha
+    # A pushed NEW commit is no proof the baseline-outage park's kept repair landed:
+    # from a worktree recreated at the remote head, the directiveless repair agent's
+    # commit pushes cleanly without it. Require the kept SHA on the remote too
+    # (PRRT_kwDOSJAM6s63PY73).
+    if (
+        baseline_park_head_sha
+        and not hint_parked
+        and not await self._preserved_commit_already_on_remote(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=baseline_park_head_sha,
+        )
+    ):
+        reason = (
+            f"repair commit {baseline_park_head_sha} kept by the protected-scope baseline "
+            "park is not on the remote PR branch after the resume push; the worktree was "
+            "reset and the kept repair was dropped"
+        )
+        mark_operator_hint_needs_human(state, reason)
+        return cast(_GitPushResult, push_result)
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
     # A parked hint pushed only its kept commit and stays ``needs_human``.
