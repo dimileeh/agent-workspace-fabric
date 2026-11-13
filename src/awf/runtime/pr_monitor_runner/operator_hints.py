@@ -9,8 +9,8 @@ from typing import Any, cast
 
 from awf.common.github_client import RepoRef
 from awf.control.blocked_transition import (
-    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+    monitor_protected_scope_resume_origin,
 )
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import WorkspaceRepository
@@ -581,6 +581,7 @@ async def _run_operator_hint_cycle(
     # the recorded resume phase and fall back to the generic unpushed-commit
     # validator otherwise (PRRT_kwDOSJAM6s6KFZN_).
     block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
+    baseline_park_pending = await self._protected_scope_baseline_park_resume_pending(workspace_id)
     protected_scope_base_branch = (
         base_branch
         if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
@@ -605,11 +606,7 @@ async def _run_operator_hint_cycle(
         # unpushed-commit validator and re-block on a target-branch-owned protected
         # change the base merge pulled in, even after the agent-authored protected
         # edit was correctly reverted (PRRT_kwDOSJAM6s6KGCXl).
-        reblock_resume_phase = (
-            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-        )
+        reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
         reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
@@ -790,6 +787,10 @@ async def _run_operator_hint_cycle(
             base_branch=base_branch or "",
             operation_start_head=operation_start_head,
             source_head_sha=operation_start_head,
+            # A transient baseline outage parks under the resume's ORIGIN, like the
+            # violation re-block above (#1221).
+            resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
+            repo=repo,
         )
         if protected_scope_block is not None
         else await self._validated_git_push_result(
@@ -820,8 +821,12 @@ async def _run_operator_hint_cycle(
             # (PRRT_kwDOSJAM6s6KZK1v). A parked hint's push suppresses it too: the
             # reset would drop the kept commit its ``needs_human`` reason promises
             # to preserve, so the rejection surfaces with the commit intact
-            # (PRRT_kwDOSJAM6s6uPSzO).
-            allow_resync_on_rejection=not active_grant_specs and not hint_parked,
+            # (PRRT_kwDOSJAM6s6uPSzO). A resume of a baseline-outage park suppresses
+            # it as well: the park kept the unpushed repair commit, and the reset would
+            # drop it if the PR branch advanced while blocked (PRRT_kwDOSJAM6s621cKV).
+            allow_resync_on_rejection=(
+                not active_grant_specs and not hint_parked and not baseline_park_pending
+            ),
             # Re-arm the terminal guard AFTER pre-push validation: the check above
             # ran before a validation suite (plus its fix passes) that can take
             # minutes, so the PR can go terminal in between
@@ -831,6 +836,8 @@ async def _run_operator_hint_cycle(
             repo=repo,
             operation_id=_operation_id,
             operation_type=_operation_type,
+            # A fix-pass baseline outage parks under the resume's ORIGIN (#1221).
+            protected_scope_resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
         )
     )
     if push_result.pr_terminal is not None:
@@ -839,6 +846,12 @@ async def _run_operator_hint_cycle(
         # branches below consume the single-use operator grant, finalize the hint,
         # or park needs_human against a PR that no longer exists; the loop's shared
         # terminal finisher runs the handling ``decide()`` would have chosen (#910).
+        return cast(_GitPushResult, push_result)
+    if push_result.paused_into_blocked:
+        # A transient protected-scope baseline outage parked the workspace in
+        # ``blocked`` (#1221). Its bumped block epoch supersedes this hint, so
+        # clear it like the re-block branches instead of parking it needs_human.
+        state.pending_operator_hint = None
         return cast(_GitPushResult, push_result)
     if push_result.failed:
         if (
@@ -879,6 +892,24 @@ async def _run_operator_hint_cycle(
             # for a grant-active resume, which always followed a genuine block). Park
             # needs_human with a NON-failed result so the recoverable workspace stays
             # at ``monitoring_pr`` rather than being terminally failed.
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+        if (
+            push_result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
+            and baseline_park_pending
+            and not hint_parked
+        ):
+            # The baseline-outage park's kept repair commit diverged from a PR branch
+            # advanced while blocked; the resync was suppressed so the commit is still
+            # HEAD. Park needs_human (non-failed, so the workspace is not terminally
+            # failed and cleaned up) until an operator directive rebases or drops it
+            # (PRRT_kwDOSJAM6s621cKV).
+            reason = (
+                "the PR branch advanced while the workspace was parked for a protected-"
+                "scope baseline outage, so the kept repair commit was rejected "
+                "non-fast-forward; it was kept (not reset to the remote head). Resume "
+                "with a directive that rebases it onto the PR branch or drops it."
+            )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         if (
@@ -1007,14 +1038,22 @@ async def _operator_hint_agent_error_result(
         # Nothing was pushed, so the envelope must not say ``git push`` (#1074).
         return _agent_verdict_protocol_failure_result(exc)
     if isinstance(exc, ProtectedScopeDiffError):
+        # Keep a sync-base origin on a re-park so the next resume still selects the
+        # sync-base-aware validator (PRRT_kwDOSJAM6s622NyQ).
+        block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
         push_result = cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+                resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
             ),
         )
+        if push_result.paused_into_blocked:
+            # Transient baseline outage parked the workspace (#1221); see above.
+            state.pending_operator_hint = None
+            return push_result
         reason = (
             push_result.stderr or str(exc)
         ).strip() or "protected-scope policy could not verify the operator hint repair push"
@@ -1097,11 +1136,7 @@ async def _reblock_preserved_protected_leak(
         self, workspace_id=workspace_id, message=reason
     )
     if leak_block is not None:
-        reblock_resume_phase = (
-            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-        )
+        reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
         reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
@@ -1310,11 +1345,7 @@ async def _terminal_directive_grant_reblock(
         return None
     # Preserve the resume ORIGIN exactly as the net-diff / leak re-block branches.
     block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
-    reblock_resume_phase = (
-        MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-        if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-        else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-    )
+    reblock_resume_phase = monitor_protected_scope_resume_origin(block_resume_phase)
     reblock_result = cast(
         _GitPushResult,
         await self._pause_monitor_for_protected_scope_block(

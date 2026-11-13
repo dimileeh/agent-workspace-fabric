@@ -76,6 +76,15 @@ class ProtectedScopeDiffError(Exception):
     """Committed diff against the remote PR branch could not be verified."""
 
 
+class ProtectedScopeBaselineUnavailableError(ProtectedScopeDiffError):
+    """Remote PR-branch baseline fetch failed transiently after bounded retries.
+
+    Still fails closed (no push), but the monitor parks the workspace in
+    ``blocked`` with the worktree and unpushed commit preserved instead of failing
+    it terminally (#1221).
+    """
+
+
 @dataclass(frozen=True)
 class _ProtectedScopeRollbackDeltaEvidence:
     reverted_paths: tuple[str, ...]

@@ -1070,12 +1070,15 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "the remote PR branch before push."
         ),
         (
-            "Verify GitHub/network access and the PR branch ref, then remonitor "
-            "the workspace once the remote branch is reachable."
+            "Verify GitHub/network access and the PR branch ref. A transient outage "
+            "parks the workspace in blocked with its unpushed commit kept: resume it "
+            "with awf workspace guide <workspace_id> once the remote branch is "
+            "reachable. Otherwise remonitor the failed workspace."
         ),
         (
             "The PR branch diff baseline could not be fetched because of a "
-            "GitHub/network failure, a missing remote ref, or delayed ref replication."
+            "GitHub/network failure that outlasted the bounded retries, a missing "
+            "remote ref, or delayed ref replication."
         ),
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#protected_scope_diff_unavailable",

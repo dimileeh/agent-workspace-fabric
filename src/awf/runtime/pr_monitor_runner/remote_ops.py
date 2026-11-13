@@ -298,6 +298,9 @@ class _ProtectedScopePushBlock:
     message: str
     reason_code: str
     violations: tuple[Any, ...] = ()
+    transient_baseline_unavailable: bool = False
+    """The PR-branch baseline fetch kept failing transiently after its bounded
+    retries (#1221): the push seams park the workspace instead of failing it."""
 
 
 @dataclass(frozen=True)
@@ -1359,7 +1362,8 @@ async def _run_sync_base(
             # one POST-PR push path still outside WS-2: it returned a plain
             # failed ``PROTECTED_SCOPE_PUSH_BLOCKED`` result that the loop's
             # SyncBase branch treated as terminal. A diff-unavailable block (no
-            # violations) keeps the terminal failed handling below.
+            # violations) keeps the terminal failed handling below, unless the
+            # baseline outage was transient (#1221), which parks instead.
             return await runner._pause_monitor_for_protected_scope_block(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -1376,6 +1380,17 @@ async def _run_sync_base(
                 source_head_sha=pr_head_sha,
                 repo=repo,
             )
+        if protected_scope_block.transient_baseline_unavailable:
+            parked = await runner._park_for_protected_scope_baseline_unavailable(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                remote_branch=remote_branch,
+                resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+                message=protected_scope_block.message,
+                pr_number=pr_number,
+                repo=repo,
+            )
+            return replace(parked, merged_base_sha=merged_base_sha)
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -1407,6 +1422,8 @@ async def _run_sync_base(
         repo=repo,
         operation_id=operation_id,
         operation_type=operation_type,
+        # A fix-pass baseline outage parks under the sync-base origin (#1221).
+        protected_scope_resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
     )
     # Fail-closed outcomes (toolchain missing, ownership repair, unowned dirty
     # delta, ...) keep their terminal reason instead of being masked by the park.

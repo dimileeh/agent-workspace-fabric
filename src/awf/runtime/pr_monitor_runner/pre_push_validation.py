@@ -13,6 +13,7 @@ from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_mes
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.common.work_slot import work_slot_kwargs
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
 from awf.control.executor.helpers import (
     _pre_push_validation_phase_names,
     _profile_for_workspace,
@@ -92,6 +93,10 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _run_pre_push_validation_fix_pass,
 )
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+    record_provider_park_stranded_edits_evidence,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
@@ -99,6 +104,7 @@ from awf.runtime.pr_monitor_runner.remote_repair import (
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
@@ -124,6 +130,7 @@ from awf.runtime.validation_worktree_constants import (
 )
 
 if TYPE_CHECKING:
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
         ValidationWorktreeCleanup,
@@ -268,6 +275,7 @@ async def _validated_git_push_result(
     repo: RepoRef | None = None,
     operation_id: str | None = None,
     operation_type: str | None = None,
+    protected_scope_resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
 ) -> _GitPushResult:
     """Run pre-push validation with optional fix passes before pushing.
 
@@ -303,6 +311,11 @@ async def _validated_git_push_result(
     tests that exercise validation alone) omit ``pr_number``/``pr_terminal_context``
     and keep the previous behavior; the no-validation early return below skips the
     recheck because no time elapses between the seam's guard and that push.
+
+    ``protected_scope_resume_phase`` is the resume phase recorded when a fix-pass
+    protected-scope baseline outage parks (#1221). Sync-base callers pass the
+    sync-base phase so the guide resume keeps the base-aware validator instead of
+    re-blocking on protected changes the base merge pulled in (PRRT_kwDOSJAM6s621cKd).
     """
     if self._deps.validation is None:
         return cast(
@@ -340,13 +353,52 @@ async def _validated_git_push_result(
         if moot_result is not None:
             return cast(_GitPushResult, moot_result)
     if not validation_result.passed:
+        details = validation_result.failure_details()
+        if (
+            validation_result.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+            and details.get("transient_baseline_unavailable") is True
+        ):
+            # A fix-pass or dirty-finalize commit hit a protected-scope baseline
+            # outage that outlived its bounded retries (#1221): park with the
+            # worktree and unpushed commit kept instead of failing terminally.
+            # The raising sink marked its uncommitted edits as stranded: record
+            # what it left dirty and persist both ahead of the park, so the guide
+            # resume commits exactly those edits before its pre-existing-dirty
+            # guard runs (``provider_park_stranded_edits``).
+            if PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in getattr(
+                state, "threads_addressed_ids", {}
+            ):
+                monitor_state = cast("MonitorState", state)
+                await record_provider_park_stranded_edits_evidence(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    state=monitor_state,
+                )
+                await self._persist_state(workspace_id, monitor_state)
+            return cast(
+                _GitPushResult,
+                await self._park_for_protected_scope_baseline_unavailable(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    resume_phase=protected_scope_resume_phase,
+                    message=validation_result.message,
+                    details=details,
+                    # Re-arm the #910 recheck: the stranded-edits evidence and
+                    # persist above run after the post-validation guard
+                    # (PRRT_kwDOSJAM6s622SF6).
+                    pr_number=pr_number,
+                    repo=repo,
+                ),
+            )
         return _GitPushResult(
             pushed=False,
             failed=True,
             returncode=1,
             stderr=validation_result.message,
             reason_code=validation_result.reason_code,
-            details=validation_result.failure_details(),
+            details=details,
         )
     return cast(
         _GitPushResult,
@@ -452,6 +504,12 @@ async def _run_pre_push_validation_with_fix_passes(
                 pass_number=pass_index + 1,
                 error=repr(exc),
             )
+            extra_details = validation_result.extra_details
+            if isinstance(exc, ProtectedScopeBaselineUnavailableError):
+                extra_details = {
+                    **(extra_details or {}),
+                    "transient_baseline_unavailable": True,
+                }
             return replace(
                 validation_result,
                 reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
@@ -459,6 +517,7 @@ async def _run_pre_push_validation_with_fix_passes(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"protected-scope diff unavailable: {exc}"
                 ),
+                extra_details=extra_details,
             )
         except _MonitorPolicyBlockedError as exc:
             _log.warning(

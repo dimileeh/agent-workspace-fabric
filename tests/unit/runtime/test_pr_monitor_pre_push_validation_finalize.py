@@ -18,6 +18,9 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+)
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     ValidationWorktreeCheck,
@@ -1078,10 +1081,12 @@ async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_co
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("transient", [False, True])
 async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unavailable_reason_code(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    transient: bool,
 ) -> None:
     """A protected-scope-diff-unavailable finalize must surface its reason code, not generic dirty.
 
@@ -1092,12 +1097,18 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     ``None``, so the stale dirty check was reused and the failure was reported
     as the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``, losing the
     protected-scope diff-unavailable reason code end-to-end (regression for thread
-    ``PRRT_kwDOSJAM6s6KWpSB``).
+    ``PRRT_kwDOSJAM6s6KWpSB``). A transient baseline outage (#1221) additionally
+    carries the ``transient_baseline_unavailable`` marker so the push seam parks.
     """
     from awf.runtime.pr_monitor_runner.constants import (
         _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     )
-    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+    from awf.runtime.pr_monitor_runner.types import (
+        ProtectedScopeBaselineUnavailableError,
+        ProtectedScopeDiffError,
+    )
+
+    error_type = ProtectedScopeBaselineUnavailableError if transient else ProtectedScopeDiffError
 
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
@@ -1131,7 +1142,7 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     monkeypatch.setattr(
         runner,
         "_commit_dirty_worktree",
-        AsyncMock(side_effect=ProtectedScopeDiffError("diff baseline unavailable")),
+        AsyncMock(side_effect=error_type("diff baseline unavailable")),
     )
     state = MonitorState()
     operation_start_head = "0" * 40
@@ -1150,6 +1161,11 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     assert result.passed is False
     assert result.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
     assert result.validation_run_id is None
+    assert result.extra_details is not None
+    assert result.extra_details.get("transient_baseline_unavailable", False) is transient
+    # Only the transient park keeps the finalize's uncommitted repair output for the
+    # guide resume to commit (PRRT_kwDOSJAM6s621aJ-).
+    assert (PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in state.threads_addressed_ids) is transient
     # The finalize failure must not re-check the tree (no verify/recheck pass).
     assert check_worktree_clean.await_count == 1
 

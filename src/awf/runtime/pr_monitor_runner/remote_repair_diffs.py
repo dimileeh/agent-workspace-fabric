@@ -24,16 +24,24 @@ from awf.control.quality_gates import (
     ProtectedFileDiff,
     diff_classified_protected_paths,
 )
+from awf.db.repositories import WorkspaceEventCreate
 from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+    _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
     _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _base_fetch_retry_wait_seconds,
     _changed_paths_from_name_status_z,
+    _is_transient_base_fetch_error,
     _read_worktree_text,
+    _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.types import (
+    BaseFetchError,
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
 )
 
@@ -97,8 +105,16 @@ async def _remote_branch_diff_base_and_changed_paths(
             remote=remote,
             remote_branch=remote_branch,
         )
+    fetch_result = await self._retry_transient_remote_branch_fetch(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        remote=remote,
+        remote_branch=remote_branch,
+        fetch_result=fetch_result,
+        context="protected_scope_diff_baseline",
+    )
     if not fetch_result.ok:
-        raise ProtectedScopeDiffError(
+        raise _remote_branch_fetch_error_type(fetch_result)(
             "Could not resolve committed diff against the remote PR branch "
             "for protected-scope validation: "
             f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
@@ -116,6 +132,96 @@ async def _remote_branch_diff_base_and_changed_paths(
         error_context="against the remote PR branch",
     )
     return local_base, changed_paths
+
+
+def _is_transient_remote_branch_fetch_failure(fetch_result: CommandResult) -> bool:
+    """Classify a failed PR-branch fetch with the base-fetch transient classifier."""
+    return not fetch_result.ok and _is_transient_base_fetch_error(
+        BaseFetchError(f"{fetch_result.stderr}\n{fetch_result.stdout}")
+    )
+
+
+def _remote_branch_fetch_error_type(
+    fetch_result: CommandResult,
+) -> type[ProtectedScopeDiffError]:
+    """Pick the fail-closed error for a PR-branch fetch that is still failing.
+
+    A transient failure that outlived its retry budget raises the narrower
+    ``ProtectedScopeBaselineUnavailableError`` so the push seams park the workspace
+    instead of failing it (#1221); anything else keeps the terminal error.
+    """
+    if _is_transient_remote_branch_fetch_failure(fetch_result):
+        return ProtectedScopeBaselineUnavailableError
+    return ProtectedScopeDiffError
+
+
+async def _retry_transient_remote_branch_fetch(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    remote: str,
+    remote_branch: str,
+    fetch_result: CommandResult,
+    context: str,
+) -> CommandResult:
+    """Retry a transiently failed PR-branch fetch with the base-fetch backoff (#1221).
+
+    Reuses the base-fetch classifier and the ``transient_base_fetch_*`` budget, so
+    DNS, connection reset/timeout, TLS and forge 5xx blips get the same bounded
+    retry as ``monitor.git_base_fetch_transient_retrying``. The counter is local to
+    this call: each baseline computation is its own bounded episode. Returns the
+    last fetch result; a non-transient failure returns immediately, unchanged.
+    """
+    max_retries = max(self._runner_config.transient_base_fetch_max_retries, 0)
+    retry_number = 0
+    while _is_transient_remote_branch_fetch_failure(fetch_result):
+        exhausted = retry_number >= max_retries
+        wait_seconds = 0.0
+        event_type = "monitor.protected_scope_baseline_fetch_transient_retry_exhausted"
+        reason_code = _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON
+        if not exhausted:
+            retry_number += 1
+            wait_seconds = _base_fetch_retry_wait_seconds(
+                retry_number=retry_number,
+                initial_backoff_seconds=(
+                    self._runner_config.transient_base_fetch_initial_backoff_seconds
+                ),
+                max_backoff_seconds=self._runner_config.transient_base_fetch_max_backoff_seconds,
+            )
+            event_type = "monitor.protected_scope_baseline_fetch_transient_retrying"
+            reason_code = _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON
+        payload: dict[str, object] = {
+            "context": context,
+            "operation": "git fetch remote branch",
+            "remote_branch": remote_branch,
+            "retry_number": retry_number,
+            "max_retries": max_retries,
+            "wait_seconds": wait_seconds,
+            "message": _redact_and_truncate_forge_error(
+                fetch_result.stderr.strip() or fetch_result.stdout.strip()
+            ),
+        }
+        _log.warning(event_type, workspace_id=workspace_id, reason_code=reason_code, **payload)
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=event_type,
+                    reason_code=reason_code,
+                    payload=payload,
+                )
+            ],
+        )
+        if exhausted:
+            break
+        await self._deps.sleep(wait_seconds)
+        fetch_result = await self._remote_branch_fetch_once(
+            worktree_path=worktree_path,
+            remote=remote,
+            remote_branch=remote_branch,
+        )
+    return fetch_result
 
 
 async def _remote_branch_fetch_once(
