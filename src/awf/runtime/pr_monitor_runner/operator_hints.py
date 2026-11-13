@@ -68,9 +68,11 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     commit_provider_park_stranded_edits,
     provider_park_resume_kept_head,
+    refresh_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
@@ -1141,6 +1143,15 @@ async def _operator_hint_agent_error_result(
         # Nothing was pushed, so the envelope must not say ``git push`` (#1074).
         return _agent_verdict_protocol_failure_result(exc)
     if isinstance(exc, ProtectedScopeDiffError):
+        if isinstance(exc, ProtectedScopeBaselineUnavailableError):
+            # A resumed stranded-edits sink re-parks: record what it now leaves
+            # dirty ahead of the park (PRRT_kwDOSJAM6s63Quqs).
+            await refresh_provider_park_stranded_edits_evidence(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=self._worktrees_root / workspace_id,
+                state=state,
+            )
         # Keep a sync-base origin on a re-park so the next resume still selects the
         # sync-base-aware validator (PRRT_kwDOSJAM6s622NyQ).
         block_resume_phase = await self._resolve_block_resume_phase(workspace_id)

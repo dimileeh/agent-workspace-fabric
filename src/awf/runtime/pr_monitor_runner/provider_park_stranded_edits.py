@@ -228,6 +228,32 @@ async def record_provider_park_stranded_edits_evidence(
     )
 
 
+async def refresh_provider_park_stranded_edits_evidence(
+    runner: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    state: MonitorState,
+) -> None:
+    """Re-record a still-marked park's evidence and persist it before it re-parks.
+
+    The resumed sink's protected-scope repair can rewrite a recorded path before its
+    baseline outage re-parks the workspace, so the earlier park's fingerprints would
+    make the next resume reject the repair's own content as
+    ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES`` (PRRT_kwDOSJAM6s63Quqs). Only the
+    evidence is replaced: the marker's HEAD, ownership boundary, delta anchor and
+    fix-pass baseline still describe the original operation.
+    """
+    threads_addressed = state.threads_addressed_ids
+    if PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in threads_addressed:
+        return
+    threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
+    await record_provider_park_stranded_edits_evidence(
+        runner, workspace_id=workspace_id, worktree_path=worktree_path, state=state
+    )
+    await runner._persist_state(workspace_id, state)
+
+
 async def commit_provider_park_stranded_edits(
     runner: Any,
     *,
