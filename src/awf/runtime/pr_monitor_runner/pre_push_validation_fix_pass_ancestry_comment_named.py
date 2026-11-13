@@ -117,10 +117,11 @@ _JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE = re.compile(
 # A trailing keyword operator (``await``/``typeof``/``new``/...) still needs its
 # operand; a property of that name (``cache.delete``) does not (PRRT_kwDOSJAM6s63SGuU).
 # So does a trailing unary ``!``; a TS non-null assertion (``value!``) follows its
-# operand and does not (PRRT_kwDOSJAM6s63Sh3A).
+# operand and does not (PRRT_kwDOSJAM6s63Sh3A). So does a trailing TS type
+# operator (``satisfies``/``as``), which still needs its type (PRRT_kwDOSJAM6s63SzHv).
 _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
     r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-|(?:^|[^\w$)\]\s!])[ \t]*!+"
-    r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in))$"
+    r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as))$"
 )
 _JS_TS_LEADING_CONTINUATION_RE = re.compile(
     r"^[ \t]*(?:(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]|(?:instanceof|in)(?![\w$]))"

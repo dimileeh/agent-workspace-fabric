@@ -958,6 +958,21 @@ async def test_js_ts_label_binds_nothing(
             "export const LIMIT = renew\nrun1();\n", 2, False, id="keyword-suffixed-identifier"
         ),
         pytest.param(
+            "export const LIMIT = value satisfies\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-satisfies-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value as\n  Expected1;\n", 2, True, id="trailing-as-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = config.as\nrun1();\n", 2, False, id="as-named-property-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = alias\nrun1();\n", 2, False, id="as-suffixed-identifier"
+        ),
+        pytest.param(
             "export const LIMIT = !\n    Boolean(10);\n",
             2,
             True,
