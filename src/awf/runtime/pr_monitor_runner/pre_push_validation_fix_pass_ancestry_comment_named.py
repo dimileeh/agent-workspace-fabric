@@ -93,6 +93,10 @@ _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
 # A further target of a chained binding (``A = B = 10``), matched right after
 # the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9).
 _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
+# A JS/TS declaration binds each declarator of ``const A = 0, B = v``; a further
+# one is matched right after a top-level ``,`` (PRRT_kwDOSJAM6s63QfAU).
+_JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
+_JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)")
 # Indentation is not scope in JS/TS: a statement ends where the code does, unless
 # its last token or the next line's first token continues the expression
 # (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-). A leading ``++``/``--``
@@ -164,6 +168,37 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
     if tail and not tail.startswith(("//", "/*")):
         return True
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
+
+
+def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
+    """Declarators after the first of the JS/TS declaration ``logical``.
+
+    Each follows a ``,`` outside brackets and before the first top-level ``;``;
+    a comma that opens no ``name =`` (a generic's ``Map<K, V>``) is skipped.
+    """
+    found: list[re.Match[str]] = []
+    depth = 0
+    for position, char in enumerate(logical):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and char == ";":
+            break
+        elif depth == 0 and char == ",":
+            match = _JS_TS_DECLARATOR_RE.match(logical, position + 1)
+            if match is not None:
+                found.append(match)
+    return found
+
+
+def _statement_line_index(statement: list[str], offset: int) -> int:
+    """Index into ``statement`` of the line holding ``offset`` of ``" ".join(statement)``."""
+    for index, line in enumerate(statement[:-1]):
+        if offset <= len(line):
+            return index
+        offset -= len(line) + 1
+    return len(statement) - 1
 
 
 def _assignment_span_end_line(
@@ -264,12 +299,15 @@ def _module_level_assignment_spans(
     binds, not only the first (PRRT_kwDOSJAM6s63PKQ9). In JS/TS a statement
     after a brace-less control head or an incomplete one (a concise arrow's
     ``=>``) is that statement's body, not a module-level binding
-    (PRRT_kwDOSJAM6s63QK8_).
+    (PRRT_kwDOSJAM6s63QK8_). Each declarator of a JS/TS ``const A = 0, B = v``
+    binds over its own lines, from its name to the ``,`` ending it, and a
+    declarator list read past a trailing ``,`` and any gap after it
+    (PRRT_kwDOSJAM6s63QfAU).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     raw_lines = file_text.splitlines()
-    bindings: list[tuple[str, int]] = []
+    bindings: list[tuple[str, int, int | None]] = []
     depth = 0
     continued = False
     in_body = False
@@ -288,9 +326,21 @@ def _module_level_assignment_spans(
         if (depth or continued) and index + 1 < len(scan_lines):
             continue
         logical = " ".join(statement)
+        lead = 0
+        declaration = False
         if js_ts:
+            lead = len(logical) - len(logical.lstrip(" \t"))
             logical = logical.strip(" \t")
             if not logical:
+                continue
+            declaration = _JS_TS_DECLARATION_RE.match(logical) is not None
+            if (
+                declaration
+                and not in_body
+                and index + 1 < len(scan_lines)
+                and not (scan.strip() and _js_ts_line_ends_statement(raw_lines[index], scan))
+            ):
+                continued = True
                 continue
             is_body = in_body
             in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
@@ -298,33 +348,50 @@ def _module_level_assignment_spans(
             )
             if is_body:
                 continue
-        match = _MODULE_LEVEL_ASSIGNMENT_RE.match(logical)
-        while match is not None:
-            if match.group(1) in names:
-                bindings.append((match.group(1), statement_start))
-            match = _CHAINED_ASSIGNMENT_TARGET_RE.match(logical, match.end())
+        first = _MODULE_LEVEL_ASSIGNMENT_RE.match(logical)
+        heads = [first] if first is not None else []
+        if js_ts and declaration:
+            heads += _js_ts_secondary_declarators(logical)
+        for position, head in enumerate(heads):
+            start = statement_start + _statement_line_index(statement, lead + head.start(1))
+            end = (
+                statement_start
+                + _statement_line_index(statement, lead + heads[position + 1].start() - 1)
+                if position + 1 < len(heads)
+                else None
+            )
+            match: re.Match[str] | None = head
+            while match is not None:
+                if match.group(1) in names:
+                    bindings.append((match.group(1), start, end))
+                match = _CHAINED_ASSIGNMENT_TARGET_RE.match(logical, match.end())
     if not bindings:
         return []
-    last = dict(bindings)
-    starts = frozenset(start for _name, start in bindings)
+    last = {name: (start, end) for name, start, end in bindings}
+    starts = frozenset(start for _name, start, _end in bindings)
     all_spans = _iter_definition_spans(file_text, path=path)
     shadowed = {
         name
         for name, start, _end, indent in all_spans
         if name in last
         and start not in starts
-        and (indent > 0 or start > last[name])
+        and (indent > 0 or start > last[name][0])
         and _definition_binding_scope(file_text, all_spans, start=start, indent=indent)[0] == 0
     }
     rebound = _rebound_scope_names(
         file_text,
         all_spans,
         path=path,
-        collected=[(name, start, 0, (0, 0), (start, start)) for name, start in bindings],
+        collected=[(name, start, 0, (0, 0), (start, start)) for name, start, _end in bindings],
     )
     return [
-        (start, _assignment_span_end_line(file_text, scan_lines, start, path=path))
-        for name, start in last.items()
+        (
+            start,
+            end
+            if end is not None
+            else _assignment_span_end_line(file_text, scan_lines, start, path=path),
+        )
+        for name, (start, end) in last.items()
         if name not in shadowed and (0, name) not in rebound
     ]
 

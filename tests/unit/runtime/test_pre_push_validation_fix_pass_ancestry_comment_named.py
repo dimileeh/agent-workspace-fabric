@@ -641,6 +641,82 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
 
 
 @pytest.mark.parametrize(
+    ("text", "line", "new", "name", "expected"),
+    [
+        pytest.param(
+            "const OTHER = 0, LIMIT = [\n  10,\n];\n",
+            2,
+            "  20,",
+            "LIMIT",
+            True,
+            id="secondary-declarator",
+        ),
+        pytest.param(
+            "const OTHER = 0, LIMIT = [\n  10,\n];\n",
+            2,
+            "  20,",
+            "OTHER",
+            False,
+            id="first-declarator-ends-at-its-comma",
+        ),
+        pytest.param(
+            "const OTHER = 0,\n  LIMIT = [\n    10,\n  ];\n",
+            3,
+            "    20,",
+            "LIMIT",
+            True,
+            id="declarator-on-its-own-line",
+        ),
+        pytest.param(
+            "const OTHER = 0,\n  LIMIT = [\n    10,\n  ];\n",
+            1,
+            "const OTHER = 1,",
+            "LIMIT",
+            False,
+            id="previous-declarator-is-not-the-binding",
+        ),
+        pytest.param(
+            "let first,\n  // the cap\n\n  LIMIT = 10;\n",
+            4,
+            "  LIMIT = 20;",
+            "LIMIT",
+            True,
+            id="after-uninitialized-declarator-and-gap",
+        ),
+        pytest.param(
+            "const m: Map<string, number> = new Map(), LIMIT = 10;\n",
+            1,
+            "const m: Map<string, number> = new Map(), LIMIT = 20;",
+            "LIMIT",
+            True,
+            id="after-generic-annotation",
+        ),
+        pytest.param(
+            "const OTHER = f(a, LIMIT = 10);\n",
+            1,
+            "const OTHER = f(a, LIMIT = 20);",
+            "LIMIT",
+            False,
+            id="bracketed-comma-is-not-a-declarator",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_declaration_binds_every_declarator(
+    text: str, line: int, new: str, name: str, *, expected: bool
+) -> None:
+    """Each declarator of ``const A = 0, B = v`` is bound to its own initializer span.
+
+    (PRRT_kwDOSJAM6s63QfAU)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{new}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, f"`{name}` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(_INBOUND, "LIMIT = 10; OTHER = (\n    1\n)\n", 2, False, id="python-next"),
