@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import update as sa_update
@@ -32,6 +33,7 @@ from awf.runtime.pr_monitor_runner import operator_hints as operator_hints_modul
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
@@ -457,7 +459,9 @@ async def test_operator_hint_stranded_sink_repark_refreshes_its_evidence(
     # restore-verification fetch outlived its retries: the re-park must record what
     # it now leaves dirty, or the next resume rejects the repair's own content as
     # PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES (PRRT_kwDOSJAM6s63Quqs). The marker's
-    # HEAD, ownership boundary and fix-pass baseline carry over unchanged.
+    # HEAD follows the repair's self-commit, as the re-park event's does
+    # (PRRT_kwDOSJAM6s63SI0A); the ownership boundary, its delta anchor and the
+    # fix-pass baseline carry over unchanged.
     workspace_id = "ws_operator_hint_stranded_repark"
     runner = _runner(factory, tmp_path, FakeCommandRunner())
     worktree_path = tmp_path / "worktrees" / workspace_id
@@ -520,6 +524,7 @@ async def test_operator_hint_stranded_sink_repark_refreshes_its_evidence(
     monkeypatch.setattr(runner, "_resolve_block_resume_phase", _recorded_phase)
     monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _guard)
     monkeypatch.setattr(runner, "_persist_state", _persist_state)
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value="def4567890abc123"))
     monkeypatch.setattr(runner, "_protected_scope_diff_unavailable_push_result", _parked)
 
     result = await runner._run_operator_hint_cycle(
@@ -540,6 +545,7 @@ async def test_operator_hint_stranded_sink_repark_refreshes_its_evidence(
     assert json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY]) == {
         "src/fix.py": _path_identity(worktree_path / "src" / "fix.py")
     }
-    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == "abc1234567890def"
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == "def4567890abc123"
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY] == "abc1234567890def"
     assert json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY]) == ["src/fix.py"]
     assert persisted[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == "base567890abcdef"

@@ -25,10 +25,13 @@ from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     mark_provider_park_stranded_edits,
     provider_park_resume_kept_head,
     record_provider_park_stranded_edits_evidence,
+    refresh_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
@@ -264,3 +267,74 @@ async def test_a_resumed_head_that_cannot_keep_the_baseline_fails_closed(
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == (
         _BASELINE_HEAD
     )
+
+
+_REPARKED_HEAD = "e" * 40
+
+
+@pytest.mark.unit
+async def test_a_reparked_sink_rekeys_the_rewrite_to_the_reparked_head(tmp_path: Path) -> None:
+    # The resumed sink's protected-scope repair self-committed before another
+    # baseline outage re-parked it, and the re-park event records that new HEAD.
+    # The marker must name it too, or the next resume keys its re-parent to the
+    # first park's SHA and the baseline-park resume still requires the
+    # reparented-away commit (PRRT_kwDOSJAM6s63SI0A).
+    state = await _baseline_parked_state(tmp_path)
+    reparker = _BaselineRunner([_dirty(["stranded_fix.py"])], FakeCommandRunner(), head=None)
+    reparker._persist_state = AsyncMock()
+    reparker._rev_parse_head = AsyncMock(return_value=_REPARKED_HEAD)
+
+    await refresh_provider_park_stranded_edits_evidence(
+        reparker, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=state
+    )
+
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _REPARKED_HEAD
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == (
+        _BASELINE_HEAD
+    )
+    # No ownership boundary, so no delta anchor is invented.
+    assert PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY not in state.threads_addressed_ids
+    reparker._persist_state.assert_awaited_once_with(_WORKSPACE_ID, state)
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    cmd.queue_result(stdout="tree-resumed\n")
+    cmd.queue_result(stdout="tree-baseline\n")
+    cmd.queue_result(stdout="fix: the agent's amended fix\n")
+    cmd.queue_result(stdout=f"{_REPARENTED_HEAD}\n")
+    cmd.queue_result()  # reset --hard onto the reparented commit.
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_REPARKED_HEAD)
+
+    assert await _resume(runner, state, tmp_path) is None
+    assert provider_park_resume_kept_head(state, _REPARKED_HEAD) == _REPARENTED_HEAD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reparked_head", [_REPARKED_HEAD, None])
+async def test_a_reparked_sink_keeps_the_original_delta_anchor(
+    tmp_path: Path, reparked_head: str | None
+) -> None:
+    # Re-keying the marker's HEAD must not move a boundary-only park's delta
+    # anchor, which defaulted to the first park's HEAD; an unreadable HEAD keeps
+    # the marker as it was.
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, owned_paths=["stranded_fix.py"])
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    reparker = _BaselineRunner([_dirty(["stranded_fix.py"])], FakeCommandRunner(), head=None)
+    reparker._persist_state = AsyncMock()
+    reparker._rev_parse_head = AsyncMock(return_value=reparked_head)
+
+    await refresh_provider_park_stranded_edits_evidence(
+        reparker, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=state
+    )
+
+    threads_addressed = state.threads_addressed_ids
+    assert threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+        reparked_head or _PRESERVED_HEAD
+    )
+    assert threads_addressed.get(PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY) == (
+        _PRESERVED_HEAD if reparked_head else None
+    )
+    assert json.loads(threads_addressed[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY]) == [
+        "stranded_fix.py"
+    ]
