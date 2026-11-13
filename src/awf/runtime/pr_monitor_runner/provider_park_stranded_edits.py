@@ -116,6 +116,17 @@ park; absent for parks with no baseline. It lives and leaves with the
 stranded-edits marker.
 """
 
+PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY: Final = "__awf_provider_park_resume_rewritten_head__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key: the parked HEAD the resume rewrote.
+
+A JSON object ``{"from": <parked HEAD>, "to": <HEAD that replaced it>}``, recorded
+when the resume re-parents a non-descendant HEAD onto the fix-pass baseline or
+resets a no-net-change rewrite to it. The parked SHA is then gone by design, so a
+baseline-park resume must require the replacement on the remote instead
+(PRRT_kwDOSJAM6s63OA3D). It reaches the row with the marker drop and is cleared by
+the next park.
+"""
+
 _RESUME_COMMIT_MESSAGE: Final = "fix: commit repair edits stranded by a managed provider key park"
 _MESSAGE_PATH_LIMIT: Final = 10
 
@@ -140,6 +151,7 @@ def mark_provider_park_stranded_edits(
     if state is not None:
         threads_addressed = state.threads_addressed_ids
         threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] = preserved_head or ""
+        threads_addressed.pop(PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         if owned_paths is None:
             threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY, None)
@@ -313,7 +325,13 @@ async def commit_provider_park_stranded_edits(
     if dirty is None:
         # Row first: a write fault then leaves the in-memory marker for the next
         # in-process resume to retry, rather than a row-only one a restart reloads.
-        await _drop_marker_from_workspace_row(runner, workspace_id=workspace_id)
+        await _drop_marker_from_workspace_row(
+            runner,
+            workspace_id=workspace_id,
+            rewritten_head=state.threads_addressed_ids.get(
+                PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY
+            ),
+        )
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY, None)
@@ -476,6 +494,25 @@ async def _unowned_committed_delta_result(
     )
 
 
+def provider_park_resume_kept_head(state: MonitorState, parked_head: str | None) -> str | None:
+    """Return the commit that now carries ``parked_head``: the resume's rewrite, if any.
+
+    Only a record whose ``from`` is exactly ``parked_head`` applies, so a stale or
+    unreadable record never stands in for a different park's kept commit.
+    """
+    raw = state.threads_addressed_ids.get(PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY)
+    if not parked_head or not raw:
+        return parked_head
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return parked_head
+    if not isinstance(record, dict) or record.get("from") != parked_head:
+        return parked_head
+    replacement = record.get("to")
+    return replacement if isinstance(replacement, str) and replacement else parked_head
+
+
 async def _keep_fix_pass_baseline(
     runner: Any,
     *,
@@ -519,6 +556,9 @@ async def _keep_fix_pass_baseline(
             )
             failure_reason = None if reset.ok else _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
         if failure_reason is None:
+            state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = json.dumps(
+                {"from": head, "to": new_head or baseline}
+            )
             _log.info(
                 "monitor.provider_park_resume_reparented",
                 workspace_id=workspace_id,
@@ -639,8 +679,14 @@ def _unexpected_worktree_changes_result(
     )
 
 
-async def _drop_marker_from_workspace_row(runner: Any, *, workspace_id: str) -> None:
+async def _drop_marker_from_workspace_row(
+    runner: Any, *, workspace_id: str, rewritten_head: str | None = None
+) -> None:
     """Remove ONLY the stranded-edits marker (and its evidence) from the persisted row.
+
+    A ``rewritten_head`` record is written in the same commit, so a restart that
+    reloads the row without the marker still knows which commit replaced the parked
+    HEAD.
 
     Never the whole ``MonitorState``, which inside a fix cycle can still carry
     unconfirmed verdicts (#305) — the single-key shape
@@ -660,5 +706,7 @@ async def _drop_marker_from_workspace_row(runner: Any, *, workspace_id: str) -> 
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY, None)
+        if rewritten_head is not None:
+            threads_addressed[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = rewritten_head
         ws.monitor_threads_addressed = threads_addressed
         await session.commit()

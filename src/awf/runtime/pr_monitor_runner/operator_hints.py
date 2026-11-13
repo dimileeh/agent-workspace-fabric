@@ -58,6 +58,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
 )
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     commit_provider_park_stranded_edits,
+    provider_park_resume_kept_head,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
@@ -588,9 +589,13 @@ async def _run_operator_hint_cycle(
     baseline_park_pending = await self._protected_scope_baseline_park_resume_pending(workspace_id)
     # The commit a baseline-outage park kept for this resume to publish. A directive
     # may legitimately drop it, so only a directiveless resume must prove it landed
-    # (PRRT_kwDOSJAM6s63M6sD).
+    # (PRRT_kwDOSJAM6s63M6sD). When the stranded-edit commit above kept the fix-pass
+    # baseline by re-parenting the parked HEAD or resetting it to the baseline, the
+    # parked SHA is gone by design, so require its replacement (PRRT_kwDOSJAM6s63OA3D).
     baseline_park_head_sha = (
-        await self._protected_scope_baseline_park_preserved_head(workspace_id)
+        provider_park_resume_kept_head(
+            state, await self._protected_scope_baseline_park_preserved_head(workspace_id)
+        )
         if baseline_park_pending and not hint.directive
         else None
     )

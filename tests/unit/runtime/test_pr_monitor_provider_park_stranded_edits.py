@@ -46,12 +46,14 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import provider_park_stranded_edits, remote_repair
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     commit_provider_park_stranded_edits,
     mark_provider_park_stranded_edits,
+    provider_park_resume_kept_head,
     record_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
@@ -657,6 +659,61 @@ async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
 
     assert _git_args(cmd)[-1] == ["reset", "--hard", _BASELINE_HEAD]
     assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("net_change", [True, False])
+async def test_a_rewritten_park_head_names_its_replacement_durably(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, net_change: bool
+) -> None:
+    # The rewrite discards the parked SHA, so a baseline-park resume must look for
+    # the commit that replaced it instead (PRRT_kwDOSJAM6s63OA3D).
+    workspace_id = await seed_monitoring_workspace(factory)
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    if net_change:
+        cmd.queue_result(stdout="tree-resumed\n")
+        cmd.queue_result(stdout="tree-baseline\n")
+        cmd.queue_result(stdout="fix: the agent's amended fix\n")
+        cmd.queue_result(stdout=f"{_REPARENTED_HEAD}\n")
+    else:
+        cmd.queue_result(stdout="same-tree\n")
+        cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result()  # reset --hard
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+    runner._deps = SimpleNamespace(runner=cmd, session_factory=factory)
+
+    assert await _resume(runner, state, tmp_path, workspace_id=workspace_id) is None
+
+    replacement = _REPARENTED_HEAD if net_change else _BASELINE_HEAD
+    assert provider_park_resume_kept_head(state, _PRESERVED_HEAD) == replacement
+    # Only the parked SHA the rewrite replaced maps to the replacement.
+    assert provider_park_resume_kept_head(state, "d" * 40) == "d" * 40
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        reloaded = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed or {}))
+    assert provider_park_resume_kept_head(reloaded, _PRESERVED_HEAD) == replacement
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in reloaded.threads_addressed_ids
+
+    # The next park starts without the previous resume's rewrite.
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    assert PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "record",
+    [None, "not json", json.dumps(["list"]), json.dumps({"from": _PRESERVED_HEAD, "to": ""})],
+)
+def test_an_unusable_rewrite_record_keeps_the_parked_head(record: str | None) -> None:
+    state = MonitorState()
+    if record is not None:
+        state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = record
+
+    assert provider_park_resume_kept_head(state, _PRESERVED_HEAD) == _PRESERVED_HEAD
+    assert provider_park_resume_kept_head(state, None) is None
 
 
 @pytest.mark.unit
