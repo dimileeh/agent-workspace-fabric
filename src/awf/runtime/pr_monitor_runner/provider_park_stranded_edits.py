@@ -37,7 +37,11 @@ gate. A recorded path outside that boundary keeps the resume parked the same way
 and the resume commit passes the finalize's committed-delta gate before it can be
 published: a committed path outside the boundary fails closed as
 ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA``, an uninspectable delta as
-``PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE``.
+``PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE``. That gate diffs from the
+finalize's operation start, the anchor the boundary was computed from, not the
+park's HEAD: the sink's protected-scope repair can self-commit before the
+baseline outage parks it, and the park's HEAD already holds that commit
+(PRRT_kwDOSJAM6s63OKfe).
 
 A park marked by a pre-push validation fix pass also records the pass's baseline
 (PRRT_kwDOSJAM6s63M6rz): the park skips the pass's post-sink ancestry check, so a
@@ -107,6 +111,16 @@ marks the park; absent for parks with no ownership boundary. It lives and leaves
 with the stranded-edits marker.
 """
 
+PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY: Final = (
+    "__awf_provider_park_stranded_edits_delta_anchor__"
+)
+"""Reserved ``MonitorState.threads_addressed_ids`` key: where the owned delta starts.
+
+The pre-push dirty finalize's operation-start HEAD, recorded with its ownership
+boundary; the resume's committed-delta gate diffs from it. Absent, the gate diffs
+from the park's HEAD. It lives and leaves with the stranded-edits marker.
+"""
+
 PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY: Final = (
     "__awf_provider_park_stranded_edits_baseline__"
 )
@@ -139,15 +153,17 @@ def mark_provider_park_stranded_edits(
     preserved_head: str | None,
     *,
     owned_paths: Collection[str] | None = None,
+    delta_anchor: str | None = None,
     baseline_head: str | None = None,
 ) -> None:
     """Record that a park left uncommitted repair edits for the resumed hint cycle.
 
     Evidence from an earlier park is dropped: the run loop's park sink records
     this park's (``record_provider_park_stranded_edits_evidence``). ``owned_paths``
-    is the ownership boundary the resume commit must stay inside, and
-    ``baseline_head`` the commit the resumed HEAD must descend from; an earlier
-    park's boundary or baseline never carries over.
+    is the ownership boundary the resume commit must stay inside, ``delta_anchor``
+    the commit that boundary's committed delta starts from, and ``baseline_head``
+    the commit the resumed HEAD must descend from; an earlier park's boundary,
+    anchor, or baseline never carries over.
     """
     if state is not None:
         threads_addressed = state.threads_addressed_ids
@@ -160,6 +176,10 @@ def mark_provider_park_stranded_edits(
             threads_addressed[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY] = json.dumps(
                 sorted(owned_paths)
             )
+        if delta_anchor is None:
+            threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, None)
+        else:
+            threads_addressed[PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY] = delta_anchor
         if baseline_head is None:
             threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY, None)
         else:
@@ -259,6 +279,9 @@ async def commit_provider_park_stranded_edits(
             operation_type=operation_type,
         )
         owned = _owned_boundary(state)
+        delta_anchor = state.threads_addressed_ids.get(
+            PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, preserved_head
+        )
         delta_gated = False
         if dirty is not None and dirty.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
             recorded = _recorded_identities(state)
@@ -294,6 +317,7 @@ async def commit_provider_park_stranded_edits(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     preserved_head=preserved_head,
+                    delta_anchor=delta_anchor,
                     owned=owned,
                 )
                 if unowned_result is not None:
@@ -327,6 +351,7 @@ async def commit_provider_park_stranded_edits(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     preserved_head=preserved_head,
+                    delta_anchor=delta_anchor,
                     owned=owned,
                 )
                 if unowned_result is not None:
@@ -350,6 +375,7 @@ async def commit_provider_park_stranded_edits(
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY, None)
+        state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, None)
         state.threads_addressed_ids.pop(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY, None)
         _log.info(
             "monitor.provider_park_stranded_edits_committed",
@@ -450,13 +476,15 @@ async def _unowned_committed_delta_result(
     workspace_id: str,
     worktree_path: Path,
     preserved_head: str,
+    delta_anchor: str,
     owned: set[str],
 ) -> _GitPushResult | None:
     """Fail closed when the resume commit holds paths outside the ownership boundary.
 
     The pre-push dirty finalize's committed-delta gate, applied to everything
-    committed on top of the park's HEAD (the sink's protected-scope repair can
-    self-commit); ``None`` when the whole delta is owned.
+    committed since ``delta_anchor`` — the finalize's operation start, so a
+    protected-scope repair self-commit from the parked sink or the resumed one is
+    inspected too; ``None`` when the whole delta is owned.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
         _committed_delta_paths,
@@ -465,9 +493,9 @@ async def _unowned_committed_delta_result(
 
     delta = (
         await _committed_delta_paths(
-            runner, worktree_path=worktree_path, operation_start_head=preserved_head
+            runner, worktree_path=worktree_path, operation_start_head=delta_anchor
         )
-        if preserved_head
+        if delta_anchor
         else None
     )
     if delta is None:
@@ -492,6 +520,7 @@ async def _unowned_committed_delta_result(
         workspace_id=workspace_id,
         reason_code=reason_code,
         preserved_head=preserved_head or None,
+        operation_start_head=delta_anchor or None,
         unowned_paths=unowned,
     )
     return _GitPushResult(
@@ -503,6 +532,7 @@ async def _unowned_committed_delta_result(
         details={
             "phase": "provider_park_resume",
             "preserved_head": preserved_head or None,
+            "operation_start_head": delta_anchor or None,
             "paths": unowned,
             "pushed": False,
         },
@@ -721,6 +751,7 @@ async def _drop_marker_from_workspace_row(
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY, None)
+        threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, None)
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY, None)
         if rewritten_head is not None:
             threads_addressed[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = rewritten_head
