@@ -8,6 +8,7 @@ resume push is rejected non-fast-forward.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -29,6 +30,13 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import operator_hints as operator_hints_module
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+    _path_identity,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeBaselineUnavailableError,
@@ -437,3 +445,101 @@ async def test_operator_hint_stranded_sink_park_keeps_original_resume_phase(
     assert state.pending_operator_hint is None
     assert captured["pr_number"] == 42
     assert captured["repo"] == RepoRef(owner="dimileeh", name="aira-web")
+
+
+@pytest.mark.unit
+async def test_operator_hint_stranded_sink_repark_refreshes_its_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The resumed sink's protected-scope repair rewrote a recorded file before its
+    # restore-verification fetch outlived its retries: the re-park must record what
+    # it now leaves dirty, or the next resume rejects the repair's own content as
+    # PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES (PRRT_kwDOSJAM6s63Quqs). The marker's
+    # HEAD, ownership boundary and fix-pass baseline carry over unchanged.
+    workspace_id = "ws_operator_hint_stranded_repark"
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    (worktree_path / "src").mkdir(parents=True)
+    (worktree_path / "src" / "fix.py").write_text("protected-scope repair content\n")
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_stranded_repark",
+        requested_at="2026-11-12T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.threads_addressed_ids.update(
+        {
+            PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: "abc1234567890def",
+            PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: json.dumps(
+                {"src/fix.py": "file:-:stale"}
+            ),
+            PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY: json.dumps(["src/fix.py"]),
+            PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY: "base567890abcdef",
+        }
+    )
+    events: list[tuple[str, dict[str, str]]] = []
+
+    async def _raise_baseline(*_args: object, **_kwargs: object) -> None:
+        raise ProtectedScopeBaselineUnavailableError("dns")
+
+    async def _not_moot(**_kwargs: object) -> None:
+        return None
+
+    async def _recorded_phase(_workspace_id: str) -> str | None:
+        return None
+
+    async def _guard(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PRE_EXISTING_DIRTY_WORKTREE",
+            details={"paths": ["src/fix.py"]},
+        )
+
+    async def _persist_state(_workspace_id: str, persisted: MonitorState) -> None:
+        events.append(("persist", dict(persisted.threads_addressed_ids)))
+
+    async def _parked(**_kwargs: object) -> _GitPushResult:
+        events.append(("park", {}))
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="parked",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            paused_into_blocked=True,
+        )
+
+    monkeypatch.setattr(
+        operator_hints_module, "commit_provider_park_stranded_edits", _raise_baseline
+    )
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _not_moot)
+    monkeypatch.setattr(runner, "_resolve_block_resume_phase", _recorded_phase)
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _guard)
+    monkeypatch.setattr(runner, "_persist_state", _persist_state)
+    monkeypatch.setattr(runner, "_protected_scope_diff_unavailable_push_result", _parked)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert [event for event, _ in events] == ["persist", "park"]
+    persisted = events[0][1]
+    assert json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY]) == {
+        "src/fix.py": _path_identity(worktree_path / "src" / "fix.py")
+    }
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == "abc1234567890def"
+    assert json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY]) == ["src/fix.py"]
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == "base567890abcdef"

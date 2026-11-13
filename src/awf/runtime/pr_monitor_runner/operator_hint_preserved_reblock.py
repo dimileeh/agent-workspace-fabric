@@ -1,10 +1,4 @@
-"""Preserved protected-commit re-block handling for operator-hint resumes.
-
-Extracted from :mod:`awf.runtime.pr_monitor_runner.operator_hints` so that module
-stays within the first-party file-line guardrail
-(``tests/unit/test_core_decomposition_maintainability.py``). Behavior is
-unchanged; the symbols are re-exported from ``operator_hints``.
-"""
+"""Re-block helpers for a preserved protected commit during operator-hint resumes."""
 
 from __future__ import annotations
 
@@ -13,29 +7,17 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.common.github_client import RepoRef
-from awf.control.blocked_transition import (
-    monitor_protected_scope_resume_origin,
-)
+from awf.control.blocked_transition import monitor_protected_scope_resume_origin
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.operator_hints import (
-    mark_operator_hint_needs_human,
-)
+from awf.runtime.operator_hints import mark_operator_hint_needs_human
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult, VerdictResult
-from awf.runtime.pr_monitor_runner.constants import (
-    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-)
-from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
-    _finalize_processed_operator_hint as _finalize_processed_operator_hint,
-)
-from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
-    _mark_referenced_needs_human_feedback_answered as _mark_referenced_needs_human_feedback_answered,
-)
+from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 
 
