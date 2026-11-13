@@ -112,3 +112,21 @@ async def test_polling_default_retries_a_transient_blip() -> None:
 
     assert state is ActionsRunsState.PENDING
     assert len(fake.calls) == 2
+
+
+@pytest.mark.unit
+async def test_a_full_page_of_completed_runs_cannot_prove_settlement() -> None:
+    from awf.common.github_client_actions import _RUN_LIST_LIMIT
+
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=0, stdout=_runs(*["completed"] * _RUN_LIST_LIMIT))
+
+    state = await GitHubClient(fake).fetch_actions_runs_state(
+        repo=_REPO, head_sha="deadbeef", retry=False
+    )
+
+    assert state is ActionsRunsState.PENDING
+    args = fake.calls[0].args
+    assert args[args.index("--limit") + 1] == str(_RUN_LIST_LIMIT)
+    below_limit = _runs(*["completed"] * (_RUN_LIST_LIMIT - 1))
+    assert await _state(below_limit) is ActionsRunsState.SETTLED

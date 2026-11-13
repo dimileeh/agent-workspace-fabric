@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from awf.common.github_client import GitHubClient, RepoRef
 
 _OPERATION = "list_actions_runs_for_sha"
+# ``gh run list`` returns newest runs first and stops at ``--limit``; a full page
+# may hide an older unsettled run, so it never proves settlement.
+_RUN_LIST_LIMIT = 1000
 
 
 async def fetch_actions_runs_state(
@@ -30,7 +33,8 @@ async def fetch_actions_runs_state(
     started. ``gh run list`` lists only Actions workflow runs; other apps' check
     suites never appear, so they cannot block. Any status other than
     ``completed`` is unsettled (fail-safe for future values). An empty list (no
-    Actions on this repo or head) is ``SETTLED``. A transport or shape error
+    Actions on this repo or head) is ``SETTLED``; a full ``_RUN_LIST_LIMIT`` page
+    is ``PENDING`` because older runs beyond it are unseen. A transport or shape error
     raises ``GitHubClientError``; the caller decides how to wait. ``retry=False``
     (the pre-merge recheck) fails fast, as for ``fetch_pr_status``.
     """
@@ -48,7 +52,7 @@ async def fetch_actions_runs_state(
             "--json",
             "databaseId,status",
             "--limit",
-            "100",
+            str(_RUN_LIST_LIMIT),
         ],
         operation=_OPERATION,
         retry_policy=RetryPolicy.READ if retry else RetryPolicy.NEVER,
@@ -61,6 +65,8 @@ async def fetch_actions_runs_state(
             returncode=0,
             stderr=f"expected a list of workflow runs, got: {str(runs)[:200]}",
         )
+    if len(runs) >= _RUN_LIST_LIMIT:
+        return ActionsRunsState.PENDING
     if any(str(run.get("status") or "").lower() != "completed" for run in runs):
         return ActionsRunsState.PENDING
     return ActionsRunsState.SETTLED
