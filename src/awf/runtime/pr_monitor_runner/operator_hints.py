@@ -1036,6 +1036,17 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
+        # A baseline-outage park with no recorded kept SHA has nothing to confirm on
+        # the remote, so a no-op push is no proof the repair landed either; mirror the
+        # idempotent no-op guard above (PRRT_kwDOSJAM6s63O2cy).
+        if baseline_park_pending and not hint.directive and not kept_head_sha:
+            reason = (
+                "baseline-outage park recorded no preserved HEAD; refusing to finalize a "
+                "no-op push without proof that the kept repair commit reached the remote "
+                "PR branch. Resume with a directive or restore the worktree, then resume."
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return cast(_GitPushResult, push_result)
         if not hint_parked:
             await _finalize_operator_hint_resume(
                 self,
