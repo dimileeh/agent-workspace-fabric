@@ -373,7 +373,7 @@ def _assignment_span_end_line(
     depth = 0
     continued = False
     complete = False
-    in_comment = False
+    comment_open = False
     last_code = start
     code_lines: list[str] = []
     for index in range(start - 1, len(scan_lines)):
@@ -381,16 +381,25 @@ def _assignment_span_end_line(
         if index == start - 1:
             scan = " " * column + scan[column:]
         raw = raw_lines[index]
-        # Code after the ``*/`` closing a comment gap opens a statement as a
-        # line starting in code would (PRRT_kwDOSJAM6s63UXPl).
-        in_code = starts_in_code[index - start + 1] or (in_comment and bool(scan.strip()))
+        # Code after the ``*/`` closing a block comment opens a statement as a
+        # line starting in code would (PRRT_kwDOSJAM6s63UXPl), even when the
+        # comment opened after code (PRRT_kwDOSJAM6s63Ukfg).
+        in_code = starts_in_code[index - start + 1] or (comment_open and bool(scan.strip()))
         # A JS/TS line holding only a block comment (or its continuation) is a
         # gap too: the expression may continue past it (PRRT_kwDOSJAM6s63QLb-).
         in_comment = (
             js_ts
             and index >= start
             and not scan.strip()
-            and (raw.lstrip().startswith("/*") if starts_in_code[index - start + 1] else in_comment)
+            and (
+                raw.lstrip().startswith("/*") if starts_in_code[index - start + 1] else comment_open
+            )
+        )
+        comment_open = (
+            js_ts
+            and index + 1 < len(scan_lines)
+            and not starts_in_code[index - start + 2]
+            and not _js_ts_line_ends_in_literal(raw_lines, index, path=path)
         )
         # A literal's line spelling ``// ...`` is its contents, not a comment
         # gap (PRRT_kwDOSJAM6s63UG07).

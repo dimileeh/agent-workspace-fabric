@@ -1164,6 +1164,24 @@ async def test_js_ts_label_binds_nothing(
             id="continuation-after-block-comment-close",
         ),
         pytest.param(
+            "export const LIMIT = 2 /* unrelated\n*/ export const OTHER = 1;\n",
+            2,
+            False,
+            id="statement-after-trailing-block-comment-close",
+        ),
+        pytest.param(
+            "export const LIMIT = 2 /* unrelated\n   note */\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="statement-after-trailing-multi-line-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = base /* scale\n */ .scaled(10);\n",
+            2,
+            True,
+            id="continuation-after-trailing-block-comment-close",
+        ),
+        pytest.param(
             "export const LIMIT = base\n  /* why */ .scaled(10);\n",
             2,
             True,
