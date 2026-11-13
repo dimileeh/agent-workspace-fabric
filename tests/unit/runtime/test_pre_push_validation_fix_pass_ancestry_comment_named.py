@@ -876,6 +876,27 @@ async def test_binding_ends_at_its_semicolon_boundary(
         pytest.param(
             "export const LIMIT = renew\nrun1();\n", 2, False, id="keyword-suffixed-identifier"
         ),
+        pytest.param(
+            "export const LIMIT = !\n    Boolean(10);\n",
+            2,
+            True,
+            id="trailing-unary-negation-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = !!\n    Boolean(10);\n",
+            2,
+            True,
+            id="trailing-double-negation-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value!\nrun1();\n", 2, False, id="non-null-assertion-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = items[0] !\nrun1();\n",
+            2,
+            False,
+            id="spaced-non-null-assertion-after-asi",
+        ),
         pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
         pytest.param(
             "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",
