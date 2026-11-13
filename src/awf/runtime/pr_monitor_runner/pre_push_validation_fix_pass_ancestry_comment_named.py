@@ -172,7 +172,9 @@ def _assignment_span_end_line(
     literal, so such a line is told apart from one the binding's own literal
     continues (PRRT_kwDOSJAM6s63MDQr). In JS/TS, where indentation is not scope,
     an indented line after a complete statement ends the span too
-    (PRRT_kwDOSJAM6s63PU_-).
+    (PRRT_kwDOSJAM6s63PU_-). A ``;`` outside brackets ends the statement on its
+    own line, so a ``;``-separated next statement's brackets are not the
+    binding's (PRRT_kwDOSJAM6s63Pd7z).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     raw_lines = file_text.splitlines()
@@ -206,6 +208,8 @@ def _assignment_span_end_line(
                 depth += 1
             elif char in ")]}":
                 depth = max(depth - 1, 0)
+            elif char == ";" and depth == 0:
+                return index + 1
         continued = scan.rstrip().endswith("\\")
         if not gap:
             complete = _js_ts_line_ends_statement(raw, scan)

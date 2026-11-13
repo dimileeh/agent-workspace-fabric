@@ -641,6 +641,31 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_INBOUND, "LIMIT = 10; OTHER = (\n    1\n)\n", 2, False, id="python-next"),
+        pytest.param(_INBOUND, "LIMIT = 10; OTHER = (\n    1\n)\n", 1, True, id="python-own"),
+        pytest.param(
+            _INBOUND, "LIMIT = (\n    1\n); OTHER = (\n    1\n)\n", 4, False, id="python-wrapped"
+        ),
+        pytest.param(
+            _WEB, "export const LIMIT = 10; const OTHER = [\n  1,\n];\n", 2, False, id="js-ts-next"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_binding_ends_at_its_semicolon_boundary(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A ``;``-separated next statement is not the binding's (PRRT_kwDOSJAM6s63Pd7z)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "expected"),
     [
         pytest.param(
