@@ -18,46 +18,11 @@ from typing import Any, Protocol
 
 import yaml
 
+from awf.hosted_node.checkpoint_contract import CONTRACT
 from awf.hosted_node.checkpoint_schemas import CHECKPOINT_SCHEMA_REVISION, CheckpointMarker
 from awf.hosted_node.identity import MaterialDeniedError
 
-TABLES = tuple(
-    sorted(
-        [
-            "alembic_version",
-            "workspaces",
-            "tasks",
-            "task_attempts",
-            "operations",
-            "validation_runs",
-            "resource_reservations",
-            "service_gc_requests",
-            "callback_deliveries",
-            "callback_subscriptions",
-            "merge_candidates",
-            "workspace_events",
-            "workspace_secret_leases",
-            "provider_model_circuit_breakers",
-            "provider_managed_keys",
-            "queue_decisions",
-            "pr_feedback_resolutions",
-            "stale_reasons",
-            "policy_findings",
-            "workspace_log_streams",
-            "egress_audit_records",
-            "operator_grant_audit_records",
-            "worker_heartbeats",
-            "work_slot_leases",
-            "hosted_owners",
-            "hosted_preparations",
-            "hosted_grants",
-            "hosted_receipts",
-            "hosted_node_lifecycle",
-            "hosted_restore_reconciliations",
-            "hosted_restore_row_holds",
-        ]
-    )
-)
+TABLES = CONTRACT.tables
 VALIDATOR_VERSION = "core-durable-cut.v1"
 
 

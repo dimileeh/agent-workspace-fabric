@@ -20,6 +20,7 @@ revision: str = "9e3b7c41d2a6"
 down_revision: str | Sequence[str] | None = "85ce3f9b2a61"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+destructive: bool = False
 
 _USD = sa.Numeric(14, 6)
 
