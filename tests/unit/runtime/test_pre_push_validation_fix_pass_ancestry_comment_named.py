@@ -973,6 +973,27 @@ async def test_js_ts_label_binds_nothing(
             "export const LIMIT = alias\nrun1();\n", 2, False, id="as-suffixed-identifier"
         ),
         pytest.param(
+            "export const LIMIT = value as Array<number>\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value as Map<string, Array<(a: number) => void>>\nrun1();\n",
+            2,
+            False,
+            id="nested-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = a < b >\n  c1;\n", 2, True, id="trailing-comparison-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = a >>\n  b1;\n", 2, True, id="trailing-shift-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = (a) =>\n  a1;\n", 2, True, id="trailing-arrow-continuation"
+        ),
+        pytest.param(
             "export const LIMIT = !\n    Boolean(10);\n",
             2,
             True,

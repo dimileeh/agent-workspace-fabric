@@ -200,7 +200,35 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
-    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
+    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or _js_ts_ends_type_arguments(code)
+
+
+def _js_ts_ends_type_arguments(code: str) -> bool:
+    """Whether ``code`` ends with the ``>`` closing a type-argument list (``Array<number>``).
+
+    The list's ``<`` must directly follow the type or callee name; a spaced
+    ``a < b >`` is a comparison, and a ``>`` of ``=>`` closes nothing
+    (PRRT_kwDOSJAM6s63TIld).
+    """
+    if not code.endswith(">") or code.endswith("=>"):
+        return False
+    angles = 0
+    depth = 0
+    for position in range(len(code) - 1, 0, -1):
+        char = code[position]
+        if char in ")]}":
+            depth += 1
+        elif char in "([{":
+            depth = max(depth - 1, 0)
+        elif depth or (char == ">" and code[position - 1] == "="):
+            continue
+        elif char == ">":
+            angles += 1
+        elif char == "<":
+            angles -= 1
+            if not angles:
+                return re.match(r"[\w$]", code[position - 1]) is not None
+    return False
 
 
 def _js_ts_type_parameter_list_end(logical: str, start: int) -> int | None:
