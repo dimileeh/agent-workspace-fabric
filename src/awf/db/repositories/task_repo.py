@@ -20,12 +20,24 @@ from awf.db.repositories.base import (
     resolve_session_dialect_name,
 )
 
+TASK_EXTERNAL_ID_CONFLICT_MESSAGE = (
+    "External task ID is already associated with a different "
+    "repo/base/task-class/owned-path/title scope; use a unique external "
+    "task ID for this backlog slice or retry the original scope."
+)
+
 
 class TaskExternalIdConflictError(ValueError):
-    """Raised when a caller reuses an external task id for a different task scope."""
+    """Raised when a caller reuses an external task id for a different task scope.
 
-    def __init__(self, external_id: str) -> None:
+    ``mismatched_fields`` names which compared fields differ, drawn from a fixed
+    vocabulary (``repo``, ``base``, ``task_class``, ``owned_paths``, ``title``,
+    ``external_id``). It never carries stored or requested values.
+    """
+
+    def __init__(self, external_id: str, mismatched_fields: Iterable[str] = ()) -> None:
         self.external_id = external_id
+        self.mismatched_fields = tuple(sorted(set(mismatched_fields)))
         super().__init__(
             f"External task id {external_id!r} already belongs to a different task scope."
         )
@@ -122,16 +134,17 @@ class TaskRepository:
                 # while the caller supplies a different explicit external_id.
                 # Reusing would leave workspace.task_external_id diverged from
                 # task.external_id; refuse rather than corrupt identity.
-                raise TaskExternalIdConflictError(external_id)
-            if not _task_scope_matches(
+                raise TaskExternalIdConflictError(external_id, ("external_id",))
+            mismatched_fields = _task_scope_mismatched_fields(
                 existing,
                 repo_url=repo_url,
                 base_branch=base_branch,
                 task_class=task_class,
                 owned_paths=owned_paths,
                 title=title,
-            ):
-                raise TaskExternalIdConflictError(external_id)
+            )
+            if mismatched_fields:
+                raise TaskExternalIdConflictError(external_id, mismatched_fields)
         if existing.external_id is None and external_id is not None:
             existing.external_id = external_id
         if existing.idempotency_key is None and idempotency_key is not None:
@@ -176,7 +189,7 @@ class TaskRepository:
         return None
 
 
-def _task_scope_matches(
+def _task_scope_mismatched_fields(
     task: Task,
     *,
     repo_url: str,
@@ -184,14 +197,20 @@ def _task_scope_matches(
     task_class: str | None,
     owned_paths: list[str],
     title: str | None = None,
-) -> bool:
-    return (
-        task.repo_url == repo_url
-        and task.base_branch == base_branch
-        and task.task_class == task_class
-        and list(task.owned_paths) == list(owned_paths)
-        and (title is None or task.title == title)
-    )
+) -> tuple[str, ...]:
+    """Return the sorted names of scope fields that differ from ``task``."""
+    mismatched = {
+        name
+        for name, matches in (
+            ("repo", task.repo_url == repo_url),
+            ("base", task.base_branch == base_branch),
+            ("task_class", task.task_class == task_class),
+            ("owned_paths", list(task.owned_paths) == list(owned_paths)),
+            ("title", title is None or task.title == title),
+        )
+        if not matches
+    }
+    return tuple(sorted(mismatched))
 
 
 class TaskAttemptRepository:

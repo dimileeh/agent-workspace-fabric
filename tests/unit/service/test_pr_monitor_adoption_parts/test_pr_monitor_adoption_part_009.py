@@ -19,7 +19,7 @@ from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.github_client import RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Task, Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import TaskExternalIdConflictError, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service import pr_monitor_adoption_helpers as adoption_helpers
@@ -157,6 +157,21 @@ class TestAdoptionForgeGates:
         assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
         assert excinfo.value.detail["requested_forge"] == "bitbucket"
         assert excinfo.value.detail["existing_forge"] == "github"
+
+
+class TestTaskExternalIdConflictMapping:
+    @pytest.mark.unit
+    def test_conflict_error_carries_mismatched_fields_and_redacts_external_id(self) -> None:
+        error = adoption_helpers._task_external_id_conflict_error(
+            TaskExternalIdConflictError(
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789", ("title", "base")
+            )
+        )
+
+        assert error.error_code == "TASK_EXTERNAL_ID_CONFLICT"
+        assert "repo/base/task-class/owned-path/title scope" in error.message
+        assert error.detail["mismatched_fields"] == ["base", "title"]
+        assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in str(error.detail)
 
 
 class TestSharedOwnershipAndAllocation:

@@ -988,12 +988,53 @@ class TestWorkspaceCreateProviderReadinessPreflight:
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
                 "External task ID is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique external "
+                "repo/base/task-class/owned-path/title scope; use a unique external "
                 "task ID for this backlog slice or retry the original scope."
             ),
-            "detail": {"external_id": "WAVE-1"},
+            "detail": {"external_id": "WAVE-1", "mismatched_fields": ["owned_paths", "title"]},
         }
         _assert_no_internal_error_fields(body)
+
+    @pytest.mark.unit
+    async def test_v2_external_id_reuse_with_new_title_reports_title_mismatch(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_codex_auth_env(monkeypatch)
+        first_payload = _v2_body(title="docs slice", owned_paths=["docs/**"])
+        first_payload["task"]["external_id"] = "WAVE-TITLE"  # type: ignore[index]
+        second_payload = _v2_body(title="renamed slice", owned_paths=["docs/**"])
+        second_payload["task"]["external_id"] = "WAVE-TITLE"  # type: ignore[index]
+
+        first = await client.post("/v1/workspaces", json=first_payload)
+        second = await client.post("/v1/workspaces", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+        body = second.json()
+        assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+        assert "title" in body["message"]
+        assert body["detail"] == {"external_id": "WAVE-TITLE", "mismatched_fields": ["title"]}
+        assert "docs slice" not in json.dumps(body)
+        assert "renamed slice" not in json.dumps(body)
+        _assert_no_internal_error_fields(body)
+
+    @pytest.mark.unit
+    async def test_v2_external_id_reuse_with_identical_scope_still_accepted(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_codex_auth_env(monkeypatch)
+        payload = _v2_body(title="docs slice", owned_paths=["docs/**"])
+        payload["task"]["external_id"] = "WAVE-SAME"  # type: ignore[index]
+
+        first = await client.post("/v1/workspaces", json=payload)
+        second = await client.post("/v1/workspaces", json=payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 202
 
     @pytest.mark.unit
     async def test_v2_external_id_scope_conflict_rolls_back_rejected_workspace(
