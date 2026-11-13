@@ -395,6 +395,9 @@ async def _run_item_verdict_protocol(
     # handlers, so the cancellation branch below must read this as "the floor is
     # protected — do not rewind" (PRRT_kwDOSJAM6s6fylWD).
     timeout_preservation_protected: list[str] = []
+    # Non-empty once a baseline-outage park has claimed this attempt's repair; the
+    # cancellation branch below must not rewind it either (PRRT_kwDOSJAM6s63O77x).
+    baseline_park_preservation_claimed: list[bool] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
         """Commit a reran-over timed-out run's uncommitted edits (#932).
@@ -1024,6 +1027,7 @@ async def _run_item_verdict_protocol(
                     worktree_path=worktree_path,
                     state=state,
                     rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+                    preservation_claimed=baseline_park_preservation_claimed,
                 ):
                     raise
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
@@ -1443,6 +1447,16 @@ async def _run_item_verdict_protocol(
             # *before* raising its ``AgentRunError``, so the timeout was
             # classified but no handler here ever saw it
             # (PRRT_kwDOSJAM6s6f0n6B).
+            if baseline_park_preservation_claimed:
+                # A baseline-outage park kept this repair and finished its marker
+                # under a shield before handing the cancellation on.
+                _log.warning(
+                    "monitor.agent_verdict_cancellation_preserved_baseline_park_repair",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                )
+                raise
             cancelled_timeout_reason_code = cancellation_agent_timeout_reason_code(cancel_exc)
             if timeout_preservation_protected or cancelled_timeout_reason_code is not None:
                 if cancelled_timeout_reason_code is not None and not timeout_preservation_protected:

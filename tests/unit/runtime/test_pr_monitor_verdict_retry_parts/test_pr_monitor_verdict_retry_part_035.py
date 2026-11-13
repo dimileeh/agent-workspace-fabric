@@ -12,8 +12,10 @@ persisted before the error reaches the park, as the CI repair does.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -164,3 +166,104 @@ async def test_baseline_outage_with_unreadable_head_still_keeps_repair(
     assert runner.reset_targets == []
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == ""
     assert len(runner.persisted) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cancel_during", ["head_read", "persist"])
+async def test_cancellation_during_baseline_park_preservation_keeps_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_during: str,
+) -> None:
+    """A worker cancelled mid-preservation keeps the repair and finishes the marker.
+
+    The preservation awaits a HEAD read, the evidence recording, and the state
+    write; a cancellation landing in any of them used to reach the cancellation
+    branch, which rewound to the floor and deleted the repair the park keeps
+    (PRRT_kwDOSJAM6s63O77x).
+    """
+    runner = _runner(tmp_path, ProtectedScopeBaselineUnavailableError("PR branch fetch failed"))
+    state = MonitorState()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    read_head = comment_verdict_baseline_park.read_protocol_attempt_start_head
+
+    async def _blocking_head_read(*args: Any, **kwargs: Any) -> str | None:
+        entered.set()
+        await release.wait()
+        return await read_head(*args, **kwargs)
+
+    async def _blocking_persist(workspace_id: str, state: MonitorState) -> None:
+        entered.set()
+        await release.wait()
+        runner.persisted.append((workspace_id, dict(state.threads_addressed_ids)))
+
+    if cancel_during == "head_read":
+        monkeypatch.setattr(
+            comment_verdict_baseline_park, "read_protocol_attempt_start_head", _blocking_head_read
+        )
+    else:
+        runner._persist_state = _blocking_persist
+
+    task = asyncio.create_task(_invoke(runner, state))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # No rollback: the repair's commit and its dirty edit both survive.
+    assert runner.reset_targets == []
+    assert runner.current_head == _REPAIR_HEAD
+    assert (tmp_path / "ws_protocol" / "fix.py").read_text() == "fixed = True\n"
+    # The preservation finished, so the persisted marker describes this worktree.
+    assert len(runner.persisted) == 1
+    _, persisted = runner.persisted[0]
+    assert persisted[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _REPAIR_HEAD
+    assert list(json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])) == [
+        "fix.py"
+    ]
+
+
+@pytest.mark.unit
+async def test_cancelled_baseline_park_preservation_write_failure_keeps_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state write that fails under a pending cancellation is logged, not raised."""
+    runner = _runner(tmp_path, ProtectedScopeBaselineUnavailableError("PR branch fetch failed"))
+    state = MonitorState()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    async def _failing_persist(_workspace_id: str, _state: MonitorState) -> None:
+        entered.set()
+        await release.wait()
+        raise OSError("database unavailable")
+
+    def _warning(event: str, **fields: Any) -> None:
+        warnings.append((event, fields))
+
+    runner._persist_state = _failing_persist
+    monkeypatch.setattr(comment_verdict_baseline_park._log, "warning", _warning)
+
+    task = asyncio.create_task(_invoke(runner, state))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert runner.reset_targets == []
+    assert runner.current_head == _REPAIR_HEAD
+    assert warnings == [
+        (
+            "monitor.agent_verdict_cancelled_baseline_park_preserve_failed",
+            {"workspace_id": "ws_protocol", "exc_type": "OSError"},
+        )
+    ]
