@@ -641,6 +641,26 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
 
 
 @pytest.mark.parametrize(
+    ("line", "new", "expected"),
+    [
+        pytest.param(3, "  2", False, id="arrow-parameter-is-not-a-target"),
+        pytest.param(1, "export const LIMIT = 20;", True, id="own-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_chained_assignment_target_excludes_an_arrow(
+    line: int, new: str, *, expected: bool
+) -> None:
+    """The ``=`` of ``=>`` binds no arrow parameter (PRRT_kwDOSJAM6s63VYOS)."""
+    text = "export const LIMIT = 10;\nconst unrelated = LIMIT => (\n  1\n);\n"
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{new}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "new", "name", "expected"),
     [
         pytest.param(

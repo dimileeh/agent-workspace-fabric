@@ -97,8 +97,9 @@ _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
     rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
 )
 # A further target of a chained binding (``A = B = 10``), matched right after
-# the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9).
-_CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
+# the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9). An arrow's ``=>`` binds
+# no parameter at module scope (PRRT_kwDOSJAM6s63VYOS).
+_CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?![=>])")
 # A Python logical line whose ``;``-separated later statements bind nothing at
 # module scope: an indented one, or a compound head whose body follows its ``:``
 # (PRRT_kwDOSJAM6s63Sh3G).
