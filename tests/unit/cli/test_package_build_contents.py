@@ -177,6 +177,15 @@ def test_wheel_excludes_generated_console_artifacts(built: BuiltDistributions) -
         assert not _present(names, f"{_WHEEL_ASSET_ROOT}/{relative}"), relative
 
 
+def test_wheel_ships_checkpoint_contract(built: BuiltDistributions) -> None:
+    """The checkpoint contract JSON loaded via importlib.resources ships byte-exact."""
+    relative = "awf/hosted_node/checkpoint_contract.json"
+    with zipfile.ZipFile(built.wheel) as archive:
+        assert relative in archive.namelist()
+        packaged = archive.read(relative)
+    assert packaged == (REPO_ROOT / "src" / relative).read_bytes()
+
+
 def test_wheel_excludes_compose_secret_env(built: BuiltDistributions) -> None:
     """The secret-bearing compose ``.env`` is never packaged into the wheel."""
     names = _wheel_names(built.wheel)

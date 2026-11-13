@@ -16,6 +16,7 @@ revision: str = "e8f9a0b1c2d3"
 down_revision: str | Sequence[str] | None = "d6e7f8a9b0c1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+destructive: bool = True
 
 _INDEX_DDL_LOCK_NAMESPACE = 0x415746
 _INDEX_DDL_LOCK_KEY = 0x45564F52
