@@ -414,6 +414,13 @@ async def _execute(
                 "pr_head_not_synchronized": (
                     "GitHub has not synchronized the PR head with the pushed branch yet."
                 ),
+                "actions_runs_pending": (
+                    "GitHub Actions workflow runs for the PR head are still queued or running."
+                ),
+                "actions_runs_unknown": (
+                    "AWF could not read GitHub Actions workflow runs for the PR head; "
+                    "waiting instead of certifying."
+                ),
             }.get(action.reason, "GitHub has not reported a stable mergeable state."),
             reason_code="CHECK_WAIT",
             pr_number=pr_number,

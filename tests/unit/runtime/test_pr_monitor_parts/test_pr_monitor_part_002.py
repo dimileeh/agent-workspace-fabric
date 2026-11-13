@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor import (
     _review_thread_needs_attention,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 
 def _thread(
@@ -99,6 +100,7 @@ def _status(
         closed=closed,
         merged=merged,
         outdated_unresolved_inline_threads=outdated,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

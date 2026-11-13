@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -52,6 +53,7 @@ def _mergeable_status() -> PRStatus:
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         checks=(),
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 
@@ -106,6 +108,13 @@ class _MergeMethodClient:
         self.expected_repo = repo
         self.expected_pr_number = pr_number
         self.expected_base_branch = base_branch
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Report every GitHub Actions run for the head completed (#1230)."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def fetch_pr_status(
         self,

@@ -1122,7 +1122,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     9.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
         protected states can represent missing approval or branch-protection
         hooks even when there is no unresolved review thread to address.
-    10. All green → Merge (or NotifyHuman if auto_merge=False).
+    10. Head Actions run unsettled → WaitForCI (#1230); else Merge (NotifyHuman w/o auto_merge).
 
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
@@ -1477,10 +1477,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="awaiting_required_checks")
 
-    # 9. GitHub may report BLOCKED / HAS_HOOKS because required approval,
-    # protected hooks, or maintainer-controlled review state has not cleared.
-    # A rejected merge would only confirm the same protected-state blocker,
-    # so hand off instead of probing GitHub every poll.
+    # 9. BLOCKED / HAS_HOOKS can mean required approval, protected hooks, or
+    # maintainer-controlled review state has not cleared; a merge would only be
+    # rejected on that same blocker, so hand off instead of probing every poll.
     if status.merge_state_status in (
         MergeStateStatus.BLOCKED,
         MergeStateStatus.HAS_HOOKS,
@@ -1493,7 +1492,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if merge_method_blocker:
         return NotifyHuman(message=merge_method_blocker)
 
-    # 10. All green — terminal success action.
+    # 10. Green only once no GitHub Actions run for the head is unsettled (#1230).
+    if status.actions_runs_wait_reason is not None:
+        return WaitForCI(reason=status.actions_runs_wait_reason)
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

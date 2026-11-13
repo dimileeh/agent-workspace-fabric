@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import overload
+from typing import Literal, overload
 
 # ── Wire-shape dataclasses — what the runner assembles after polling GH ────
 
@@ -71,6 +71,17 @@ class CheckState(StrEnum):
     FAILURE = "FAILURE"
     PENDING = "PENDING"
     NEUTRAL = "NEUTRAL"
+
+
+class ActionsRunsState(StrEnum):
+    """Whether every GitHub Actions workflow run for the PR head has completed (#1230)."""
+
+    UNKNOWN = "UNKNOWN"
+    """Not fetched, or the fetch failed — wait."""
+    PENDING = "PENDING"
+    """At least one Actions run for the head is not ``completed`` — wait."""
+    SETTLED = "SETTLED"
+    """Every Actions run for the head completed, or the head has none — no block."""
 
 
 DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = (
@@ -357,6 +368,26 @@ class PRStatus:
     outdated-resolution hygiene path that resolves AWF-closed conversations
     after the fix cycle has recorded evidence.
     """
+    actions_runs: ActionsRunsState = ActionsRunsState.UNKNOWN
+    """Settlement of the GitHub Actions workflow runs for ``head_sha`` (#1230).
+
+    The ``statusCheckRollup`` omits a workflow run that is still queued with zero
+    jobs, so a rollup holding only fast third-party checks can report SUCCESS
+    while the head's own CI has not started. Populated by the RUNNER in
+    ``_fetch_status_for_decision`` from ``gh run list --commit``. The default
+    ``UNKNOWN`` is the SAFE value ("wait"), so a forgotten populate never
+    certifies. Consumed only by ``decide`` right before the merge-ready gate."""
+
+    @property
+    def actions_runs_wait_reason(
+        self,
+    ) -> Literal["actions_runs_pending", "actions_runs_unknown"] | None:
+        """``WaitForCI`` reason while an Actions run for the head may be unsettled (#1230)."""
+        if self.actions_runs is ActionsRunsState.SETTLED:
+            return None
+        if self.actions_runs is ActionsRunsState.PENDING:
+            return "actions_runs_pending"
+        return "actions_runs_unknown"
 
     @property
     def canonical_unresolved_inline_threads(self) -> tuple[ReviewThread, ...]:

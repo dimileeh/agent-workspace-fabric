@@ -94,3 +94,14 @@ async def test_review_thread_audit_is_reported_unsupported(thread_id: str | None
     assert audit.viewer_login is None
     assert audit.threads == ()
     assert fake.requests == []
+
+
+async def test_actions_runs_state_is_settled_without_a_request() -> None:
+    """#1230: Bitbucket has no GitHub Actions; pipelines already fold into check_state."""
+    from awf.runtime.pr_monitor_models import ActionsRunsState
+
+    fake = FakeBitbucket()
+    client = make_client(fake)
+    state = await client.fetch_actions_runs_state(repo=repo(), head_sha="abc", retry=False)
+    assert state is ActionsRunsState.SETTLED
+    assert fake.requests == []

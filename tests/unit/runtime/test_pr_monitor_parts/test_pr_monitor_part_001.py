@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor import (
     _mark_review_thread_addressed,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 
 def _thread(
@@ -82,6 +83,7 @@ def _status(
     ci_failures: tuple[CheckFailure, ...] = (),
     closed: bool = False,
     merged: bool = False,
+    actions_runs: ActionsRunsState = ActionsRunsState.SETTLED,
 ) -> PRStatus:
     return PRStatus(
         number=42,
@@ -100,6 +102,7 @@ def _status(
         ci_failures=ci_failures,
         closed=closed,
         merged=merged,
+        actions_runs=actions_runs,
     )
 
 
