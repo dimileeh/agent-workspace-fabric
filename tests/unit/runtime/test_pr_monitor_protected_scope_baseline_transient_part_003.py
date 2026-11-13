@@ -294,3 +294,71 @@ async def test_baseline_park_resume_no_op_refuses_without_a_recorded_kept_commit
     assert "no preserved HEAD" in (state.pending_operator_hint.status_reason or "")
     # Not finalized: the park stays unsettled for the operator.
     assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True
+
+
+@pytest.mark.unit
+async def test_baseline_park_resume_no_op_push_refuses_without_a_recorded_kept_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-op-push fall-through must not finalize a park with no kept SHA either.
+
+    When the early empty-diff check does not fire (a diff/fetch failure or a
+    non-empty diff) and the push then no-ops, there is still no recorded commit to
+    prove the kept repair landed (PRRT_kwDOSJAM6s63O2cy).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
+    await _park(factory, tmp_path, workspace_id, cmd)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_unrecorded_push",
+        requested_at="2026-11-13T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _none(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _diff_unavailable(**_kwargs: object) -> bool:
+        return False
+
+    async def _up_to_date(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _none)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _none)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _none)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _diff_unavailable)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _up_to_date)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "no preserved HEAD" in (state.pending_operator_hint.status_reason or "")
+    # Not finalized: the park stays unsettled for the operator.
+    assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True

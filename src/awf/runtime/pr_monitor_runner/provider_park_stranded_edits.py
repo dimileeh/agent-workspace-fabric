@@ -358,7 +358,11 @@ async def commit_provider_park_stranded_edits(
                     return unowned_result
             # The worktree is clean, so re-parenting cannot discard anyone's edits.
             baseline_result = await _keep_fix_pass_baseline(
-                runner, workspace_id=workspace_id, worktree_path=worktree_path, state=state
+                runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                state=state,
+                parked_head=preserved_head,
             )
             if baseline_result is not None:
                 return baseline_result
@@ -564,12 +568,15 @@ async def _keep_fix_pass_baseline(
     workspace_id: str,
     worktree_path: Path,
     state: MonitorState,
+    parked_head: str,
 ) -> _GitPushResult | None:
     """Keep the resumed HEAD on the fix pass's baseline; ``None`` once it descends.
 
     The fix pass's post-sink ancestry check, applied to the clean resumed worktree:
     a non-descendant HEAD's tree is re-parented onto the baseline, and a rewrite
-    with no net change is reset to the baseline, so the push never drops it.
+    with no net change is reset to the baseline, so the push never drops it. The
+    replacement is keyed to ``parked_head``, not the resumed HEAD: the resume's own
+    stranded-edits commit sits between them (PRRT_kwDOSJAM6s63OyKh).
     """
     baseline = state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY)
     if not baseline:
@@ -603,7 +610,7 @@ async def _keep_fix_pass_baseline(
             failure_reason = None if reset.ok else _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
         if failure_reason is None:
             state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = json.dumps(
-                {"from": head, "to": new_head or baseline}
+                {"from": parked_head or head, "to": new_head or baseline}
             )
             _log.info(
                 "monitor.provider_park_resume_reparented",
