@@ -7,7 +7,9 @@ in ``blocked``, promising to keep the unpushed repair (#1221). The verdict
 protocol used to roll the item back first, so the park recorded the rolled-back
 HEAD and the resume had nothing to continue (PRRT_kwDOSJAM6s63N-C1). The repair's
 commits and edits now stay, and the stranded-edit marker and evidence are
-persisted before the error reaches the park, as the CI repair does.
+persisted before the error reaches the park, as the CI repair does. Only those
+keys are written: the full state can still hold earlier items' unpushed
+``fix_committed`` markers (PRRT_kwDOSJAM6s63UyV-).
 """
 
 from __future__ import annotations
@@ -38,6 +40,18 @@ _ITEM_START_HEAD = "a" * 40
 _REPAIR_HEAD = "b" * 40
 
 
+@pytest.fixture(autouse=True)
+def _record_stranded_edits_persist(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _persist_marker(
+        runner: _VerdictRunner, *, workspace_id: str, state: MonitorState
+    ) -> None:
+        runner.persisted.append((workspace_id, dict(state.threads_addressed_ids)))
+
+    monkeypatch.setattr(
+        comment_verdict_baseline_park, "persist_stranded_edits_marker", _persist_marker
+    )
+
+
 def _runner(tmp_path: Path, exc: ProtectedScopeDiffError) -> _VerdictRunner:
     """A FIXED repair whose commit sink raises ``exc`` with the edit still dirty."""
     worktree = tmp_path / "ws_protocol"
@@ -66,8 +80,8 @@ def _runner(tmp_path: Path, exc: ProtectedScopeDiffError) -> _VerdictRunner:
             details={"paths": ["fix.py"]},
         )
 
-    async def _persist_state(workspace_id: str, state: MonitorState) -> None:
-        runner.persisted.append((workspace_id, dict(state.threads_addressed_ids)))
+    async def _persist_state(_workspace_id: str, _state: MonitorState) -> None:
+        raise AssertionError("a full state flush would persist unpushed batch verdicts")
 
     runner._commit_dirty_worktree = _raise_during_commit
     runner._pre_existing_dirty_repair_worktree_result = _dirty_result
@@ -193,7 +207,9 @@ async def test_cancellation_during_baseline_park_preservation_keeps_repair(
         await release.wait()
         return await read_head(*args, **kwargs)
 
-    async def _blocking_persist(workspace_id: str, state: MonitorState) -> None:
+    async def _blocking_persist(
+        _runner: _VerdictRunner, *, workspace_id: str, state: MonitorState
+    ) -> None:
         entered.set()
         await release.wait()
         runner.persisted.append((workspace_id, dict(state.threads_addressed_ids)))
@@ -203,7 +219,9 @@ async def test_cancellation_during_baseline_park_preservation_keeps_repair(
             comment_verdict_baseline_park, "read_protocol_attempt_start_head", _blocking_head_read
         )
     else:
-        runner._persist_state = _blocking_persist
+        monkeypatch.setattr(
+            comment_verdict_baseline_park, "persist_stranded_edits_marker", _blocking_persist
+        )
 
     task = asyncio.create_task(_invoke(runner, state))
     await entered.wait()
@@ -239,7 +257,9 @@ async def test_cancelled_baseline_park_preservation_write_failure_keeps_cancella
     release = asyncio.Event()
     warnings: list[tuple[str, dict[str, Any]]] = []
 
-    async def _failing_persist(_workspace_id: str, _state: MonitorState) -> None:
+    async def _failing_persist(
+        _runner: _VerdictRunner, *, workspace_id: str, state: MonitorState
+    ) -> None:
         entered.set()
         await release.wait()
         raise OSError("database unavailable")
@@ -247,7 +267,9 @@ async def test_cancelled_baseline_park_preservation_write_failure_keeps_cancella
     def _warning(event: str, **fields: Any) -> None:
         warnings.append((event, fields))
 
-    runner._persist_state = _failing_persist
+    monkeypatch.setattr(
+        comment_verdict_baseline_park, "persist_stranded_edits_marker", _failing_persist
+    )
     monkeypatch.setattr(comment_verdict_baseline_park._log, "warning", _warning)
 
     task = asyncio.create_task(_invoke(runner, state))
