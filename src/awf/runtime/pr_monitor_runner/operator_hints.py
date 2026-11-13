@@ -780,6 +780,21 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+        # A baseline-outage park whose HEAD was unresolvable recorded no kept SHA, so
+        # the check above passed on the empty diff alone: refuse to finalize it as
+        # published without proof (PRRT_kwDOSJAM6s63OKfO).
+        if (
+            baseline_park_pending
+            and not hint.directive
+            and not (preserved_head_sha or baseline_park_head_sha)
+        ):
+            reason = (
+                "baseline-outage park recorded no preserved HEAD; refusing to finalize an "
+                "empty-diff no-op without proof that the kept repair commit reached the "
+                "remote PR branch. Resume with a directive or restore the worktree, then resume."
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
