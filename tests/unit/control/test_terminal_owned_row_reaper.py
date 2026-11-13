@@ -25,6 +25,7 @@ from awf.db.models import (
 )
 from awf.db.session import make_session_factory
 from awf.hosted_node.lifecycle_store import quiescence_blockers
+from awf.hosted_node.restore_reconciliation_models import RestoreReconciliationRow, RestoreRowHold
 from tests.unit.hosted_node.test_quiescence_blockers import (
     delivery,
     lease,
@@ -235,6 +236,52 @@ async def test_recent_retry_callback_is_left_to_its_dispatcher(factory):
     await reap_terminal_owned_rows(reaper_worker(factory), limit=200)
     state = await snapshot(factory)
     assert state["callback"] == "pending" and state["operation"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("family", "row_id"),
+    [("callback_deliveries", "cbd_ws_reap_pending"), ("callback_subscriptions", "cbs_quiescence")],
+)
+async def test_restore_held_callback_is_left_while_other_rows_are_reaped(factory, family, row_id):
+    await seed(factory)
+    async with factory.begin() as session:
+        session.add(
+            RestoreReconciliationRow(
+                id="journal",
+                owner="owner/node",
+                restore_id="restore",
+                idempotency_key="restore",
+                receipt_ref="evidence",
+                identity={},
+                binding={},
+                prior_revision=0,
+                revision=1,
+                authority_revision=1,
+                inventory_sha256="a" * 64,
+                plan_sha256="b" * 64,
+                inventory={},
+                plan={},
+                state="committed",
+                expires_at=datetime.now(UTC) + timedelta(minutes=1),
+            )
+        )
+        await session.flush()
+        session.add(
+            RestoreRowHold(
+                owner="owner/node",
+                restore_id="restore",
+                family=family,
+                row_id=row_id,
+                preimage_sha256="a" * 64,
+                reason_code="RESTORE_OUTCOME_UNRESOLVED",
+                state="held",
+                journal_id="journal",
+            )
+        )
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=200)
+    state = await snapshot(factory)
+    assert state["callback"] == "pending" and state["operation"] == "failed"
+    assert "callback_delivery" not in {event["kind"] for event in state["events"]}
 
 
 @pytest.mark.parametrize("locked", ["workspace", "operation", "lease", "reservation"])

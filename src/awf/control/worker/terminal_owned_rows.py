@@ -30,7 +30,10 @@ from awf.db.models import (
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.repositories.base import _SECRET_LEASE_REVOCABLE_STATUSES
 from awf.db.repositories.quality_repo import ResourceReservationRepository
-from awf.db.repositories.workspace_recovery import recovery_allows_work
+from awf.db.repositories.workspace_recovery import (
+    recovery_allows_work,
+    restore_callback_allows_work,
+)
 from awf.db.repositories.workspace_repo_callbacks import CallbackDeliveryRepository
 from awf.db.session import session_scope
 from awf.service.secret_leases import SecretLeaseService
@@ -79,9 +82,11 @@ def _attempts(workspace_id: Any) -> Any:
 def _callbacks(workspace_id: Any, overdue: datetime) -> Any:
     # In-flight or backing-off deliveries stay with their dispatcher, so a
     # terminal notification is never dropped while it can still be sent.
+    # Restore-held deliveries/subscriptions stay with restore reconciliation.
     return select(CallbackDelivery).where(
         CallbackDelivery.workspace_id == workspace_id,
         CallbackDelivery.status == "pending",
+        restore_callback_allows_work(),
         or_(
             CallbackDelivery.next_attempt_at.is_(None),
             CallbackDelivery.next_attempt_at <= overdue,
