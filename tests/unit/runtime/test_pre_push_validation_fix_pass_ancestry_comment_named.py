@@ -803,6 +803,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             False,
             id="new-statement-after-declaration-block-comment",
         ),
+        pytest.param(
+            "const OTHER =\n`a\nb`\nconst LIMIT = 1;\n",
+            4,
+            "const LIMIT = 2;",
+            "LIMIT",
+            True,
+            id="declaration-after-semicolon-free-multiline-template",
+        ),
+        pytest.param(
+            "const OTHER =\n`a\nb`\nconst LIMIT = 1;\n",
+            4,
+            "const LIMIT = 2;",
+            "OTHER",
+            False,
+            id="semicolon-free-multiline-template-ends-declaration",
+        ),
     ],
 )
 @pytest.mark.unit

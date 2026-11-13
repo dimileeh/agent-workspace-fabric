@@ -439,7 +439,8 @@ def _module_level_assignment_spans(
     declarator list read past a trailing ``,`` and any gap after it
     (PRRT_kwDOSJAM6s63QfAU) or a next line leading with a continuation
     (PRRT_kwDOSJAM6s63TOG5) or continuing a multi-line literal
-    (PRRT_kwDOSJAM6s63TdLt). Each ``;``-separated statement of a line binds over
+    (PRRT_kwDOSJAM6s63TdLt), which ends on the line closing it even with no
+    ``;`` (PRRT_kwDOSJAM6s63Tr7E). Each ``;``-separated statement of a line binds over
     its own lines too, unless the line is a Python compound head's body
     (PRRT_kwDOSJAM6s63Sh3G).
     """
@@ -485,7 +486,13 @@ def _module_level_assignment_spans(
                 and not in_body
                 and index + 1 < len(scan_lines)
                 and not (
-                    scan.strip()
+                    (
+                        scan.strip()
+                        or (
+                            not starts_in_code[index]
+                            and _js_ts_line_ends_in_literal(raw_lines, index - 1, path=path)
+                        )
+                    )
                     and _js_ts_line_ends_statement(raw_lines[index], scan, typescript=typescript)
                     and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
                     and (
