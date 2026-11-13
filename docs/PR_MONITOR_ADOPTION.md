@@ -215,7 +215,7 @@ to use the generated repo/PR adoption identity, and omit `task_class` to leave
 the class unset. Changing either value on a live adoption returns
 `PR_ADOPTION_POLICY_CONFLICT`. An explicit `external_id` that already belongs to
 a different task scope returns `TASK_EXTERNAL_ID_CONFLICT` instead of attaching
-or creating under the wrong identity. `detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values).
+or creating under the wrong identity. `detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values). It is `["external_id"]` alone when the request's saved key (idempotency key) resolves to a task already stamped with a different explicit `external_id`.
 
 Terminal adoption retries: destroyed, destroying, cancelled, failed, completed,
 and superseded adoption rows are not reused as live monitor attachments. AWF

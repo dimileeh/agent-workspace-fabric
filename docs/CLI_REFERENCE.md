@@ -257,7 +257,7 @@ monitor actions use the service-visible `AWF_GITHUB_TOKEN`, with `GH_TOKEN` and
 idempotency for adoption; do not pass an adoption idempotency key. Changing
 `external_id` or `task_class` on a live adoption returns
 `PR_ADOPTION_POLICY_CONFLICT`; an explicit `external_id` owned by another task
-scope returns `TASK_EXTERNAL_ID_CONFLICT`. `detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values). See
+scope returns `TASK_EXTERNAL_ID_CONFLICT`. `detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values). It is `["external_id"]` alone when the request's saved key (idempotency key) resolves to a task already stamped with a different explicit `external_id`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub readiness, permissions,
 terminal adoption retry behavior, console inspection, REST/MCP examples, and the
 mocked-local docs-tested demo path.
