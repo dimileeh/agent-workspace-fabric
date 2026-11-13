@@ -1144,6 +1144,39 @@ async def test_gap_edits_trailing_a_left_side_definition_are_not_evidence(
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a type")
 
 
+@pytest.mark.parametrize(
+    ("path", "left_text", "right_text", "diff"),
+    [
+        pytest.param(
+            _INBOUND,
+            '_TASK_INBOUND_TYPES = """echo start\n# cleanup"""\n',
+            '_TASK_INBOUND_TYPES = """echo start\n# teardown"""\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-# cleanup"""', '+# teardown"""'),
+            id="python-triple-quoted",
+        ),
+        pytest.param(
+            _WEB,
+            "const _TASK_INBOUND_TYPES = `echo start\n// cleanup`;\n",
+            "const _TASK_INBOUND_TYPES = `echo start\n// teardown`;\n",
+            _diff(_WEB, "@@ -2 +2 @@", "-// cleanup`;", "+// teardown`;"),
+            id="js-ts-template-literal",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_literal_lines_spelling_a_comment_marker_stay_in_the_span(
+    path: str, left_text: str, right_text: str, diff: str
+) -> None:
+    """A literal's last line is its contents, not a trailing gap (PRRT_kwDOSJAM6s63SSj1)."""
+    runner = _Probe(
+        texts={(_LEFT, path): left_text, (_RIGHT, path): right_text},
+        changed_paths=(path,),
+        diffs={path: diff},
+    )
+
+    assert await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a type")
+
+
 @pytest.mark.unit
 async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     moved = "src/app/messaging/inbound_kinds.py"

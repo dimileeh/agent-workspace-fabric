@@ -447,7 +447,7 @@ def _module_level_assignment_spans(
 
 
 def _without_trailing_gaps(
-    file_text: str | None, spans: list[tuple[int, int]]
+    file_text: str | None, spans: list[tuple[int, int]], *, path: str
 ) -> list[tuple[int, int]]:
     """``spans`` ending at their last non-blank, non-comment line of ``file_text``.
 
@@ -455,11 +455,26 @@ def _without_trailing_gaps(
     hunk there changes no definition line, so it is dropped before the overlap
     check on either side (PRRT_kwDOSJAM6s63LtTS, PRRT_kwDOSJAM6s63L_5C). An
     insert in the gap that does extend a body shows up in the right-side span.
+    Only a line that starts outside a literal is a gap: a multi-line string's
+    last line spelling ``# ...`` or ``// ...`` is its contents, told apart by
+    the tab re-masking ``_assignment_span_end_line`` uses (PRRT_kwDOSJAM6s63SSj1).
     """
     lines = (file_text or "").splitlines()
+    starts_in_code = (
+        [
+            line.startswith("\t")
+            for line in _mask_comments_and_string_literals_for_callee_scan(
+                "\n".join(f"\t{raw}" for raw in lines), path=path
+            ).split("\n")
+        ]
+        if spans
+        else []
+    )
     trimmed: list[tuple[int, int]] = []
     for start, end in spans:
-        while end > start and _is_ignorable_span_gap_line(lines[end - 1]):
+        while (
+            end > start and starts_in_code[end - 1] and _is_ignorable_span_gap_line(lines[end - 1])
+        ):
             end -= 1
         trimmed.append((start, end))
     return trimmed
@@ -587,8 +602,8 @@ async def _commit_range_changes_comment_named_target(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
         head_spans, binding_spans = _named_definition_spans(file_text, names, path=candidate)
-        spans = _without_trailing_gaps(file_text, head_spans)
-        bindings = _without_trailing_gaps(file_text, binding_spans)
+        spans = _without_trailing_gaps(file_text, head_spans, path=candidate)
+        bindings = _without_trailing_gaps(file_text, binding_spans, path=candidate)
         # A rename source's right-side text is read under its target, itself a candidate.
         right_text = (
             None
@@ -598,7 +613,9 @@ async def _commit_range_changes_comment_named_target(
             )
         )
         right_heads, right_bindings = _named_definition_spans(right_text, names, path=candidate)
-        right_spans = _without_trailing_gaps(right_text, right_heads + right_bindings)
+        right_spans = _without_trailing_gaps(
+            right_text, right_heads + right_bindings, path=candidate
+        )
         if not (spans or bindings or right_spans):
             continue
         source = renamed_from.get(candidate)
