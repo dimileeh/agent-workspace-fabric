@@ -688,6 +688,18 @@ async def test_binding_ends_at_its_semicolon_boundary(
             "export const LIMIT = base\n  .scaled(10);\n", 2, True, id="leading-continuation"
         ),
         pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
+        pytest.param(
+            "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",
+            3,
+            False,
+            id="standalone-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n  /* why */ .scaled(10);\n",
+            2,
+            True,
+            id="block-comment-then-continuation",
+        ),
     ],
 )
 @pytest.mark.unit
