@@ -1006,6 +1006,12 @@ async def test_js_ts_label_binds_nothing(
             "export const LIMIT = /a/g!\nrun1();\n", 2, False, id="regex-non-null-assertion"
         ),
         pytest.param(
+            'export const LIMIT = "a" /* x */ /* y */!\nrun1();\n',
+            2,
+            False,
+            id="commented-string-non-null-assertion",
+        ),
+        pytest.param(
             "export const LIMIT = /* why */ !\n    Boolean(10);\n",
             2,
             True,

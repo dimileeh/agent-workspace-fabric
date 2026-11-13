@@ -123,6 +123,9 @@ _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
     r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-|(?:^|[^\w$)\]\s!])[ \t]*!+"
     r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as))$"
 )
+# A block comment closing a JS/TS operand, skipped to reach the operand that a
+# following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
+_JS_TS_TRAILING_BLOCK_COMMENT_RE = re.compile(r"/\*(?:(?!\*/).)*\*/$")
 _JS_TS_LEADING_CONTINUATION_RE = re.compile(
     r"^[ \t]*(?:(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]|(?:instanceof|in)(?![\w$]))"
 )
@@ -193,7 +196,9 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
         return True
     if code.endswith("!"):
         operand = raw[: len(code.rstrip("!"))].rstrip()
-        if operand and scan[len(operand) - 1] != operand[-1] and not operand.endswith("*/"):
+        while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(operand)) is not None:
+            operand = operand[: comment.start()].rstrip()
+        if operand and scan[len(operand) - 1] != operand[-1]:
             return True
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
 
