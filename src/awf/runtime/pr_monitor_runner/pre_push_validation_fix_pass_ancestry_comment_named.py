@@ -44,7 +44,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _mask_comments_and_string_literals_for_callee_scan,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
+    _JS_TS_CALL_SITE_SUFFIXES,
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
+    _PYTHON_CALL_SITE_SUFFIXES,
     _diff_adds_decorators_above_span,
     _importable_definition_spans_for_names,
     _path_diff_text_in_commit_range,
@@ -59,6 +61,8 @@ if TYPE_CHECKING:
 # Upper bound on the ``:line`` probes one comment can trigger. Each runs the
 # line-anchored rule's Git reads, and a review names one to three targets.
 _MAX_COMMENT_NAMED_PATHS = 10
+# Suffixes whose definition heads the identifier gate (b) can read.
+_DEFINITION_SUFFIXES = _PYTHON_CALL_SITE_SUFFIXES | _JS_TS_CALL_SITE_SUFFIXES
 
 # ``scheme://...`` links are dropped before path parsing, so a GitHub permalink
 # never contributes a path (its line fragment is a non-goal).
@@ -375,7 +379,10 @@ async def _commit_range_changes_comment_named_target(
         self, worktree_path=worktree_path, left=left, right=right
     )
     renamed_from = {target: source for source, target in rename_map.items()}
-    for candidate in changed[:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]:
+    # Definition discovery reads Python and JS/TS heads; a docs or text snippet
+    # spelling the name is not its definition (PRRT_kwDOSJAM6s63O-t2).
+    sources = [path for path in changed if Path(path).suffix.lower() in _DEFINITION_SUFFIXES]
+    for candidate in sources[:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]:
         file_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )

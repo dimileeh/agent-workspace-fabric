@@ -747,6 +747,37 @@ async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     assert runner.shows == [_INBOUND, moved, moved]
 
 
+@pytest.mark.parametrize(
+    "path", [_DOC, "docs/reference/inbound.rst", "notes/inbound.txt", "docs/inbound.py.orig"]
+)
+@pytest.mark.unit
+async def test_named_identifier_snippet_in_a_non_source_file_is_not_evidence(path: str) -> None:
+    """A docs snippet spelling the definition is not the definition (PRRT_kwDOSJAM6s63O-t2)."""
+    left_text = "# Inbound\n\ndef _TASK_INBOUND_TYPES():\n    return ()\n"
+    right_text = "# Inbound\n\ndef _TASK_INBOUND_TYPES():\n    return ('task',)\n"
+    runner = _Probe(
+        texts={(_LEFT, path): left_text, (_RIGHT, path): right_text},
+        changed_paths=(path,),
+        diffs={path: _diff(path, "@@ -4 +4 @@", "-    return ()", "+    return ('task',)")},
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
+    assert runner.shows == []
+
+
+@pytest.mark.unit
+async def test_non_source_paths_do_not_spend_the_identifier_candidate_budget() -> None:
+    docs = tuple(f"docs/page_{index:02d}.md" for index in range(30))
+    runner = _Probe(
+        texts={(_LEFT, _INBOUND): _INBOUND_TEXT, (_RIGHT, _INBOUND): _INBOUND_TEXT},
+        changed_paths=(*docs, _INBOUND),
+        diffs={_INBOUND: _INBOUND_INSERT},
+    )
+
+    assert await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
+    assert set(runner.shows) == {_INBOUND}
+
+
 # --- fail-closed -------------------------------------------------------------------
 
 
