@@ -76,9 +76,11 @@ async def _no_fence(*_: Any) -> None:
     return None
 
 
-def _blockers(docker_idle: bool, *samples: LinuxSnapshot) -> tuple[QuiescenceBlockerName, ...]:
+def _blockers(
+    unexpected_container: bool, *samples: LinuxSnapshot
+) -> tuple[QuiescenceBlockerName, ...]:
     return (
-        *(() if docker_idle else ("DOCKER_UNEXPECTED_CONTAINER",)),
+        *(("DOCKER_UNEXPECTED_CONTAINER",) if unexpected_container else ()),
         *(() if all(sample.execution_quiescent for sample in samples) else ("CGROUP_POPULATED",)),
     )
 
@@ -159,8 +161,14 @@ class HostRuntime:
             if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            blockers = _blockers(docker_idle, before, after)
-            return replace(after, execution_quiescent=not blockers, blockers=blockers)
+            # A failed quiescence read is not proof of an unexpected container:
+            # stay non-quiescent, but only name a container Docker confirms.
+            blockers = _blockers(
+                not docker_idle and await self.docker.unexpected_container(), before, after
+            )
+            return replace(
+                after, execution_quiescent=docker_idle and not blockers, blockers=blockers
+            )
 
     async def physical_blockers(self, identity: Identity) -> tuple[QuiescenceBlockerName, ...]:
         """Name busy physical facts when no host observation could be approved.
@@ -176,7 +184,7 @@ class HostRuntime:
                 if self.baseline is not None and not self.same_host(self.baseline, sample):
                     return ()
                 # Docker being unavailable is not an unexpected container.
-                return _blockers(not await self.docker.unexpected_container(), sample)
+                return _blockers(await self.docker.unexpected_container(), sample)
         except Exception as exc:
             _log_denial("physical_blockers", exc)
         return ()

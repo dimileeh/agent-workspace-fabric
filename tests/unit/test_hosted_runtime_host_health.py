@@ -15,7 +15,11 @@ async def test_enabled_host_observation_preserves_health_while_work_is_active(
 ):
     authority, _, factory = authority
     receiver = authority.receiver
-    docker = Mock(quiescent=AsyncMock(return_value=False), healthy=AsyncMock(return_value=True))
+    docker = Mock(
+        quiescent=AsyncMock(return_value=False),
+        healthy=AsyncMock(return_value=True),
+        unexpected_container=AsyncMock(return_value=True),
+    )
     host = HostRuntime(receiver.config, factory, receiver.identity, docker)
     active = LinuxSnapshot("12345678-1234-1234-1234-123456789abc", 1, 2, 3, False, False)
     host.linux.sample = Mock(return_value=active)
