@@ -456,6 +456,7 @@ class TestSupersedeDivergentAndExhaustion:
                 )
         assert excinfo.value.error_code == "TASK_EXTERNAL_ID_CONFLICT"
         assert excinfo.value.detail["external_id"] == generated_external_id
+        assert excinfo.value.detail["mismatched_fields"] == ["external_id"]
 
     @pytest.mark.unit
     async def test_owned_generation_slot_without_explicit_id_mints_generation(
