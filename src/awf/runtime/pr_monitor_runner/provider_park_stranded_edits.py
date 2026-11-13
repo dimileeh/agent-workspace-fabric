@@ -240,17 +240,36 @@ async def refresh_provider_park_stranded_edits_evidence(
     The resumed sink's protected-scope repair can rewrite a recorded path before its
     baseline outage re-parks the workspace, so the earlier park's fingerprints would
     make the next resume reject the repair's own content as
-    ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES`` (PRRT_kwDOSJAM6s63Quqs). Only the
-    evidence is replaced: the marker's HEAD, ownership boundary, delta anchor and
-    fix-pass baseline still describe the original operation.
+    ``PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES`` (PRRT_kwDOSJAM6s63Quqs). That repair
+    can also self-commit, and the re-park's event records the new HEAD, so the
+    marker's HEAD moves with it: a fix-pass re-parent keyed to the old HEAD would
+    never name the replacement the next resume requires (PRRT_kwDOSJAM6s63SI0A).
+    A refresh that cannot read the worktree keeps the earlier evidence rather than
+    leaving the marker with none (PRRT_kwDOSJAM6s63SJ3b): the resume still checks
+    every recorded path's content, so a stale fingerprint only ever fails closed.
+    The ownership boundary, delta anchor and fix-pass baseline still describe the
+    original operation; a boundary with no recorded anchor keeps diffing from the
+    original HEAD.
     """
     threads_addressed = state.threads_addressed_ids
-    if PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in threads_addressed:
+    parked_head = threads_addressed.get(PROVIDER_PARK_STRANDED_EDITS_STATE_KEY)
+    if parked_head is None:
         return
-    threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
+    head = await runner._rev_parse_head(worktree_path)
+    if head:
+        if PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY in threads_addressed:
+            threads_addressed.setdefault(
+                PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, parked_head
+            )
+        threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] = head
+    earlier_evidence = threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
     await record_provider_park_stranded_edits_evidence(
         runner, workspace_id=workspace_id, worktree_path=worktree_path, state=state
     )
+    if earlier_evidence is not None:
+        threads_addressed.setdefault(
+            PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, earlier_evidence
+        )
     await runner._persist_state(workspace_id, state)
 
 
