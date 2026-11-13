@@ -702,6 +702,15 @@ async def test_binding_ends_at_its_semicolon_boundary(
             False,
             id="column-zero-statement-after-asi",
         ),
+        pytest.param(
+            "export const LIMIT = 10\n++counter1;\n", 2, False, id="prefix-increment-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = 10\n  --counter1;\n", 2, False, id="prefix-decrement-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = base\n+ step1;\n", 2, True, id="leading-binary-plus-continuation"
+        ),
         pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
         pytest.param(
             "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",

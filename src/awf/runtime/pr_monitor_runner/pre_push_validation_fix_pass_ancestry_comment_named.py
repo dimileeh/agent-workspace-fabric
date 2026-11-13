@@ -95,9 +95,11 @@ _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
 _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
 # Indentation is not scope in JS/TS: a statement ends where the code does, unless
 # its last token or the next line's first token continues the expression
-# (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-).
+# (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-). A leading ``++``/``--``
+# after a line break is a new prefix-update statement, not a continuation
+# (PRRT_kwDOSJAM6s63QfAQ).
 _JS_TS_TRAILING_CONTINUATION_RE = re.compile(r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-)$")
-_JS_TS_LEADING_CONTINUATION_RE = re.compile(r"^[ \t]*[.?:,=*/%&|^<>+\-(\[`]")
+_JS_TS_LEADING_CONTINUATION_RE = re.compile(r"^[ \t]*(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]")
 # A JS/TS statement that leaves the next one as its brace-less body: an
 # ``if``/``for``/``while``/``with`` head, ``else`` or ``do`` (PRRT_kwDOSJAM6s63QK8_).
 _JS_TS_BODY_HEAD_RE = re.compile(
