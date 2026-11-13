@@ -299,7 +299,7 @@ def _mask_quoted_region_for_callee_scan(
             out.extend((" ", " ", " "))
             return i + 3
         if not triple and cur == "\\" and i + 1 < n:
-            out.extend((" ", " "))
+            out.extend((" ", _mask_char_preserving_splitlines_separators(line[i + 1])))
             i += 2
             continue
         if not triple and cur == quote:

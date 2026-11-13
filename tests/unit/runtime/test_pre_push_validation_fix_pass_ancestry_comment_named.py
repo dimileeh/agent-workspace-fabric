@@ -555,6 +555,33 @@ async def test_column_0_literals_after_a_binding_are_not_evidence(
 
 
 @pytest.mark.parametrize(
+    ("text", "diff", "expected"),
+    [
+        pytest.param(
+            '_TASK_INBOUND_TYPES = "a\\\nb"\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-b"', '+c"'),
+            True,
+            id="last-statement-continued-line",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a\\\nb",\n    1)\nother = 1\n',
+            _diff(_INBOUND, "@@ -4 +4 @@", "-other = 1", "+other = 2"),
+            False,
+            id="statement-after-bracketed-continuation",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_backslash_continued_string_keeps_binding_lines_aligned(
+    text: str, diff: str, *, expected: bool
+) -> None:
+    """An escaped newline in a string keeps its raw line (PRRT_kwDOSJAM6s63MUc8)."""
+    runner = _probe(texts={_INBOUND: text}, changed_paths=(_INBOUND,), diffs={_INBOUND: diff})
+
+    assert await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` is wrong") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(
