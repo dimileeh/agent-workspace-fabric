@@ -381,6 +381,9 @@ def _assignment_span_end_line(
         if index == start - 1:
             scan = " " * column + scan[column:]
         raw = raw_lines[index]
+        # Code after the ``*/`` closing a comment gap opens a statement as a
+        # line starting in code would (PRRT_kwDOSJAM6s63UXPl).
+        in_code = starts_in_code[index - start + 1] or (in_comment and bool(scan.strip()))
         # A JS/TS line holding only a block comment (or its continuation) is a
         # gap too: the expression may continue past it (PRRT_kwDOSJAM6s63QLb-).
         in_comment = (
@@ -400,13 +403,15 @@ def _assignment_span_end_line(
             index >= start
             and depth == 0
             and not continued
-            and starts_in_code[index - start + 1]
+            and in_code
             and not gap
             and (
                 (
                     complete
                     and not _JS_TS_LEADING_CONTINUATION_RE.match(
-                        scan if raw.lstrip().startswith("/*") else raw
+                        raw
+                        if starts_in_code[index - start + 1] and not raw.lstrip().startswith("/*")
+                        else scan
                     )
                 )
                 if js_ts
