@@ -99,6 +99,7 @@ from awf.db.repositories.system_repo import (
     WorkerHeartbeatRepository,
 )
 from awf.db.repositories.task_repo import (
+    TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
     TaskAttemptRepository,
     TaskExternalIdConflictError,
     TaskRepository,
@@ -187,6 +188,7 @@ __all__ = [
     "_scheduler_json_int_expr",
     "_scheduler_age_boost_expr",
     "_scheduler_scoring_time",
+    "TASK_EXTERNAL_ID_CONFLICT_MESSAGE",
     "TaskExternalIdConflictError",
     "TaskRepository",
     "TaskAttemptRepository",

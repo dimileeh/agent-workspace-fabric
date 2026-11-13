@@ -304,7 +304,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
     )
 
     async def raise_conflict(*_args: object, **_kwargs: object) -> object:
-        raise TaskExternalIdConflictError("task-123")
+        raise TaskExternalIdConflictError("task-123", ("title", "base"))
 
     class _Repository:
         def __init__(self, _session: object) -> None:
@@ -337,10 +337,13 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
     assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
     assert body["message"] == (
         "External task ID is already associated with a different "
-        "repo/base/task-class/owned-path scope; use a unique external "
+        "repo/base/task-class/owned-path/title scope; use a unique external "
         "task ID for this backlog slice or retry the original scope."
     )
-    assert body["detail"] == {"external_id": "task-123"}
+    assert body["detail"] == {
+        "external_id": "task-123",
+        "mismatched_fields": ["base", "title"],
+    }
     assert_no_internal_error_fields(body)
 
 

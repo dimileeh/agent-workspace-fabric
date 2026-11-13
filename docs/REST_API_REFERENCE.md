@@ -965,6 +965,7 @@ workspace with `attached_existing=true`; policy changes — including a differen
 `external_id` or `task_class` on a live adoption — return
 `PR_ADOPTION_POLICY_CONFLICT`. An explicit `external_id` that already belongs to
 a different task scope returns `TASK_EXTERNAL_ID_CONFLICT`.
+`detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values). It is `["external_id"]` alone when the request's saved key (idempotency key) resolves to a task already stamped with a different explicit `external_id`.
 Agent `model`, `effort`, and `cursor_auto_mode` overrides are part of that raw monitor policy:
 omitting them requests the default/no-override policy and conflicts with an
 existing live adoption pinned to explicit `agent_model` or `agent_effort`
