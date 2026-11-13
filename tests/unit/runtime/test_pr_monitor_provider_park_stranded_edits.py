@@ -653,6 +653,7 @@ async def test_an_uninspectable_resume_commit_fails_closed(
 
 _BASELINE_HEAD = "f" * 40
 _REPARENTED_HEAD = "c" * 40
+_RESUME_COMMIT_HEAD = "a" * 40
 
 
 class _BaselineRunner(_FakeRunner):
@@ -774,11 +775,14 @@ async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("net_change", [True, False])
+@pytest.mark.parametrize("resumed_head", [_PRESERVED_HEAD, _RESUME_COMMIT_HEAD])
 async def test_a_rewritten_park_head_names_its_replacement_durably(
-    factory: async_sessionmaker[AsyncSession], tmp_path: Path, net_change: bool
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, net_change: bool, resumed_head: str
 ) -> None:
     # The rewrite discards the parked SHA, so a baseline-park resume must look for
-    # the commit that replaced it instead (PRRT_kwDOSJAM6s63OA3D).
+    # the commit that replaced it instead (PRRT_kwDOSJAM6s63OA3D). When the resume
+    # committed stranded edits first, the rewritten HEAD is that commit, yet the
+    # replacement is still keyed to the parked SHA (PRRT_kwDOSJAM6s63OyKh).
     workspace_id = await seed_monitoring_workspace(factory)
     state = await _baseline_parked_state(tmp_path)
     cmd = FakeCommandRunner()
@@ -792,7 +796,7 @@ async def test_a_rewritten_park_head_names_its_replacement_durably(
         cmd.queue_result(stdout="same-tree\n")
         cmd.queue_result(stdout="same-tree\n")
     cmd.queue_result()  # reset --hard
-    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=resumed_head)
     runner._deps = SimpleNamespace(runner=cmd, session_factory=factory)
 
     assert await _resume(runner, state, tmp_path, workspace_id=workspace_id) is None
