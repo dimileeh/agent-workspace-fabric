@@ -203,6 +203,20 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or _js_ts_ends_type_arguments(code)
 
 
+def _js_ts_next_line_continues(raw_lines: list[str], scan_lines: list[str], index: int) -> bool:
+    """Whether the JS/TS code line after ``index`` leads with an expression continuation.
+
+    Blank, ``//`` and block-comment-only lines are skipped; a line opening with a
+    ``/*`` is read from its masked code (PRRT_kwDOSJAM6s63TOG5).
+    """
+    for raw, scan in zip(raw_lines[index + 1 :], scan_lines[index + 1 :], strict=False):
+        comment = raw.lstrip().startswith(("/*", "*"))
+        if _is_ignorable_span_gap_line(raw) or (comment and not scan.strip()):
+            continue
+        return _JS_TS_LEADING_CONTINUATION_RE.match(scan if comment else raw) is not None
+    return False
+
+
 def _js_ts_ends_type_arguments(code: str) -> bool:
     """Whether ``code`` ends with the ``>`` closing a type-argument list (``Array<number>``).
 
@@ -404,7 +418,8 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63QK8_). Each declarator of a JS/TS ``const A = 0, B = v``
     binds over its own lines, from its name to the ``,`` ending it, and a
     declarator list read past a trailing ``,`` and any gap after it
-    (PRRT_kwDOSJAM6s63QfAU). Each ``;``-separated statement of a line binds over
+    (PRRT_kwDOSJAM6s63QfAU) or a next line leading with a continuation
+    (PRRT_kwDOSJAM6s63TOG5). Each ``;``-separated statement of a line binds over
     its own lines too, unless the line is a Python compound head's body
     (PRRT_kwDOSJAM6s63Sh3G).
     """
@@ -442,7 +457,11 @@ def _module_level_assignment_spans(
                 declaration
                 and not in_body
                 and index + 1 < len(scan_lines)
-                and not (scan.strip() and _js_ts_line_ends_statement(raw_lines[index], scan))
+                and not (
+                    scan.strip()
+                    and _js_ts_line_ends_statement(raw_lines[index], scan)
+                    and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
+                )
             ):
                 continued = True
                 continue

@@ -755,6 +755,30 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             True,
             id="comparison-ends-at-semicolon",
         ),
+        pytest.param(
+            "const OTHER = base\n  .method(), LIMIT = [\n  10,\n];\n",
+            3,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-leading-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\n  /*\n   * note\n   */\n  .method(), LIMIT = [\n  10,\n];\n",
+            6,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-comment-and-leading-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\nfoo(), LIMIT = [\n  10,\n];\n",
+            3,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-complete-declaration",
+        ),
     ],
 )
 @pytest.mark.unit
