@@ -149,20 +149,23 @@ class NodeLifecycle:
             blockers=blockers,
         )
 
+    async def _physical_blockers(self, host: HostObservation | None) -> list[QuiescenceBlocker]:
+        # Without host evidence, still explain a busy host; names never approve it.
+        if host is not None:
+            return []
+        names = await _bounded(self.observe_blockers(self.identity))
+        return [QuiescenceBlocker(name=name, count=1) for name in names or ()]
+
     async def readiness(self) -> LifecycleStatus:
         host = await _bounded(self.observe_host(self.identity))
         runtime = await _bounded(self.observe_runtime(self.identity))
-        # Without host evidence, still explain a busy host; names never approve it.
-        physical: tuple[QuiescenceBlockerName, ...] | None = ()
-        if host is None:
-            physical = await _bounded(self.observe_blockers(self.identity))
+        physical = await self._physical_blockers(host)
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
             status = self.status(row, await quiescence_blockers(session), host)
             return status.model_copy(
                 update={
-                    "blockers": status.blockers
-                    + [QuiescenceBlocker(name=name, count=1) for name in physical or ()],
+                    "blockers": status.blockers + physical,
                     "runtime_ready": runtime is True
                     and status.node_ready
                     and row.restore_quarantine is None,
@@ -350,23 +353,29 @@ class NodeLifecycle:
             if row.restore_quarantine is not None:
                 raise MaterialDeniedError("RESTORE_QUARANTINED")
             db_blockers = await quiescence_blockers(session)
-            if db_blockers:
-                return self.status(row, db_blockers, None)
-            row.phase, row.drain_generation = "draining", generation
+            refused = self.status(row, db_blockers, None) if db_blockers else None
+            if refused is None:
+                row.phase, row.drain_generation = "draining", generation
+        if refused is not None:
+            physical = await self._physical_blockers(None)
+            return refused.model_copy(update={"blockers": refused.blockers + physical})
         host = await _bounded(self.observe_host(self.identity))
+        physical = await self._physical_blockers(host)
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
             result = self.status(row, await quiescence_blockers(session), host)
             if row.drain_generation == generation and row.phase == "draining" and result.quiescent:
                 row.phase = "drained"
                 result = result.model_copy(update={"state": "drained"})
-            return result
+            return result.model_copy(update={"blockers": result.blockers + physical})
 
     async def abort(self, generation: int) -> LifecycleStatus:
+        physical = await self._physical_blockers(None)
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
             row.aborted_through = max(generation, row.aborted_through)
             if row.drain_generation is None or generation >= row.drain_generation:
                 row.drain_generation, row.idle_since = None, None
                 row.phase = "ready" if row.recovery_key else "recovering"
-            return self.status(row, await quiescence_blockers(session), None)
+            status = self.status(row, await quiescence_blockers(session), None)
+            return status.model_copy(update={"blockers": status.blockers + physical})

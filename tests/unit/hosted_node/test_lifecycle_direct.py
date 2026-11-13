@@ -150,6 +150,29 @@ async def test_readiness_names_physical_blockers_when_host_evidence_is_denied(re
     assert ready.quiescent and ready.blockers == [] and len(calls) == 1
 
 
+async def test_drain_and_abort_name_physical_blockers_when_host_evidence_is_denied(ready_node):
+    _, receiver, _ = ready_node
+    service = receiver.lifecycle
+    physical_names = ["DOCKER_UNEXPECTED_CONTAINER", "CGROUP_POPULATED"]
+
+    async def physical(identity):
+        return tuple(physical_names)
+
+    async def denied(identity):
+        return None
+
+    service.observe_host, service.observe_blockers = denied, physical
+    draining = await service.drain(1)
+    assert draining.state == "draining" and not draining.quiescent
+    assert [b.name for b in draining.blockers] == physical_names
+    aborted = await service.abort(1)
+    assert aborted.state == "ready" and [b.name for b in aborted.blockers] == physical_names
+    await create(receiver.factory)
+    refused = await service.drain(2)
+    assert refused.state == "ready"
+    assert [b.name for b in refused.blockers] == ["WORKSPACE_ACTIVE", *physical_names]
+
+
 async def test_lifecycle_status_without_blockers_stays_valid(ready_node):
     _, receiver, _ = ready_node
     current = (await receiver.lifecycle.readiness()).model_dump(mode="json")
