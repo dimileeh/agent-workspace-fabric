@@ -703,6 +703,25 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
         pytest.param("    </div> helper()", frozenset(), id="unmatched-closing-tag"),
         pytest.param("    </div> <A /> helper()", frozenset(), id="nesting-lost"),
         pytest.param("    const view = <!-- x --> helper()", frozenset(), id="comment-tag"),
+        pytest.param("    {cond && <Icon />} helper()", frozenset(), id="and-container-text"),
+        pytest.param("    {<Icon />} helper()", frozenset(), id="brace-container-text"),
+        pytest.param(
+            "    {ok ? <Icon /> : null} helper()", frozenset(), id="ternary-container-text"
+        ),
+        pytest.param("    a = <Icon /> helper()", frozenset(), id="identifier-after-element"),
+        pytest.param(
+            "    {f(<Icon />)} helper()", frozenset({(None, "f")}), id="closers-then-text"
+        ),
+        pytest.param(
+            "    const v = ok ? <A /> : <B />; helper();",
+            frozenset({(None, "helper")}),
+            id="next-rooted-element",
+        ),
+        pytest.param(
+            "    const v = <Icon />; if (x) { run(); } helper();",
+            frozenset({(None, "run"), (None, "helper")}),
+            id="balanced-braces-stay-code",
+        ),
     ],
 )
 @pytest.mark.unit

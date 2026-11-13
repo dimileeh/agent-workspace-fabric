@@ -421,6 +421,8 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     — completes, the code after it is scanned again (PRRT_kwDOSJAM6s63VJ_g).
     Any other tag (a children line read without its parent, a closing tag
     with nothing open) leaves the rest blanked until each next tag, as before.
+    A rooted element followed by text (``{cond && <Icon />} helper()``) keeps
+    blanking too (PRRT_kwDOSJAM6s63Vay1).
     """
     if not line or "<" not in line:
         return line
@@ -442,7 +444,10 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             i += 1  # past ``>``
             depth = _jsx_depth_after_tag(line, start, i, depth)
             if depth == 0:
-                continue
+                text_start = _jsx_text_start_after_rooted_element(line, i)
+                if text_start is None:
+                    continue
+                depth, i = None, text_start
             # Text node until the next tag opener; retain ``{...}`` expressions.
             while i < n and line[i] != "<":
                 if line[i] == "{":
@@ -471,3 +476,31 @@ def _jsx_depth_after_tag(line: str, start: int, end: int, depth: int | None) -> 
     if not depth and _JSX_ROOT_PREFIX_RE.search(line, 0, start) is None:
         return None
     return depth if line[end - 2] == "/" else depth + 1
+
+
+def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
+    """Where JSX text resumes after a rooted element ending at ``end``; ``None`` if code.
+
+    Code cannot put an identifier right after a completed element
+    (``a = <Icon /> helper()``), and a ``}`` closing a brace opened before it
+    ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
+    so text follows. Line-local: the look-ahead stops at a line separator.
+    """
+    n = len(line)
+    j = end
+    while j < n and line[j] in " \t)]":
+        j += 1
+    if j < n and (line[j].isalnum() or line[j] in "_$"):
+        return end
+    braces = 0
+    while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:
+        if line[j] == "<" and j + 1 < n and (line[j + 1].isalpha() or line[j + 1] in "/!>"):
+            return None
+        if line[j] == "{":
+            braces += 1
+        elif line[j] == "}":
+            if not braces:
+                return j + 1
+            braces -= 1
+        j += 1
+    return None
