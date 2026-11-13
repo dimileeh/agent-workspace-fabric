@@ -362,3 +362,113 @@ async def test_baseline_park_resume_no_op_push_refuses_without_a_recorded_kept_c
     assert "no preserved HEAD" in (state.pending_operator_hint.status_reason or "")
     # Not finalized: the park stays unsettled for the operator.
     assert await runner._protected_scope_baseline_park_resume_pending(workspace_id) is True
+
+
+async def _run_pushed_baseline_park_resume(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kept_commit_on_remote_after_push: bool,
+) -> tuple[object, MonitorState, list[str | None], _GitPushResult]:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{_REPAIR_COMMIT_SHA}\n")
+    await _park(factory, tmp_path, workspace_id, cmd)
+    runner = _runner(factory, tmp_path, FakeCommandRunner())
+    hint = OperatorHint(
+        reason="resume after baseline outage",
+        operation_id="op_resume_pushed",
+        requested_at="2026-11-13T10:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    containment_checks: list[str | None] = []
+    new_head_sha = "d" * 40
+
+    async def _none(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _kept_commit_check(
+        *, preserved_head_sha: str | None = None, **_kwargs: object
+    ) -> bool:
+        containment_checks.append(preserved_head_sha)
+        # Pre-push: the agent's new commit is unpushed, so this is no idempotent no-op.
+        # Post-push: the remote now matches HEAD; only containment decides.
+        return len(containment_checks) > 1 and kept_commit_on_remote_after_push
+
+    async def _pushed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(_worktree_path: Path) -> str:
+        return new_head_sha
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _none)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_post_action_pr_terminal_push_result_if_moot", _none)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _none)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _kept_commit_check)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+    assert state.last_push_sha == new_head_sha
+    pending = await runner._protected_scope_baseline_park_resume_pending(workspace_id)
+    return pending, state, containment_checks, result
+
+
+@pytest.mark.unit
+async def test_baseline_park_resume_push_requires_kept_commit_in_pushed_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful push of a NEW commit is no proof the kept repair landed.
+
+    A worktree recreated at the remote head still runs the directiveless repair agent,
+    whose new commit pushes cleanly without the parked repair; finalizing would clear
+    the park while the kept commit never landed (PRRT_kwDOSJAM6s63PY73).
+    """
+    pending, state, containment_checks, result = await _run_pushed_baseline_park_resume(
+        factory, tmp_path, monkeypatch, kept_commit_on_remote_after_push=False
+    )
+
+    assert containment_checks == [_REPAIR_COMMIT_SHA, _REPAIR_COMMIT_SHA]
+    assert result.pushed is True
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert _REPAIR_COMMIT_SHA in (state.pending_operator_hint.status_reason or "")
+    # Not finalized: the park stays unsettled for the operator.
+    assert pending is True
+
+
+@pytest.mark.unit
+async def test_baseline_park_resume_push_finalizes_when_kept_commit_landed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending, state, containment_checks, result = await _run_pushed_baseline_park_resume(
+        factory, tmp_path, monkeypatch, kept_commit_on_remote_after_push=True
+    )
+
+    assert containment_checks == [_REPAIR_COMMIT_SHA, _REPAIR_COMMIT_SHA]
+    assert result.pushed is True
+    assert state.pending_operator_hint is None
+    assert pending is False
