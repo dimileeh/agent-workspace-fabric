@@ -53,9 +53,8 @@ async def test_all_completed_runs_are_settled() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stdout", ["[]", ""])
-async def test_head_without_actions_runs_does_not_block(stdout: str) -> None:
-    assert await _state(stdout) is ActionsRunsState.SETTLED
+async def test_head_without_actions_runs_does_not_block() -> None:
+    assert await _state("[]") is ActionsRunsState.SETTLED
 
 
 @pytest.mark.unit
@@ -79,7 +78,7 @@ async def test_non_zero_exit_raises() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stdout", ['{"runs": []}', "[1]"])
+@pytest.mark.parametrize("stdout", ['{"runs": []}', "[1]", "", "null"])
 async def test_malformed_payload_raises(stdout: str) -> None:
     with pytest.raises(GitHubClientError, match="list_actions_runs_for_sha"):
         await _state(stdout)
