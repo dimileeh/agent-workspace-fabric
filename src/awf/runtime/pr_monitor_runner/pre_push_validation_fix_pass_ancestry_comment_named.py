@@ -97,6 +97,10 @@ _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
 # one is matched right after a top-level ``,`` (PRRT_kwDOSJAM6s63QfAU).
 _JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
 _JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)")
+# What follows a type-parameter list's ``>`` (PRRT_kwDOSJAM6s63SGuR).
+_JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE = re.compile(
+    r"[ \t]*(?:[({]|(?:extends|implements)(?![\w$]))"
+)
 # Indentation is not scope in JS/TS: a statement ends where the code does, unless
 # its last token or the next line's first token continues the expression
 # (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-). A leading ``++``/``--``
@@ -173,16 +177,54 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
 
 
+def _js_ts_type_parameter_list_end(logical: str, start: int) -> int | None:
+    """Index of the ``>`` closing a type-parameter list opened at ``logical[start]``.
+
+    A ``<`` opens one only when its matching ``>`` is followed by the ``(`` or
+    ``{`` of a generic arrow, function or class, or by ``extends``/``implements``;
+    a ``>`` of ``=>`` closes nothing. Anything else is a comparison: ``None``.
+    """
+    angles = 0
+    depth = 0
+    for position in range(start, len(logical)):
+        char = logical[position]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif depth:
+            continue
+        elif char == ";":
+            return None
+        elif char == "<":
+            angles += 1
+        elif char == ">" and logical[position - 1] != "=":
+            angles -= 1
+            if not angles:
+                follower = _JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE.match(logical, position + 1)
+                return position if follower is not None else None
+    return None
+
+
 def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
     """Declarators after the first of the JS/TS declaration ``logical``.
 
-    Each follows a ``,`` outside brackets and before the first top-level ``;``;
-    a comma that opens no ``name =`` (a generic's ``Map<K, V>``) is skipped.
+    Each follows a ``,`` outside brackets and type-parameter lists and before
+    the first top-level ``;``, so the ``LIMIT = number`` default of a generic
+    ``<T, LIMIT = number>(x: T) => x`` binds nothing (PRRT_kwDOSJAM6s63SGuR); a
+    comma that opens no ``name =`` (a generic's ``Map<K, V>``) is skipped.
     """
     found: list[re.Match[str]] = []
     depth = 0
-    for position, char in enumerate(logical):
-        if char in "([{":
+    position = -1
+    while position + 1 < len(logical):
+        position += 1
+        char = logical[position]
+        if depth == 0 and char == "<":
+            end = _js_ts_type_parameter_list_end(logical, position)
+            if end is not None:
+                position = end
+        elif char in "([{":
             depth += 1
         elif char in ")]}":
             depth = max(depth - 1, 0)
