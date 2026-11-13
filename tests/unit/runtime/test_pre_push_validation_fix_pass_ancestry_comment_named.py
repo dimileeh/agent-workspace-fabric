@@ -724,6 +724,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             id="generic-function-expression-type-parameter",
         ),
         pytest.param(
+            "export const LIMIT = 10;\nlet make: new <T, LIMIT = number>(x: T) => T;\n",
+            2,
+            "let make: new <T, LIMIT = string>(x: T) => T;",
+            "LIMIT",
+            False,
+            id="construct-signature-type-parameter",
+        ),
+        pytest.param(
+            "const OTHER = renew < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = renew < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="new-suffixed-operand-is-not-a-construct-signature",
+        ),
+        pytest.param(
             "const g = <T,>(x: T) => x, LIMIT = 10;\n",
             1,
             "const g = <T,>(x: T) => x, LIMIT = 20;",
