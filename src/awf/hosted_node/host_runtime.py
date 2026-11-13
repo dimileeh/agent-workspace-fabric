@@ -76,6 +76,13 @@ async def _no_fence(*_: Any) -> None:
     return None
 
 
+def _blockers(docker_idle: bool, *samples: LinuxSnapshot) -> tuple[QuiescenceBlockerName, ...]:
+    return (
+        *(() if docker_idle else ("DOCKER_UNEXPECTED_CONTAINER",)),
+        *(() if all(sample.execution_quiescent for sample in samples) else ("CGROUP_POPULATED",)),
+    )
+
+
 class HostRuntime:
     def __init__(
         self,
@@ -152,15 +159,26 @@ class HostRuntime:
             if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            blockers: tuple[QuiescenceBlockerName, ...] = (
-                *(() if docker_idle else ("DOCKER_UNEXPECTED_CONTAINER",)),
-                *(
-                    ()
-                    if before.execution_quiescent and after.execution_quiescent
-                    else ("CGROUP_POPULATED",)
-                ),
-            )
+            blockers = _blockers(docker_idle, before, after)
             return replace(after, execution_quiescent=not blockers, blockers=blockers)
+
+    async def physical_blockers(self, identity: Identity) -> tuple[QuiescenceBlockerName, ...]:
+        """Name busy physical facts when no host observation could be approved.
+
+        Diagnostic only: this never verifies retained state, health, or quiescence,
+        so a closed node still denies observation while explaining why it is busy.
+        """
+        if identity != self.identity:
+            return ()
+        try:
+            async with asyncio.timeout(4), self._observation_lock:
+                sample = await self.host_io(lambda: self.linux.sample(require_quiescent=False))
+                if self.baseline is not None and not self.same_host(self.baseline, sample):
+                    return ()
+                return _blockers(await self.docker.quiescent(identity.owner), sample)
+        except Exception as exc:
+            _log_denial("physical_blockers", exc)
+        return ()
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:

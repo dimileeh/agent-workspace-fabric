@@ -108,6 +108,7 @@ async def start_hosted(
                 host.identity = host.linux.identity = receiver.identity
                 assert receiver.lifecycle is not None
                 receiver.lifecycle.observe_host = host.observe
+                receiver.lifecycle.observe_blockers = host.physical_blockers
                 receiver.lifecycle.observe_boot = host.observe_boot
                 receiver.lifecycle.verify_recovery = host.recover
                 yield receiver

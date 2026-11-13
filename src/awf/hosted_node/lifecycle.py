@@ -18,6 +18,7 @@ from awf.hosted_node.lifecycle_schemas import (
     HostObservation,
     LifecycleStatus,
     QuiescenceBlocker,
+    QuiescenceBlockerName,
     RecoveryAcknowledgement,
     RecoveryEvidence,
 )
@@ -52,6 +53,9 @@ class NodeLifecycle:
     def __init__(self, factory: async_sessionmaker[AsyncSession], identity: Identity):
         self.factory, self.identity = factory, identity
         self.observe_host: Callable[[Identity], Awaitable[HostObservation | None]] = _deny
+        self.observe_blockers: Callable[
+            [Identity], Awaitable[tuple[QuiescenceBlockerName, ...] | None]
+        ] = _deny
         self.observe_boot: Callable[[Identity], Awaitable[HostBootObservation | None]] = _deny
         self.verify_recovery: Callable[
             [Identity, Identity | None, str], Awaitable[RecoveryEvidence | None]
@@ -148,14 +152,20 @@ class NodeLifecycle:
     async def readiness(self) -> LifecycleStatus:
         host = await _bounded(self.observe_host(self.identity))
         runtime = await _bounded(self.observe_runtime(self.identity))
+        # Without host evidence, still explain a busy host; names never approve it.
+        physical: tuple[QuiescenceBlockerName, ...] | None = ()
+        if host is None:
+            physical = await _bounded(self.observe_blockers(self.identity))
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
             status = self.status(row, await quiescence_blockers(session), host)
             return status.model_copy(
                 update={
+                    "blockers": status.blockers
+                    + [QuiescenceBlocker(name=name, count=1) for name in physical or ()],
                     "runtime_ready": runtime is True
                     and status.node_ready
-                    and row.restore_quarantine is None
+                    and row.restore_quarantine is None,
                 }
             )
 

@@ -120,6 +120,36 @@ async def test_status_names_database_and_host_blockers_without_ids(ready_node):
     assert [b.name for b in aborted.blockers] == ["WORKSPACE_ACTIVE"]
 
 
+async def test_readiness_names_physical_blockers_when_host_evidence_is_denied(ready_node):
+    _, receiver, _ = ready_node
+    service = receiver.lifecycle
+    calls = []
+
+    async def physical(identity):
+        calls.append(identity)
+        return ("DOCKER_UNEXPECTED_CONTAINER", "CGROUP_POPULATED")
+
+    async def denied(identity):
+        return None
+
+    service.observe_host, service.observe_blockers = denied, physical
+    busy = await service.readiness()
+    assert not busy.quiescent and not busy.node_ready and busy.database_quiescent
+    assert [(b.name, b.count) for b in busy.blockers] == [
+        ("DOCKER_UNEXPECTED_CONTAINER", 1),
+        ("CGROUP_POPULATED", 1),
+    ]
+    assert calls == [receiver.identity]
+
+    # Approved host evidence already carries its own names; never double count.
+    async def idle(identity):
+        return HostObservation(identity, datetime.now(UTC) + timedelta(seconds=30), True, True)
+
+    service.observe_host = idle
+    ready = await service.readiness()
+    assert ready.quiescent and ready.blockers == [] and len(calls) == 1
+
+
 async def test_lifecycle_status_without_blockers_stays_valid(ready_node):
     _, receiver, _ = ready_node
     current = (await receiver.lifecycle.readiness()).model_dump(mode="json")
