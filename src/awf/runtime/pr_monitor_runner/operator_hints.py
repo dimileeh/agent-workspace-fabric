@@ -153,6 +153,8 @@ async def _run_operator_hint_cycle(
             workspace_id=workspace_id,
             remote_branch=remote_branch,
             state=state,
+            pr_number=pr_number,
+            repo=repo,
         )
     if stranded_result is not None:
         if stranded_result.reason_code == _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON:
@@ -415,6 +417,8 @@ async def _run_operator_hint_cycle(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 state=state,
+                pr_number=pr_number,
+                repo=repo,
             )
         # The directive agent is told to reset a preserved protected commit away,
         # so it can orphan item records the pre-agent pass above still saw as
@@ -582,6 +586,14 @@ async def _run_operator_hint_cycle(
     # validator otherwise (PRRT_kwDOSJAM6s6KFZN_).
     block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
     baseline_park_pending = await self._protected_scope_baseline_park_resume_pending(workspace_id)
+    # The commit a baseline-outage park kept for this resume to publish. A directive
+    # may legitimately drop it, so only a directiveless resume must prove it landed
+    # (PRRT_kwDOSJAM6s63M6sD).
+    baseline_park_head_sha = (
+        await self._protected_scope_baseline_park_preserved_head(workspace_id)
+        if baseline_park_pending and not hint.directive
+        else None
+    )
     protected_scope_base_branch = (
         base_branch
         if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
@@ -741,7 +753,7 @@ async def _run_operator_hint_cycle(
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
-        preserved_head_sha=preserved_head_sha,
+        preserved_head_sha=preserved_head_sha or baseline_park_head_sha,
     ):
         # An approve-and-keep resume (active grant) must NOT finalize this no-op
         # without PROOF the approved commit landed. ``_preserved_commit_already_on_remote``
@@ -972,22 +984,35 @@ async def _run_operator_hint_cycle(
         # worktree back to the remote PR head, so an up-to-date no-op push is a valid
         # successful revert — requiring the old preserved SHA on the remote would
         # wedge an applied directive at needs_human (PRRT_kwDOSJAM6s6KFytV).
+        #
+        # A baseline-outage park's kept repair commit gets the same guard: a no-op push
+        # from a worktree recreated at the remote head must not finalize the park as
+        # published while the kept commit never landed (PRRT_kwDOSJAM6s63M6sD).
+        kept_head_sha = preserved_head_sha or baseline_park_head_sha
         if (
             not hint.directive
-            and preserved_head_sha
+            and kept_head_sha
             and not await self._preserved_commit_already_on_remote(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 remote_branch=remote_branch,
                 remote_push_url=remote_push_url,
-                preserved_head_sha=preserved_head_sha,
+                preserved_head_sha=kept_head_sha,
             )
         ):
             reason = (
-                "operator-approved preserved commit "
-                f"{preserved_head_sha} is not on the remote PR branch after a no-op "
-                "push; the worktree was reset and the approved protected change was "
-                "dropped"
+                (
+                    "operator-approved preserved commit "
+                    f"{preserved_head_sha} is not on the remote PR branch after a no-op "
+                    "push; the worktree was reset and the approved protected change was "
+                    "dropped"
+                )
+                if preserved_head_sha
+                else (
+                    f"repair commit {kept_head_sha} kept by the protected-scope baseline "
+                    "park is not on the remote PR branch after a no-op push; the "
+                    "worktree was reset and the kept repair was dropped"
+                )
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
@@ -1025,6 +1050,8 @@ async def _operator_hint_agent_error_result(
     workspace_id: str,
     remote_branch: str,
     state: MonitorState,
+    pr_number: int,
+    repo: RepoRef,
 ) -> _GitPushResult:
     """Build the terminal push result for a CLI error raised by an operator-hint resume.
 
@@ -1047,6 +1074,11 @@ async def _operator_hint_agent_error_result(
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+                # Re-arm the #910 recheck: the resume-phase read and diff probe
+                # above run after the caller's terminal-PR guard
+                # (PRRT_kwDOSJAM6s63MpIE).
+                pr_number=pr_number,
+                repo=repo,
                 resume_phase=monitor_protected_scope_resume_origin(block_resume_phase),
             ),
         )

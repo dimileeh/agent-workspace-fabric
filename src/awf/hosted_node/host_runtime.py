@@ -175,7 +175,8 @@ class HostRuntime:
                 sample = await self.host_io(lambda: self.linux.sample(require_quiescent=False))
                 if self.baseline is not None and not self.same_host(self.baseline, sample):
                     return ()
-                return _blockers(await self.docker.quiescent(identity.owner), sample)
+                # Docker being unavailable is not an unexpected container.
+                return _blockers(not await self.docker.unexpected_container(), sample)
         except Exception as exc:
             _log_denial("physical_blockers", exc)
         return ()

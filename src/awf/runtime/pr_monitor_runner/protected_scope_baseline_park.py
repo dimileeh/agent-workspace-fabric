@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import select
+
 from awf.common.audit import redact_audit_text
 from awf.common.github_client import RepoRef
 from awf.control.blocked_transition import (
@@ -26,6 +28,7 @@ from awf.control.blocked_transition import (
 )
 from awf.control.quality_gates import PROTECTED_QUALITY_GATE_BLOCK_TYPE
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -53,6 +56,35 @@ async def _protected_scope_baseline_park_resume_pending(self: Any, workspace_id:
     )
 
 
+async def _protected_scope_baseline_park_preserved_head(self: Any, workspace_id: str) -> str | None:
+    """Return the HEAD SHA the latest baseline-outage park preserved, if recorded.
+
+    Read from the park's own ``monitoring_pr -> blocked`` transition event, which is
+    committed atomically with the block columns. A monitor-state marker would be
+    clobbered by the loop's ``_persist_state`` right after the park, and the shared
+    ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` would trip the directive-resume leak
+    guard. The resume passes this SHA to ``_preserved_commit_already_on_remote`` so an
+    empty worktree-to-remote diff alone (a worktree recreated at the remote head)
+    cannot finalize the park as already published (PRRT_kwDOSJAM6s63M6sD).
+    """
+    async with self._deps.session_factory() as session:
+        event = (
+            await session.execute(
+                select(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.state_changed",
+                    WorkspaceEvent.new_state == WorkspaceStatus.blocked.value,
+                    WorkspaceEvent.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                )
+                .order_by(WorkspaceEvent.event_order.desc().nullslast())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    sha = (event.payload or {}).get("preserved_head_sha") if event is not None else None
+    return sha if isinstance(sha, str) and sha else None
+
+
 async def _park_for_protected_scope_baseline_unavailable(
     self: Any,
     *,
@@ -71,8 +103,9 @@ async def _park_for_protected_scope_baseline_unavailable(
     ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` marker: that marker means "an
     ungranted protected commit is preserved", and the directive-resume leak guard
     would then refuse to push this legitimate repair commit. The preserved HEAD is
-    recorded in the transition/event payload for the operator; the resume keeps the
-    commit through ``_protected_scope_baseline_park_resume_pending``.
+    recorded in the transition/event payload instead; the resume keeps the commit
+    through ``_protected_scope_baseline_park_resume_pending`` and requires it on the
+    remote via ``_protected_scope_baseline_park_preserved_head``.
 
     ``pr_number`` re-arms the #910 terminal-PR guard: the bounded fetch retries can
     outlast the seam's own check, and a moot PR must not be parked. A lost CAS (the

@@ -2,6 +2,9 @@
 
 from unittest.mock import AsyncMock, Mock
 
+import httpx
+
+from awf.hosted_node.host_docker import DockerObservation
 from awf.hosted_node.host_linux import LinuxSnapshot
 from awf.hosted_node.host_runtime import HostRuntime
 from tests.unit.test_hosted_runtime_authority import authority as authority
@@ -41,7 +44,11 @@ async def test_closed_busy_host_is_denied_but_still_names_its_physical_blockers(
     authority, _, factory = authority
     receiver = authority.receiver
     config = receiver.config.model_copy(update={"runtime_enabled": False})
-    docker = Mock(quiescent=AsyncMock(return_value=False), healthy=AsyncMock(return_value=True))
+    docker = Mock(
+        quiescent=AsyncMock(return_value=False),
+        healthy=AsyncMock(return_value=True),
+        unexpected_container=AsyncMock(return_value=True),
+    )
     host = HostRuntime(config, factory, receiver.identity, docker)
     busy = LinuxSnapshot("boot", 1, 2, 3, False, False)
 
@@ -59,7 +66,7 @@ async def test_closed_busy_host_is_denied_but_still_names_its_physical_blockers(
     # Naming blockers is diagnostic only: it never pins or approves host state.
     assert host.baseline is None
     docker.healthy.assert_not_awaited()
-    docker.quiescent.return_value = True
+    docker.unexpected_container.return_value = False
     assert await host.physical_blockers(receiver.identity) == ("CGROUP_POPULATED",)
     host.linux.sample = Mock(return_value=LinuxSnapshot("boot", 1, 2, 3, False))
     assert await host.physical_blockers(receiver.identity) == ()
@@ -68,7 +75,7 @@ async def test_closed_busy_host_is_denied_but_still_names_its_physical_blockers(
 async def test_physical_blockers_refuse_other_hosts_and_failed_samples(authority):
     authority, _, factory = authority
     receiver = authority.receiver
-    docker = Mock(quiescent=AsyncMock(return_value=False))
+    docker = Mock(unexpected_container=AsyncMock(return_value=True))
     host = HostRuntime(receiver.config, factory, receiver.identity, docker)
     other = receiver.identity.model_copy(update={"boot_epoch": receiver.identity.boot_epoch + 1})
     assert await host.physical_blockers(other) == ()
@@ -77,4 +84,18 @@ async def test_physical_blockers_refuse_other_hosts_and_failed_samples(authority
     assert await host.physical_blockers(receiver.identity) == ()
     host.linux.sample = Mock(side_effect=ValueError("CGROUP_V2_REQUIRED"))
     assert await host.physical_blockers(receiver.identity) == ()
-    docker.quiescent.assert_not_awaited()
+    docker.unexpected_container.assert_not_awaited()
+
+
+async def test_unavailable_docker_is_not_named_an_unexpected_container(authority):
+    authority, _, factory = authority
+    receiver = authority.receiver
+    config = receiver.config.model_copy(update={"runtime_enabled": False})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)), base_url="http://docker"
+    ) as client:
+        docker = DockerObservation(config.host, client)
+        host = HostRuntime(config, factory, receiver.identity, docker)
+        host.linux.sample = Mock(return_value=LinuxSnapshot("boot", 1, 2, 3, False, False))
+        assert not await docker.quiescent(receiver.identity.owner)
+        assert await host.physical_blockers(receiver.identity) == ("CGROUP_POPULATED",)

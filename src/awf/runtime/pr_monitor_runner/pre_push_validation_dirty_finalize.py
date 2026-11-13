@@ -788,11 +788,15 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # ``_validated_git_push_result`` parks the workspace in ``blocked`` with the
         # worktree kept instead of failing it terminally (#1221); the sink failed
         # before ``git commit``, so mark the repair output it was committing for
-        # the guide resume's hint cycle (``provider_park_stranded_edits``).
+        # the guide resume's hint cycle (``provider_park_stranded_edits``), bounded
+        # by this finalize's owned delta so the resume commits nothing the
+        # ownership gate above would have refused (PRRT_kwDOSJAM6s63M6rp).
         transient = isinstance(exc, ProtectedScopeBaselineUnavailableError)
         if transient:
             preserved_head = await self._rev_parse_head(worktree_path)
-            mark_provider_park_stranded_edits(cast("MonitorState", state), preserved_head)
+            mark_provider_park_stranded_edits(
+                cast("MonitorState", state), preserved_head, owned_paths=owned_delta_paths
+            )
         _log.warning(
             "monitor.pre_push_dirty_finalize_protected_scope_diff_unavailable",
             workspace_id=workspace_id,

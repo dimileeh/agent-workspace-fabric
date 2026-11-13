@@ -1,6 +1,8 @@
 """Boot identity and conservative database quiescence under the node mutex."""
 
-from sqlalchemy import and_, func, or_, select, text
+from typing import Any
+
+from sqlalchemy import ColumnElement, and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.hosted_node.config import HostedSettings
@@ -74,8 +76,8 @@ DATABASE_BLOCKER_NAMES: tuple[QuiescenceBlockerName, ...] = (
 )
 
 
-async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
-    """Count the conservative idle predicates, in fixed vocabulary order.
+def _database_predicates() -> tuple[tuple[Any, ColumnElement[bool]], ...]:
+    """The conservative idle predicates, in fixed vocabulary order.
 
     The three workspace names split the historical single OR; their union is
     exactly the old predicate, so ``database_quiescent`` is unchanged.
@@ -95,7 +97,7 @@ async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
     from awf.db.repositories.base import terminal_runtime_effectively_released_expr
 
     terminal = ("completed", "failed", "cancelled", "destroyed")
-    predicates = (
+    return (
         (Workspace.id, Workspace.status.not_in(terminal)),
         (
             Workspace.id,
@@ -129,7 +131,12 @@ async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
             WorkspaceSecretLease.status.not_in(("revoked", "released")),
         ),
     )
+
+
+async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
+    """Count each idle predicate for diagnostic responses."""
     blockers = []
+    predicates = _database_predicates()
     for name, (column, predicate) in zip(DATABASE_BLOCKER_NAMES, predicates, strict=True):
         count = await session.scalar(select(func.count(column)).where(predicate))
         if count:
@@ -138,4 +145,9 @@ async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
 
 
 async def database_quiescent(session: AsyncSession) -> bool:
-    return not await quiescence_blockers(session)
+    # Boolean callers hold the node lock that guarded writes need: probe for
+    # existence and stop at the first busy row instead of counting everything.
+    for column, predicate in _database_predicates():
+        if (await session.execute(select(column).where(predicate).limit(1))).first() is not None:
+            return False
+    return True

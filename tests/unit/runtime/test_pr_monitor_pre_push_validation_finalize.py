@@ -7,6 +7,7 @@ under the maintainability line limit; see
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -19,6 +20,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
 )
 from awf.runtime.validation_worktree import (
@@ -1166,6 +1168,12 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     # Only the transient park keeps the finalize's uncommitted repair output for the
     # guide resume to commit (PRRT_kwDOSJAM6s621aJ-).
     assert (PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in state.threads_addressed_ids) is transient
+    # The park carries the finalize's ownership boundary to the resume commit
+    # (PRRT_kwDOSJAM6s63M6rp).
+    owned = state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY)
+    assert (json.loads(owned) if owned is not None else None) == (
+        ["src/fix.py"] if transient else None
+    )
     # The finalize failure must not re-check the tree (no verify/recheck pass).
     assert check_worktree_clean.await_count == 1
 

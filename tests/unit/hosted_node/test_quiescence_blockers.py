@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.models import (
@@ -338,6 +339,25 @@ async def test_one_workspace_can_report_several_names_in_vocabulary_order(factor
         ("SECRET_LEASE_ACTIVE", 1),
     ]
     assert quiescent is False
+
+
+async def test_boolean_idle_check_probes_existence_and_stops_at_first_busy_row(engine, factory):
+    """Callers holding the node lock must not pay for counts they discard."""
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    async with factory.begin() as session:
+        await seed_workspace(session, status="running")
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        async with factory() as session:
+            assert await database_quiescent(session) is False
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+    assert len(statements) == 1
+    assert "count(" not in statements[0] and "limit" in statements[0]
 
 
 def test_vocabulary_is_fixed_and_ordered():
