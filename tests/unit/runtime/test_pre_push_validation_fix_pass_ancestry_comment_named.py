@@ -277,6 +277,19 @@ _INBOUND_INSERT = _diff(_INBOUND, "@@ -3,0 +4 @@", '+    "c",')
             "`memberWorkload` ignores paused members",
             id="js-export-const-arrow",
         ),
+        pytest.param(
+            _INBOUND,
+            'def _TASK_INBOUND_TYPES():\n    return ()\n\n\n_TASK_INBOUND_TYPES = ("a",)\n'
+            '_TASK_INBOUND_TYPES = ("b",)\n',
+            _diff(
+                _INBOUND,
+                "@@ -6 +6 @@",
+                '-_TASK_INBOUND_TYPES = ("b",)',
+                '+_TASK_INBOUND_TYPES = ("c",)',
+            ),
+            "`_TASK_INBOUND_TYPES` misses the task type",
+            id="last-module-level-binding",
+        ),
     ],
 )
 @pytest.mark.unit
@@ -322,6 +335,46 @@ async def test_named_identifier_definition_changed_by_the_range_is_evidence(
             _INBOUND_TEXT,
             _diff(_INBOUND, "@@ -8 +8 @@", "-    return 0", "+    return 1"),
             id="same-file-outside-span",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\n_TASK_INBOUND_TYPES = ("b",)\n',
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                '-_TASK_INBOUND_TYPES = ("a",)',
+                "+_TASK_INBOUND_TYPES = ()",
+            ),
+            id="shadowed-by-later-assignment",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\n\n\ndef _TASK_INBOUND_TYPES():\n    return ()\n',
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                '-_TASK_INBOUND_TYPES = ("a",)',
+                "+_TASK_INBOUND_TYPES = ()",
+            ),
+            id="shadowed-by-later-def",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\nfrom app.kinds import _TASK_INBOUND_TYPES\n',
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                '-_TASK_INBOUND_TYPES = ("a",)',
+                "+_TASK_INBOUND_TYPES = ()",
+            ),
+            id="shadowed-by-import",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\nif FLAG:\n    _TASK_INBOUND_TYPES = ("b",)\n',
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                '-_TASK_INBOUND_TYPES = ("a",)',
+                "+_TASK_INBOUND_TYPES = ()",
+            ),
+            id="guarded-rebinding",
         ),
     ],
 )

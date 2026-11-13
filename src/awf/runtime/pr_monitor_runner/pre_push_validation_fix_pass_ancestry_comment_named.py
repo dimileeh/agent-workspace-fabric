@@ -35,14 +35,19 @@ from typing import TYPE_CHECKING, Any
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _CALLEE_KEYWORD_BLOCKLIST,
     _JS_IDENT,
+    _definition_binding_scope,
     _definition_head_scan_lines,
     _definition_span_end_line,
+    _iter_definition_spans,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
     _diff_adds_decorators_above_span,
     _importable_definition_spans_for_names,
     _path_diff_text_in_commit_range,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
+    _rebound_scope_names,
 )
 
 if TYPE_CHECKING:
@@ -127,15 +132,46 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
 def _module_level_assignment_spans(
     file_text: str, names: frozenset[str], *, path: str
 ) -> list[tuple[int, int]]:
-    """Spans of module-level plain bindings of ``names``, multi-line literals included."""
+    """Spans of effective module-level plain bindings of ``names``, multi-line literals included.
+
+    The module body runs its column-0 bindings in order, so only the last one of
+    a name is the value importers reach; an earlier one is dead, and an edit
+    confined to it changes nothing (PRRT_kwDOSJAM6s63LR_S). A name the module
+    scope also binds another way — a ``def``/``class`` head after that last
+    binding or under a guard, an ``import``, or any assignment, loop or ``with``
+    target the ``_rebound_scope_names`` readers find — withholds it entirely,
+    matching ``_importable_definition_spans_for_names``'s effective-binding rule.
+    """
     lines = file_text.splitlines()
-    spans: list[tuple[int, int]] = []
+    bindings: list[tuple[str, int]] = []
     for index, scan in enumerate(_definition_head_scan_lines(file_text, path=path)):
         match = _MODULE_LEVEL_ASSIGNMENT_RE.match(scan)
-        if match is None or match.group(1) not in names:
-            continue
-        spans.append((index + 1, _definition_span_end_line(lines, index + 1, 0)))
-    return spans
+        if match is not None and match.group(1) in names:
+            bindings.append((match.group(1), index + 1))
+    if not bindings:
+        return []
+    last = dict(bindings)
+    starts = frozenset(start for _name, start in bindings)
+    all_spans = _iter_definition_spans(file_text, path=path)
+    shadowed = {
+        name
+        for name, start, _end, indent in all_spans
+        if name in last
+        and start not in starts
+        and (indent > 0 or start > last[name])
+        and _definition_binding_scope(file_text, all_spans, start=start, indent=indent)[0] == 0
+    }
+    rebound = _rebound_scope_names(
+        file_text,
+        all_spans,
+        path=path,
+        collected=[(name, start, 0, (0, 0), (start, start)) for name, start in bindings],
+    )
+    return [
+        (start, _definition_span_end_line(lines, start, 0))
+        for name, start in last.items()
+        if name not in shadowed and (0, name) not in rebound
+    ]
 
 
 async def _commit_range_changes_comment_named_target(
