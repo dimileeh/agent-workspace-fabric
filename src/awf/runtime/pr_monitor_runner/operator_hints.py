@@ -1063,7 +1063,21 @@ async def _run_operator_hint_cycle(
     # A pushed NEW commit is no proof the baseline-outage park's kept repair landed:
     # from a worktree recreated at the remote head, the directiveless repair agent's
     # commit pushes cleanly without it. Require the kept SHA on the remote too
-    # (PRRT_kwDOSJAM6s63PY73).
+    # (PRRT_kwDOSJAM6s63PY73). A park with no recorded kept SHA has nothing to
+    # confirm, so the push is no proof either (PRRT_kwDOSJAM6s63QAPz).
+    if (
+        baseline_park_pending
+        and not hint.directive
+        and not hint_parked
+        and not baseline_park_head_sha
+    ):
+        reason = (
+            "baseline-outage park recorded no preserved HEAD; refusing to finalize the "
+            "resume push without proof that the kept repair commit reached the remote "
+            "PR branch. Resume with a directive or restore the worktree, then resume."
+        )
+        mark_operator_hint_needs_human(state, reason)
+        return cast(_GitPushResult, push_result)
     if (
         baseline_park_head_sha
         and not hint_parked
