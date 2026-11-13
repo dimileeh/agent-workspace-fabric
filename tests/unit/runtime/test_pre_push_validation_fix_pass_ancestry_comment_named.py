@@ -392,6 +392,13 @@ _INBOUND_INSERT = _diff(_INBOUND, "@@ -3,0 +4 @@", '+    "c",')
             "`LIMIT` is too low",
             id="backslash-continuation",
         ),
+        pytest.param(
+            _ROUTES,
+            'KINDS: tuple[\n    str, ...\n] = ("a",)\nOTHER = 2\n',
+            _diff(_ROUTES, "@@ -3 +3 @@", '-] = ("a",)', '+] = ("a", "b")'),
+            "`KINDS` misses a kind",
+            id="multi-line-annotation",
+        ),
     ],
 )
 @pytest.mark.unit

@@ -191,22 +191,31 @@ def _module_level_assignment_spans(
     matching ``_importable_definition_spans_for_names``'s effective-binding rule.
     Only statement-opening lines count: a column-0 line inside open brackets or
     after a ``\\`` continuation (a keyword argument, say) binds nothing
-    (PRRT_kwDOSJAM6s63L3DZ).
+    (PRRT_kwDOSJAM6s63L3DZ). The pattern is matched against the whole logical
+    statement, so an annotation that wraps before its ``=`` still binds
+    (PRRT_kwDOSJAM6s63MSFg).
     """
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     bindings: list[tuple[str, int]] = []
     depth = 0
     continued = False
+    statement: list[str] = []
+    statement_start = 1
     for index, scan in enumerate(scan_lines):
-        match = None if depth or continued else _MODULE_LEVEL_ASSIGNMENT_RE.match(scan)
-        if match is not None and match.group(1) in names:
-            bindings.append((match.group(1), index + 1))
+        if not (depth or continued):
+            statement_start, statement = index + 1, []
+        statement.append(scan)
         for char in scan:
             if char in "([{":
                 depth += 1
             elif char in ")]}":
                 depth = max(depth - 1, 0)
         continued = scan.rstrip().endswith("\\")
+        if (depth or continued) and index + 1 < len(scan_lines):
+            continue
+        match = _MODULE_LEVEL_ASSIGNMENT_RE.match(" ".join(statement))
+        if match is not None and match.group(1) in names:
+            bindings.append((match.group(1), statement_start))
     if not bindings:
         return []
     last = dict(bindings)
