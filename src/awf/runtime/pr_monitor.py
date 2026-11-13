@@ -54,6 +54,7 @@ from awf.runtime.feedback_policy import (
     thread_needs_attention,
 )
 from awf.runtime.monitor_state_keys import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     _merge_method_blocked_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
@@ -322,6 +323,15 @@ class MonitorState:
         the offending protected commit is still sitting on the workspace HEAD.
         """
         return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
+
+    @property
+    def has_stranded_park_edits(self) -> bool:
+        """Whether a park left uncommitted repair edits for its resume to commit.
+
+        Keyed on presence, not value: a park that could not read its HEAD records
+        the marker as the empty string.
+        """
+        return PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in self.threads_addressed_ids
 
     @property
     def awaiting_workflow_scope(self) -> bool:
@@ -1221,7 +1231,15 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # (PRRT_kwDOSJAM6s6KHtX0). So an unfinalized preserved block outranks SyncBase
     # regardless of hint status: surface NotifyHuman instead, and a later resume
     # pushes the resolved block before SyncBase integrates the base with no grant.
-    if state.pending_operator_hint is not None and state.has_preserved_protected_block:
+    #
+    # A park that stranded uncommitted repair edits (a baseline-outage or managed-key
+    # park) outranks SyncBase the same way without the preserved-block marker, which
+    # would trip the directive-resume leak guard: merging the advanced base over the
+    # dirty repair paths fails as the terminal ``SYNC_BASE_MERGE_FAILED`` before the
+    # hint cycle can commit those edits (PRRT_kwDOSJAM6s63QUyw).
+    if state.pending_operator_hint is not None and (
+        state.has_preserved_protected_block or state.has_stranded_park_edits
+    ):
         hint = state.pending_operator_hint
         if hint.status == "pending":
             return AddressOperatorHint(hint=hint)

@@ -13,6 +13,15 @@ from datetime import UTC, datetime
 # iterates that map's values, and no review item can collide with the name.
 _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY = "__awf_comment_repair_unpublished_provenance__"
 
+# Reserved ``MonitorState.threads_addressed_ids`` key: a park left uncommitted
+# edits. Its value is the HEAD the park preserved (empty when it could not be
+# read); it reaches the workspace row through the run loop's ``_persist_state``
+# ahead of the park itself, and the operator-hint resume keeps the row's map
+# intact until it drops the key from the row itself. Unlike the other reserved
+# keys ``decide()`` reads it: the resume that commits those edits outranks
+# SyncBase (PRRT_kwDOSJAM6s63QUyw).
+PROVIDER_PARK_STRANDED_EDITS_STATE_KEY = "__awf_provider_park_stranded_edits__"
+
 
 def _non_check_reviewer_settle_started_key(
     *,

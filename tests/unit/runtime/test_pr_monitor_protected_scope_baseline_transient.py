@@ -40,15 +40,19 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
+    OperatorHint,
     PRStatus,
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    decide,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner import ci_ops as ci_ops_module
@@ -1110,6 +1114,15 @@ async def test_validated_push_park_persists_stranded_edits_evidence_before_block
     evidence = json.loads(persisted[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY])
     assert list(evidence) == ["src/fix.py"]
     assert evidence["src/fix.py"].startswith("file:")
+    # The persisted park routes its guide resume ahead of SyncBase even though it
+    # records no preserved-protected-block marker: a base that advanced while
+    # blocked must not be merged over the dirty repair paths first
+    # (PRRT_kwDOSJAM6s63QUyw).
+    hint = OperatorHint(reason="baseline reachable again", reason_code="OPERATOR_GUIDE")
+    resumed = MonitorState(pending_operator_hint=hint, threads_addressed_ids=dict(persisted))
+    assert not resumed.has_preserved_protected_block
+    behind = replace(_status(), base_behind_count=2)
+    assert decide(behind, resumed, MonitorConfig(auto_merge=True)) == AddressOperatorHint(hint=hint)
 
 
 @pytest.mark.unit
