@@ -20,6 +20,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
 )
@@ -1173,6 +1174,11 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     owned = state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY)
     assert (json.loads(owned) if owned is not None else None) == (
         ["src/fix.py"] if transient else None
+    )
+    # ... and the operation start that boundary was computed from, so the resume's
+    # committed-delta gate also inspects a sink-time self-commit (PRRT_kwDOSJAM6s63OKfe).
+    assert state.threads_addressed_ids.get(PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY) == (
+        operation_start_head if transient else None
     )
     # The finalize failure must not re-check the tree (no verify/recheck pass).
     assert check_worktree_clean.await_count == 1

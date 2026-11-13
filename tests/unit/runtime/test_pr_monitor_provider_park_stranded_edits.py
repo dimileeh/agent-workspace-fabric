@@ -46,12 +46,15 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import provider_park_stranded_edits, remote_repair
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     commit_provider_park_stranded_edits,
     mark_provider_park_stranded_edits,
+    provider_park_resume_kept_head,
     record_provider_park_stranded_edits_evidence,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
@@ -69,6 +72,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 _PRESERVED_HEAD = "b" * 40
+_OPERATION_START_HEAD = "e" * 40
 _WORKSPACE_ID = "ws_park_stranded"
 _REMOTE_BRANCH = "awf/ws_park_stranded"
 
@@ -131,10 +135,13 @@ async def _parked_state(
     paths: tuple[str, ...] = ("stranded_fix.py",),
     *,
     owned_paths: tuple[str, ...] | None = None,
+    delta_anchor: str | None = None,
 ) -> MonitorState:
     """Mark a park and record the evidence of what it left dirty."""
     state = MonitorState()
-    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, owned_paths=owned_paths)
+    mark_provider_park_stranded_edits(
+        state, _PRESERVED_HEAD, owned_paths=owned_paths, delta_anchor=delta_anchor
+    )
     await record_provider_park_stranded_edits_evidence(
         _FakeRunner([_dirty(list(paths))], commits=True),
         workspace_id=_WORKSPACE_ID,
@@ -434,6 +441,21 @@ def test_a_later_park_never_inherits_an_earlier_ownership_boundary() -> None:
 
 
 @pytest.mark.unit
+def test_a_later_park_never_inherits_an_earlier_delta_anchor() -> None:
+    state = MonitorState()
+    mark_provider_park_stranded_edits(
+        state, _PRESERVED_HEAD, owned_paths={"a.py"}, delta_anchor=_OPERATION_START_HEAD
+    )
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY] == (
+        _OPERATION_START_HEAD
+    )
+
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+
+    assert PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_a_recorded_path_outside_the_owned_delta_is_never_committed(
     tmp_path: Path,
 ) -> None:
@@ -521,6 +543,91 @@ async def test_a_resume_commit_with_unowned_paths_fails_closed_before_publishing
     # No post-commit guard ran: the result never reaches the push.
     assert len(runner.guard_calls) == 1
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_a_rejected_unowned_resume_commit_stays_rejected_on_every_retry(
+    tmp_path: Path,
+) -> None:
+    # The rejected commit leaves the worktree clean; a retried resume must not take
+    # that clean worktree as settled and publish it (PRRT_kwDOSJAM6s63OKfZ).
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    for _ in range(3):
+        cmd.queue_result(stdout="M\0stranded_fix.py\0A\0agent_extra.py\0")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"]), None, None], cmd)
+
+    for _ in range(3):
+        result = await _resume(runner, state, tmp_path)
+
+        assert result is not None
+        assert result.reason_code == "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"
+        assert result.details is not None
+        assert result.details["paths"] == ["agent_extra.py"]
+        assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+            _PRESERVED_HEAD
+        )
+        assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY in state.threads_addressed_ids
+    assert len(runner.sink_calls) == 1
+    assert [call.args[-1] for call in cmd.calls] == [f"{_PRESERVED_HEAD}..HEAD"] * 3
+
+
+@pytest.mark.unit
+async def test_the_committed_delta_gate_inspects_a_sink_self_commit_before_the_park(
+    tmp_path: Path,
+) -> None:
+    # The protected-scope repair agent can self-commit inside the finalize's sink
+    # before the baseline outage parks it, so the park's HEAD already holds that
+    # commit; the gate diffs from the operation start instead (PRRT_kwDOSJAM6s63OKfe).
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(
+        tmp_path, owned_paths=("stranded_fix.py",), delta_anchor=_OPERATION_START_HEAD
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0A\0sink_self_commit.py\0")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"])], cmd)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.reason_code == "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"
+    assert result.details is not None
+    assert result.details["paths"] == ["sink_self_commit.py"]
+    assert result.details["operation_start_head"] == _OPERATION_START_HEAD
+    assert [call.args[-1] for call in cmd.calls] == [f"{_OPERATION_START_HEAD}..HEAD"]
+    # The resume itself still continues from the park's HEAD.
+    assert runner.sink_calls[0]["operation_start_head"] == _PRESERVED_HEAD
+    assert PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_settled_resume_drops_the_delta_anchor(tmp_path: Path) -> None:
+    state = await _parked_state(
+        tmp_path, owned_paths=("stranded_fix.py",), delta_anchor=_OPERATION_START_HEAD
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0")
+    runner = _GatedRunner([None], cmd)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert [call.args[-1] for call in cmd.calls] == [f"{_OPERATION_START_HEAD}..HEAD"]
+    assert PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(tmp_path: Path) -> None:
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0")
+    runner = _GatedRunner([None], cmd)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert runner.sink_calls == []
+    assert len(cmd.calls) == 1
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -643,8 +750,11 @@ async def test_a_rewritten_resumed_head_is_reparented_onto_the_fix_pass_baseline
 
 @pytest.mark.unit
 async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Like every re-parent git step, the reset ignores process object-lookup
+    # overrides (PRRT_kwDOSJAM6s63OA3P).
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/elsewhere/objects")
     state = await _baseline_parked_state(tmp_path)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=1)
@@ -656,7 +766,65 @@ async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
     assert await _resume(runner, state, tmp_path) is None
 
     assert _git_args(cmd)[-1] == ["reset", "--hard", _BASELINE_HEAD]
+    reset_env = cmd.calls[-1].env
+    assert reset_env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in reset_env
     assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("net_change", [True, False])
+async def test_a_rewritten_park_head_names_its_replacement_durably(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, net_change: bool
+) -> None:
+    # The rewrite discards the parked SHA, so a baseline-park resume must look for
+    # the commit that replaced it instead (PRRT_kwDOSJAM6s63OA3D).
+    workspace_id = await seed_monitoring_workspace(factory)
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    if net_change:
+        cmd.queue_result(stdout="tree-resumed\n")
+        cmd.queue_result(stdout="tree-baseline\n")
+        cmd.queue_result(stdout="fix: the agent's amended fix\n")
+        cmd.queue_result(stdout=f"{_REPARENTED_HEAD}\n")
+    else:
+        cmd.queue_result(stdout="same-tree\n")
+        cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result()  # reset --hard
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+    runner._deps = SimpleNamespace(runner=cmd, session_factory=factory)
+
+    assert await _resume(runner, state, tmp_path, workspace_id=workspace_id) is None
+
+    replacement = _REPARENTED_HEAD if net_change else _BASELINE_HEAD
+    assert provider_park_resume_kept_head(state, _PRESERVED_HEAD) == replacement
+    # Only the parked SHA the rewrite replaced maps to the replacement.
+    assert provider_park_resume_kept_head(state, "d" * 40) == "d" * 40
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        reloaded = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed or {}))
+    assert provider_park_resume_kept_head(reloaded, _PRESERVED_HEAD) == replacement
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in reloaded.threads_addressed_ids
+
+    # The next park starts without the previous resume's rewrite.
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    assert PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "record",
+    [None, "not json", json.dumps(["list"]), json.dumps({"from": _PRESERVED_HEAD, "to": ""})],
+)
+def test_an_unusable_rewrite_record_keeps_the_parked_head(record: str | None) -> None:
+    state = MonitorState()
+    if record is not None:
+        state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = record
+
+    assert provider_park_resume_kept_head(state, _PRESERVED_HEAD) == _PRESERVED_HEAD
+    assert provider_park_resume_kept_head(state, None) is None
 
 
 @pytest.mark.unit
