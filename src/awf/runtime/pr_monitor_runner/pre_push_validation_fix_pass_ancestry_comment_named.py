@@ -171,8 +171,8 @@ def _assignment_span_end_line(
     lines are re-masked each behind a tab, which the masker keeps only outside a
     literal, so such a line is told apart from one the binding's own literal
     continues (PRRT_kwDOSJAM6s63MDQr). In JS/TS, where indentation is not scope,
-    an indented line after a complete statement ends the span too
-    (PRRT_kwDOSJAM6s63PU_-); a leading ``/*`` is a comment, not an operator, so
+    a line of any indent ends the span only after a complete statement
+    (PRRT_kwDOSJAM6s63PU_-, PRRT_kwDOSJAM6s63Pq1L); a leading ``/*`` is a comment, not an operator, so
     only code after it can continue the expression (PRRT_kwDOSJAM6s63Pq1C). A
     ``;`` outside brackets ends the statement on its
     own line, so a ``;``-separated next statement's brackets are not the
@@ -200,14 +200,14 @@ def _assignment_span_end_line(
             and starts_in_code[index - start + 1]
             and not gap
             and (
-                _leading_indent(raw) == 0
-                or (
-                    js_ts
-                    and complete
+                (
+                    complete
                     and not _JS_TS_LEADING_CONTINUATION_RE.match(
                         scan if raw.lstrip().startswith("/*") else raw
                     )
                 )
+                if js_ts
+                else _leading_indent(raw) == 0
             )
         ):
             return index
