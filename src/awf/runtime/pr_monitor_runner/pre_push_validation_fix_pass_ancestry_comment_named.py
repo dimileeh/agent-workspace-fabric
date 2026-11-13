@@ -108,6 +108,13 @@ _PYTHON_INLINE_BODY_RE = re.compile(
 # one is matched right after a top-level ``,`` (PRRT_kwDOSJAM6s63QfAU).
 _JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
 _JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)")
+# What precedes a type-parameter list's ``<``: the start of an expression (a
+# generic arrow or function type) or a ``function``/``class`` head. A ``<`` after
+# an operand (``1 < 2``) is a comparison (PRRT_kwDOSJAM6s63UyJU).
+_JS_TS_TYPE_PARAMETER_LIST_OPENER_RE = re.compile(
+    r"(?:^|[=(,:?\[{]|=>|(?<![\w$.])(?:async|(?:function|class)(?:[ \t]*\*)?(?:[ \t]*[\w$]+)?))"
+    r"[ \t]*$"
+)
 # What follows a type-parameter list's ``>`` (PRRT_kwDOSJAM6s63SGuR).
 _JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE = re.compile(
     r"[ \t]*(?:[({]|(?:extends|implements)(?![\w$]))"
@@ -271,10 +278,13 @@ def _js_ts_ends_type_arguments(code: str) -> bool:
 def _js_ts_type_parameter_list_end(logical: str, start: int) -> int | None:
     """Index of the ``>`` closing a type-parameter list opened at ``logical[start]``.
 
-    A ``<`` opens one only when its matching ``>`` is followed by the ``(`` or
-    ``{`` of a generic arrow, function or class, or by ``extends``/``implements``;
-    a ``>`` of ``=>`` closes nothing. Anything else is a comparison: ``None``.
+    A ``<`` opens one only where an expression or a ``function``/``class`` head
+    starts, and when its matching ``>`` is followed by the ``(`` or ``{`` of a
+    generic arrow, function or class, or by ``extends``/``implements``; a ``>``
+    of ``=>`` closes nothing. Anything else is a comparison: ``None``.
     """
+    if _JS_TS_TYPE_PARAMETER_LIST_OPENER_RE.search(logical, 0, start) is None:
+        return None
     angles = 0
     depth = 0
     for position in range(start, len(logical)):

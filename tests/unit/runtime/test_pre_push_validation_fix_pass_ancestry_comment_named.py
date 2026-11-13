@@ -756,6 +756,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             id="comparison-ends-at-semicolon",
         ),
         pytest.param(
+            "const OTHER = 1 < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = 1 < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="comparisons-around-declarator-are-not-a-generic",
+        ),
+        pytest.param(
+            "const OTHER = 1 < 2, LIMIT = 3 > (\n  4\n);\n",
+            2,
+            "  5",
+            "LIMIT",
+            True,
+            id="comparisons-around-declarator-with-multiline-operand",
+        ),
+        pytest.param(
             "const OTHER = base\n  .method(), LIMIT = [\n  10,\n];\n",
             3,
             "  20,",
