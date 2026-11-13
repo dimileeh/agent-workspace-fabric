@@ -36,6 +36,7 @@ from awf.common.workspace_policy import (
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
+    TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
     TaskExternalIdConflictError,
     WorkspaceRepository,
 )
@@ -723,12 +724,11 @@ def _adoption_external_id_policy_conflicts(
 def _task_external_id_conflict_error(exc: TaskExternalIdConflictError) -> PRMonitorAdoptionError:
     return PRMonitorAdoptionError(
         error_code="TASK_EXTERNAL_ID_CONFLICT",
-        message=(
-            "External task ID is already associated with a different "
-            "repo/base/task-class/owned-path scope; use a unique external "
-            "task ID for this backlog slice or retry the original scope."
-        ),
-        detail={"external_id": _redacted_optional_text(exc.external_id)},
+        message=TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
+        detail={
+            "external_id": _redacted_optional_text(exc.external_id),
+            "mismatched_fields": list(exc.mismatched_fields),
+        },
     )
 
 

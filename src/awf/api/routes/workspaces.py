@@ -66,6 +66,7 @@ from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
     EgressAuditRepository,
     TaskExternalIdConflictError,
     ValidationRunRepository,
@@ -367,12 +368,11 @@ async def create_workspace(
             status_code=status.HTTP_409_CONFLICT,
             content=ErrorResponse(
                 error_code="TASK_EXTERNAL_ID_CONFLICT",
-                message=(
-                    "External task ID is already associated with a different "
-                    "repo/base/task-class/owned-path scope; use a unique external "
-                    "task ID for this backlog slice or retry the original scope."
-                ),
-                detail={"external_id": exc.external_id},
+                message=TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
+                detail={
+                    "external_id": exc.external_id,
+                    "mismatched_fields": list(exc.mismatched_fields),
+                },
             ).model_dump(),
         )
     except (
