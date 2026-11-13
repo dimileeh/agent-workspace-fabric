@@ -38,8 +38,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _JS_IDENT,
     _definition_binding_scope,
     _definition_head_scan_lines,
-    _definition_span_end_line,
+    _is_ignorable_span_gap_line,
     _iter_definition_spans,
+    _leading_indent,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
@@ -130,6 +131,36 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _assignment_span_end_line(scan_lines: list[str], start: int) -> int:
+    """Inclusive end line of the column-0 binding whose statement opens at ``start``.
+
+    Read over comment/string-masked lines, so a multi-line string's contents are
+    blank gaps rather than dedented statements, and a line inside open brackets
+    or after a ``\\`` continuation belongs to the statement whatever its indent
+    (PRRT_kwDOSJAM6s63Lp9D). Past those, the next column-0 line ends the span on
+    the line before it, as ``_definition_span_end_line`` does.
+    """
+    depth = 0
+    continued = False
+    for index in range(start - 1, len(scan_lines)):
+        scan = scan_lines[index]
+        if (
+            index >= start
+            and depth == 0
+            and not continued
+            and not _is_ignorable_span_gap_line(scan)
+            and _leading_indent(scan) == 0
+        ):
+            return index
+        for char in scan:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth = max(depth - 1, 0)
+        continued = scan.rstrip().endswith("\\")
+    return len(scan_lines)
+
+
 def _module_level_assignment_spans(
     file_text: str, names: frozenset[str], *, path: str
 ) -> list[tuple[int, int]]:
@@ -143,9 +174,9 @@ def _module_level_assignment_spans(
     target the ``_rebound_scope_names`` readers find — withholds it entirely,
     matching ``_importable_definition_spans_for_names``'s effective-binding rule.
     """
-    lines = file_text.splitlines()
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
     bindings: list[tuple[str, int]] = []
-    for index, scan in enumerate(_definition_head_scan_lines(file_text, path=path)):
+    for index, scan in enumerate(scan_lines):
         match = _MODULE_LEVEL_ASSIGNMENT_RE.match(scan)
         if match is not None and match.group(1) in names:
             bindings.append((match.group(1), index + 1))
@@ -169,7 +200,7 @@ def _module_level_assignment_spans(
         collected=[(name, start, 0, (0, 0), (start, start)) for name, start in bindings],
     )
     return [
-        (start, _definition_span_end_line(lines, start, 0))
+        (start, _assignment_span_end_line(scan_lines, start))
         for name, start in last.items()
         if name not in shadowed and (0, name) not in rebound
     ]

@@ -371,6 +371,27 @@ _INBOUND_INSERT = _diff(_INBOUND, "@@ -3,0 +4 @@", '+    "c",')
             "`_TASK_INBOUND_TYPES` misses the task type",
             id="last-module-level-binding",
         ),
+        pytest.param(
+            _ROUTES,
+            'QUERY = """\nSELECT id\nFROM users\n"""\n\n\ndef other():\n    return 0\n',
+            _diff(_ROUTES, "@@ -2 +2 @@", "-SELECT id", "+SELECT id, name"),
+            "`QUERY` misses the name column",
+            id="unindented-multi-line-string",
+        ),
+        pytest.param(
+            _ROUTES,
+            "LIMITS = dict(\nteam=1,\n)\nOTHER = 2\n",
+            _diff(_ROUTES, "@@ -2 +2 @@", "-team=1,", "+team=2,"),
+            "`LIMITS` is too low",
+            id="unindented-bracket-continuation",
+        ),
+        pytest.param(
+            _ROUTES,
+            "LIMIT = 1 + \\\n2\nOTHER = 2\n",
+            _diff(_ROUTES, "@@ -2 +2 @@", "-2", "+3"),
+            "`LIMIT` is too low",
+            id="backslash-continuation",
+        ),
     ],
 )
 @pytest.mark.unit
@@ -421,6 +442,16 @@ async def test_named_identifier_definition_changed_by_the_range_is_evidence(
             _INBOUND_TEXT,
             _diff(_INBOUND, "@@ -8 +8 @@", "-    return 0", "+    return 1"),
             id="same-file-outside-span",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = """\na\n"""\nVALUE = (\n1\n)\n',
+            _diff(_INBOUND, "@@ -5 +5 @@", "-1", "+2"),
+            id="statement-after-multi-line-string",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = """\na\n"""\nVALUE = (\n1\n)\n',
+            _diff(_INBOUND, "@@ -5 +5 @@", "-1", "+2"),
+            id="statement-after-multi-line-string",
         ),
         pytest.param(
             '_TASK_INBOUND_TYPES = ("a",)\n_TASK_INBOUND_TYPES = ("b",)\n',
