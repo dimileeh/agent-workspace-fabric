@@ -609,6 +609,38 @@ async def test_python_floor_division_does_not_extend_a_binding(
 
 
 @pytest.mark.parametrize(
+    ("diff", "expected"),
+    [
+        pytest.param(
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                "-DEFAULT_LIMIT = LIMIT = 10",
+                "+DEFAULT_LIMIT = LIMIT = 20",
+            ),
+            True,
+            id="chained-binding",
+        ),
+        pytest.param(
+            _diff(_INBOUND, "@@ -2 +2 @@", "-OTHER = LIMIT == 1", "+OTHER = LIMIT == 2"),
+            False,
+            id="comparison-is-not-a-target",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_chained_assignment_binds_every_target(diff: str, *, expected: bool) -> None:
+    """A secondary target of ``A = B = v`` is bound too (PRRT_kwDOSJAM6s63PKQ9)."""
+    runner = _probe(
+        texts={_INBOUND: "DEFAULT_LIMIT = LIMIT = 10\nOTHER = LIMIT == 1\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(

@@ -88,6 +88,9 @@ _NON_DEFINITION_NAMES = (
 _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
     rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
 )
+# A further target of a chained binding (``A = B = 10``), matched right after
+# the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9).
+_CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -197,7 +200,8 @@ def _module_level_assignment_spans(
     after a ``\\`` continuation (a keyword argument, say) binds nothing
     (PRRT_kwDOSJAM6s63L3DZ). The pattern is matched against the whole logical
     statement, so an annotation that wraps before its ``=`` still binds
-    (PRRT_kwDOSJAM6s63MSFg).
+    (PRRT_kwDOSJAM6s63MSFg), and every target of a chained ``A = B = 10``
+    binds, not only the first (PRRT_kwDOSJAM6s63PKQ9).
     """
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     bindings: list[tuple[str, int]] = []
@@ -217,9 +221,12 @@ def _module_level_assignment_spans(
         continued = scan.rstrip().endswith("\\")
         if (depth or continued) and index + 1 < len(scan_lines):
             continue
-        match = _MODULE_LEVEL_ASSIGNMENT_RE.match(" ".join(statement))
-        if match is not None and match.group(1) in names:
-            bindings.append((match.group(1), statement_start))
+        logical = " ".join(statement)
+        match = _MODULE_LEVEL_ASSIGNMENT_RE.match(logical)
+        while match is not None:
+            if match.group(1) in names:
+                bindings.append((match.group(1), statement_start))
+            match = _CHAINED_ASSIGNMENT_TARGET_RE.match(logical, match.end())
     if not bindings:
         return []
     last = dict(bindings)
