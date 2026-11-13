@@ -745,13 +745,42 @@ async def test_js_ts_binding_ends_at_its_statement_boundary(
         ),
         pytest.param(_WEB, "if (on) {\n  LIMIT = 1;\n}\n", 2, False, id="js-ts-block-body"),
         pytest.param(_INBOUND, "if on:\n    LIMIT = 1\n", 2, False, id="python-indented"),
+        pytest.param(_WEB, "if (on)\n  LIMIT = 1;\n", 2, False, id="js-ts-braceless-if"),
+        pytest.param(_WEB, "if (on)\nLIMIT = 1;\n", 2, False, id="js-ts-braceless-col0"),
+        pytest.param(
+            _WEB,
+            "for (let i = 0; i < n; i++)\n  LIMIT = 1;\n",
+            2,
+            False,
+            id="js-ts-braceless-for",
+        ),
+        pytest.param(_WEB, "if (on) {\n  a();\n} else\n  LIMIT = 1;\n", 4, False, id="js-ts-else"),
+        pytest.param(_WEB, "const f = () =>\n  LIMIT = 1;\n", 2, False, id="js-ts-arrow-body"),
+        pytest.param(
+            _WEB,
+            "if (on)\n  a = 0;\n  LIMIT = 1;\n",
+            3,
+            True,
+            id="js-ts-after-braceless-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 1;\nif (on)\n  LIMIT = 3;\n",
+            3,
+            False,
+            id="js-ts-braceless-write-after-binding",
+        ),
     ],
 )
 @pytest.mark.unit
 async def test_indented_binding_counts_only_at_js_ts_module_scope(
     path: str, text: str, line: int, *, expected: bool
 ) -> None:
-    """Leading whitespace is valid at JS/TS module scope (PRRT_kwDOSJAM6s63P5Zi)."""
+    """Leading whitespace is valid at JS/TS module scope (PRRT_kwDOSJAM6s63P5Zi).
+
+    A brace-less control or concise-arrow body is not a statement of its own, so
+    a write there is no binding (PRRT_kwDOSJAM6s63QK8_).
+    """
     old = text.splitlines()[line - 1]
     diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
     runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})

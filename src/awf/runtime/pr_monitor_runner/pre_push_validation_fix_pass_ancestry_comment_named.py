@@ -98,6 +98,11 @@ _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
 # (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-).
 _JS_TS_TRAILING_CONTINUATION_RE = re.compile(r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-)$")
 _JS_TS_LEADING_CONTINUATION_RE = re.compile(r"^[ \t]*[.?:,=*/%&|^<>+\-(\[`]")
+# A JS/TS statement that leaves the next one as its brace-less body: an
+# ``if``/``for``/``while``/``with`` head, ``else`` or ``do`` (PRRT_kwDOSJAM6s63QK8_).
+_JS_TS_BODY_HEAD_RE = re.compile(
+    r"(?:^|[;}])[ \t]*(?:(?:else[ \t]+)?(?:if|for|while|with)\b.*\)|else|do)$"
+)
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -243,13 +248,18 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63L3DZ). The pattern is matched against the whole logical
     statement, so an annotation that wraps before its ``=`` still binds
     (PRRT_kwDOSJAM6s63MSFg), and every target of a chained ``A = B = 10``
-    binds, not only the first (PRRT_kwDOSJAM6s63PKQ9).
+    binds, not only the first (PRRT_kwDOSJAM6s63PKQ9). In JS/TS a statement
+    after a brace-less control head or an incomplete one (a concise arrow's
+    ``=>``) is that statement's body, not a module-level binding
+    (PRRT_kwDOSJAM6s63QK8_).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     scan_lines = _definition_head_scan_lines(file_text, path=path)
+    raw_lines = file_text.splitlines()
     bindings: list[tuple[str, int]] = []
     depth = 0
     continued = False
+    in_body = False
     statement: list[str] = []
     statement_start = 1
     for index, scan in enumerate(scan_lines):
@@ -266,7 +276,15 @@ def _module_level_assignment_spans(
             continue
         logical = " ".join(statement)
         if js_ts:
-            logical = logical.lstrip(" \t")
+            logical = logical.strip(" \t")
+            if not logical:
+                continue
+            is_body = in_body
+            in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
+                _js_ts_line_ends_statement(raw_lines[index], scan)
+            )
+            if is_body:
+                continue
         match = _MODULE_LEVEL_ASSIGNMENT_RE.match(logical)
         while match is not None:
             if match.group(1) in names:
