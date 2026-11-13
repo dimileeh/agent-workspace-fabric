@@ -477,6 +477,7 @@ async def comment_named_target_item_fix_evidence(
     item_line: int | None,
     comment_text: str | None,
     state: MonitorState | None,
+    anchor_head: str | None = None,
 ) -> bool:
     """Accept a fix to a target the reviewer's comment names (#1232).
 
@@ -498,6 +499,8 @@ async def comment_named_target_item_fix_evidence(
     changes no named target keeps escalating with the commit preserved, and the
     ``item_line <= 0`` unmappable-anchor sentinel stays fail-closed; a
     file-level thread (``item_line is None``) is not that sentinel.
+    ``anchor_head`` is the PR head the review was written against; named
+    ``path:line`` targets are relocated from it into ``item_start_head``.
     """
     if item_start_head is None or item_path is None or not (comment_text or "").strip():
         return False
@@ -541,6 +544,7 @@ async def comment_named_target_item_fix_evidence(
             left=item_start_head,
             right=candidate,
             comment_text=comment_text,
+            anchor_head=anchor_head,
         ):
             continue
         return True

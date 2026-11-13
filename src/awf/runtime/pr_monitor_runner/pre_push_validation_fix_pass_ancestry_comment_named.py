@@ -181,12 +181,17 @@ async def _commit_range_changes_comment_named_target(
     left: str,
     right: str,
     comment_text: str,
+    anchor_head: str | None = None,
 ) -> bool:
     """True when ``left``..``right`` changes a target the reviewer's text names.
 
     (a) A named path the range changed: any change without ``:line``, or one the
     line-anchored rule accepts for that line (the first
-    ``_MAX_COMMENT_NAMED_PATHS`` such probes). (b) A named identifier whose
+    ``_MAX_COMMENT_NAMED_PATHS`` such probes). Named paths and lines are in the
+    coordinates of ``anchor_head``, the PR head the review was written against,
+    so they are first relocated into ``left`` through the commits between them —
+    an earlier item in the batch may have renamed the file or shifted the line
+    (PRRT_kwDOSJAM6s63LTKz); one that no longer maps is skipped. (b) A named identifier whose
     definition span at ``left`` — a module-reachable head, decorators included,
     or a module-level plain binding — overlaps a hunk of the range in a changed
     file, diffed with its rename target so a pure move stays hunkless. Fails
@@ -196,6 +201,8 @@ async def _commit_range_changes_comment_named_target(
         _changed_paths_in_commit_range,
         _commit_range_touches_path,
         _diff_hunk_overlaps_line_span,
+        _map_review_line_through_commits,
+        _map_review_path_through_commits,
         _normalize_evidence_item_path,
         _path_text_at_ref,
         _rename_map_in_commit_range,
@@ -217,15 +224,38 @@ async def _commit_range_changes_comment_named_target(
     ]
     if not changed:
         return False
+    anchor = (anchor_head or "").strip()
+    remap = bool(anchor) and anchor.lower() != left.lower()
     line_probes = 0
-    for path, line in named_paths:
-        if path not in changed:
+    for named_path, named_line in named_paths:
+        path: str | None = named_path
+        if remap:
+            path = await _map_review_path_through_commits(
+                self,
+                worktree_path=worktree_path,
+                anchor_head=anchor,
+                target_head=left,
+                path=named_path,
+            )
+        if path is None or path not in changed:
             continue
-        if line is None:
+        if named_line is None:
             return True
         if line_probes >= _MAX_COMMENT_NAMED_PATHS:
             continue
         line_probes += 1
+        line: int | None = named_line
+        if remap:
+            line = await _map_review_line_through_commits(
+                self,
+                worktree_path=worktree_path,
+                anchor_head=anchor,
+                target_head=left,
+                path=named_path,
+                line=named_line,
+            )
+        if line is None or line < 1:
+            continue
         if await _commit_range_touches_path(
             self, worktree_path=worktree_path, left=left, right=right, path=path, line=line
         ):

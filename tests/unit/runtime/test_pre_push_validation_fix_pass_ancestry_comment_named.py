@@ -219,6 +219,87 @@ async def test_named_path_with_a_line_needs_a_hunk_at_that_line() -> None:
     assert not await _changes_named_target(far_away, f"See `{_DOC}:823` for the stale step.")
 
 
+_ANCHOR = "c" * 40
+
+
+class _AnchoredProbe(_Probe):
+    """A ``_Probe`` that also answers the review-anchor..``_LEFT`` relocation reads."""
+
+    def __init__(self, *, anchor_name_status: str, anchor_diffs: dict[str, str], **kwargs: object):
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.anchor_name_status = anchor_name_status
+        self.anchor_diffs = anchor_diffs
+
+    async def _run(self, cmd: list[str], **kwargs: object):
+        from awf.common.commands import CommandResult
+
+        if _ANCHOR not in cmd:
+            return await super()._run(cmd, **kwargs)
+        if "--name-status" in cmd:
+            return CommandResult(returncode=0, stdout=self.anchor_name_status, stderr="")
+        return CommandResult(returncode=0, stdout=self.anchor_diffs.get(cmd[-1], ""), stderr="")
+
+
+async def _changes_anchored_target(runner: object, comment_text: str) -> bool:
+    return await comment_named._commit_range_changes_comment_named_target(
+        runner,
+        worktree_path=Path("/tmp/ws"),
+        left=_LEFT,
+        right=_RIGHT,
+        comment_text=comment_text,
+        anchor_head=_ANCHOR,
+    )
+
+
+@pytest.mark.unit
+async def test_named_line_is_relocated_from_the_review_anchor_head() -> None:
+    """An earlier item's insert above ``:823`` moves the fix to 923 (PRRT_kwDOSJAM6s63LTKz)."""
+
+    def runner() -> _AnchoredProbe:
+        return _AnchoredProbe(
+            anchor_name_status=f"M\0{_DOC}\0",
+            anchor_diffs={_DOC: _diff(_DOC, "@@ -10,0 +11,100 @@", *(["+intro"] * 100))},
+            changed_paths=(_DOC,),
+            diffs={_DOC: _diff(_DOC, "@@ -923 +923 @@", "-old step", "+new step")},
+            texts={},
+        )
+
+    comment = f"See `{_DOC}:823` for the stale step."
+
+    assert await _changes_anchored_target(runner(), comment)
+    assert not await _changes_named_target(runner(), comment)
+
+
+@pytest.mark.unit
+async def test_named_path_is_relocated_through_a_rename_since_the_review_anchor() -> None:
+    moved = "docs/runbooks/vm-core-upgrade.md"
+    runner = _AnchoredProbe(
+        anchor_name_status=f"R100\0{_DOC}\0{moved}\0",
+        anchor_diffs={},
+        changed_paths=(moved,),
+        diffs={moved: _diff(moved, "@@ -823 +823 @@", "-old step", "+new step")},
+        texts={},
+    )
+
+    assert await _changes_anchored_target(runner, f"Update {_DOC} and `{_DOC}:823`.")
+
+
+@pytest.mark.unit
+async def test_named_target_that_no_longer_maps_from_the_review_anchor_is_skipped() -> None:
+    gone = "docs/runbooks/legacy.md"
+    replacement = "docs/runbooks/replacement.md"
+    runner = _AnchoredProbe(
+        anchor_name_status=f"D\0{gone}\0A\0{replacement}\0",
+        anchor_diffs={},
+        changed_paths=(gone,),
+        diffs={gone: _diff(gone, "@@ -5 +5 @@", "-a", "+b")},
+        texts={},
+    )
+
+    assert not await _changes_anchored_target(runner, f"See `{gone}:5`.")
+    assert await _changes_named_target(runner, f"See `{gone}:5`.")
+
+
 # --- (b) comment-named identifier definition ---------------------------------------
 
 _INBOUND_TEXT = '_TASK_INBOUND_TYPES = (\n    "a",\n    "b",\n)\n\n\ndef other():\n    return 0\n'

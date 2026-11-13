@@ -990,6 +990,7 @@ async def _run_item_verdict_protocol(
                         item_line=item_line,
                         comment_text=evidence_comment_text,
                         state=state,
+                        anchor_head=evidence_anchor_head,
                     )
             except (
                 ProviderRecoveryRetryError,

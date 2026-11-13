@@ -482,6 +482,7 @@ class _NamedProbeRunner(SimpleNamespace):
         self.identical_trees = identical_trees
         self.named_heads = named_heads
         self.named_calls: list[tuple[str, str]] = []
+        self.named_anchor_heads: list[str | None] = []
 
     async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
         return self.head
@@ -497,10 +498,17 @@ class _NamedProbeRunner(SimpleNamespace):
         return right not in self.identical_trees
 
     async def _commit_range_changes_comment_named_target(
-        self, *, worktree_path: Path, left: str, right: str, comment_text: str
+        self,
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+        comment_text: str,
+        anchor_head: str | None,
     ) -> bool:
         del worktree_path, left
         self.named_calls.append((right, comment_text))
+        self.named_anchor_heads.append(anchor_head)
         return right in self.named_heads
 
 
@@ -513,6 +521,7 @@ async def _named_evidence(
     item_line: int | None = 849,
     comment_text: str | None = _SHAPE1_BODY,
     state: MonitorState | None = None,
+    anchor_head: str | None = None,
 ) -> bool:
     return await comment_named_target_item_fix_evidence(
         runner,  # type: ignore[arg-type]
@@ -522,6 +531,7 @@ async def _named_evidence(
         item_line=item_line,
         comment_text=comment_text,
         state=state,
+        anchor_head=anchor_head,
     )
 
 
@@ -544,6 +554,10 @@ async def test_named_evidence_requires_a_baseline_a_path_text_and_a_mappable_anc
     # A file-level thread (no line) is not the unmappable sentinel.
     assert await _named_evidence(runner, worktree_path=worktree, item_line=None)
     assert runner.named_calls == [(_ATTEMPT0_HEAD, _SHAPE1_BODY)]
+
+    # The review's anchor head reaches the probe so named lines can be relocated.
+    assert await _named_evidence(runner, worktree_path=worktree, anchor_head=_HOSTED_HEAD)
+    assert runner.named_anchor_heads == [None, _HOSTED_HEAD]
 
 
 @pytest.mark.unit
