@@ -107,7 +107,12 @@ _JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE = re.compile(
 # after a line break is a new prefix-update statement, not a continuation
 # (PRRT_kwDOSJAM6s63QfAQ). A leading keyword operator (``instanceof``/``in``)
 # cannot start a statement, so it continues the expression (PRRT_kwDOSJAM6s63Qv0F).
-_JS_TS_TRAILING_CONTINUATION_RE = re.compile(r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-)$")
+# A trailing keyword operator (``await``/``typeof``/``new``/...) still needs its
+# operand; a property of that name (``cache.delete``) does not (PRRT_kwDOSJAM6s63SGuU).
+_JS_TS_TRAILING_CONTINUATION_RE = re.compile(
+    r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-"
+    r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in))$"
+)
 _JS_TS_LEADING_CONTINUATION_RE = re.compile(
     r"^[ \t]*(?:(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]|(?:instanceof|in)(?![\w$]))"
 )
