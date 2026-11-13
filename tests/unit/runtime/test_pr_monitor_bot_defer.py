@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 
 def _status(
@@ -50,6 +51,7 @@ def _status(
         unresolved_review_comments=reviews,
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

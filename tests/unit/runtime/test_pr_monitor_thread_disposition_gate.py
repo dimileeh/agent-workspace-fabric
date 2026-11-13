@@ -43,6 +43,7 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
@@ -97,6 +98,7 @@ def _green_status() -> PRStatus:
         unresolved_review_comments=(),
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

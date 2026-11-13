@@ -53,6 +53,7 @@ from awf.runtime.pr_monitor import (
     _mark_review_thread_addressed,
     _review_thread_body_state_key,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _drop_stale_review_comment_addressed_state,
@@ -101,6 +102,13 @@ class _CapturingGH:
         self.posted_comments: list[tuple[RepoRef, int, str]] = []
         self.post_errors: list[GitHubClientError] = []
         self.closed = False
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Report every GitHub Actions run for the head completed (#1230)."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def fetch_pr_status(
         self,

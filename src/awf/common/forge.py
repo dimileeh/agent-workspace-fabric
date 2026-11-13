@@ -55,6 +55,7 @@ from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 
@@ -194,6 +195,17 @@ class ForgeClient(Protocol):
         ``supported=False`` means the forge cannot attribute resolutions yet.
         ``retry=False`` (the in-lock re-audit) surfaces a single failure promptly
         instead of retrying under the merge lock, as for ``fetch_pr_status``.
+        """
+        ...
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Return whether every GitHub Actions workflow run for ``head_sha`` completed.
+
+        ``decide`` waits on anything but ``SETTLED`` before a merge-ready outcome
+        (#1230). Forges without GitHub Actions report ``SETTLED``. A read failure
+        raises; ``retry=False`` fails fast, as for ``fetch_pr_status``.
         """
         ...
 

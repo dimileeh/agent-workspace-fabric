@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
@@ -33,6 +34,7 @@ def _status(*, inline: tuple[ReviewThread, ...] = ()) -> PRStatus:
         unresolved_review_comments=(),
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

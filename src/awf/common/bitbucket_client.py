@@ -96,6 +96,7 @@ from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
 from awf.runtime.pr_monitor import CheckFailure, CheckFailureLogResult, CheckTiming, PRStatus
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 _log = get_logger(__name__)
 
@@ -771,6 +772,13 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         """Report the disposition audit unsupported: resolver identity is not read yet."""
         del repo, pr_number, retry, thread_id
         return ReviewThreadAudit(supported=False)
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """No GitHub Actions on Bitbucket; pipeline progress already folds into ``check_state``."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment."""

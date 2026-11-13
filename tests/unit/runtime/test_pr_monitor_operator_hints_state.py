@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -62,6 +63,7 @@ def _ready_status(
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

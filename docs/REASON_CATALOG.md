@@ -4,6 +4,13 @@
 
 This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.
 
+### ACTIONS_RUNS_UNAVAILABLE
+**Problem:** AWF could not read the GitHub Actions workflow runs for the PR head.
+**Likely Cause:** A queued Actions run with no jobs yet is absent from the PR check rollup, so before READY_TO_MERGE (release) or merge (feature) AWF lists the head's Actions runs. A failed read waits (actions_runs_unknown) instead of certifying.
+**Operator Fix:** Check forge connectivity and the token's permissions in the monitor log. AWF re-reads the runs on the next poll; no READY_TO_MERGE or merge happens meanwhile.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#actions_runs_unavailable](#actions_runs_unavailable)
+
 ### ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED
 **Problem:** AWF rewound a preserved active execution to run validate-only recovery.
 **Likely Cause:** A worker restart found a stale active execution with recoverable committed work and created a validation recovery operation instead of failing the workspace.

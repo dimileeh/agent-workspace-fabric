@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
     _mark_review_thread_addressed,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner.outdated_resolution import _grep_id_pattern
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
@@ -321,6 +322,7 @@ def _status_with_outdated(*outdated: ReviewThread) -> PRStatus:
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         outdated_unresolved_inline_threads=outdated,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

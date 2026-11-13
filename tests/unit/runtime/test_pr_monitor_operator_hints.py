@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
@@ -79,6 +80,7 @@ def _ready_status(
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 
