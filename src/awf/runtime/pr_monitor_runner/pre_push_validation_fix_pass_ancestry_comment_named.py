@@ -362,12 +362,14 @@ def _assignment_span_end_line(
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     typescript = Path(path).suffix.lower() in _TS_SUFFIXES
     raw_lines = file_text.splitlines()
+    # Masked from the top of the file, so a ``start`` line closing an earlier
+    # literal is not read as opening one (PRRT_kwDOSJAM6s63UNtz).
     starts_in_code = [
         line.startswith("\t")
         for line in _mask_comments_and_string_literals_for_callee_scan(
-            "\n".join(f"\t{raw}" for raw in raw_lines[start - 1 :]), path=path
+            "\n".join(f"\t{raw}" for raw in raw_lines), path=path
         ).split("\n")
-    ]
+    ][start - 1 :]
     depth = 0
     continued = False
     complete = False

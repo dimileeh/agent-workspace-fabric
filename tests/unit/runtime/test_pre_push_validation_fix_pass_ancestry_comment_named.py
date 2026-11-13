@@ -835,6 +835,14 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             True,
             id="wrapped-semicolon-free-multiline-template-closing-comment-marker",
         ),
+        pytest.param(
+            "const OTHER = `hello\nworld`, LIMIT = 10\nconst NEXT = 3;\n",
+            3,
+            "const NEXT = 4;",
+            "LIMIT",
+            False,
+            id="declarator-on-multiline-template-closing-line",
+        ),
     ],
 )
 @pytest.mark.unit
