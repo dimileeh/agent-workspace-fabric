@@ -15,7 +15,8 @@ This module adds the fifth gate. Over the item's own commit range it accepts:
   to the file counts.
 * **(b)** a change to the *definition* of an identifier the reviewer's comment
   names in single backticks (``name`` / ``name()``): a module-reachable head the
-  callee check already resolves, or a module-level plain assignment.
+  callee check already resolves, or a module-level plain assignment. A
+  definition the range *adds* — in an existing file or a new one — counts too.
 
 Only the reviewer's text is read (``reviewer_comment_text``): AWF-authored
 replies, which can carry the agent's own reason (#1018), and the agent's
@@ -174,6 +175,25 @@ def _module_level_assignment_spans(
     ]
 
 
+def _diff_new_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> bool:
+    """True when a new-side hunk of ``diff_text`` overlaps the inclusive ``[start, end]``.
+
+    ``start``/``end`` are lines of the *right* blob, so new-side hunk ranges are
+    exact there: an overlap means the range added or rewrote a line of that span.
+    Pure deletions (``new_count == 0``) have no new-side lines and never count.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _UNIFIED_DIFF_HUNK_HEADER_RE,
+    )
+
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        if new_count > 0 and new_start <= end and start < new_start + new_count:
+            return True
+    return False
+
+
 async def _commit_range_changes_comment_named_target(
     self: Any,
     *,
@@ -193,9 +213,12 @@ async def _commit_range_changes_comment_named_target(
     an earlier item in the batch may have renamed the file or shifted the line
     (PRRT_kwDOSJAM6s63LTKz); one that no longer maps is skipped. (b) A named identifier whose
     definition span at ``left`` — a module-reachable head, decorators included,
-    or a module-level plain binding — overlaps a hunk of the range in a changed
-    file, diffed with its rename target so a pure move stays hunkless. Fails
-    closed on any unreadable Git output.
+    or a module-level plain binding — overlaps an old-side hunk of the range in
+    a changed file, or whose span at ``right`` overlaps a new-side hunk, so a
+    definition the range adds counts in an existing or a new file
+    (PRRT_kwDOSJAM6s63LTK6). Each file is diffed paired with its rename source or
+    target so a pure move stays hunkless. Fails closed on any unreadable Git
+    output.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _changed_paths_in_commit_range,
@@ -265,24 +288,31 @@ async def _commit_range_changes_comment_named_target(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
+    renamed_from = {target: source for source, target in rename_map.items()}
     for candidate in changed[:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]:
         file_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
-        if not file_text:
+        spans = _named_definition_spans(file_text, names, path=candidate)
+        # A rename source's right-side text is read under its target, itself a candidate.
+        right_text = (
+            None
+            if candidate in rename_map
+            else await _path_text_at_ref(
+                self, worktree_path=worktree_path, ref=right, path=candidate
+            )
+        )
+        right_spans = _named_definition_spans(right_text, names, path=candidate)
+        if not (spans or right_spans):
             continue
-        spans = _importable_definition_spans_for_names(
-            file_text, names, path=candidate
-        ) + _module_level_assignment_spans(file_text, names, path=candidate)
-        if not spans:
-            continue
+        source = renamed_from.get(candidate)
         diff_text = await _path_diff_text_in_commit_range(
             self,
             worktree_path=worktree_path,
             left=left,
             right=right,
-            path=candidate,
-            rename_path=rename_map.get(candidate),
+            path=source or candidate,
+            rename_path=candidate if source else rename_map.get(candidate),
         )
         if diff_text is None:
             continue
@@ -290,6 +320,19 @@ async def _commit_range_changes_comment_named_target(
             _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=file_text)
             or _diff_adds_decorators_above_span(diff_text, start)
             for start, end in spans
+        ) or any(
+            _diff_new_hunk_overlaps_line_span(diff_text, start, end) for start, end in right_spans
         ):
             return True
     return False
+
+
+def _named_definition_spans(
+    file_text: str | None, names: frozenset[str], *, path: str
+) -> list[tuple[int, int]]:
+    """Reachable definition and module-level binding spans of ``names`` in ``file_text``."""
+    if not file_text:
+        return []
+    return _importable_definition_spans_for_names(
+        file_text, names, path=path
+    ) + _module_level_assignment_spans(file_text, names, path=path)

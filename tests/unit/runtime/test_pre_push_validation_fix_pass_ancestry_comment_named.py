@@ -468,19 +468,80 @@ async def test_named_identifier_without_a_changed_definition_is_not_evidence(
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
 
 
+@pytest.mark.parametrize(
+    ("left_text", "right_text", "diff"),
+    [
+        pytest.param(
+            "def other():\n    return 0\n",
+            'def other():\n    return 0\n\n\n_TASK_INBOUND_TYPES = (\n    "a",\n)\n',
+            _diff(
+                _INBOUND, "@@ -2,0 +3,5 @@", "+", "+", "+_TASK_INBOUND_TYPES = (", '+    "a",', "+)"
+            ),
+            id="existing-file",
+        ),
+        pytest.param(
+            None,
+            "def _TASK_INBOUND_TYPES():\n    return ()\n",
+            _diff(_INBOUND, "@@ -0,0 +1,2 @@", "+def _TASK_INBOUND_TYPES():", "+    return ()"),
+            id="new-file",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_named_identifier_definition_added_by_the_range_is_evidence(
+    left_text: str | None, right_text: str, diff: str
+) -> None:
+    """A requested helper the fix adds has no left-side span (PRRT_kwDOSJAM6s63LTK6)."""
+    runner = _Probe(
+        texts={(_LEFT, _INBOUND): left_text, (_RIGHT, _INBOUND): right_text},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert await _changes_named_target(runner, "Add a `_TASK_INBOUND_TYPES` constant")
+
+
+@pytest.mark.unit
+async def test_added_lines_outside_the_right_side_definition_are_not_evidence() -> None:
+    right_text = (
+        '_TASK_INBOUND_TYPES = ("a",)\n\n\ndef visible(kind):\n'
+        "    return kind in _TASK_INBOUND_TYPES\n"
+    )
+    new_usage = _Probe(
+        texts={(_LEFT, _INBOUND): None, (_RIGHT, _INBOUND): "from app.kinds import X\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -0,0 +1 @@", "+from app.kinds import X")},
+    )
+    usage_edit = _Probe(
+        texts={(_LEFT, _INBOUND): right_text, (_RIGHT, _INBOUND): right_text},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -5 +5 @@", "-    return 0", "+    return 1")},
+    )
+    removed = _Probe(
+        texts={(_LEFT, _INBOUND): right_text, (_RIGHT, _INBOUND): right_text},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -6,2 +5,0 @@", "-", "-x = 1")},
+    )
+
+    for runner in (new_usage, usage_edit, removed):
+        assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a type")
+
+
 @pytest.mark.unit
 async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     moved = "src/app/messaging/inbound_kinds.py"
     runner = _RenameProbe(
         name_status=f"R100\0{_INBOUND}\0{moved}\0",
-        texts={(_LEFT, _INBOUND): _INBOUND_TEXT},
+        texts={(_LEFT, _INBOUND): _INBOUND_TEXT, (_RIGHT, moved): _INBOUND_TEXT},
         changed_paths=(),
         # The pathspec carries both sides of the move, so git reports no hunks.
         diffs={moved: f"diff --git a/{_INBOUND} b/{moved}\nrename from {_INBOUND}\n"},
     )
 
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
-    assert runner.diff_paths[-1] == moved
+    # Both sides of the move are diffed as the same pair; the source is never read at right.
+    assert runner.diff_paths[-2:] == [moved, moved]
+    assert runner.shows == [_INBOUND, moved, moved]
 
 
 # --- fail-closed -------------------------------------------------------------------
