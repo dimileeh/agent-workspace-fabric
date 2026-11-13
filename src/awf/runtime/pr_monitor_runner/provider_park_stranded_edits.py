@@ -67,6 +67,9 @@ from awf.common.logging import get_logger
 from awf.common.work_slot import hold_work_slot
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.runtime.monitor_state_keys import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY as PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
@@ -84,14 +87,6 @@ if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
-PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: Final = "__awf_provider_park_stranded_edits__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key: a park left uncommitted edits.
-
-Its value is the HEAD the park preserved (empty when it could not be read); it
-reaches the workspace row through the run loop's ``_persist_state`` ahead of the
-park itself, and the operator-hint resume keeps the row's map intact until it
-drops the key from the row itself.
-"""
 
 PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY: Final = (
     "__awf_provider_park_stranded_edits_evidence__"
