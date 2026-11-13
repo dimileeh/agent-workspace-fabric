@@ -397,6 +397,11 @@ async def test_named_identifier_definition_changed_by_the_range_is_evidence(
             id="class-body-assignment",
         ),
         pytest.param(
+            'class Config:\n    def _TASK_INBOUND_TYPES(self):\n        return ("a",)\n',
+            _diff(_INBOUND, "@@ -3 +3 @@", '-        return ("a",)', '+        return ("b",)'),
+            id="class-method",
+        ),
+        pytest.param(
             '"""Docs.\n\n_TASK_INBOUND_TYPES = (\n    "a",\n)\n"""\nVALUE = 1\n',
             _diff(_INBOUND, "@@ -4 +4 @@", '-    "a",', '+    "b",'),
             id="docstring-decoy",

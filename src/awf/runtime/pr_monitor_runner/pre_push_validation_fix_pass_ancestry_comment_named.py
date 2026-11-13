@@ -330,9 +330,14 @@ async def _commit_range_changes_comment_named_target(
 def _named_definition_spans(
     file_text: str | None, names: frozenset[str], *, path: str
 ) -> list[tuple[int, int]]:
-    """Reachable definition and module-level binding spans of ``names`` in ``file_text``."""
+    """Module-scope definition and binding spans of ``names`` in ``file_text``.
+
+    A backticked name carries no receiver, so it is held to the bare-name
+    module-scope rule: a same-named method of some class in a changed file is
+    not the definition the reviewer named (PRRT_kwDOSJAM6s63LVep).
+    """
     if not file_text:
         return []
     return _importable_definition_spans_for_names(
-        file_text, names, path=path
+        file_text, frozenset(), path=path, bare_names=names
     ) + _module_level_assignment_spans(file_text, names, path=path)
