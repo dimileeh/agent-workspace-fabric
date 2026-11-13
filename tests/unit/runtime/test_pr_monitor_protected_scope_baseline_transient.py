@@ -56,6 +56,7 @@ from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_valida
 from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass as fix_pass_module
 from awf.runtime.pr_monitor_runner.pre_push_validation import _PrePushValidationResult
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     mark_provider_park_stranded_edits,
@@ -988,7 +989,9 @@ async def test_fix_pass_sink_baseline_unavailable_marks_stranded_edits_only_when
 
     The commit sink fails before ``git commit``; without the stranded-edits marker the
     guide resume's repair-start guard rejects that dirt as ``PRE_EXISTING_DIRTY_WORKTREE``
-    (PRRT_kwDOSJAM6s621aJ-). A non-transient failure stays terminal and unmarked.
+    (PRRT_kwDOSJAM6s621aJ-). A non-transient failure stays terminal and unmarked. The
+    park skips the post-sink ancestry check, so it also records the pass's baseline for
+    the resume to keep a rewritten HEAD on it (PRRT_kwDOSJAM6s63M6rz).
     """
     workspace_id = await seed_monitoring_workspace(factory)
     _mark_git_worktree(tmp_path / "worktrees" / workspace_id)
@@ -997,7 +1000,11 @@ async def test_fix_pass_sink_baseline_unavailable_marks_stranded_edits_only_when
     monkeypatch.setattr(
         runner, "_run_monitor_agent_with_service_recovery", AsyncMock(return_value=None)
     )
-    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=_REPAIR_COMMIT_SHA))
+    fix_start_head = "f" * 40
+    # The fix agent rewrote HEAD off the pass's starting commit before the sink failed.
+    monkeypatch.setattr(
+        runner, "_rev_parse_head", AsyncMock(side_effect=[fix_start_head, _REPAIR_COMMIT_SHA])
+    )
     monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=error_type("dns")))
     monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _worktree_path: None)
     monkeypatch.setattr(fix_pass_module, "verify_head_object_exists", AsyncMock(return_value=True))
@@ -1029,6 +1036,9 @@ async def test_fix_pass_sink_baseline_unavailable_marks_stranded_edits_only_when
     if transient:
         assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
             _REPAIR_COMMIT_SHA
+        )
+        assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == (
+            fix_start_head
         )
     else:
         assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids

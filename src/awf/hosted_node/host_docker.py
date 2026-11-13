@@ -42,6 +42,22 @@ class DockerObservation:
         """Verify retained Docker/control health without claiming workloads idle."""
         return await self._observe(owner, allow_workloads=True)
 
+    async def unexpected_container(self) -> bool:
+        """Name a non-allowlisted container without verifying Docker health.
+
+        An unavailable or mismatched daemon proves nothing, so it names nothing.
+        """
+        try:
+            async with asyncio.timeout(3):
+                info = await self._get("info")
+                if info["DockerRootDir"] != str(self.config.docker_root):
+                    return False
+                rows = await self._get("containers/json", all_containers=True)
+                allowed = {item.id for item in self.config.allowed_containers}
+                return isinstance(rows, list) and any(row["Id"] not in allowed for row in rows)
+        except (httpx.HTTPError, OSError, TimeoutError, ValueError, KeyError, TypeError):
+            return False
+
     async def _observe(self, owner: str, *, allow_workloads: bool) -> bool:
         try:
             async with asyncio.timeout(3):

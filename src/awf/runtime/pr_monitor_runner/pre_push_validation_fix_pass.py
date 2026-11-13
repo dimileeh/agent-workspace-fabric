@@ -1053,11 +1053,18 @@ async def _run_pre_push_validation_fix_pass_impl(
         # the workspace in ``blocked`` with the worktree kept instead. The sink
         # failed before ``git commit``, so mark the fix pass's uncommitted edits:
         # the guide resume's hint cycle commits them before its pre-existing-dirty
-        # guard runs (``provider_park_stranded_edits``).
+        # guard runs (``provider_park_stranded_edits``). The park skips the
+        # ancestry check below, so it records ``fix_pass_baseline_head`` for the
+        # resume to apply it before publishing a rewritten HEAD
+        # (PRRT_kwDOSJAM6s63M6rz).
         _raise_unproven_timeout_cleanup()
         if isinstance(exc, ProtectedScopeBaselineUnavailableError):
             preserved_head = await self._rev_parse_head(worktree_path)
-            mark_provider_park_stranded_edits(cast("MonitorState | None", state), preserved_head)
+            mark_provider_park_stranded_edits(
+                cast("MonitorState | None", state),
+                preserved_head,
+                baseline_head=fix_pass_baseline_head,
+            )
         raise
     except Exception as exc:
         _log.warning(

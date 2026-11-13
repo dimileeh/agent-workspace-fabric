@@ -120,3 +120,35 @@ async def test_unknown_docker_responses_are_not_quiescent(case):
         transport=httpx.MockTransport(respond), base_url="http://docker"
     ) as client:
         assert not await DockerObservation(config, client).quiescent("org/node")
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("unexpected", True),
+        ("allowed", False),
+        ("empty", False),
+        ("daemon_error", False),
+        ("root", False),
+        ("malformed", False),
+    ],
+)
+async def test_unexpected_container_is_named_only_from_a_verified_daemon(case, expected):
+    def respond(request):
+        if case == "daemon_error":
+            return httpx.Response(503)
+        if request.url.path.endswith("/info"):
+            root = "/elsewhere" if case == "root" else "/var/lib/awf/docker"
+            return httpx.Response(200, json={"DockerRootDir": root})
+        if case == "malformed":
+            return httpx.Response(200, json={"Id": "unknown"})
+        rows = {"allowed": [{"Id": CID}], "empty": []}
+        return httpx.Response(200, json=rows.get(case, [{"Id": CID}, {"Id": "unknown"}]))
+
+    config = host_config(allowed_containers=[{"id": CID, "image": IMAGE}])
+    if case == "root":
+        config = host_config(allowed_containers=[])
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://docker"
+    ) as client:
+        assert await DockerObservation(config, client).unexpected_container() is expected

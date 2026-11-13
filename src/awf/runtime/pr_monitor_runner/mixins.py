@@ -228,6 +228,9 @@ class RunnerDelegatesMixin:
     _protected_scope_baseline_park_resume_pending = (
         _protected_scope_baseline_park._protected_scope_baseline_park_resume_pending
     )
+    _protected_scope_baseline_park_preserved_head = (
+        _protected_scope_baseline_park._protected_scope_baseline_park_preserved_head
+    )
     _merge_base_with_head = _remote_repair_diffs._merge_base_with_head
     _changed_paths_between_ref_and_head = _remote_repair_diffs._changed_paths_between_ref_and_head
     _protected_file_diffs_for_status_paths = (

@@ -46,7 +46,9 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import provider_park_stranded_edits, remote_repair
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     commit_provider_park_stranded_edits,
     mark_provider_park_stranded_edits,
@@ -125,11 +127,14 @@ async def _resume(
 
 
 async def _parked_state(
-    tmp_path: Path, paths: tuple[str, ...] = ("stranded_fix.py",)
+    tmp_path: Path,
+    paths: tuple[str, ...] = ("stranded_fix.py",),
+    *,
+    owned_paths: tuple[str, ...] | None = None,
 ) -> MonitorState:
     """Mark a park and record the evidence of what it left dirty."""
     state = MonitorState()
-    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, owned_paths=owned_paths)
     await record_provider_park_stranded_edits_evidence(
         _FakeRunner([_dirty(list(paths))], commits=True),
         workspace_id=_WORKSPACE_ID,
@@ -410,6 +415,285 @@ async def test_a_stranded_file_reverted_while_parked_blocks_the_rest(tmp_path: P
     result = await _resume(runner, state, tmp_path)
 
     _assert_left_for_a_human(result, runner, changed_paths=("stranded_test.py",))
+
+
+@pytest.mark.unit
+def test_a_later_park_never_inherits_an_earlier_ownership_boundary() -> None:
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, owned_paths={"b.py", "a.py"})
+    assert json.loads(
+        state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY]
+    ) == [
+        "a.py",
+        "b.py",
+    ]
+
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+
+    assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_recorded_path_outside_the_owned_delta_is_never_committed(
+    tmp_path: Path,
+) -> None:
+    # The finalize's ownership gate passed, but the park sink recorded a path that
+    # turned dirty afterwards: the resume must not commit it (PRRT_kwDOSJAM6s63M6rp).
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    _write(tmp_path, "unrelated.py", "dirt outside the operation\n")
+    state = await _parked_state(
+        tmp_path, ("stranded_fix.py", "unrelated.py"), owned_paths=("stranded_fix.py",)
+    )
+    runner = _FakeRunner([_dirty(["stranded_fix.py", "unrelated.py"])], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner)
+    assert result is not None
+    assert result.details is not None
+    assert result.details["unowned_paths"] == ["unrelated.py"]
+    assert "outside the operation-owned delta: unrelated.py" in result.stderr
+    assert (tmp_path / _WORKSPACE_ID / "unrelated.py").read_text() == (
+        "dirt outside the operation\n"
+    )
+    assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("boundary", ["not json", '{"stranded_fix.py": true}'])
+async def test_an_unreadable_ownership_boundary_owns_nothing(tmp_path: Path, boundary: str) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY] = boundary
+    runner = _FakeRunner([_dirty(["stranded_fix.py"])], commits=True)
+
+    result = await _resume(runner, state, tmp_path)
+
+    _assert_left_for_a_human(result, runner)
+    assert result is not None
+    assert result.details is not None
+    assert result.details["unowned_paths"] == ["stranded_fix.py"]
+
+
+class _GatedRunner(_FakeRunner):
+    """A resume runner whose committed delta the finalize's gate reads through git."""
+
+    def __init__(self, guard_results: list[_GitPushResult | None], cmd: FakeCommandRunner) -> None:
+        super().__init__(guard_results, commits=True)
+        self._deps = SimpleNamespace(runner=cmd)
+
+
+@pytest.mark.unit
+async def test_an_owned_resume_commit_passes_the_committed_delta_gate(tmp_path: Path) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py", "src/earlier.py"))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"]), None], cmd)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert len(runner.sink_calls) == 1
+    assert cmd.calls[0].args[-1] == f"{_PRESERVED_HEAD}..HEAD"
+    assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_resume_commit_with_unowned_paths_fails_closed_before_publishing(
+    tmp_path: Path,
+) -> None:
+    # The sink's protected-scope repair can self-commit beyond the recorded paths.
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0A\0agent_extra.py\0")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"])], cmd)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.reason_code == "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"
+    assert result.terminal_monitor_failure is True
+    assert result.details is not None
+    assert result.details["paths"] == ["agent_extra.py"]
+    assert result.details["phase"] == "provider_park_resume"
+    assert "agent_extra.py" in result.stderr
+    # No post-commit guard ran: the result never reaches the push.
+    assert len(runner.guard_calls) == 1
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("preserved_head", [_PRESERVED_HEAD, ""])
+async def test_an_uninspectable_resume_commit_fails_closed(
+    tmp_path: Path, preserved_head: str
+) -> None:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] = preserved_head
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: bad revision")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"])], cmd)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.reason_code == "PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE"
+    assert result.terminal_monitor_failure is True
+    # Without a preserved HEAD there is no delta to diff: git is never asked.
+    assert len(cmd.calls) == (1 if preserved_head else 0)
+
+
+_BASELINE_HEAD = "f" * 40
+_REPARENTED_HEAD = "c" * 40
+
+
+class _BaselineRunner(_FakeRunner):
+    """A resume runner whose resumed HEAD the fix-pass ancestry check reads through git."""
+
+    def __init__(
+        self,
+        guard_results: list[_GitPushResult | None],
+        cmd: FakeCommandRunner,
+        *,
+        head: str | None,
+    ) -> None:
+        super().__init__(guard_results, commits=True)
+        self._deps = SimpleNamespace(runner=cmd)
+        self._rev_parse_head = AsyncMock(return_value=head)
+        self._resolve_task_tag = AsyncMock(return_value="AWF-1234")
+
+
+async def _baseline_parked_state(tmp_path: Path) -> MonitorState:
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, baseline_head=_BASELINE_HEAD)
+    await record_provider_park_stranded_edits_evidence(
+        _FakeRunner([_dirty(["stranded_fix.py"])], commits=True),
+        workspace_id=_WORKSPACE_ID,
+        worktree_path=tmp_path / _WORKSPACE_ID,
+        state=state,
+    )
+    return state
+
+
+def _git_args(cmd: FakeCommandRunner) -> list[list[str]]:
+    return [call.args[call.args.index("-C") + 2 :] for call in cmd.calls]
+
+
+@pytest.mark.unit
+def test_a_later_park_never_inherits_an_earlier_baseline() -> None:
+    state = MonitorState()
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD, baseline_head=_BASELINE_HEAD)
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == (
+        _BASELINE_HEAD
+    )
+
+    mark_provider_park_stranded_edits(state, _PRESERVED_HEAD)
+
+    assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head", [_BASELINE_HEAD, _PRESERVED_HEAD])
+async def test_a_resumed_head_on_the_fix_pass_baseline_is_kept(tmp_path: Path, head: str) -> None:
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # merge-base --is-ancestor: HEAD descends from the baseline.
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=head)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert _git_args(cmd) == (
+        [] if head == _BASELINE_HEAD else [["merge-base", "--is-ancestor", _BASELINE_HEAD, head]]
+    )
+    assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_rewritten_resumed_head_is_reparented_onto_the_fix_pass_baseline(
+    tmp_path: Path,
+) -> None:
+    # The fix agent amended the unpushed baseline commit away before the transient
+    # park; publishing that tip would drop it from the branch (PRRT_kwDOSJAM6s63M6rz).
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    cmd.queue_result(stdout="tree-resumed\n")
+    cmd.queue_result(stdout="tree-baseline\n")
+    cmd.queue_result(stdout="fix: the agent's amended fix\n")
+    cmd.queue_result(stdout=f"{_REPARENTED_HEAD}\n")
+    cmd.queue_result()  # reset --hard onto the reparented commit.
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    commit_tree = _git_args(cmd)[4]
+    assert commit_tree[commit_tree.index("commit-tree") :][:4] == [
+        "commit-tree",
+        "tree-resumed",
+        "-p",
+        _BASELINE_HEAD,
+    ]
+    assert commit_tree[-1] == "AWF-1234 fix: the agent's amended fix"
+    assert _git_args(cmd)[5] == ["reset", "--hard", _REPARENTED_HEAD]
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+    assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
+    tmp_path: Path,
+) -> None:
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result()
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert _git_args(cmd)[-1] == ["reset", "--hard", _BASELINE_HEAD]
+    assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["head_unreadable", "commit_tree", "reset_to_baseline"])
+async def test_a_resumed_head_that_cannot_keep_the_baseline_fails_closed(
+    tmp_path: Path, failure: str
+) -> None:
+    state = await _baseline_parked_state(tmp_path)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)
+    if failure == "commit_tree":
+        cmd.queue_result(stdout="tree-resumed\n")
+        cmd.queue_result(stdout="tree-baseline\n")
+        cmd.queue_result(stdout="fix: the agent's amended fix\n")
+        cmd.queue_result(returncode=128, stderr="fatal: commit-tree failed")
+    else:
+        cmd.queue_result(stdout="same-tree\n")
+        cmd.queue_result(stdout="same-tree\n")
+        cmd.queue_result(returncode=128, stderr="fatal: reset failed")
+    head = None if failure == "head_unreadable" else _PRESERVED_HEAD
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=head)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.reason_code == "PRE_PUSH_VALIDATION_REPARENT_FAILED"
+    assert result.terminal_monitor_failure is True
+    assert result.details is not None
+    assert result.details["phase"] == "provider_park_resume"
+    assert result.details["fix_start_head"] == _BASELINE_HEAD
+    assert result.details["head"] == head
+    if failure == "head_unreadable":
+        assert cmd.calls == []
+    # The marker stays: nothing is published, and the next resume re-checks.
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY] == (
+        _BASELINE_HEAD
+    )
 
 
 @pytest.mark.unit

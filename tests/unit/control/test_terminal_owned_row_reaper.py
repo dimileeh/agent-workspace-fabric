@@ -15,6 +15,7 @@ from awf.control.worker.terminal_owned_rows import REAPED_EVENT, REASON, reap_te
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import (
     CallbackDelivery,
+    CallbackSubscription,
     Operation,
     ResourceReservation,
     TaskAttempt,
@@ -92,6 +93,8 @@ async def seed(
             ):
                 session.add(row)
                 await session.flush()
+            # Exhausted attempts: its dispatcher would never send it again.
+            (await session.get(CallbackDelivery, f"cbd_{ws_id}_pending")).attempt_count = 3
         await session.execute(
             update(Workspace).where(Workspace.id == ws_id).values(updated_at=now - age)
         )
@@ -239,6 +242,29 @@ async def test_recent_retry_callback_is_left_to_its_dispatcher(factory):
 
 
 @pytest.mark.parametrize(
+    ("change", "expected"),
+    [("deliverable", "pending"), ("subscription_disabled", "skipped")],
+)
+async def test_overdue_callback_is_skipped_only_when_its_dispatcher_cannot_send_it(
+    factory, change, expected
+):
+    await seed(factory, age=timedelta(days=2))
+    async with factory.begin() as session:
+        await session.execute(
+            update(CallbackDelivery)
+            .where(CallbackDelivery.id == "cbd_ws_reap_pending")
+            .values(attempt_count=1, next_attempt_at=datetime.now(UTC) - timedelta(days=1))
+        )
+        if change == "subscription_disabled":
+            await session.execute(update(CallbackSubscription).values(enabled=False))
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=200)
+    state = await snapshot(factory)
+    assert state["callback"] == expected and state["operation"] == "failed"
+    reaped = {event["kind"] for event in state["events"]}
+    assert ("callback_delivery" in reaped) is (expected == "skipped")
+
+
+@pytest.mark.parametrize(
     ("family", "row_id"),
     [("callback_deliveries", "cbd_ws_reap_pending"), ("callback_subscriptions", "cbs_quiescence")],
 )
@@ -336,6 +362,38 @@ async def test_only_the_stale_claim_is_released_and_only_execution_is_fenced(fac
             select(WorkspaceEvent.payload).where(WorkspaceEvent.event_type == REAPED_EVENT)
         )
         assert event == {"kind": "claim", "action": "released", "ids": [claim]}
+
+
+async def test_both_stale_claims_are_released_across_runs_with_a_budget_of_one(factory):
+    await seed(factory, rows=False)
+    async with factory.begin() as session:
+        expired = datetime.now(UTC) - timedelta(minutes=1)
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == "ws_reap")
+            .values(
+                execution_claimed_by="dead-worker",
+                execution_claim_expires_at=expired,
+                monitor_claimed_by="dead-monitor",
+                monitor_claim_expires_at=expired,
+                updated_at=Workspace.updated_at,
+            )
+        )
+
+    async def claims():
+        async with factory() as session:
+            ws = await session.get(Workspace, "ws_reap")
+            return ws.execution_claimed_by, ws.monitor_claimed_by, ws.execution_claim_epoch
+
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=1)
+    assert await claims() == (None, "dead-monitor", 4)
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=1)
+    assert await claims() == (None, None, 4)
+    async with factory() as session:
+        events = await session.scalars(
+            select(WorkspaceEvent.payload).where(WorkspaceEvent.event_type == REAPED_EVENT)
+        )
+        assert sorted(event["ids"] for event in events) == [["execution"], ["monitor"]]
 
 
 async def test_each_run_acts_on_at_most_its_row_budget(factory):
