@@ -244,6 +244,9 @@ async def refresh_provider_park_stranded_edits_evidence(
     can also self-commit, and the re-park's event records the new HEAD, so the
     marker's HEAD moves with it: a fix-pass re-parent keyed to the old HEAD would
     never name the replacement the next resume requires (PRRT_kwDOSJAM6s63SI0A).
+    A refresh that cannot read the worktree keeps the earlier evidence rather than
+    leaving the marker with none (PRRT_kwDOSJAM6s63SJ3b): the resume still checks
+    every recorded path's content, so a stale fingerprint only ever fails closed.
     The ownership boundary, delta anchor and fix-pass baseline still describe the
     original operation; a boundary with no recorded anchor keeps diffing from the
     original HEAD.
@@ -259,10 +262,14 @@ async def refresh_provider_park_stranded_edits_evidence(
                 PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY, parked_head
             )
         threads_addressed[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] = head
-    threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
+    earlier_evidence = threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, None)
     await record_provider_park_stranded_edits_evidence(
         runner, workspace_id=workspace_id, worktree_path=worktree_path, state=state
     )
+    if earlier_evidence is not None:
+        threads_addressed.setdefault(
+            PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY, earlier_evidence
+        )
     await runner._persist_state(workspace_id, state)
 
 

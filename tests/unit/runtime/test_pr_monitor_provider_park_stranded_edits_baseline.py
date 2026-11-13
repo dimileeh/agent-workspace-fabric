@@ -26,6 +26,7 @@ from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_DELTA_ANCHOR_STATE_KEY,
+    PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY,
     PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     mark_provider_park_stranded_edits,
@@ -338,3 +339,38 @@ async def test_a_reparked_sink_keeps_the_original_delta_anchor(
     assert json.loads(threads_addressed[PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY]) == [
         "stranded_fix.py"
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("unreadable", ["status_failed", "hash_failed"])
+async def test_a_reparked_sink_that_cannot_rerecord_keeps_the_earlier_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unreadable: str
+) -> None:
+    # A refresh that records nothing must not leave the marker with no evidence:
+    # the next resume would reject the park's own dirt as unexpected. The earlier
+    # fingerprints are still checked against every recorded path's content, so
+    # keeping them never commits a path that changed since.
+    state = await _baseline_parked_state(tmp_path)
+    earlier = state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY]
+    status_failed = _GitPushResult(
+        pushed=False, failed=True, returncode=128, reason_code="REPAIR_WORKTREE_STATUS_FAILED"
+    )
+    guard = status_failed if unreadable == "status_failed" else _dirty(["stranded_fix.py"])
+    if unreadable == "hash_failed":
+
+        def _unreadable(*_args: object) -> dict[str, str | None]:
+            raise PermissionError("unreadable")
+
+        monkeypatch.setattr(
+            "awf.runtime.pr_monitor_runner.provider_park_stranded_edits._path_identities",
+            _unreadable,
+        )
+    reparker = _BaselineRunner([guard], FakeCommandRunner(), head=_REPARKED_HEAD)
+    reparker._persist_state = AsyncMock()
+
+    await refresh_provider_park_stranded_edits_evidence(
+        reparker, workspace_id=_WORKSPACE_ID, worktree_path=tmp_path / _WORKSPACE_ID, state=state
+    )
+
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] == earlier
+    reparker._persist_state.assert_awaited_once_with(_WORKSPACE_ID, state)
