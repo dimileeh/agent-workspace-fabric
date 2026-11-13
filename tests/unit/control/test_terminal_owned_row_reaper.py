@@ -361,6 +361,49 @@ async def test_each_run_acts_on_at_most_its_row_budget(factory):
     assert await running() == []
 
 
+async def test_lease_and_reservation_sets_larger_than_the_budget_still_make_progress(factory):
+    await seed(factory, rows=False)
+    async with factory.begin() as session:
+        for index in range(3):
+            row = lease("ws_reap", status="issued")
+            row.id, row.secret_name = f"sl_big_{index}", f"token_big_{index}"
+            session.add(row)
+            held = reservation("ws_reap", released=False)
+            held.id = f"rr_big_{index}"
+            session.add(held)
+
+    async def remaining():
+        async with factory() as session:
+            leases = await session.scalars(
+                select(WorkspaceSecretLease.id).where(WorkspaceSecretLease.status == "issued")
+            )
+            held = await session.scalars(
+                select(ResourceReservation.id).where(ResourceReservation.released_at.is_(None))
+            )
+            return len(list(leases)), len(list(held))
+
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=2)
+    assert await remaining() == (1, 3)
+    for _ in range(3):
+        await reap_terminal_owned_rows(reaper_worker(factory), limit=2)
+    assert await remaining() == (0, 0)
+    async with factory() as session:
+        events = list(
+            await session.scalars(
+                select(WorkspaceEvent.payload).where(WorkspaceEvent.event_type == REAPED_EVENT)
+            )
+        )
+        revoked = await session.scalars(
+            select(WorkspaceEvent.id).where(WorkspaceEvent.reason_code == "SECRET_LEASE_REVOKED")
+        )
+        assert len(list(revoked)) == 3
+    assert sorted(i for e in events if e["kind"] == "secret_lease" for i in e["ids"]) == [
+        "sl_big_0",
+        "sl_big_1",
+        "sl_big_2",
+    ]
+
+
 def _throttled_worker(*, enabled=True):
     return ControlWorker(
         session_factory=SimpleNamespace(),  # type: ignore[arg-type]

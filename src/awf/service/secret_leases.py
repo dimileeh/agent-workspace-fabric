@@ -86,6 +86,21 @@ class SecretLeaseService:
             reason_code=reason_code,
         )
 
+    async def revoke_secret_leases(
+        self,
+        workspace: Workspace,
+        leases: list[WorkspaceSecretLease],
+        *,
+        now: datetime | None = None,
+        reason_code: str,
+    ) -> list[WorkspaceSecretLease]:
+        return await self._repo.revoke_leases(
+            workspace,
+            leases,
+            now=_coerce_now(now),
+            reason_code=reason_code,
+        )
+
     async def workspace_secret_lease_status(
         self,
         workspace_id: str,

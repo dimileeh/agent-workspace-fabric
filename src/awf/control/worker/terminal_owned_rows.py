@@ -29,7 +29,6 @@ from awf.db.models import (
 )
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.repositories.base import _SECRET_LEASE_REVOCABLE_STATUSES
-from awf.db.repositories.quality_repo import ResourceReservationRepository
 from awf.db.repositories.workspace_recovery import (
     recovery_allows_work,
     restore_callback_allows_work,
@@ -183,17 +182,6 @@ async def _locked(session: Any, query: Any, budget: int) -> list[Any]:
     )
 
 
-async def _all_locked(session: Any, query: Any, budget: int) -> bool:
-    """Lock every matching row, or report False when any is held elsewhere or over budget.
-
-    Guards whole-workspace service calls that would otherwise block on, or act
-    beyond, rows this run did not lock.
-    """
-    rows = await _locked(session, query, budget + 1)
-    total = len((await session.scalars(query)).all())
-    return bool(rows) and len(rows) == total <= budget
-
-
 async def _reap_workspace(session: Any, ws: Workspace, *, now: datetime, budget: int) -> int:
     repo = WorkspaceRepository(session)
     used = 0
@@ -253,17 +241,20 @@ async def _reap_workspace(session: Any, ws: Workspace, *, now: datetime, budget:
     if validations:
         await audit("validation_run", "failed", [row.id for row in validations])
 
-    if await _all_locked(session, _leases(ws.id), budget - used):
-        revoked = await SecretLeaseService(session).revoke_workspace_secret_leases(
-            ws, now=now, reason_code=REASON
+    leases = await _locked(session, _leases(ws.id).order_by(WorkspaceSecretLease.id), budget - used)
+    if leases:
+        revoked = await SecretLeaseService(session).revoke_secret_leases(
+            ws, leases, now=now, reason_code=REASON
         )
         await audit("secret_lease", "revoked", [row.id for row in revoked])
 
-    if await _all_locked(session, _reservations(ws.id), budget - used):
-        released = await ResourceReservationRepository(session).release_active_for_workspace(
-            ws.id, released_at=now
-        )
-        await audit("resource_reservation", "released", [row.id for row in released])
+    reservations = await _locked(
+        session, _reservations(ws.id).order_by(ResourceReservation.id), budget - used
+    )
+    for reservation in reservations:
+        reservation.released_at = now
+    if reservations:
+        await audit("resource_reservation", "released", [row.id for row in reservations])
 
     attempts = await _locked(session, _attempts(ws.id).order_by(TaskAttempt.id), budget - used)
     for attempt in attempts:
