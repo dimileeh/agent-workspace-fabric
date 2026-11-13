@@ -258,9 +258,10 @@ async def commit_provider_park_stranded_edits(
             worktree_path=worktree_path,
             operation_type=operation_type,
         )
+        owned = _owned_boundary(state)
+        delta_gated = False
         if dirty is not None and dirty.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
             recorded = _recorded_identities(state)
-            owned = _owned_boundary(state)
             extra_paths, changed_paths = await _unexpected_worktree_changes(
                 recorded, worktree_path=worktree_path, dirty_paths=_dirty_paths(dirty)
             )
@@ -297,6 +298,7 @@ async def commit_provider_park_stranded_edits(
                 )
                 if unowned_result is not None:
                     return unowned_result
+                delta_gated = True
             dirty = await runner._pre_existing_dirty_repair_worktree_result(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
@@ -317,6 +319,18 @@ async def commit_provider_park_stranded_edits(
                     committed_paths=sorted(recorded_dirty - dirty_paths) if committed else [],
                 )
         if dirty is None:
+            # A clean worktree may hold an earlier resume's rejected commit, so it
+            # passes the same committed-delta gate before the marker can go.
+            if owned is not None and not delta_gated:
+                unowned_result = await _unowned_committed_delta_result(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    preserved_head=preserved_head,
+                    owned=owned,
+                )
+                if unowned_result is not None:
+                    return unowned_result
             # The worktree is clean, so re-parenting cannot discard anyone's edits.
             baseline_result = await _keep_fix_pass_baseline(
                 runner, workspace_id=workspace_id, worktree_path=worktree_path, state=state

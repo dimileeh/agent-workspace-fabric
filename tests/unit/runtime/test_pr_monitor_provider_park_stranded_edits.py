@@ -526,6 +526,48 @@ async def test_a_resume_commit_with_unowned_paths_fails_closed_before_publishing
 
 
 @pytest.mark.unit
+async def test_a_rejected_unowned_resume_commit_stays_rejected_on_every_retry(
+    tmp_path: Path,
+) -> None:
+    # The rejected commit leaves the worktree clean; a retried resume must not take
+    # that clean worktree as settled and publish it (PRRT_kwDOSJAM6s63OKfZ).
+    _write(tmp_path, "stranded_fix.py", "the agent's fix\n")
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    for _ in range(3):
+        cmd.queue_result(stdout="M\0stranded_fix.py\0A\0agent_extra.py\0")
+    runner = _GatedRunner([_dirty(["stranded_fix.py"]), None, None], cmd)
+
+    for _ in range(3):
+        result = await _resume(runner, state, tmp_path)
+
+        assert result is not None
+        assert result.reason_code == "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"
+        assert result.details is not None
+        assert result.details["paths"] == ["agent_extra.py"]
+        assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+            _PRESERVED_HEAD
+        )
+        assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY in state.threads_addressed_ids
+    assert len(runner.sink_calls) == 1
+    assert [call.args[-1] for call in cmd.calls] == [f"{_PRESERVED_HEAD}..HEAD"] * 3
+
+
+@pytest.mark.unit
+async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(tmp_path: Path) -> None:
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0stranded_fix.py\0")
+    runner = _GatedRunner([None], cmd)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert runner.sink_calls == []
+    assert len(cmd.calls) == 1
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("preserved_head", [_PRESERVED_HEAD, ""])
 async def test_an_uninspectable_resume_commit_fails_closed(
     tmp_path: Path, preserved_head: str
