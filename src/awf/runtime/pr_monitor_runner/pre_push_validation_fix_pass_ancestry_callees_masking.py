@@ -14,6 +14,8 @@ index-aligned with the raw file.
 
 from __future__ import annotations
 
+import re
+
 # ``str.splitlines()`` separators beyond ``\r``/``\n``. Masking must preserve
 # these so masked scan lines stay index-aligned with raw ``splitlines()``.
 _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
@@ -22,6 +24,11 @@ _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 def _mask_char_preserving_splitlines_separators(ch: str) -> str:
     """Blank ``ch`` unless it is a ``str.splitlines()`` separator."""
     return ch if ch in _SPLITLINES_SEPARATOR_CHARS else " "
+
+
+# What precedes a JSX element opened as an expression (``= <A />``,
+# ``return (<div>``, ``cond && <A />``): its completion ends the JSX.
+_JSX_ROOT_PREFIX_RE = re.compile(r"(?:[=(,?:\[{&|]|(?<![\w$])(?:return|yield|default))\s*$")
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -408,15 +415,24 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     not become FIXED call-site evidence. Attribute strings are already blanked
     by the prior quote pass. Comparisons without a ``<`` tag opener are left
     unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
+
+    Text is blanked only inside an element: once a *rooted* element — one
+    opened right after an expression start (``= <Widget />``, ``return (<div>``)
+    — completes, the code after it is scanned again (PRRT_kwDOSJAM6s63VJ_g).
+    Any other tag (a children line read without its parent, a closing tag
+    with nothing open) leaves the rest blanked until each next tag, as before.
     """
     if not line or "<" not in line:
         return line
     chars = list(line)
     n = len(line)
     i = 0
+    # Open rooted elements; ``None`` once the nesting cannot be followed.
+    depth: int | None = 0
     while i < n:
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
+            start = i
             # Advance through the tag to its closing ``>`` (strings already blank).
             i += 1
             while i < n and line[i] != ">":
@@ -424,16 +440,19 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             if i >= n:
                 break
             i += 1  # past ``>``
+            depth = _jsx_depth_after_tag(line, start, i, depth)
+            if depth == 0:
+                continue
             # Text node until the next tag opener; retain ``{...}`` expressions.
             while i < n and line[i] != "<":
                 if line[i] == "{":
-                    depth = 1
+                    brace_depth = 1
                     i += 1
-                    while i < n and depth > 0:
+                    while i < n and brace_depth > 0:
                         if line[i] == "{":
-                            depth += 1
+                            brace_depth += 1
                         elif line[i] == "}":
-                            depth -= 1
+                            brace_depth -= 1
                         i += 1
                     continue
                 chars[i] = _mask_char_preserving_splitlines_separators(line[i])
@@ -441,3 +460,14 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             continue
         i += 1
     return "".join(chars)
+
+
+def _jsx_depth_after_tag(line: str, start: int, end: int, depth: int | None) -> int | None:
+    """Rooted-element nesting after the JSX tag ``line[start:end]``; ``None`` when lost."""
+    if depth is None or line[start + 1] == "!":
+        return None
+    if line[start + 1] == "/":
+        return depth - 1 if depth else None
+    if not depth and _JSX_ROOT_PREFIX_RE.search(line, 0, start) is None:
+        return None
+    return depth if line[end - 2] == "/" else depth + 1

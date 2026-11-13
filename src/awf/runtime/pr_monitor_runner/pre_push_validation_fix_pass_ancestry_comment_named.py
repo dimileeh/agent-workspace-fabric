@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _iter_definition_spans,
     _leading_indent,
     _mask_comments_and_string_literals_for_callee_scan,
+    _path_is_jsx,
     _simple_statement_segments,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
@@ -137,6 +138,9 @@ _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
     r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-|(?:^|[^\w$)\]\s!])[ \t]*!+"
     r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as))$"
 )
+# The ``>`` ending a completed JSX element (``<Widget />``, ``</div>``, ``</>``)
+# closes an operand rather than opening a comparison (PRRT_kwDOSJAM6s63VJ_g).
+_JSX_COMPLETED_ELEMENT_RE = re.compile(r"(?:/|</[\w$.:-]*[ \t]*)>$")
 # A block comment closing a JS/TS operand, skipped to reach the operand that a
 # following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
 _JS_TS_TRAILING_BLOCK_COMMENT_RE = re.compile(r"/\*(?:(?!\*/).)*\*/$")
@@ -197,7 +201,7 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
 
 
 def _js_ts_line_ends_statement(
-    raw: str, scan: str, *, typescript: bool, statement: Sequence[str] = ()
+    raw: str, scan: str, *, typescript: bool, statement: Sequence[str] = (), jsx: bool = False
 ) -> bool:
     """Whether the JS/TS ``raw`` line (masked as ``scan``) can end its statement.
 
@@ -208,6 +212,8 @@ def _js_ts_line_ends_statement(
     ``typescript`` code has type arguments to close; in JavaScript a trailing
     ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy). A type-argument list may
     open on an earlier masked line of the ``statement`` (PRRT_kwDOSJAM6s63Tr7Q).
+    In ``jsx`` code a line ending a completed JSX element ends on that operand
+    (PRRT_kwDOSJAM6s63VJ_g).
     """
     code = scan.rstrip()
     tail = raw[len(code) :].lstrip()
@@ -219,8 +225,10 @@ def _js_ts_line_ends_statement(
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
-    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or (
-        typescript and _js_ts_ends_type_arguments(" ".join([*statement, code]))
+    return (
+        _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
+        or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
+        or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
     )
 
 
@@ -456,7 +464,7 @@ def _assignment_span_end_line(
         continued = scan.rstrip().endswith("\\")
         if not gap:
             complete = _js_ts_line_ends_statement(
-                raw, scan, typescript=typescript, statement=code_lines
+                raw, scan, typescript=typescript, statement=code_lines, jsx=_path_is_jsx(path)
             )
             code_lines.append(scan)
             last_code = index + 1
@@ -543,7 +551,11 @@ def _module_level_assignment_spans(
                         )
                     )
                     and _js_ts_line_ends_statement(
-                        raw_lines[index], scan, typescript=typescript, statement=statement[:-1]
+                        raw_lines[index],
+                        scan,
+                        typescript=typescript,
+                        statement=statement[:-1],
+                        jsx=_path_is_jsx(path),
                     )
                     and not _js_ts_next_line_continues(raw_lines, scan_lines, starts_in_code, index)
                     and (
@@ -557,7 +569,11 @@ def _module_level_assignment_spans(
             is_body = in_body
             in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
                 _js_ts_line_ends_statement(
-                    raw_lines[index], scan, typescript=typescript, statement=statement[:-1]
+                    raw_lines[index],
+                    scan,
+                    typescript=typescript,
+                    statement=statement[:-1],
+                    jsx=_path_is_jsx(path),
                 )
             )
             if is_body:

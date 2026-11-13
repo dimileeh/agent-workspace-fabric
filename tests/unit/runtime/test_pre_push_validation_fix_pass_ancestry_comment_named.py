@@ -1312,6 +1312,34 @@ async def test_js_ts_compact_trailing_angle_is_type_arguments_only_in_typescript
 
 
 @pytest.mark.parametrize(
+    ("path", "element"),
+    [
+        pytest.param("src/app/web/team.tsx", "<Widget />", id="tsx-self-closing"),
+        pytest.param("src/app/web/team.jsx", "<></>", id="jsx-fragment"),
+        pytest.param("src/app/web/team.tsx", "<div>hi</div>", id="tsx-closing-tag"),
+        pytest.param("src/app/web/team.jsx", "<ui.Panel open />", id="jsx-member-tag"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("comment", "expected"),
+    [
+        pytest.param("`VIEW` is wrong", False, id="unchanged-jsx-binding"),
+        pytest.param("`OTHER` is wrong", True, id="changed-next-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_completed_jsx_initializer_ends_its_statement(
+    path: str, element: str, comment: str, *, expected: bool
+) -> None:
+    """A completed JSX element's ``>`` is no comparison (PRRT_kwDOSJAM6s63VJ_g)."""
+    text = f"export const VIEW = {element}\nexport const OTHER = 1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, comment) is expected
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(_WEB, "  export const LIMIT = 1;\n", 1, True, id="js-ts-indented-module"),

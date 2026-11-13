@@ -686,6 +686,37 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        pytest.param(
+            "    const view = <Widget />; helper();",
+            frozenset({(None, "helper")}),
+            id="rooted-self-closing",
+        ),
+        pytest.param(
+            "    const view = (<div><b>t()</b></div>); helper();",
+            frozenset({(None, "helper")}),
+            id="rooted-nested-elements",
+        ),
+        pytest.param("    <span />helper()", frozenset(), id="unrooted-children-line"),
+        pytest.param("    </div> helper()", frozenset(), id="unmatched-closing-tag"),
+        pytest.param("    </div> <A /> helper()", frozenset(), id="nesting-lost"),
+        pytest.param("    const view = <!-- x --> helper()", frozenset(), id="comment-tag"),
+    ],
+)
+@pytest.mark.unit
+def test_callee_refs_scan_code_after_a_completed_rooted_jsx_element(
+    line: str, expected: frozenset[tuple[str | None, str]]
+) -> None:
+    """Code after a completed rooted JSX element is not text (PRRT_kwDOSJAM6s63VJ_g).
+
+    A tag whose enclosing element the text does not show keeps blanking, so a
+    children line read on its own cannot yield callees.
+    """
+    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == expected
+
+
 @pytest.mark.unit
 def test_callee_refs_mask_js_block_comments_and_prefix_poison() -> None:
     """``/* */`` must blank decoys and must not leave quotes that poison later lines."""
