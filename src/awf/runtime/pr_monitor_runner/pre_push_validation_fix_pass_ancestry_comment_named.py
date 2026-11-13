@@ -217,6 +217,18 @@ def _js_ts_next_line_continues(raw_lines: list[str], scan_lines: list[str], inde
     return False
 
 
+def _js_ts_line_ends_in_literal(raw_lines: list[str], index: int, *, path: str) -> bool:
+    """Whether JS/TS line ``index``, which the next line opens inside, ends in a literal.
+
+    Such a line ends in a multi-line template (or ``\\``-continued string) the
+    next line continues, or in a block comment. Re-masked behind ``*/`` and a
+    tab, the tab survives only when the ``*/`` closes a block comment
+    (PRRT_kwDOSJAM6s63TdLt).
+    """
+    probe = "\n".join(raw_lines[: index + 1]) + "*/\t"
+    return not _mask_comments_and_string_literals_for_callee_scan(probe, path=path).endswith("\t")
+
+
 def _js_ts_ends_type_arguments(code: str) -> bool:
     """Whether ``code`` ends with the ``>`` closing a type-argument list (``Array<number>``).
 
@@ -419,13 +431,20 @@ def _module_level_assignment_spans(
     binds over its own lines, from its name to the ``,`` ending it, and a
     declarator list read past a trailing ``,`` and any gap after it
     (PRRT_kwDOSJAM6s63QfAU) or a next line leading with a continuation
-    (PRRT_kwDOSJAM6s63TOG5). Each ``;``-separated statement of a line binds over
+    (PRRT_kwDOSJAM6s63TOG5) or continuing a multi-line literal
+    (PRRT_kwDOSJAM6s63TdLt). Each ``;``-separated statement of a line binds over
     its own lines too, unless the line is a Python compound head's body
     (PRRT_kwDOSJAM6s63Sh3G).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     raw_lines = file_text.splitlines()
+    starts_in_code = [
+        line.startswith("\t")
+        for line in _mask_comments_and_string_literals_for_callee_scan(
+            "\n".join(f"\t{raw}" for raw in raw_lines), path=path
+        ).split("\n")
+    ]
     bindings: list[tuple[str, int, int | None, int]] = []
     depth = 0
     continued = False
@@ -461,6 +480,10 @@ def _module_level_assignment_spans(
                     scan.strip()
                     and _js_ts_line_ends_statement(raw_lines[index], scan)
                     and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
+                    and (
+                        starts_in_code[index + 1]
+                        or not _js_ts_line_ends_in_literal(raw_lines, index, path=path)
+                    )
                 )
             ):
                 continued = True

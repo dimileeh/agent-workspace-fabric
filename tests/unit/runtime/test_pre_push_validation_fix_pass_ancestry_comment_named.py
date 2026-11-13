@@ -779,6 +779,30 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             False,
             id="new-statement-after-complete-declaration",
         ),
+        pytest.param(
+            "const OTHER = `hello\nworld`, LIMIT = [\n  10\n];\n",
+            3,
+            "  20",
+            "LIMIT",
+            True,
+            id="declarator-after-multiline-template",
+        ),
+        pytest.param(
+            "const OTHER = `a ${x}\nb ${y}\nc`, LIMIT = [\n  10\n];\n",
+            4,
+            "  20",
+            "LIMIT",
+            True,
+            id="declarator-after-template-interpolation-line",
+        ),
+        pytest.param(
+            "const OTHER = 1 /* note\n  more */\nfoo(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-declaration-block-comment",
+        ),
     ],
 )
 @pytest.mark.unit
