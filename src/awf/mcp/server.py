@@ -38,7 +38,7 @@ from awf.common.profiles import (
     format_safe_validation_message as _format_safe_validation_message,
 )
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
-from awf.db.repositories import TaskExternalIdConflictError
+from awf.db.repositories import TASK_EXTERNAL_ID_CONFLICT_MESSAGE, TaskExternalIdConflictError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
@@ -246,12 +246,11 @@ def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallT
     """Return a ``TASK_EXTERNAL_ID_CONFLICT`` error result for duplicate external ID."""
     error = ErrorResponse(
         error_code="TASK_EXTERNAL_ID_CONFLICT",
-        message=(
-            "External task ID is already associated with a different "
-            "repo/base/task-class/owned-path scope; use a unique external "
-            "task ID for this backlog slice or retry the original scope."
-        ),
-        detail={"external_id": exc.external_id},
+        message=TASK_EXTERNAL_ID_CONFLICT_MESSAGE,
+        detail={
+            "external_id": exc.external_id,
+            "mismatched_fields": list(exc.mismatched_fields),
+        },
     )
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 

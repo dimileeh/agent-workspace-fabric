@@ -197,7 +197,7 @@ match workspace-create identity fields; omit `external_id` for the generated
 repo/PR adoption identity. AWF derives deterministic repo/PR idempotency;
 callers do not provide an `Idempotency-Key`. Changing either identity field on a
 live adoption returns `PR_ADOPTION_POLICY_CONFLICT`; an explicit `external_id`
-owned by another task scope returns `TASK_EXTERNAL_ID_CONFLICT`. See
+owned by another task scope returns `TASK_EXTERNAL_ID_CONFLICT`. `detail.mismatched_fields` lists which of `repo`, `base`, `task_class`, `owned_paths`, and `title` differ (sorted; never the values). It is `["external_id"]` alone when the request's saved key (idempotency key) resolves to a task already stamped with a different explicit `external_id`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub auth readiness,
 monitor policy, terminal adoption retry behavior, console inspection, and the
 mocked-local demo path.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import typer
@@ -191,6 +193,25 @@ def test_handle_response_covers_empty_pretty_items_and_scalar_emit(capsys) -> No
     assert "--- #1 ---" in output
     assert "id: one" in output
     assert "plain" in output
+
+
+@pytest.mark.unit
+def test_handle_response_prints_task_external_id_conflict_mismatched_fields(capsys) -> None:
+    body = {
+        "error_code": "TASK_EXTERNAL_ID_CONFLICT",
+        "message": "External task ID is already associated with a different scope",
+        "detail": {"external_id": "WAVE-1", "mismatched_fields": ["title"]},
+    }
+
+    with pytest.raises(typer.Exit) as exit_info:
+        cli_common._handle_response(
+            httpx.Response(409, json=body),
+            cli_common.OutputFormat.json,
+        )
+
+    assert exit_info.value.exit_code == 1
+    err = capsys.readouterr().err
+    assert json.loads(err[err.index("{") :])["detail"]["mismatched_fields"] == ["title"]
 
 
 @pytest.mark.unit
