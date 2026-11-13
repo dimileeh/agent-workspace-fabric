@@ -1,12 +1,13 @@
 """Boot identity and conservative database quiescence under the node mutex."""
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError, check
 from awf.hosted_node.lifecycle_barrier import GUARDED_TABLES, verify_barrier
 from awf.hosted_node.lifecycle_models import NodeLifecycleRow
+from awf.hosted_node.lifecycle_schemas import QuiescenceBlocker, QuiescenceBlockerName
 from awf.hosted_node.schemas import Identity
 
 
@@ -58,7 +59,27 @@ async def locked(session: AsyncSession, identity: Identity) -> NodeLifecycleRow:
     return row
 
 
-async def database_quiescent(session: AsyncSession) -> bool:
+DATABASE_BLOCKER_NAMES: tuple[QuiescenceBlockerName, ...] = (
+    "WORKSPACE_ACTIVE",
+    "WORKSPACE_CLAIMED",
+    "COMPOSE_NOT_RELEASED",
+    "ATTEMPT_ACTIVE",
+    "OPERATION_ACTIVE",
+    "VALIDATION_ACTIVE",
+    "RESERVATION_HELD",
+    "GC_PENDING",
+    "CALLBACK_PENDING",
+    "MERGE_CANDIDATE_OPEN",
+    "SECRET_LEASE_ACTIVE",
+)
+
+
+async def quiescence_blockers(session: AsyncSession) -> list[QuiescenceBlocker]:
+    """Count the conservative idle predicates, in fixed vocabulary order.
+
+    The three workspace names split the historical single OR; their union is
+    exactly the old predicate, so ``database_quiescent`` is unchanged.
+    """
     # Imports are local to avoid the central ORM registry's hosted-model cycle.
     from awf.db.models import (
         CallbackDelivery,
@@ -75,33 +96,46 @@ async def database_quiescent(session: AsyncSession) -> bool:
 
     terminal = ("completed", "failed", "cancelled", "destroyed")
     predicates = (
-        select(Workspace.id).where(
+        (Workspace.id, Workspace.status.not_in(terminal)),
+        (
+            Workspace.id,
             or_(
-                Workspace.status.not_in(terminal),
                 Workspace.execution_claimed_by.is_not(None),
                 Workspace.monitor_claimed_by.is_not(None),
-                and_(
-                    Workspace.compose_project_name.is_not(None),
-                    ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
-                ),
-            )
+            ),
         ),
-        select(TaskAttempt.id).where(TaskAttempt.status.not_in(terminal)),
-        select(Operation.id).where(Operation.status.not_in(("succeeded", "failed", "cancelled"))),
-        select(ValidationRun.id).where(ValidationRun.status.not_in(("succeeded", "failed"))),
-        select(ResourceReservation.id).where(ResourceReservation.released_at.is_(None)),
-        select(ServiceGCRequest.id).where(
-            ServiceGCRequest.status.not_in(("completed", "failed", "expired"))
+        (
+            Workspace.id,
+            and_(
+                Workspace.compose_project_name.is_not(None),
+                ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
+            ),
         ),
-        select(CallbackDelivery.id).where(
-            CallbackDelivery.status.not_in(("succeeded", "failed", "skipped"))
+        (TaskAttempt.id, TaskAttempt.status.not_in(terminal)),
+        (Operation.id, Operation.status.not_in(("succeeded", "failed", "cancelled"))),
+        (ValidationRun.id, ValidationRun.status.not_in(("succeeded", "failed"))),
+        (ResourceReservation.id, ResourceReservation.released_at.is_(None)),
+        (
+            ServiceGCRequest.id,
+            ServiceGCRequest.status.not_in(("completed", "failed", "expired")),
         ),
-        select(MergeCandidate.id).where(MergeCandidate.status.not_in(("merged", "closed"))),
-        select(WorkspaceSecretLease.id).where(
-            WorkspaceSecretLease.status.not_in(("revoked", "released"))
+        (
+            CallbackDelivery.id,
+            CallbackDelivery.status.not_in(("succeeded", "failed", "skipped")),
+        ),
+        (MergeCandidate.id, MergeCandidate.status.not_in(("merged", "closed"))),
+        (
+            WorkspaceSecretLease.id,
+            WorkspaceSecretLease.status.not_in(("revoked", "released")),
         ),
     )
-    for query in predicates:
-        if (await session.execute(query.limit(1))).first() is not None:
-            return False
-    return True
+    blockers = []
+    for name, (column, predicate) in zip(DATABASE_BLOCKER_NAMES, predicates, strict=True):
+        count = await session.scalar(select(func.count(column)).where(predicate))
+        if count:
+            blockers.append(QuiescenceBlocker(name=name, count=count))
+    return blockers
+
+
+async def database_quiescent(session: AsyncSession) -> bool:
+    return not await quiescence_blockers(session)

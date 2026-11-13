@@ -228,6 +228,16 @@ class SecretLeaseRepository:
             workspace.id,
             statuses=_SECRET_LEASE_REVOCABLE_STATUSES,
         )
+        return await self.revoke_leases(workspace, leases, now=now, reason_code=reason_code)
+
+    async def revoke_leases(
+        self,
+        workspace: Workspace,
+        leases: list[WorkspaceSecretLease],
+        *,
+        now: datetime,
+        reason_code: str,
+    ) -> list[WorkspaceSecretLease]:
         for lease in leases:
             lease.status = SECRET_LEASE_STATUS_REVOKED
             lease.revoked_at = now

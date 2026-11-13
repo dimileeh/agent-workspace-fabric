@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID as DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
 )
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
+
+# A terminal workspace must have stopped this long before its owned rows are reaped.
+TERMINAL_OWNED_ROW_GRACE = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,11 @@ class WorkerConfig:
     workspace_steady_memory_gb: float = 10.0
     workspace_peak_cpu: float = 6.0
     workspace_peak_memory_gb: float = 16.0
+    # Hosted-only sweep closing rows owned by long-terminal workspaces so an idle
+    # node can park. Enabled by ``build_worker_runtime`` only for hosted workers.
+    terminal_owned_row_reaper_enabled: bool = False
+    terminal_owned_row_reap_interval_seconds: float = 60.0
+    terminal_owned_row_reap_max_per_run: int = 200
 
 
 def effective_worker_config_node_id(config: WorkerConfig) -> str:

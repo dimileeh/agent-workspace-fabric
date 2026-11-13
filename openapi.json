@@ -3273,6 +3273,14 @@
             "title": "Admission Closed",
             "type": "boolean"
           },
+          "blockers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/QuiescenceBlocker"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
           "database_quiescent": {
             "title": "Database Quiescent",
             "type": "boolean"
@@ -7378,6 +7386,43 @@
           "dind_slots"
         ],
         "title": "QueuePlannedResourcesResponse",
+        "type": "object"
+      },
+      "QuiescenceBlocker": {
+        "additionalProperties": false,
+        "description": "Why the node is not idle: a fixed name and a row count, never row ids.",
+        "properties": {
+          "count": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "name": {
+            "enum": [
+              "WORKSPACE_ACTIVE",
+              "WORKSPACE_CLAIMED",
+              "COMPOSE_NOT_RELEASED",
+              "ATTEMPT_ACTIVE",
+              "OPERATION_ACTIVE",
+              "VALIDATION_ACTIVE",
+              "RESERVATION_HELD",
+              "GC_PENDING",
+              "CALLBACK_PENDING",
+              "MERGE_CANDIDATE_OPEN",
+              "SECRET_LEASE_ACTIVE",
+              "DOCKER_UNEXPECTED_CONTAINER",
+              "CGROUP_POPULATED"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "count"
+        ],
+        "title": "QuiescenceBlocker",
         "type": "object"
       },
       "ReadyResponse": {

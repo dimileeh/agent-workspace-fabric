@@ -61,6 +61,7 @@ from awf.control.worker.helpers import (
     _worker_exception_is_transient_db_connection,
 )
 from awf.control.worker.logging import _log
+from awf.control.worker.terminal_owned_rows import reap_terminal_owned_rows
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import (
@@ -119,6 +120,32 @@ async def _maybe_expire_due_secret_leases(self: Any) -> None:
 
     interval = max(0.0, self._config.secret_lease_expiration_scan_interval_seconds)
     self._next_secret_lease_expiration_scan_at = monotonic() + interval
+
+
+async def _maybe_reap_terminal_owned_rows(self: Any) -> None:
+    """Reap terminal-owned rows at most once per interval, even after a failure."""
+    if not self._config.terminal_owned_row_reaper_enabled:
+        return
+    if monotonic() < self._next_terminal_owned_row_reap_at:
+        return
+    interval = max(0.0, self._config.terminal_owned_row_reap_interval_seconds)
+    self._next_terminal_owned_row_reap_at = monotonic() + interval
+    try:
+        await reap_terminal_owned_rows(self, limit=self._config.terminal_owned_row_reap_max_per_run)
+    except Exception as exc:
+        if _worker_exception_is_transient_db_connection(exc):
+            _log.warning(
+                "worker.terminal_owned_row_reap_db_connection_closed",
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+            return
+        _log.exception(
+            "worker.terminal_owned_row_reap_failed",
+            reason_code="TERMINAL_OWNED_ROW_REAP_FAILED",
+        )
+        raise
 
 
 async def _expire_due_secret_leases(self: Any) -> None:

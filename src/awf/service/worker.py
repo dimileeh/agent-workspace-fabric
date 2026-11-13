@@ -31,6 +31,7 @@ from awf.common.workspace_scope import WorkspaceScope
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.cancelled_activity import settle_hosted_stop_activity
 from awf.control.worker.work_slot_probe import LocalWorkSlotProcessProbe
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
 from awf.db.models import Workspace
@@ -922,6 +923,8 @@ def build_worker_runtime(
             workspace_steady_memory_gb=settings.workspace_steady_memory_gb,
             workspace_peak_cpu=settings.workspace_peak_cpu,
             workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
+            # Runs inside the hosted lifespan's worker loop; never on local nodes.
+            terminal_owned_row_reaper_enabled=hosted is not None,
         ),
     )
     if hosted is not None:
@@ -1006,6 +1009,7 @@ def build_worker_runtime(
                 else:
                     restore_primary_failure_row_fields(current, primary)
                 await repo.clear_workspace_attention(workspace_id)
+                await settle_hosted_stop_activity(session, current, reason_code=reason)
 
         hosted.stop_workspace = stop_workspace
     return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)
