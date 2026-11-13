@@ -715,6 +715,33 @@ async def test_binding_ends_at_its_semicolon_boundary(
             True,
             id="block-comment-then-continuation",
         ),
+        pytest.param(
+            "export const LIMIT = base\n/* scale for production */\n.scaled(10);\n",
+            3,
+            True,
+            id="standalone-block-comment-then-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n  /* scale\n     note */\n  .scaled(10);\n",
+            4,
+            True,
+            id="multi-line-block-comment-then-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = base +\n/* why */\n10;\n",
+            3,
+            True,
+            id="operator-then-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* note 1 */\nlimit();\n",
+            2,
+            False,
+            id="block-comment-before-next-statement",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* note 1 */\n", 2, False, id="trailing-block-comment"
+        ),
     ],
 )
 @pytest.mark.unit

@@ -196,10 +196,20 @@ def _assignment_span_end_line(
     depth = 0
     continued = False
     complete = False
+    in_comment = False
+    last_code = start
     for index in range(start - 1, len(scan_lines)):
         scan = scan_lines[index]
         raw = raw_lines[index]
-        gap = _is_ignorable_span_gap_line(raw)
+        # A JS/TS line holding only a block comment (or its continuation) is a
+        # gap too: the expression may continue past it (PRRT_kwDOSJAM6s63QLb-).
+        in_comment = (
+            js_ts
+            and index >= start
+            and not scan.strip()
+            and (raw.lstrip().startswith("/*") if starts_in_code[index - start + 1] else in_comment)
+        )
+        gap = in_comment or _is_ignorable_span_gap_line(raw)
         if (
             index >= start
             and depth == 0
@@ -217,7 +227,7 @@ def _assignment_span_end_line(
                 else _leading_indent(raw) == 0
             )
         ):
-            return index
+            return last_code if js_ts else index
         for char in scan:
             if char in "([{":
                 depth += 1
@@ -228,7 +238,8 @@ def _assignment_span_end_line(
         continued = scan.rstrip().endswith("\\")
         if not gap:
             complete = _js_ts_line_ends_statement(raw, scan)
-    return len(scan_lines)
+            last_code = index + 1
+    return last_code if js_ts else len(scan_lines)
 
 
 def _module_level_assignment_spans(
