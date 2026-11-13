@@ -493,6 +493,16 @@ async def test_named_identifier_definition_changed_by_the_range_is_evidence(
             ),
             id="guarded-rebinding",
         ),
+        pytest.param(
+            "CONFIG = dict(\n_TASK_INBOUND_TYPES=1,\n)\n",
+            _diff(_INBOUND, "@@ -2 +2 @@", "-_TASK_INBOUND_TYPES=1,", "+_TASK_INBOUND_TYPES=2,"),
+            id="unindented-keyword-argument",
+        ),
+        pytest.param(
+            "CONFIG = 1 + \\\n_TASK_INBOUND_TYPES=1\n",
+            _diff(_INBOUND, "@@ -2 +2 @@", "-_TASK_INBOUND_TYPES=1", "+_TASK_INBOUND_TYPES=2"),
+            id="backslash-continuation-line",
+        ),
     ],
 )
 @pytest.mark.unit

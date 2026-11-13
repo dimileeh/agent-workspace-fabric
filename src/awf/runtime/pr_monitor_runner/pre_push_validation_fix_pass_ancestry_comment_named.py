@@ -173,13 +173,24 @@ def _module_level_assignment_spans(
     binding or under a guard, an ``import``, or any assignment, loop or ``with``
     target the ``_rebound_scope_names`` readers find — withholds it entirely,
     matching ``_importable_definition_spans_for_names``'s effective-binding rule.
+    Only statement-opening lines count: a column-0 line inside open brackets or
+    after a ``\\`` continuation (a keyword argument, say) binds nothing
+    (PRRT_kwDOSJAM6s63L3DZ).
     """
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     bindings: list[tuple[str, int]] = []
+    depth = 0
+    continued = False
     for index, scan in enumerate(scan_lines):
-        match = _MODULE_LEVEL_ASSIGNMENT_RE.match(scan)
+        match = None if depth or continued else _MODULE_LEVEL_ASSIGNMENT_RE.match(scan)
         if match is not None and match.group(1) in names:
             bindings.append((match.group(1), index + 1))
+        for char in scan:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth = max(depth - 1, 0)
+        continued = scan.rstrip().endswith("\\")
     if not bindings:
         return []
     last = dict(bindings)
