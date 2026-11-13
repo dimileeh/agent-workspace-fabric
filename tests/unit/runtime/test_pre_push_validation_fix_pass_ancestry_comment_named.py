@@ -798,6 +798,58 @@ async def test_binding_ends_at_its_semicolon_boundary(
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_INBOUND, "OTHER = 0; LIMIT = (\n    10\n)\n", 2, True, id="python-later"),
+        pytest.param(
+            _INBOUND, "OTHER = 0; LIMIT = 0; X = (\n    10\n)\n", 2, False, id="python-middle"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = (\n    0\n); LIMIT = [\n    10\n]\n", 4, True, id="python-wrapped"
+        ),
+        pytest.param(
+            _INBOUND, "LIMIT = 0; LIMIT = (\n    10\n)\n", 2, True, id="python-last-rebinding"
+        ),
+        pytest.param(
+            _INBOUND, "if ready: OTHER = 0; LIMIT = (\n    10\n)\n", 2, False, id="python-body"
+        ),
+        pytest.param(
+            _INBOUND, "class C: OTHER = 0; LIMIT = (\n    10\n)\n", 2, False, id="class-body"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = ';'; LIMIT = (\n    10\n)\n", 2, True, id="python-string-semicolon"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = 'é'; LIMIT = (\n    10\n)\n", 2, True, id="python-non-ascii-column"
+        ),
+        pytest.param(
+            _INBOUND,
+            "OTHER = 0; LIMIT = (\n    10\n)\nfor LIMIT in ():\n    pass\n",
+            2,
+            False,
+            id="python-rebound-later",
+        ),
+        pytest.param(
+            _WEB, "const OTHER = 0; const LIMIT = [\n  10,\n];\n", 2, True, id="js-ts-later"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_semicolon_separated_statements_each_bind(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A binding after a ``;`` on the same line is found, over its own lines.
+
+    (PRRT_kwDOSJAM6s63Sh3G)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "expected"),
     [
         pytest.param(

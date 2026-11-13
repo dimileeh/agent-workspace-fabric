@@ -301,6 +301,7 @@ def _plain_assignment_rebound_scope_names(
     path: str | None,
     names: frozenset[str],
     definition_head_starts: frozenset[int],
+    statement_heads: frozenset[tuple[int, int]] = frozenset(),
 ) -> set[tuple[int, str]]:
     """``(scope_start, name)`` pairs a plain assignment rebinds in that scope.
 
@@ -321,7 +322,9 @@ def _plain_assignment_rebound_scope_names(
     statement a line spells is read for the same reason — ``initialize();
     validate = replacement`` is the binding an importer reaches, and left
     unread it leaves the dead head standing as the callee a correction must
-    touch (PRRT_kwDOSJAM6s6rBTTP).
+    touch (PRRT_kwDOSJAM6s6rBTTP). A statement opening at a ``(line, column)``
+    of ``statement_heads`` is a binding the caller already read after a ``;``,
+    and is skipped the same way (PRRT_kwDOSJAM6s63Sh3G).
 
     Only statement positions count — bracket depth is tracked across the file
     so a keyword argument or a continuation-line parameter default
@@ -343,8 +346,11 @@ def _plain_assignment_rebound_scope_names(
             continue
         head_is_a_definition = line in definition_head_starts
         targets: set[str] = set()
+        column = 0
         for position, segment in enumerate(_simple_statement_segments(scan)):
-            if position == 0 and head_is_a_definition:
+            opens = column + len(segment) - len(segment.lstrip(" \t"))
+            column += len(segment) + 1
+            if (position == 0 and head_is_a_definition) or (line, opens) in statement_heads:
                 continue
             match = _PLAIN_ASSIGNMENT_TARGETS_RE.match(segment)
             if match is not None:

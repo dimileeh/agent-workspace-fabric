@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _iter_definition_spans,
     _leading_indent,
     _mask_comments_and_string_literals_for_callee_scan,
+    _simple_statement_segments,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _JS_TS_CALL_SITE_SUFFIXES,
@@ -93,6 +94,12 @@ _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
 # A further target of a chained binding (``A = B = 10``), matched right after
 # the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9).
 _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
+# A Python logical line whose ``;``-separated later statements bind nothing at
+# module scope: an indented one, or a compound head whose body follows its ``:``
+# (PRRT_kwDOSJAM6s63Sh3G).
+_PYTHON_INLINE_BODY_RE = re.compile(
+    r"[ \t]|(?:if|elif|else|for|while|with|try|except|finally|class|def|async)(?![\w])"
+)
 # A JS/TS declaration binds each declarator of ``const A = 0, B = v``; a further
 # one is matched right after a top-level ``,`` (PRRT_kwDOSJAM6s63QfAU).
 _JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
@@ -254,7 +261,7 @@ def _statement_line_index(statement: list[str], offset: int) -> int:
 
 
 def _assignment_span_end_line(
-    file_text: str, scan_lines: list[str], start: int, *, path: str
+    file_text: str, scan_lines: list[str], start: int, *, path: str, column: int = 0
 ) -> int:
     """Inclusive end line of the column-0 binding whose statement opens at ``start``.
 
@@ -272,7 +279,8 @@ def _assignment_span_end_line(
     only code after it can continue the expression (PRRT_kwDOSJAM6s63Pq1C). A
     ``;`` outside brackets ends the statement on its
     own line, so a ``;``-separated next statement's brackets are not the
-    binding's (PRRT_kwDOSJAM6s63Pd7z).
+    binding's (PRRT_kwDOSJAM6s63Pd7z); one opening at ``column`` of ``start``
+    after such a ``;`` reads only the code from there (PRRT_kwDOSJAM6s63Sh3G).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     raw_lines = file_text.splitlines()
@@ -289,6 +297,8 @@ def _assignment_span_end_line(
     last_code = start
     for index in range(start - 1, len(scan_lines)):
         scan = scan_lines[index]
+        if index == start - 1:
+            scan = " " * column + scan[column:]
         raw = raw_lines[index]
         # A JS/TS line holding only a block comment (or its continuation) is a
         # gap too: the expression may continue past it (PRRT_kwDOSJAM6s63QLb-).
@@ -354,12 +364,14 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63QK8_). Each declarator of a JS/TS ``const A = 0, B = v``
     binds over its own lines, from its name to the ``,`` ending it, and a
     declarator list read past a trailing ``,`` and any gap after it
-    (PRRT_kwDOSJAM6s63QfAU).
+    (PRRT_kwDOSJAM6s63QfAU). Each ``;``-separated statement of a line binds over
+    its own lines too, unless the line is a Python compound head's body
+    (PRRT_kwDOSJAM6s63Sh3G).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     raw_lines = file_text.splitlines()
-    bindings: list[tuple[str, int, int | None]] = []
+    bindings: list[tuple[str, int, int | None, int]] = []
     depth = 0
     continued = False
     in_body = False
@@ -400,27 +412,47 @@ def _module_level_assignment_spans(
             )
             if is_body:
                 continue
-        first = _MODULE_LEVEL_ASSIGNMENT_RE.match(logical)
-        heads = [first] if first is not None else []
-        if js_ts and declaration:
-            heads += _js_ts_secondary_declarators(logical)
-        for position, head in enumerate(heads):
-            start = statement_start + _statement_line_index(statement, lead + head.start(1))
-            end = (
-                statement_start
-                + _statement_line_index(statement, lead + heads[position + 1].start() - 1)
-                if position + 1 < len(heads)
-                else None
-            )
-            match: re.Match[str] | None = head
-            while match is not None:
-                if match.group(1) in names:
-                    bindings.append((match.group(1), start, end))
-                match = _CHAINED_ASSIGNMENT_TARGET_RE.match(logical, match.end())
+        texts = (
+            list(_simple_statement_segments(logical))
+            if js_ts or not _PYTHON_INLINE_BODY_RE.match(logical)
+            else [logical]
+        )
+        begin = 0
+        for number, text in enumerate(texts):
+            segment = text.lstrip(" \t") if number else text
+            base = lead + begin + len(text) - len(segment)
+            stop = begin + len(text)
+            begin = stop + 1
+            first = _MODULE_LEVEL_ASSIGNMENT_RE.match(segment)
+            heads = [first] if first is not None else []
+            if js_ts and _JS_TS_DECLARATION_RE.match(segment):
+                heads += _js_ts_secondary_declarators(segment)
+            for position, head in enumerate(heads):
+                start_index = _statement_line_index(statement, base + head.start(1))
+                start = statement_start + start_index
+                end = (
+                    statement_start
+                    + _statement_line_index(statement, base + heads[position + 1].start() - 1)
+                    if position + 1 < len(heads)
+                    else statement_start + _statement_line_index(statement, lead + stop)
+                    if number + 1 < len(texts)
+                    else None
+                )
+                # The column this statement opens at, past the ``;`` it follows.
+                column = (
+                    base - sum(len(line) + 1 for line in statement[:start_index])
+                    if number and _statement_line_index(statement, base) == start_index
+                    else 0
+                )
+                match: re.Match[str] | None = head
+                while match is not None:
+                    if match.group(1) in names:
+                        bindings.append((match.group(1), start, end, column))
+                    match = _CHAINED_ASSIGNMENT_TARGET_RE.match(segment, match.end())
     if not bindings:
         return []
-    last = {name: (start, end) for name, start, end in bindings}
-    starts = frozenset(start for _name, start, _end in bindings)
+    last = {name: (start, end, column) for name, start, end, column in bindings}
+    starts = frozenset(start for _name, start, _end, _column in bindings)
     all_spans = _iter_definition_spans(file_text, path=path)
     shadowed = {
         name
@@ -434,16 +466,21 @@ def _module_level_assignment_spans(
         file_text,
         all_spans,
         path=path,
-        collected=[(name, start, 0, (0, 0), (start, start)) for name, start, _end in bindings],
+        collected=[
+            (name, start, 0, (0, 0), (start, start)) for name, start, _end, _column in bindings
+        ],
+        statement_heads=frozenset(
+            (start, column) for _name, start, _end, column in bindings if column
+        ),
     )
     return [
         (
             start,
             end
             if end is not None
-            else _assignment_span_end_line(file_text, scan_lines, start, path=path),
+            else _assignment_span_end_line(file_text, scan_lines, start, path=path, column=column),
         )
-        for name, (start, end) in last.items()
+        for name, (start, end, column) in last.items()
         if name not in shadowed and (0, name) not in rebound
     ]
 
