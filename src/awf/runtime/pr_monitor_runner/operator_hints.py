@@ -38,13 +38,17 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
     _agent_verdict_protocol_failure_result,
 )
-
-# The protected-block re-block helpers live in a sibling module (file-line
-# guardrail); the resume cycle below and existing test imports resolve them here.
-from awf.runtime.pr_monitor_runner.operator_hint_protected_reblock import (
-    _clear_dropped_preserved_marker_after_terminal_directive,
-    _reblock_preserved_protected_leak,
-    _terminal_directive_grant_reblock,
+from awf.runtime.pr_monitor_runner.operator_hint_preserved_reblock import (
+    _clear_dropped_preserved_marker_after_terminal_directive as _clear_dropped_preserved_marker_after_terminal_directive,
+)
+from awf.runtime.pr_monitor_runner.operator_hint_preserved_reblock import (
+    _directive_preserved_leak_protected_block as _directive_preserved_leak_protected_block,
+)
+from awf.runtime.pr_monitor_runner.operator_hint_preserved_reblock import (
+    _reblock_preserved_protected_leak as _reblock_preserved_protected_leak,
+)
+from awf.runtime.pr_monitor_runner.operator_hint_preserved_reblock import (
+    _terminal_directive_grant_reblock as _terminal_directive_grant_reblock,
 )
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint as _finalize_processed_operator_hint,

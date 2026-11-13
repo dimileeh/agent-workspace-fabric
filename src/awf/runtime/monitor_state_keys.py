@@ -23,6 +23,72 @@ _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY = "__awf_comment_repair_unpublished_pr
 PROVIDER_PARK_STRANDED_EDITS_STATE_KEY = "__awf_provider_park_stranded_edits__"
 
 
+_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
+(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
+restart reconstructs it and the idempotent-push ancestry check avoids a
+duplicate push (WS-2 §5). Re-exported by the pure core (``pr_monitor``) so
+``decide`` can spot a still-preserved protected commit; the runner re-exports it
+from ``remote_repair``."""
+
+
+_AWAITING_WORKFLOW_SCOPE_STATE_KEY = "__awf_awaiting_workflow_scope__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the previous
+poll's comment repair left the workspace waiting on an operator to grant the
+GitHub ``workflow`` token scope. That arm requeues ``AddressComments`` and keeps
+the row in ``monitoring_pr`` (it does NOT terminally fail like the sync-base /
+CI-repair workflow-scope arms), so the human wait spans polls. ``decide`` never
+reads it (it only ever looks up real thread/comment IDs), so — like the preserved
+protected-block key — it is inert to the decision core; it exists only to let the
+runner keep the awaiting-human attention flag set across those requeued polls
+instead of nulling it at the top-of-poll resume clear."""
+
+
+_PARKED_UNPUBLISHED_REPAIR_STATE_KEY = "__awf_parked_unpublished_repair__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that recovery
+parked unattributable unpushed commits for a human (#935). Its value is the park
+signature (disposition + local/remote heads) so a re-park of the SAME situation
+on a later poll is recognised as the ongoing episode instead of a new one.
+
+Like the workflow-scope key this is inert to ``decide`` (which only looks up real
+thread/comment IDs). It exists so the parked wait survives across polls: the
+runner keeps the awaiting-human attention flag set at the top-of-poll resume
+clear, and the recovery path appends its operator-facing park event once per
+distinct situation rather than once per poll."""
+
+
+_PRE_PUSH_INFRA_FAILURE_STATE_KEY = "__awf_pre_push_infra_failure__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON budget
+record for repeated infrastructure-signature pre-push validation fix failures
+(#1182): signature, attempt count, the PR head it was counted on, and the
+preserved evidence. Owned by ``pr_monitor_runner.pre_push_infrastructure_budget``.
+Like the park key above it is inert to ``decide``; it lets the comment-repair
+arm park for a human, without running agents, once the attempt cap is reached."""
+
+
+_MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
+loop's branch-protection fallback set the awaiting-human attention flag for an
+active deterministic merge rejection. That arm records NO sticky blocker (branch
+protection can clear externally without a code change), so ``decide`` keeps
+returning ``Merge`` every poll. ``decide`` never reads this key (it only looks up
+real thread/comment IDs) — like the workflow-scope key, it is inert to the
+decision core; it exists only so ``handle_merge_action``'s non-human gate waits
+(merge queue, reviewer settle, initial review grace) preserve that still-active
+human signal across polls instead of clearing it as a resolved ``NotifyHuman``
+episode (PRRT_kwDOSJAM6s6LXscz)."""
+
+_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY = "__awf_merge_block_attention_origin__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying structured origin
+metadata for ``_MERGE_BLOCK_ATTENTION_STATE_KEY``.
+
+The merge-block marker itself stores the TTL timestamp. This companion key keeps
+machine decisions independent from the user-facing ``awaiting_human_reason``
+text while staying in the same persisted state map and row transaction."""
+
+_MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION = "merge_rejection"
+
+
 def _non_check_reviewer_settle_started_key(
     *,
     pr_number: int,

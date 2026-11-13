@@ -1,10 +1,4 @@
-"""Protected-block re-block helpers for the operator remonitor hint resume.
-
-Extracted from :mod:`awf.runtime.pr_monitor_runner.operator_hints` so that module
-stays within the first-party file-line guardrail
-(``tests/unit/test_core_decomposition_maintainability.py``). Behavior is
-unchanged; ``operator_hints`` imports these back for the resume cycle.
-"""
+"""Re-block helpers for a preserved protected commit during operator-hint resumes."""
 
 from __future__ import annotations
 
