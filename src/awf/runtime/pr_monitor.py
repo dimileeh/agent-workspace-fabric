@@ -239,6 +239,16 @@ class MonitorState:
         repr=False,
         compare=False,
     )
+    # Whether a protected-scope baseline-outage park's kept commit is still
+    # unpublished (#1221). Derived each poll from the workspace's block columns
+    # (``_protected_scope_baseline_park_resume_pending``), never persisted: a park
+    # of an already-committed repair leaves the worktree clean and sets no marker
+    # in ``threads_addressed_ids`` (PRRT_kwDOSJAM6s63UyV5).
+    protected_scope_baseline_park_pending: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+    )
     # One accepted comment-repair item whose end-HEAD probe failed, as opaque JSON
     # owned by ``pr_monitor_runner.comment_repair_provenance`` (#937). Deliberately
     # transient and never persisted: the next item of the same batch completes the
@@ -1191,9 +1201,15 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # park) outranks SyncBase the same way without the preserved-block marker, which
     # would trip the directive-resume leak guard: merging the advanced base over the
     # dirty repair paths fails as the terminal ``SYNC_BASE_MERGE_FAILED`` before the
-    # hint cycle can commit those edits (PRRT_kwDOSJAM6s63QUyw).
+    # hint cycle can commit those edits (PRRT_kwDOSJAM6s63QUyw). A baseline-outage
+    # park of an already-committed repair strands no edits, yet SyncBase's push would
+    # still allow the non-fast-forward resync, whose ``reset --hard`` drops the kept
+    # commit if the PR branch advanced while parked; the hint resume suppresses that
+    # resync, so it outranks SyncBase too (PRRT_kwDOSJAM6s63UyV5).
     if state.pending_operator_hint is not None and (
-        state.has_preserved_protected_block or state.has_stranded_park_edits
+        state.has_preserved_protected_block
+        or state.has_stranded_park_edits
+        or state.protected_scope_baseline_park_pending
     ):
         hint = state.pending_operator_hint
         if hint.status == "pending":

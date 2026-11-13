@@ -28,7 +28,7 @@ from awf.control.blocked_transition import (
 )
 from awf.control.quality_gates import PROTECTED_QUALITY_GATE_BLOCK_TYPE
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import WorkspaceEvent
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -49,9 +49,17 @@ async def _protected_scope_baseline_park_resume_pending(self: Any, workspace_id:
     """
     async with self._deps.session_factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
+    return ws is not None and protected_scope_baseline_park_pending(ws)
+
+
+def protected_scope_baseline_park_pending(ws: Workspace) -> bool:
+    """Read the baseline-outage park's durable marker off an already-loaded row.
+
+    ``decide()`` uses it to run the park's resume before SyncBase, whose push would
+    otherwise ``reset --hard`` the kept commit away (PRRT_kwDOSJAM6s63UyV5).
+    """
     return (
-        ws is not None
-        and ws.block_reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+        ws.block_reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
         and ws.block_resume_phase is not None
     )
 

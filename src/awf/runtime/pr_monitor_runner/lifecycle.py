@@ -79,6 +79,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _truncate_target_reconcile_failure_payload,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.protected_scope_baseline_park import (
+    protected_scope_baseline_park_pending,
+)
 from awf.service.gc import (
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardown,
@@ -157,6 +160,7 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
         threads_addressed_ids=threads_addressed,
         started_at=started_at,
         pending_operator_hint=pending_operator_hint,
+        protected_scope_baseline_park_pending=protected_scope_baseline_park_pending(ws),
     )
 
 

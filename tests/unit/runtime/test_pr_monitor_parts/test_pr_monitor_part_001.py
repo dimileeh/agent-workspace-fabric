@@ -479,6 +479,50 @@ class TestOperatorHints:
         assert "unexpected worktree changes" in action.message
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_resume_of_clean_baseline_park_runs_before_sync_base(
+        self, status: PRStatus
+    ) -> None:
+        """A baseline-outage park of an already-committed repair leaves the
+        worktree clean, so it sets neither state marker. SyncBase would still push
+        with the non-fast-forward resync, whose ``reset --hard`` drops the kept
+        commit if the PR branch advanced while parked; the hint resume suppresses
+        that resync, so it must run first (PRRT_kwDOSJAM6s63UyV5)."""
+        hint = OperatorHint(reason="baseline reachable again", reason_code="OPERATOR_GUIDE")
+        state = MonitorState(pending_operator_hint=hint, protected_scope_baseline_park_pending=True)
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+        assert not state.has_preserved_protected_block
+        assert not state.has_stranded_park_edits
+
+    @pytest.mark.unit
+    def test_terminal_resume_of_clean_baseline_park_notifies_before_sync_base(self) -> None:
+        """A failed resume leaves the kept commit unpublished, so it must not fall
+        through to SyncBase's resetting push either (PRRT_kwDOSJAM6s63UyV5)."""
+        hint = OperatorHint(
+            reason="baseline reachable again",
+            reason_code="OPERATOR_GUIDE",
+            status="needs_human",
+            status_reason="push rejected",
+        )
+        state = MonitorState(pending_operator_hint=hint, protected_scope_baseline_park_pending=True)
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "push rejected" in action.message
+
+    @pytest.mark.unit
     def test_pending_directive_without_preserved_block_keeps_sync_base_first(self) -> None:
         """No preserved protected commit → SyncBase would not re-block, so the
         documented SyncBase-before-hint ordering still wins for a stale base."""
