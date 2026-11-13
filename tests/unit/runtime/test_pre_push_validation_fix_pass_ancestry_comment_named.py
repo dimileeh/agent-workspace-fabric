@@ -772,6 +772,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             id="comparisons-around-declarator-with-multiline-operand",
         ),
         pytest.param(
+            "const OTHER = className < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = className < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="class-prefixed-operand-is-not-a-class-head",
+        ),
+        pytest.param(
+            "const OTHER = functional < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = functional < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="function-prefixed-operand-is-not-a-function-head",
+        ),
+        pytest.param(
             "const OTHER = base\n  .method(), LIMIT = [\n  10,\n];\n",
             3,
             "  20,",

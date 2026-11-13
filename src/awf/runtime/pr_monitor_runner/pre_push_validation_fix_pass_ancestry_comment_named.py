@@ -110,9 +110,11 @@ _JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
 _JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)")
 # What precedes a type-parameter list's ``<``: the start of an expression (a
 # generic arrow or function type) or a ``function``/``class`` head. A ``<`` after
-# an operand (``1 < 2``) is a comparison (PRRT_kwDOSJAM6s63UyJU).
+# an operand (``1 < 2``) is a comparison (PRRT_kwDOSJAM6s63UyJU), including one
+# merely prefixed by a keyword (``className < 2``) (PRRT_kwDOSJAM6s63U903).
 _JS_TS_TYPE_PARAMETER_LIST_OPENER_RE = re.compile(
-    r"(?:^|[=(,:?\[{]|=>|(?<![\w$.])(?:async|(?:function|class)(?:[ \t]*\*)?(?:[ \t]*[\w$]+)?))"
+    r"(?:^|[=(,:?\[{]|=>|(?<![\w$.])(?:async"
+    r"|(?:function|class)(?![\w$])(?:[ \t]*\*)?(?:[ \t]*[\w$]+)?))"
     r"[ \t]*$"
 )
 # What follows a type-parameter list's ``>`` (PRRT_kwDOSJAM6s63SGuR).
