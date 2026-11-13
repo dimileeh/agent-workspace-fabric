@@ -641,6 +641,43 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
 
 
 @pytest.mark.parametrize(
+    ("text", "line", "expected"),
+    [
+        pytest.param(
+            "export const LIMIT = 10;\n  export function limit() {\n    return 1;\n  }\n",
+            3,
+            False,
+            id="indented-statement-after-semicolon",
+        ),
+        pytest.param(
+            'export const LIMIT = "10"\n  export function limit() {\n    return 1;\n  }\n',
+            3,
+            False,
+            id="indented-statement-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = 10; // max\n  limit();\n", 2, False, id="trailing-comment"
+        ),
+        pytest.param("export const LIMIT =\n  10;\n", 2, True, id="operator-continuation"),
+        pytest.param(
+            "export const LIMIT = base\n  .scaled(10);\n", 2, True, id="leading-continuation"
+        ),
+        pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_binding_ends_at_its_statement_boundary(
+    text: str, line: int, *, expected: bool
+) -> None:
+    """Indentation is not scope in JS/TS (PRRT_kwDOSJAM6s63PU_-)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(

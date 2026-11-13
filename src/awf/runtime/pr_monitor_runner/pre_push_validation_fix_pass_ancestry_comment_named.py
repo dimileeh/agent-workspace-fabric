@@ -91,6 +91,11 @@ _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
 # A further target of a chained binding (``A = B = 10``), matched right after
 # the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9).
 _CHAINED_ASSIGNMENT_TARGET_RE = re.compile(rf"[ \t]*({_JS_IDENT})[ \t]*=(?!=)")
+# Indentation is not scope in JS/TS: a statement ends where the code does, unless
+# its last token or the next line's first token continues the expression
+# (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-).
+_JS_TS_TRAILING_CONTINUATION_RE = re.compile(r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-)$")
+_JS_TS_LEADING_CONTINUATION_RE = re.compile(r"^[ \t]*[.?:,=*/%&|^<>+\-(\[`]")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -139,6 +144,19 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
+    """Whether the JS/TS ``raw`` line (masked as ``scan``) can end its statement.
+
+    A line whose code is followed by a masked literal ends on that operand; one
+    followed only by a comment ends on its last code token.
+    """
+    code = scan.rstrip()
+    tail = raw[len(code) :].lstrip()
+    if tail and not tail.startswith(("//", "/*")):
+        return True
+    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
+
+
 def _assignment_span_end_line(
     file_text: str, scan_lines: list[str], start: int, *, path: str
 ) -> int:
@@ -152,8 +170,11 @@ def _assignment_span_end_line(
     that opens a string literal or block comment, which masks blank. The raw
     lines are re-masked each behind a tab, which the masker keeps only outside a
     literal, so such a line is told apart from one the binding's own literal
-    continues (PRRT_kwDOSJAM6s63MDQr).
+    continues (PRRT_kwDOSJAM6s63MDQr). In JS/TS, where indentation is not scope,
+    an indented line after a complete statement ends the span too
+    (PRRT_kwDOSJAM6s63PU_-).
     """
+    js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     raw_lines = file_text.splitlines()
     starts_in_code = [
         line.startswith("\t")
@@ -163,16 +184,21 @@ def _assignment_span_end_line(
     ]
     depth = 0
     continued = False
+    complete = False
     for index in range(start - 1, len(scan_lines)):
         scan = scan_lines[index]
         raw = raw_lines[index]
+        gap = _is_ignorable_span_gap_line(raw)
         if (
             index >= start
             and depth == 0
             and not continued
             and starts_in_code[index - start + 1]
-            and not _is_ignorable_span_gap_line(raw)
-            and _leading_indent(raw) == 0
+            and not gap
+            and (
+                _leading_indent(raw) == 0
+                or (js_ts and complete and not _JS_TS_LEADING_CONTINUATION_RE.match(raw))
+            )
         ):
             return index
         for char in scan:
@@ -181,6 +207,8 @@ def _assignment_span_end_line(
             elif char in ")]}":
                 depth = max(depth - 1, 0)
         continued = scan.rstrip().endswith("\\")
+        if not gap:
+            complete = _js_ts_line_ends_statement(raw, scan)
     return len(scan_lines)
 
 
