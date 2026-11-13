@@ -64,6 +64,8 @@ if TYPE_CHECKING:
 _MAX_COMMENT_NAMED_PATHS = 10
 # Suffixes whose definition heads the identifier gate (b) can read.
 _DEFINITION_SUFFIXES = _PYTHON_CALL_SITE_SUFFIXES | _JS_TS_CALL_SITE_SUFFIXES
+# Suffixes whose expressions can carry type arguments (``Array<number>``).
+_TS_SUFFIXES = frozenset({".ts", ".tsx", ".mts", ".cts"})
 
 # ``scheme://...`` links are dropped before path parsing, so a GitHub permalink
 # never contributes a path (its line fragment is a non-goal).
@@ -182,13 +184,15 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
+def _js_ts_line_ends_statement(raw: str, scan: str, *, typescript: bool) -> bool:
     """Whether the JS/TS ``raw`` line (masked as ``scan``) can end its statement.
 
     A line whose code is followed by a masked literal ends on that operand; one
     followed only by a comment ends on its last code token. A trailing ``!``
     right after a masked string, template or regex literal is a TS non-null
-    assertion on that operand, not a unary ``!`` (PRRT_kwDOSJAM6s63S15a).
+    assertion on that operand, not a unary ``!`` (PRRT_kwDOSJAM6s63S15a). Only
+    ``typescript`` code has type arguments to close; in JavaScript a trailing
+    ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy).
     """
     code = scan.rstrip()
     tail = raw[len(code) :].lstrip()
@@ -200,7 +204,9 @@ def _js_ts_line_ends_statement(raw: str, scan: str) -> bool:
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
-    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or _js_ts_ends_type_arguments(code)
+    return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or (
+        typescript and _js_ts_ends_type_arguments(code)
+    )
 
 
 def _js_ts_next_line_continues(raw_lines: list[str], scan_lines: list[str], index: int) -> bool:
@@ -349,6 +355,7 @@ def _assignment_span_end_line(
     after such a ``;`` reads only the code from there (PRRT_kwDOSJAM6s63Sh3G).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
+    typescript = Path(path).suffix.lower() in _TS_SUFFIXES
     raw_lines = file_text.splitlines()
     starts_in_code = [
         line.startswith("\t")
@@ -402,7 +409,7 @@ def _assignment_span_end_line(
                 return index + 1
         continued = scan.rstrip().endswith("\\")
         if not gap:
-            complete = _js_ts_line_ends_statement(raw, scan)
+            complete = _js_ts_line_ends_statement(raw, scan, typescript=typescript)
             last_code = index + 1
     return last_code if js_ts else len(scan_lines)
 
@@ -437,6 +444,7 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63Sh3G).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
+    typescript = Path(path).suffix.lower() in _TS_SUFFIXES
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     raw_lines = file_text.splitlines()
     starts_in_code = [
@@ -478,7 +486,7 @@ def _module_level_assignment_spans(
                 and index + 1 < len(scan_lines)
                 and not (
                     scan.strip()
-                    and _js_ts_line_ends_statement(raw_lines[index], scan)
+                    and _js_ts_line_ends_statement(raw_lines[index], scan, typescript=typescript)
                     and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
                     and (
                         starts_in_code[index + 1]
@@ -490,7 +498,7 @@ def _module_level_assignment_spans(
                 continue
             is_body = in_body
             in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
-                _js_ts_line_ends_statement(raw_lines[index], scan)
+                _js_ts_line_ends_statement(raw_lines[index], scan, typescript=typescript)
             )
             if is_body:
                 continue

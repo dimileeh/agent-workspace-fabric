@@ -1141,6 +1141,25 @@ async def test_js_ts_binding_ends_at_its_statement_boundary(
 
 
 @pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        pytest.param("src/app/web/team.js", True, id="javascript-comparison"),
+        pytest.param(_WEB, False, id="typescript-instantiation-expression"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_compact_trailing_angle_is_type_arguments_only_in_typescript(
+    path: str, *, expected: bool
+) -> None:
+    """JavaScript has no type arguments: ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy)."""
+    text = "export const LIMIT = a<b >\n  c1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-  c1;", "+  c2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(_WEB, "  export const LIMIT = 1;\n", 1, True, id="js-ts-indented-module"),
