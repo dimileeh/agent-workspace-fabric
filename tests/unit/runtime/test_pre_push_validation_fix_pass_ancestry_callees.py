@@ -368,6 +368,25 @@ def test_callee_refs_ignore_triple_quoted_and_escaped_string_calls() -> None:
     assert callees._callee_refs_from_anchor_line("") == frozenset()
 
 
+@pytest.mark.parametrize(
+    ("line", "path", "expected"),
+    [
+        pytest.param("x = (a // b)", "pkg/mod.py", "x = (a // b)", id="python"),
+        pytest.param("x = (a // b)", "pkg/mod.pyi", "x = (a // b)", id="python-stub"),
+        pytest.param('f"{a // b}"', "pkg/mod.py", "f {a // b} ", id="python-f-string"),
+        pytest.param('f"{a // b}"', None, "f {a // b} ", id="unknown-path-f-string"),
+        pytest.param("x = (a // b)", "web/app.ts", "x = (a      ", id="typescript"),
+        pytest.param("x = (a // b)", None, "x = (a      ", id="unknown-path"),
+    ],
+)
+@pytest.mark.unit
+def test_mask_keeps_python_floor_division_as_code(
+    line: str, path: str | None, expected: str
+) -> None:
+    """``//`` is floor division in Python, a comment elsewhere (PRRT_kwDOSJAM6s63OADy)."""
+    assert callees._mask_comments_and_string_literals_for_callee_scan(line, path=path) == expected
+
+
 @pytest.mark.unit
 def test_callee_refs_fail_closed_on_definition_line_without_colon() -> None:
     """JS/TS function heads without ``:`` must not scan the brace body as callees."""

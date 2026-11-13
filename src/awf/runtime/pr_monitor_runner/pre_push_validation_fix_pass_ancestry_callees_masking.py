@@ -61,6 +61,13 @@ def _path_allows_js_private_fields(path: str | None) -> bool:
     return any(name.endswith(suffix) for suffix in _JS_TS_PRIVATE_FIELD_SUFFIXES)
 
 
+def _path_is_python(path: str | None) -> bool:
+    """Return True when ``path`` is a Python source file, where ``//`` is floor division."""
+    if not path:
+        return False
+    return path.lower().replace("\\", "/").rsplit("/", 1)[-1].endswith((".py", ".pyi"))
+
+
 def _path_is_jsx(path: str | None) -> bool:
     """Return True when ``path`` is a JSX/TSX source file (text nodes possible)."""
     if not path:
@@ -232,8 +239,13 @@ def _append_retained_brace_expr(
     *,
     n: int,
     allow_js_private_fields: bool,
+    slash_comments: bool = True,
 ) -> int:
-    """Retain ``{...}`` with nested strings/comments masked; return index after."""
+    """Retain ``{...}`` with nested strings/comments masked; return index after.
+
+    ``slash_comments=False`` keeps ``//`` as code: inside a Python f-string
+    expression it is floor division, not a comment.
+    """
     depth = 0
     i = start
     while i < n:
@@ -264,7 +276,7 @@ def _append_retained_brace_expr(
             out.append(" ")
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
-        if cur == "/" and i + 1 < n and line[i + 1] == "/":
+        if slash_comments and cur == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
@@ -311,7 +323,12 @@ def _mask_quoted_region_for_callee_scan(
                 i += 2
                 continue
             i = _append_retained_brace_expr(
-                line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
+                line,
+                i,
+                out,
+                n=n,
+                allow_js_private_fields=allow_js_private_fields,
+                slash_comments=False,
             )
             continue
         if retain_template and cur == "$" and i + 1 < n and line[i + 1] == "{":
@@ -338,12 +355,15 @@ def _mask_comments_and_string_literals_for_callee_scan(
     such as ``f'{"helper()"}'`` or ``${/helper()/}`` do not become false callees.
     ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
     and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
+    ``//`` begins a comment except on Python paths, where it is floor division
+    (PRRT_kwDOSJAM6s63OADy).
     JS/TS regex masking uses the same path gate. Block comments are blanked for
     every path so a quote inside ``/* ... */`` cannot poison later prefix lines.
     """
     if not line:
         return line
     allow_js_private_fields = _path_allows_js_private_fields(path)
+    slash_comments = not _path_is_python(path)
     out: list[str] = []
     i = 0
     n = len(line)
@@ -363,7 +383,7 @@ def _mask_comments_and_string_literals_for_callee_scan(
             out.append(" ")
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
-        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+        if slash_comments and ch == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue

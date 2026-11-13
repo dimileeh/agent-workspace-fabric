@@ -582,6 +582,33 @@ async def test_backslash_continued_string_keeps_binding_lines_aligned(
 
 
 @pytest.mark.parametrize(
+    ("diff", "expected"),
+    [
+        pytest.param(
+            _diff(_INBOUND, "@@ -2 +2 @@", "-OTHER = 1", "+OTHER = 2"), False, id="next-binding"
+        ),
+        pytest.param(
+            _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = (10 // 2)", "+LIMIT = (10 // 1)"),
+            True,
+            id="own-binding",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_python_floor_division_does_not_extend_a_binding(
+    diff: str, *, expected: bool
+) -> None:
+    """``//`` is an operator in Python, not a comment (PRRT_kwDOSJAM6s63OADy)."""
+    runner = _probe(
+        texts={_INBOUND: "LIMIT = (10 // 2)\nOTHER = 1\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(
