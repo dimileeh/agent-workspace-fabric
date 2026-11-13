@@ -433,9 +433,9 @@ async def _commit_range_changes_comment_named_target(
         file_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
-        spans = _without_trailing_gaps(
-            file_text, _named_definition_spans(file_text, names, path=candidate)
-        )
+        head_spans, binding_spans = _named_definition_spans(file_text, names, path=candidate)
+        spans = _without_trailing_gaps(file_text, head_spans)
+        bindings = _without_trailing_gaps(file_text, binding_spans)
         # A rename source's right-side text is read under its target, itself a candidate.
         right_text = (
             None
@@ -444,10 +444,9 @@ async def _commit_range_changes_comment_named_target(
                 self, worktree_path=worktree_path, ref=right, path=candidate
             )
         )
-        right_spans = _without_trailing_gaps(
-            right_text, _named_definition_spans(right_text, names, path=candidate)
-        )
-        if not (spans or right_spans):
+        right_heads, right_bindings = _named_definition_spans(right_text, names, path=candidate)
+        right_spans = _without_trailing_gaps(right_text, right_heads + right_bindings)
+        if not (spans or bindings or right_spans):
             continue
         source = renamed_from.get(candidate)
         diff_text = await _path_diff_text_in_commit_range(
@@ -460,12 +459,24 @@ async def _commit_range_changes_comment_named_target(
         )
         if diff_text is None:
             continue
-        if any(
-            _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=file_text)
-            or _diff_adds_decorators_above_span(diff_text, start)
-            for start, end in spans
-        ) or any(
-            _diff_new_hunk_overlaps_line_span(diff_text, start, end) for start, end in right_spans
+        if (
+            any(
+                _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=file_text)
+                or _diff_adds_decorators_above_span(diff_text, start)
+                for start, end in spans
+            )
+            or any(
+                # A statement does not extend by indentation, so a left-side insert
+                # counts only inside the binding; one that does continue it overlaps
+                # its right-side span (PRRT_kwDOSJAM6s63P5ZX).
+                _diff_hunk_overlaps_line_span(diff_text, start, end)
+                or _diff_adds_decorators_above_span(diff_text, start)
+                for start, end in bindings
+            )
+            or any(
+                _diff_new_hunk_overlaps_line_span(diff_text, start, end)
+                for start, end in right_spans
+            )
         ):
             return True
     return False
@@ -473,15 +484,15 @@ async def _commit_range_changes_comment_named_target(
 
 def _named_definition_spans(
     file_text: str | None, names: frozenset[str], *, path: str
-) -> list[tuple[int, int]]:
-    """Module-scope definition and binding spans of ``names`` in ``file_text``.
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Module-scope definition-head spans and plain-binding spans of ``names`` in ``file_text``.
 
     A backticked name carries no receiver, so it is held to the bare-name
     module-scope rule: a same-named method of some class in a changed file is
     not the definition the reviewer named (PRRT_kwDOSJAM6s63LVep).
     """
     if not file_text:
-        return []
+        return [], []
     return _importable_definition_spans_for_names(
         file_text, frozenset(), path=path, bare_names=names
-    ) + _module_level_assignment_spans(file_text, names, path=path)
+    ), _module_level_assignment_spans(file_text, names, path=path)

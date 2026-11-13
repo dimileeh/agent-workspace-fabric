@@ -730,6 +730,39 @@ async def test_js_ts_binding_ends_at_its_statement_boundary(
 
 
 @pytest.mark.parametrize(
+    ("left_text", "right_text", "diff", "expected"),
+    [
+        pytest.param(
+            "export const LIMIT = 1;\n",
+            "export const LIMIT = 1;\n  export const OTHER = 2;\n",
+            _diff(_WEB, "@@ -1,0 +2 @@", "+  export const OTHER = 2;"),
+            False,
+            id="js-ts-indented-statement-after-binding",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n",
+            "export const LIMIT = base\n  .scaled(10)\n",
+            _diff(_WEB, "@@ -1,0 +2 @@", "+  .scaled(10)"),
+            True,
+            id="js-ts-insert-continuing-binding",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_insert_after_a_complete_binding_is_not_evidence(
+    left_text: str, right_text: str, diff: str, *, expected: bool
+) -> None:
+    """Deeper indent does not extend an assignment (PRRT_kwDOSJAM6s63P5ZX)."""
+    runner = _Probe(
+        texts={(_LEFT, _WEB): left_text, (_RIGHT, _WEB): right_text},
+        changed_paths=(_WEB,),
+        diffs={_WEB: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(
