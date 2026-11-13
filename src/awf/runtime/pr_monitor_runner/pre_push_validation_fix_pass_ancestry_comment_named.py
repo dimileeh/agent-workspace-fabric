@@ -101,9 +101,12 @@ _JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]
 # its last token or the next line's first token continues the expression
 # (ASI's rules, approximately) (PRRT_kwDOSJAM6s63PU_-). A leading ``++``/``--``
 # after a line break is a new prefix-update statement, not a continuation
-# (PRRT_kwDOSJAM6s63QfAQ).
+# (PRRT_kwDOSJAM6s63QfAQ). A leading keyword operator (``instanceof``/``in``)
+# cannot start a statement, so it continues the expression (PRRT_kwDOSJAM6s63Qv0F).
 _JS_TS_TRAILING_CONTINUATION_RE = re.compile(r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-)$")
-_JS_TS_LEADING_CONTINUATION_RE = re.compile(r"^[ \t]*(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]")
+_JS_TS_LEADING_CONTINUATION_RE = re.compile(
+    r"^[ \t]*(?:(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]|(?:instanceof|in)(?![\w$]))"
+)
 # A JS/TS statement that leaves the next one as its brace-less body: an
 # ``if``/``for``/``while``/``with`` head, ``else`` or ``do`` (PRRT_kwDOSJAM6s63QK8_).
 _JS_TS_BODY_HEAD_RE = re.compile(

@@ -787,6 +787,18 @@ async def test_binding_ends_at_its_semicolon_boundary(
         pytest.param(
             "export const LIMIT = base\n+ step1;\n", 2, True, id="leading-binary-plus-continuation"
         ),
+        pytest.param(
+            "export const LIMIT = value\n  instanceof Expected1;\n",
+            2,
+            True,
+            id="leading-instanceof-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = key\n  in table1;\n", 2, True, id="leading-in-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = 10\ninner1();\n", 2, False, id="in-prefixed-identifier-after-asi"
+        ),
         pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
         pytest.param(
             "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",
