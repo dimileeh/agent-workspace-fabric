@@ -97,6 +97,7 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_path: str | None = None,
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
+    evidence_comment_text: str | None = None,
 ) -> VerdictResult:
     """Run one logical item, re-arming its #932 anchor if no verdict is produced.
 
@@ -180,6 +181,7 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_path=evidence_item_path,
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
+            evidence_comment_text=evidence_comment_text,
             timeout_rerun_anchor_sink=timeout_rerun_anchor_sink,
         )
     except ItemUnexpectedError as park:
