@@ -221,14 +221,19 @@ def _js_ts_line_ends_statement(
     )
 
 
-def _js_ts_next_line_continues(raw_lines: list[str], scan_lines: list[str], index: int) -> bool:
+def _js_ts_next_line_continues(
+    raw_lines: list[str], scan_lines: list[str], starts_in_code: list[bool], index: int
+) -> bool:
     """Whether the JS/TS code line after ``index`` leads with an expression continuation.
 
     Blank, ``//`` and block-comment-only lines are skipped; a line opening with a
-    ``/*`` is read from its masked code (PRRT_kwDOSJAM6s63TOG5).
+    ``/*`` is read from its masked code (PRRT_kwDOSJAM6s63TOG5), as is one that
+    starts inside a block comment, whatever its prefix (PRRT_kwDOSJAM6s63U6z7).
     """
-    for raw, scan in zip(raw_lines[index + 1 :], scan_lines[index + 1 :], strict=False):
-        comment = raw.lstrip().startswith(("/*", "*"))
+    for raw, scan, in_code in zip(
+        raw_lines[index + 1 :], scan_lines[index + 1 :], starts_in_code[index + 1 :], strict=False
+    ):
+        comment = raw.lstrip().startswith(("/*", "*")) or not in_code
         if _is_ignorable_span_gap_line(raw) or (comment and not scan.strip()):
             continue
         return _JS_TS_LEADING_CONTINUATION_RE.match(scan if comment else raw) is not None
@@ -537,7 +542,7 @@ def _module_level_assignment_spans(
                     and _js_ts_line_ends_statement(
                         raw_lines[index], scan, typescript=typescript, statement=statement[:-1]
                     )
-                    and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
+                    and not _js_ts_next_line_continues(raw_lines, scan_lines, starts_in_code, index)
                     and (
                         starts_in_code[index + 1]
                         or not _js_ts_line_ends_in_literal(raw_lines, index, path=path)

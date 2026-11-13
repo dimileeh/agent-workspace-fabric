@@ -788,6 +788,22 @@ async def test_chained_assignment_binds_every_target(diff: str, *, expected: boo
             id="declarator-after-comment-and-leading-continuation",
         ),
         pytest.param(
+            "const OTHER = base\n/* explanation\n note */ .method(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-unstarred-comment-close-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\n/* explanation\n note */ foo(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-unstarred-comment-close",
+        ),
+        pytest.param(
             "const OTHER = base\nfoo(), LIMIT = [\n  10,\n];\n",
             3,
             "  20,",
