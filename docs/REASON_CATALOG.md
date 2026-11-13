@@ -1581,7 +1581,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### TERMINAL_OWNED_ROW_REAPED
 **Problem:** A row still open for a workspace that finished on this node at least ten minutes ago was closed so the idle node can park.
-**Likely Cause:** A terminal transition left an expired claim, operation, validation, secret lease, reservation, task attempt or overdue callback behind.
+**Likely Cause:** A terminal transition left an expired claim, operation, validation, secret lease, reservation, task attempt or undeliverable callback behind.
 **Operator Fix:** No action is required. The workspace event lists the row kind, action and ids; inspect them if the leftover row points at a lifecycle bug.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#terminal_owned_row_reaped](#terminal_owned_row_reaped)

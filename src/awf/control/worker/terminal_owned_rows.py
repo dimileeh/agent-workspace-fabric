@@ -20,6 +20,7 @@ from awf.control.worker.config import (
 from awf.db.enums import OperationStatus
 from awf.db.models import (
     CallbackDelivery,
+    CallbackSubscription,
     Operation,
     ResourceReservation,
     TaskAttempt,
@@ -79,9 +80,11 @@ def _attempts(workspace_id: Any) -> Any:
 
 
 def _callbacks(workspace_id: Any, overdue: datetime) -> Any:
-    # In-flight or backing-off deliveries stay with their dispatcher, so a
-    # terminal notification is never dropped while it can still be sent.
-    # Restore-held deliveries/subscriptions stay with restore reconciliation.
+    # In-flight, backing-off or merely queued deliveries stay with their
+    # dispatcher, so a terminal notification is never dropped while it can
+    # still be sent: only a disabled subscription or exhausted attempts make an
+    # overdue delivery undeliverable. Restore-held deliveries/subscriptions stay
+    # with restore reconciliation.
     return select(CallbackDelivery).where(
         CallbackDelivery.workspace_id == workspace_id,
         CallbackDelivery.status == "pending",
@@ -89,6 +92,15 @@ def _callbacks(workspace_id: Any, overdue: datetime) -> Any:
         or_(
             CallbackDelivery.next_attempt_at.is_(None),
             CallbackDelivery.next_attempt_at <= overdue,
+        ),
+        or_(
+            CallbackDelivery.attempt_count >= CallbackDelivery.max_attempts,
+            select(CallbackSubscription.id)
+            .where(
+                CallbackSubscription.id == CallbackDelivery.subscription_id,
+                CallbackSubscription.enabled.is_(False),
+            )
+            .exists(),
         ),
     )
 

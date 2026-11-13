@@ -15,6 +15,7 @@ from awf.control.worker.terminal_owned_rows import REAPED_EVENT, REASON, reap_te
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import (
     CallbackDelivery,
+    CallbackSubscription,
     Operation,
     ResourceReservation,
     TaskAttempt,
@@ -92,6 +93,8 @@ async def seed(
             ):
                 session.add(row)
                 await session.flush()
+            # Exhausted attempts: its dispatcher would never send it again.
+            (await session.get(CallbackDelivery, f"cbd_{ws_id}_pending")).attempt_count = 3
         await session.execute(
             update(Workspace).where(Workspace.id == ws_id).values(updated_at=now - age)
         )
@@ -236,6 +239,29 @@ async def test_recent_retry_callback_is_left_to_its_dispatcher(factory):
     await reap_terminal_owned_rows(reaper_worker(factory), limit=200)
     state = await snapshot(factory)
     assert state["callback"] == "pending" and state["operation"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [("deliverable", "pending"), ("subscription_disabled", "skipped")],
+)
+async def test_overdue_callback_is_skipped_only_when_its_dispatcher_cannot_send_it(
+    factory, change, expected
+):
+    await seed(factory, age=timedelta(days=2))
+    async with factory.begin() as session:
+        await session.execute(
+            update(CallbackDelivery)
+            .where(CallbackDelivery.id == "cbd_ws_reap_pending")
+            .values(attempt_count=1, next_attempt_at=datetime.now(UTC) - timedelta(days=1))
+        )
+        if change == "subscription_disabled":
+            await session.execute(update(CallbackSubscription).values(enabled=False))
+    await reap_terminal_owned_rows(reaper_worker(factory), limit=200)
+    state = await snapshot(factory)
+    assert state["callback"] == expected and state["operation"] == "failed"
+    reaped = {event["kind"] for event in state["events"]}
+    assert ("callback_delivery" in reaped) is (expected == "skipped")
 
 
 @pytest.mark.parametrize(

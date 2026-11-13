@@ -45,7 +45,7 @@ def get_hosted_quiescence_reasons(
             ),
             (
                 "A terminal transition left an expired claim, operation, validation, secret "
-                "lease, reservation, task attempt or overdue callback behind."
+                "lease, reservation, task attempt or undeliverable callback behind."
             ),
             "awf workspace show <workspace_id>",
             "docs/REASON_CATALOG.md#terminal_owned_row_reaped",
