@@ -122,3 +122,55 @@ async def reconcile_cancelled_activity(worker: Any, *, limit: int | None) -> Non
                         "validation_run_ids": [run.id for run in validations],
                     },
                 )
+
+
+async def settle_hosted_stop_activity(session: Any, ws: Workspace, *, reason_code: str) -> None:
+    """Settle a hosted-stopped workspace's monitor bookkeeping in its failing transaction.
+
+    The cancelled monitor task cannot finish its own operation once the consumer
+    authority is gone. Rows locked by a concurrent writer are skipped and left for
+    the terminal-owned-row reaper.
+    """
+    operations = list(
+        (
+            await session.scalars(
+                _monitor_operations(ws.id)
+                .order_by(Operation.id)
+                .limit(_BATCH_SIZE)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+    )
+    validations = list(
+        (
+            await session.scalars(
+                _validations(ws.id)
+                .order_by(ValidationRun.id)
+                .limit(_BATCH_SIZE)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+    )
+    message = "Hosted execution was stopped by its consumer authority boundary."
+    for operation in operations:
+        await OperationRepository(session).finish(
+            operation,
+            status=OperationStatus.failed,
+            result=operation.result,
+            error_code=reason_code,
+            error_message=message,
+        )
+    for validation in validations:
+        validation.status = "failed"
+        validation.reason_code = reason_code
+        validation.finished_at = datetime.now(UTC)
+    if operations or validations:
+        await WorkspaceRepository(session).add_event(
+            ws,
+            event_type="workspace.hosted_stop_activity_settled",
+            reason_code=reason_code,
+            payload={
+                "operation_ids": [op.id for op in operations],
+                "validation_run_ids": [run.id for run in validations],
+            },
+        )

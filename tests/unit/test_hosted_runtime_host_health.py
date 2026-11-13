@@ -35,3 +35,46 @@ async def test_closed_host_still_requires_quiescence(authority, monkeypatch):
     host.linux.sample = Mock(return_value=LinuxSnapshot("boot", 1, 2, 3, False))
     assert await host.observe(receiver.identity) is None
     docker.healthy.assert_not_awaited()
+
+
+async def test_closed_busy_host_is_denied_but_still_names_its_physical_blockers(authority):
+    authority, _, factory = authority
+    receiver = authority.receiver
+    config = receiver.config.model_copy(update={"runtime_enabled": False})
+    docker = Mock(quiescent=AsyncMock(return_value=False), healthy=AsyncMock(return_value=True))
+    host = HostRuntime(config, factory, receiver.identity, docker)
+    busy = LinuxSnapshot("boot", 1, 2, 3, False, False)
+
+    def sample(*, require_quiescent=True):
+        if require_quiescent:
+            raise ValueError("HOST_TASKS_ACTIVE")
+        return busy
+
+    host.linux.sample = Mock(side_effect=sample)
+    assert await host.observe(receiver.identity) is None
+    assert await host.physical_blockers(receiver.identity) == (
+        "DOCKER_UNEXPECTED_CONTAINER",
+        "CGROUP_POPULATED",
+    )
+    # Naming blockers is diagnostic only: it never pins or approves host state.
+    assert host.baseline is None
+    docker.healthy.assert_not_awaited()
+    docker.quiescent.return_value = True
+    assert await host.physical_blockers(receiver.identity) == ("CGROUP_POPULATED",)
+    host.linux.sample = Mock(return_value=LinuxSnapshot("boot", 1, 2, 3, False))
+    assert await host.physical_blockers(receiver.identity) == ()
+
+
+async def test_physical_blockers_refuse_other_hosts_and_failed_samples(authority):
+    authority, _, factory = authority
+    receiver = authority.receiver
+    docker = Mock(quiescent=AsyncMock(return_value=False))
+    host = HostRuntime(receiver.config, factory, receiver.identity, docker)
+    other = receiver.identity.model_copy(update={"boot_epoch": receiver.identity.boot_epoch + 1})
+    assert await host.physical_blockers(other) == ()
+    host.baseline = LinuxSnapshot("boot", 1, 2, 3, True)
+    host.linux.sample = Mock(return_value=LinuxSnapshot("other-boot", 1, 2, 3, True, False))
+    assert await host.physical_blockers(receiver.identity) == ()
+    host.linux.sample = Mock(side_effect=ValueError("CGROUP_V2_REQUIRED"))
+    assert await host.physical_blockers(receiver.identity) == ()
+    docker.quiescent.assert_not_awaited()

@@ -18,6 +18,7 @@ from awf.service.doctor.reasons_helpers import (
     reason_catalog_link as _reason_catalog_link,
 )
 from awf.service.doctor.reasons_hosted_profile_secrets import get_hosted_profile_secret_reasons
+from awf.service.doctor.reasons_hosted_quiescence import get_hosted_quiescence_reasons
 from awf.service.doctor.reasons_monitor_runtime_restart import (
     get_monitor_runtime_restart_reasons,
 )
@@ -1437,6 +1438,7 @@ _REASON_TEXT.update(get_work_slot_reasons(_ReasonText))
 _REASON_TEXT.update(get_provider_reasons(_ReasonText))
 _REASON_TEXT.update(get_provider_budget_reasons(_ReasonText))
 _REASON_TEXT.update(get_hosted_profile_secret_reasons(_ReasonText))
+_REASON_TEXT.update(get_hosted_quiescence_reasons(_ReasonText))
 
 
 _REASON_TEXT.update(

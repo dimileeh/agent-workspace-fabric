@@ -14,7 +14,12 @@ from awf.hosted_node.host_database import no_work_history, validate_database
 from awf.hosted_node.host_docker import DockerObservation
 from awf.hosted_node.host_linux import LinuxObservation, LinuxSnapshot
 from awf.hosted_node.lifecycle import fresh
-from awf.hosted_node.lifecycle_schemas import HostBootObservation, HostObservation, RecoveryEvidence
+from awf.hosted_node.lifecycle_schemas import (
+    HostBootObservation,
+    HostObservation,
+    QuiescenceBlockerName,
+    RecoveryEvidence,
+)
 from awf.hosted_node.lifecycle_store import database_quiescent, locked
 from awf.hosted_node.schemas import Identity
 
@@ -69,6 +74,13 @@ class PhysicalFenceEvidence:
 
 async def _no_fence(*_: Any) -> None:
     return None
+
+
+def _blockers(docker_idle: bool, *samples: LinuxSnapshot) -> tuple[QuiescenceBlockerName, ...]:
+    return (
+        *(() if docker_idle else ("DOCKER_UNEXPECTED_CONTAINER",)),
+        *(() if all(sample.execution_quiescent for sample in samples) else ("CGROUP_POPULATED",)),
+    )
 
 
 class HostRuntime:
@@ -147,12 +159,26 @@ class HostRuntime:
             if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            return replace(
-                after,
-                execution_quiescent=(
-                    before.execution_quiescent and after.execution_quiescent and docker_idle
-                ),
-            )
+            blockers = _blockers(docker_idle, before, after)
+            return replace(after, execution_quiescent=not blockers, blockers=blockers)
+
+    async def physical_blockers(self, identity: Identity) -> tuple[QuiescenceBlockerName, ...]:
+        """Name busy physical facts when no host observation could be approved.
+
+        Diagnostic only: this never verifies retained state, health, or quiescence,
+        so a closed node still denies observation while explaining why it is busy.
+        """
+        if identity != self.identity:
+            return ()
+        try:
+            async with asyncio.timeout(4), self._observation_lock:
+                sample = await self.host_io(lambda: self.linux.sample(require_quiescent=False))
+                if self.baseline is not None and not self.same_host(self.baseline, sample):
+                    return ()
+                return _blockers(await self.docker.quiescent(identity.owner), sample)
+        except Exception as exc:
+            _log_denial("physical_blockers", exc)
+        return ()
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:
@@ -170,6 +196,7 @@ class HostRuntime:
                         datetime.now(UTC) + timedelta(seconds=30),
                         sample.execution_quiescent,
                         True,
+                        sample.blockers,
                     )
         except Exception as exc:
             _log_denial("observe", exc)

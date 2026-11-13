@@ -5,16 +5,19 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
-from awf.db.models import Operation, Workspace
+from awf.control.worker import WorkerConfig
+from awf.control.worker.terminal_owned_rows import REAPED_EVENT, reap_terminal_owned_rows
+from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.service_gc_request_repo import ServiceGCRequestRepository
 from awf.db.session import make_session_factory
@@ -27,6 +30,12 @@ from awf.hosted_node.lifecycle_schemas import (
     RecoveryEvidence,
 )
 from awf.hosted_node.receiver import Receiver
+from tests.unit.hosted_node.test_quiescence_blockers import (
+    candidate,
+    operation,
+    seed_workspace,
+    validation,
+)
 
 PREFIX = "/v1/hosted-node/lifecycle"
 
@@ -557,7 +566,7 @@ async def test_database_failure_returns_sanitized_unavailable(node, monkeypatch)
     async def unavailable(*args):
         raise SQLAlchemyError("synthetic-private-diagnostic")
 
-    monkeypatch.setattr(module, "database_quiescent", unavailable)
+    monkeypatch.setattr(module, "quiescence_blockers", unavailable)
     response = await client.get(PREFIX + "/readiness")
     assert response.status_code == 503
     assert "synthetic-private-diagnostic" not in response.text
@@ -642,3 +651,71 @@ async def test_real_repository_restart_claim_cannot_run_before_recovery(node):
                 lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
                 claim_cutoff=datetime.now(UTC),
             )
+
+
+@pytest.mark.parametrize("work", ["agent", "claim", "validation", "monitor"])
+async def test_real_work_names_its_blockers_and_survives_the_reaper(node, work):
+    client, receiver, _ = node
+    service = evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    owner = receiver.identity.owner
+    now = datetime.now(UTC)
+    expected = {
+        "agent": ["CGROUP_POPULATED"],
+        "claim": ["WORKSPACE_ACTIVE", "WORKSPACE_CLAIMED", "ATTEMPT_ACTIVE"],
+        "validation": ["WORKSPACE_ACTIVE", "ATTEMPT_ACTIVE", "VALIDATION_ACTIVE"],
+        "monitor": [
+            "WORKSPACE_ACTIVE",
+            "ATTEMPT_ACTIVE",
+            "OPERATION_ACTIVE",
+            "MERGE_CANDIDATE_OPEN",
+        ],
+    }[work]
+    if work == "agent":
+
+        async def running_agent(identity):
+            expiry = datetime.now(UTC) + timedelta(seconds=30)
+            return HostObservation(identity, expiry, False, True, ("CGROUP_POPULATED",))
+
+        service.observe_host = running_agent
+    else:
+        status = {"claim": "running", "validation": "validating", "monitor": "monitoring_pr"}
+        async with receiver.factory.begin() as session:
+            await seed_workspace(
+                session,
+                "ws_live",
+                status=status[work],
+                node_id=owner,
+                execution_claimed_by="live-worker" if work == "claim" else None,
+                execution_claim_expires_at=now + timedelta(minutes=5) if work == "claim" else None,
+            )
+            if work == "validation":
+                session.add(validation("ws_live", status="running"))
+            if work == "monitor":
+                session.add(candidate("ws_live", status="open"))
+                session.add(operation("ws_live", "op_live", status="running"))
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == "ws_live")
+                .values(updated_at=now - timedelta(days=1))
+            )
+
+    async def names(response):
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert not body["quiescent"] and body["state"] != "drained"
+        assert "ws_live" not in response.text and "op_live" not in response.text
+        return [item["name"] for item in body["blockers"]]
+
+    assert await names(await client.get(PREFIX + "/readiness")) == expected
+    worker = SimpleNamespace(
+        _session_factory=receiver.factory,
+        _config=WorkerConfig(node_id=owner),
+        _execution_tasks={},
+    )
+    await reap_terminal_owned_rows(worker, limit=200)
+    assert await names(await client.post(PREFIX + "/drain", json={"generation": 1})) == expected
+    async with receiver.factory() as session:
+        assert not await session.scalar(
+            select(WorkspaceEvent.id).where(WorkspaceEvent.event_type == REAPED_EVENT)
+        )

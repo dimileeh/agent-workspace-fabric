@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from awf.hosted_node.host_config import HostSettings
+from awf.hosted_node.lifecycle_schemas import QuiescenceBlockerName
 from awf.hosted_node.schemas import Identity
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -111,6 +112,8 @@ class LinuxSnapshot:
     cgroup_inode: int
     workspaces_empty: bool
     execution_quiescent: bool = True
+    # Derived by the host runtime from Docker and cgroup samples; never sampled here.
+    blockers: tuple[QuiescenceBlockerName, ...] = ()
 
 
 class LinuxObservation:

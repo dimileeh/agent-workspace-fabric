@@ -78,6 +78,30 @@ class RecoveryAcceptance(RecoveryAcknowledgement):
     attention_workspaces: Annotated[int, Field(strict=True, ge=0, le=9223372036854775807)]
 
 
+QuiescenceBlockerName = Literal[
+    "WORKSPACE_ACTIVE",
+    "WORKSPACE_CLAIMED",
+    "COMPOSE_NOT_RELEASED",
+    "ATTEMPT_ACTIVE",
+    "OPERATION_ACTIVE",
+    "VALIDATION_ACTIVE",
+    "RESERVATION_HELD",
+    "GC_PENDING",
+    "CALLBACK_PENDING",
+    "MERGE_CANDIDATE_OPEN",
+    "SECRET_LEASE_ACTIVE",
+    "DOCKER_UNEXPECTED_CONTAINER",
+    "CGROUP_POPULATED",
+]
+
+
+class QuiescenceBlocker(StrictModel):
+    """Why the node is not idle: a fixed name and a row count, never row ids."""
+
+    name: QuiescenceBlockerName
+    count: Annotated[int, Field(strict=True, ge=1, le=9223372036854775807)]
+
+
 class LifecycleStatus(StrictModel):
     identity: Identity
     state: Literal["recovering", "ready", "draining", "drained"]
@@ -92,6 +116,8 @@ class LifecycleStatus(StrictModel):
     maintenance_released_through: int = 0
     recovery_acceptance: RecoveryAcceptance | None = None
     expires_at: datetime | None
+    # Additive: older payloads omit it. Names and counts only, never row ids.
+    blockers: list[QuiescenceBlocker] = []
 
 
 @dataclass(frozen=True)
@@ -100,6 +126,7 @@ class HostObservation:
     expires_at: datetime
     quiescent: bool
     retained_state_verified: bool
+    blockers: tuple[QuiescenceBlockerName, ...] = ()
 
 
 @dataclass(frozen=True)
