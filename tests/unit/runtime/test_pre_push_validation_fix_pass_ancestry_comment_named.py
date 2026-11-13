@@ -1049,6 +1049,24 @@ async def test_js_ts_label_binds_nothing(
             id="nested-closing-type-arguments-after-asi",
         ),
         pytest.param(
+            "export const LIMIT = value as Array<\n  number>\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value as Array<\n  number>\nrun1();\n",
+            3,
+            False,
+            id="wrapped-closing-type-arguments-before-statement",
+        ),
+        pytest.param(
+            "export const LIMIT = a <\n  b >\n  c1;\n",
+            3,
+            True,
+            id="wrapped-trailing-comparison-continuation",
+        ),
+        pytest.param(
             "export const LIMIT = a < b >\n  c1;\n", 2, True, id="trailing-comparison-continuation"
         ),
         pytest.param(

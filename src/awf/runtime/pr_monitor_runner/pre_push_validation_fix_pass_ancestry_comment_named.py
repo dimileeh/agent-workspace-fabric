@@ -57,6 +57,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebindi
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from awf.runtime.pr_monitor import ReviewThread
 
 # Upper bound on the ``:line`` probes one comment can trigger. Each runs the
@@ -184,7 +186,9 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _js_ts_line_ends_statement(raw: str, scan: str, *, typescript: bool) -> bool:
+def _js_ts_line_ends_statement(
+    raw: str, scan: str, *, typescript: bool, statement: Sequence[str] = ()
+) -> bool:
     """Whether the JS/TS ``raw`` line (masked as ``scan``) can end its statement.
 
     A line whose code is followed by a masked literal ends on that operand; one
@@ -192,7 +196,8 @@ def _js_ts_line_ends_statement(raw: str, scan: str, *, typescript: bool) -> bool
     right after a masked string, template or regex literal is a TS non-null
     assertion on that operand, not a unary ``!`` (PRRT_kwDOSJAM6s63S15a). Only
     ``typescript`` code has type arguments to close; in JavaScript a trailing
-    ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy).
+    ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy). A type-argument list may
+    open on an earlier masked line of the ``statement`` (PRRT_kwDOSJAM6s63Tr7Q).
     """
     code = scan.rstrip()
     tail = raw[len(code) :].lstrip()
@@ -205,7 +210,7 @@ def _js_ts_line_ends_statement(raw: str, scan: str, *, typescript: bool) -> bool
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
     return _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None or (
-        typescript and _js_ts_ends_type_arguments(code)
+        typescript and _js_ts_ends_type_arguments(" ".join([*statement, code]))
     )
 
 
@@ -368,6 +373,7 @@ def _assignment_span_end_line(
     complete = False
     in_comment = False
     last_code = start
+    code_lines: list[str] = []
     for index in range(start - 1, len(scan_lines)):
         scan = scan_lines[index]
         if index == start - 1:
@@ -409,7 +415,10 @@ def _assignment_span_end_line(
                 return index + 1
         continued = scan.rstrip().endswith("\\")
         if not gap:
-            complete = _js_ts_line_ends_statement(raw, scan, typescript=typescript)
+            complete = _js_ts_line_ends_statement(
+                raw, scan, typescript=typescript, statement=code_lines
+            )
+            code_lines.append(scan)
             last_code = index + 1
     return last_code if js_ts else len(scan_lines)
 
@@ -493,7 +502,9 @@ def _module_level_assignment_spans(
                             and _js_ts_line_ends_in_literal(raw_lines, index - 1, path=path)
                         )
                     )
-                    and _js_ts_line_ends_statement(raw_lines[index], scan, typescript=typescript)
+                    and _js_ts_line_ends_statement(
+                        raw_lines[index], scan, typescript=typescript, statement=statement[:-1]
+                    )
                     and not _js_ts_next_line_continues(raw_lines, scan_lines, index)
                     and (
                         starts_in_code[index + 1]
@@ -505,7 +516,9 @@ def _module_level_assignment_spans(
                 continue
             is_body = in_body
             in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
-                _js_ts_line_ends_statement(raw_lines[index], scan, typescript=typescript)
+                _js_ts_line_ends_statement(
+                    raw_lines[index], scan, typescript=typescript, statement=statement[:-1]
+                )
             )
             if is_body:
                 continue
