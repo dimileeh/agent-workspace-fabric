@@ -1000,7 +1000,7 @@ async def test_fix_pass_sink_baseline_unavailable_marks_stranded_edits_only_when
     monkeypatch.setattr(
         runner, "_run_monitor_agent_with_service_recovery", AsyncMock(return_value=None)
     )
-    fix_start_head = "f" * 40
+    fix_start_head = "e" * 40
     # The fix agent rewrote HEAD off the pass's starting commit before the sink failed.
     monkeypatch.setattr(
         runner, "_rev_parse_head", AsyncMock(side_effect=[fix_start_head, _REPAIR_COMMIT_SHA])
