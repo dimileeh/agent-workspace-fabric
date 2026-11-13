@@ -40,7 +40,13 @@ async def composed(runtime_database, monkeypatch):
     store = Mock(_locked_root=Mock(side_effect=lambda: store_lock))
     receiver = Receiver(config, factory, identity, store)
     state = {"linux": LinuxSnapshot(BOOT, 1, 2, 3, True), "containers": [], "approval": True}
-    monkeypatch.setattr(LinuxObservation, "sample", lambda _: state["linux"])
+
+    def sample(_, *, require_quiescent=True):
+        if require_quiescent and not state["linux"].execution_quiescent:
+            raise ValueError("HOST_TASKS_ACTIVE")
+        return state["linux"]
+
+    monkeypatch.setattr(LinuxObservation, "sample", sample)
     monkeypatch.setattr(
         LinuxObservation,
         "bootstrap_approved",
@@ -64,6 +70,7 @@ async def composed(runtime_database, monkeypatch):
         runtime = HostRuntime(config, factory, identity, DockerObservation(host, docker_client))
         assert receiver.lifecycle
         receiver.lifecycle.observe_host = runtime.observe
+        receiver.lifecycle.observe_blockers = runtime.physical_blockers
         receiver.lifecycle.observe_boot = runtime.observe_boot
         receiver.lifecycle.verify_recovery = runtime.recover
         app = create_app(use_lifespan=False)
@@ -100,6 +107,25 @@ async def test_genuine_composition_acknowledges_drains_aborts_but_never_runtime(
     busy = (await client.get(PREFIX + "/readiness")).json()
     assert busy["node_ready"] and not busy["runtime_ready"]
     assert not busy["database_quiescent"] and not busy["quiescent"]
+
+
+async def test_closed_busy_host_readiness_names_physical_blockers(composed):
+    client, receiver, runtime, state = composed
+    assert not receiver.config.runtime_enabled
+    assert (await ack(client)).status_code == 200
+    state["containers"] = [{"Id": "unknown-container"}]
+    state["linux"] = replace(state["linux"], execution_quiescent=False)
+    assert await runtime.observe(receiver.identity) is None
+    busy = (await client.get(PREFIX + "/readiness")).json()
+    assert busy["database_quiescent"] and not busy["quiescent"] and not busy["node_ready"]
+    assert [(b["name"], b["count"]) for b in busy["blockers"]] == [
+        ("DOCKER_UNEXPECTED_CONTAINER", 1),
+        ("CGROUP_POPULATED", 1),
+    ]
+    state["containers"] = []
+    state["linux"] = replace(state["linux"], execution_quiescent=True)
+    idle = (await client.get(PREFIX + "/readiness")).json()
+    assert idle["quiescent"] and idle["blockers"] == []
 
 
 @pytest.mark.parametrize("cause", ["approval", "workspaces", "container", "mount", "boot"])
