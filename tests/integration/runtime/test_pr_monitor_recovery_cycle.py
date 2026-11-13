@@ -225,6 +225,7 @@ async def test_recovery_round_trip_does_not_rewrite_plan_files(
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR snapshot — green
+    cmd.queue_result(returncode=0, stdout="[]")  # gh run list --commit <head> (#1230)
 
     runner = PullRequestMonitorRunner(
         session_factory=factory,
@@ -311,6 +312,7 @@ async def test_review_quiet_window_keeps_workspace_in_monitoring_pr(
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=_pr_payload())  # green PR
+    cmd.queue_result(returncode=0, stdout="[]")  # gh run list --commit <head> (#1230)
 
     runner = PullRequestMonitorRunner(
         session_factory=factory,
