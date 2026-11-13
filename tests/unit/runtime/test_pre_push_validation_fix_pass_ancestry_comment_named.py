@@ -1441,6 +1441,21 @@ async def test_literal_lines_spelling_a_comment_marker_stay_in_the_span(
 
 
 @pytest.mark.unit
+async def test_python_floor_division_line_is_not_a_trailing_gap() -> None:
+    """``// 2`` in Python is floor division, not a comment (PRRT_kwDOSJAM6s63T8r0)."""
+    runner = _Probe(
+        texts={
+            (_LEFT, _INBOUND): "LIMIT = (100\n    // 2)\n",
+            (_RIGHT, _INBOUND): "LIMIT = (100\n    // 4)\n",
+        },
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -2 +2 @@", "-    // 2)", "+    // 4)")},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too high")
+
+
+@pytest.mark.unit
 async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     moved = "src/app/messaging/inbound_kinds.py"
     runner = _RenameProbe(

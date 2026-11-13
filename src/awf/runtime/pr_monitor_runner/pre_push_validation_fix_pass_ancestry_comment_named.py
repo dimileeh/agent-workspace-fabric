@@ -617,22 +617,24 @@ def _without_trailing_gaps(
     Only a line that starts outside a literal is a gap: a multi-line string's
     last line spelling ``# ...`` or ``// ...`` is its contents, told apart by
     the tab re-masking ``_assignment_span_end_line`` uses (PRRT_kwDOSJAM6s63SSj1).
+    The masker is language-aware, so a line it leaves non-blank is code — a
+    Python ``// 2`` is floor division, not a comment (PRRT_kwDOSJAM6s63T8r0).
     """
     lines = (file_text or "").splitlines()
-    starts_in_code = (
-        [
-            line.startswith("\t")
-            for line in _mask_comments_and_string_literals_for_callee_scan(
-                "\n".join(f"\t{raw}" for raw in lines), path=path
-            ).split("\n")
-        ]
+    masked = (
+        _mask_comments_and_string_literals_for_callee_scan(
+            "\n".join(f"\t{raw}" for raw in lines), path=path
+        ).split("\n")
         if spans
         else []
     )
     trimmed: list[tuple[int, int]] = []
     for start, end in spans:
         while (
-            end > start and starts_in_code[end - 1] and _is_ignorable_span_gap_line(lines[end - 1])
+            end > start
+            and masked[end - 1].startswith("\t")
+            and not masked[end - 1].strip()
+            and _is_ignorable_span_gap_line(lines[end - 1])
         ):
             end -= 1
         trimmed.append((start, end))
