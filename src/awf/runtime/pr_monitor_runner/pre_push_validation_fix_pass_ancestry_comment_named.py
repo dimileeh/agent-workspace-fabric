@@ -41,6 +41,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _is_ignorable_span_gap_line,
     _iter_definition_spans,
     _leading_indent,
+    _mask_comments_and_string_literals_for_callee_scan,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
@@ -131,25 +132,40 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _assignment_span_end_line(scan_lines: list[str], start: int) -> int:
+def _assignment_span_end_line(
+    file_text: str, scan_lines: list[str], start: int, *, path: str
+) -> int:
     """Inclusive end line of the column-0 binding whose statement opens at ``start``.
 
     Read over comment/string-masked lines, so a multi-line string's contents are
     blank gaps rather than dedented statements, and a line inside open brackets
     or after a ``\\`` continuation belongs to the statement whatever its indent
     (PRRT_kwDOSJAM6s63Lp9D). Past those, the next column-0 line ends the span on
-    the line before it, as ``_definition_span_end_line`` does.
+    the line before it, as ``_definition_span_end_line`` does — including one
+    that opens a string literal or block comment, which masks blank. The raw
+    lines are re-masked each behind a tab, which the masker keeps only outside a
+    literal, so such a line is told apart from one the binding's own literal
+    continues (PRRT_kwDOSJAM6s63MDQr).
     """
+    raw_lines = file_text.splitlines()
+    starts_in_code = [
+        line.startswith("\t")
+        for line in _mask_comments_and_string_literals_for_callee_scan(
+            "\n".join(f"\t{raw}" for raw in raw_lines[start - 1 :]), path=path
+        ).split("\n")
+    ]
     depth = 0
     continued = False
     for index in range(start - 1, len(scan_lines)):
         scan = scan_lines[index]
+        raw = raw_lines[index]
         if (
             index >= start
             and depth == 0
             and not continued
-            and not _is_ignorable_span_gap_line(scan)
-            and _leading_indent(scan) == 0
+            and starts_in_code[index - start + 1]
+            and not _is_ignorable_span_gap_line(raw)
+            and _leading_indent(raw) == 0
         ):
             return index
         for char in scan:
@@ -211,7 +227,7 @@ def _module_level_assignment_spans(
         collected=[(name, start, 0, (0, 0), (start, start)) for name, start in bindings],
     )
     return [
-        (start, _assignment_span_end_line(scan_lines, start))
+        (start, _assignment_span_end_line(file_text, scan_lines, start, path=path))
         for name, start in last.items()
         if name not in shadowed and (0, name) not in rebound
     ]

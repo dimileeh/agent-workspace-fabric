@@ -515,6 +515,39 @@ async def test_named_identifier_without_a_changed_definition_is_not_evidence(
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "diff"),
+    [
+        pytest.param(
+            _INBOUND,
+            '_TASK_INBOUND_TYPES = ("a",)\n"""Trailing note."""\nVALUE = 1\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-"""Trailing note."""', '+"""Reworded note."""'),
+            id="column-0-string-literal",
+        ),
+        pytest.param(
+            _INBOUND,
+            '_TASK_INBOUND_TYPES = """\na\n"""\n"""Trailing\nnote."""\n',
+            _diff(_INBOUND, "@@ -5 +5 @@", '-note."""', '+notes."""'),
+            id="string-literal-after-multi-line-string",
+        ),
+        pytest.param(
+            _WEB,
+            'const _TASK_INBOUND_TYPES = ["a"];\n/* Trailing\n   note. */\nconst other = 1;\n',
+            _diff(_WEB, "@@ -3 +3 @@", "-   note. */", "+   notes. */"),
+            id="column-0-block-comment",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_column_0_literals_after_a_binding_are_not_evidence(
+    path: str, text: str, diff: str
+) -> None:
+    """Masked blanks still open a new statement at column 0 (PRRT_kwDOSJAM6s63MDQr)."""
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
+
+
+@pytest.mark.parametrize(
     ("left_text", "right_text", "diff"),
     [
         pytest.param(
