@@ -645,8 +645,11 @@ async def test_a_rewritten_resumed_head_is_reparented_onto_the_fix_pass_baseline
 
 @pytest.mark.unit
 async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Like every re-parent git step, the reset ignores process object-lookup
+    # overrides (PRRT_kwDOSJAM6s63OA3P).
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/elsewhere/objects")
     state = await _baseline_parked_state(tmp_path)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=1)
@@ -658,6 +661,9 @@ async def test_a_rewrite_with_no_net_change_is_reset_to_the_fix_pass_baseline(
     assert await _resume(runner, state, tmp_path) is None
 
     assert _git_args(cmd)[-1] == ["reset", "--hard", _BASELINE_HEAD]
+    reset_env = cmd.calls[-1].env
+    assert reset_env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in reset_env
     assert PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY not in state.threads_addressed_ids
 
 

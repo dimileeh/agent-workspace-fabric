@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from awf.common.logging import get_logger
 from awf.common.work_slot import hold_work_slot
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.constants import (
     _PARK_RESUME_UNEXPECTED_WORKTREE_CHANGES_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
@@ -552,7 +553,8 @@ async def _keep_fix_pass_baseline(
         )
         if no_net_change:
             reset = await runner._deps.runner.run(
-                git_worktree_command(worktree_path, "reset", "--hard", baseline)
+                git_worktree_command(worktree_path, "reset", "--hard", baseline),
+                env=git_env_without_object_lookup_overrides(),
             )
             failure_reason = None if reset.ok else _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
         if failure_reason is None:
