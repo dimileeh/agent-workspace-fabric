@@ -1600,6 +1600,12 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             True,
             id="reads-and-member-assignments-only",
         ),
+        pytest.param(
+            "export let LIMIT = 10;\nconst obj = {};\nobj. LIMIT = 20;\nobj?.\tLIMIT++;\n"
+            "obj./* c */LIMIT += 1;\nobj\n  .LIMIT = 30;\n",
+            True,
+            id="spaced-member-assignments-only",
+        ),
     ],
 )
 @pytest.mark.unit
