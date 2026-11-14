@@ -1431,3 +1431,66 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
     runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "export let LIMIT = 10;\nif (true) LIMIT = 20;\n",
+            False,
+            id="inline-if-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) work(); else LIMIT = 20;\n",
+            False,
+            id="inline-else-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor (const x of xs) LIMIT = x;\n",
+            False,
+            id="inline-for-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) {\n  LIMIT = 20;\n}\n",
+            False,
+            id="braced-block-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) LIMIT += 20;\n",
+            False,
+            id="inline-compound-assignment",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) LIMIT++;\n",
+            False,
+            id="inline-update-expression",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) [LIMIT] = [20];\n",
+            False,
+            id="inline-destructuring-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (a)\n  if (b) LIMIT = 20;\n",
+            False,
+            id="nested-inline-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) other = LIMIT;\n"
+            "if (LIMIT >= 5) obj.LIMIT = cache[LIMIT] = 1;\n",
+            True,
+            id="reads-and-member-assignments-only",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_inline_reassignment_withholds_the_binding(
+    text: str, *, expected: bool
+) -> None:
+    """An assignment that does not open its statement rebinds the name (PRRT_kwDOSJAM6s63XLQk)."""
+    old = text.splitlines()[0]
+    diff = _diff(_WEB, "@@ -1 +1 @@", f"-{old}", f"+{old.replace('10', '11')}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected

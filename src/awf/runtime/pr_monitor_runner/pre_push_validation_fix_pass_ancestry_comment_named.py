@@ -176,13 +176,18 @@ _JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?<![\w$])(?:else|do)$")
 _JS_TS_DO_RE = re.compile(r"(?<![\w$])do(?![\w$])")
 _JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$")
 _JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
-# A JS/TS destructuring pattern opening a statement — after any declaration
-# keyword and the ``(`` an object pattern needs — and the ``=`` assigning it
-# (PRRT_kwDOSJAM6s63W936).
-_JS_TS_DESTRUCTURING_HEAD_RE = re.compile(
-    r"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?[ \t(]*(?=[{\[])"
-)
+# The ``=`` assigning a JS/TS destructuring pattern (PRRT_kwDOSJAM6s63W936).
 _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
+# A JS/TS identifier any assignment or update operator writes, wherever it sits
+# in its statement — an inline ``if (on) LIMIT = 20`` body included
+# (PRRT_kwDOSJAM6s63XLQk).
+_JS_TS_ASSIGNED_TARGET_RE = re.compile(
+    rf"(?<![\w$.])({_JS_IDENT})[ \t]*"
+    r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
+    rf"|(?:\+\+|--)[ \t]*({_JS_IDENT})"
+)
+# A word a destructuring pattern can follow, unlike the object of ``a[LIMIT]``.
+_JS_TS_PATTERN_KEYWORD_RE = re.compile(r"(?<![\w$])(?:const|let|var|else|do)$")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -543,32 +548,51 @@ def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
     return found
 
 
-def _js_ts_destructured_names(segment: str) -> set[str]:
-    """Identifiers of a destructuring pattern ``segment`` opens by assigning it.
+def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -> set[str]:
+    """Identifiers the JS/TS statement ``segment`` assigns past its ``claimed`` heads.
 
     ``({ LIMIT } = next)`` and ``[LIMIT] = next`` rebind ``LIMIT`` with no
     ``name =`` for the plain-binding readers to match, so the earlier binding
     looked effective while importers reach the destructured value
-    (PRRT_kwDOSJAM6s63W936). Every identifier of the pattern is returned — a
-    property key or a default's operand included — so a name it may bind fails
-    closed rather than leaving that dead binding as evidence.
+    (PRRT_kwDOSJAM6s63W936). So does an assignment that does not open its
+    statement — ``if (on) LIMIT = 20``, a braced block's, a ``+=`` or ``++`` —
+    which those statement-opening readers never see (PRRT_kwDOSJAM6s63XLQk).
+    Every identifier a pattern holds is returned — a property key or a
+    default's operand included — and an assignment is not told apart from a
+    parameter default or a shadowing local, so a name the statement may bind
+    fails closed rather than leaving that dead binding as evidence. Only the
+    binding heads the caller reads itself, at offsets ``claimed``, are skipped.
     """
-    head = _JS_TS_DESTRUCTURING_HEAD_RE.match(segment)
-    if head is None:
-        return set()
-    depth = 0
-    for position in range(head.end(), len(segment)):
-        if segment[position] in "([{":
-            depth += 1
-        elif segment[position] in ")]}":
-            depth -= 1
-            if not depth:
-                break
-    else:
-        return set()
-    if _JS_TS_DESTRUCTURING_EQUALS_RE.match(segment, position + 1) is None:
-        return set()
-    return set(re.findall(_JS_IDENT, segment[head.end() : position + 1]))
+    found = {
+        match.group(group)
+        for match in _JS_TS_ASSIGNED_TARGET_RE.finditer(segment)
+        for group in (1, 2)
+        if match.group(group) is not None and match.start(group) not in claimed
+    }
+    previous = -1
+    for opener, char in enumerate(segment):
+        if char in "[{" and (
+            previous < 0
+            or segment[previous] not in "].$_"
+            and not segment[previous].isalnum()
+            or _JS_TS_PATTERN_KEYWORD_RE.search(segment, max(previous - 4, 0), previous + 1)
+            is not None
+        ):
+            depth = 0
+            for position in range(opener, len(segment)):
+                if segment[position] in "([{":
+                    depth += 1
+                elif segment[position] in ")]}":
+                    depth -= 1
+                    if not depth:
+                        break
+            else:
+                continue
+            if _JS_TS_DESTRUCTURING_EQUALS_RE.match(segment, position + 1) is not None:
+                found.update(re.findall(_JS_IDENT, segment[opener : position + 1]))
+        if char not in " \t":
+            previous = opener
+    return found
 
 
 def _annotation_binding_equals(text: str, start: int) -> int | None:
@@ -751,7 +775,9 @@ def _module_level_assignment_spans(
     ``;`` (PRRT_kwDOSJAM6s63Tr7E). Each ``;``-separated statement of a line binds over
     its own lines too, unless the line is a Python compound head's body
     (PRRT_kwDOSJAM6s63Sh3G). A JS/TS destructuring assignment of the name,
-    which no ``name =`` reader matches, withholds it too (PRRT_kwDOSJAM6s63W936).
+    which no ``name =`` reader matches, withholds it too (PRRT_kwDOSJAM6s63W936),
+    as does any JS/TS assignment of it not opening its statement, such as an
+    inline ``if (on) LIMIT = 20`` body (PRRT_kwDOSJAM6s63XLQk).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     typescript = Path(path).suffix.lower() in _TS_SUFFIXES
@@ -764,7 +790,7 @@ def _module_level_assignment_spans(
         ).split("\n")
     ]
     bindings: list[tuple[str, int, int | None, int]] = []
-    destructured: set[str] = set()
+    reassigned: set[str] = set()
     depth = 0
     continued = False
     in_body = False
@@ -837,9 +863,9 @@ def _module_level_assignment_spans(
             # A brace-less body continues its head's chain, which a ``do``
             # block ends across lines (PRRT_kwDOSJAM6s63W1Vj).
             previous = f"{previous} {logical}" if is_body else logical
-            for segment in _simple_statement_segments(logical):
-                destructured |= _js_ts_destructured_names(segment.lstrip(" \t"))
             if is_body:
+                for segment in _simple_statement_segments(logical):
+                    reassigned |= _js_ts_assigned_names(segment)
                 continue
         texts = (
             list(_simple_statement_segments(logical))
@@ -866,6 +892,7 @@ def _module_level_assignment_spans(
             heads = [first] if first is not None else []
             if declares:
                 heads += _js_ts_secondary_declarators(segment)
+            claimed: set[int] = set()
             for position, head in enumerate(heads):
                 start_index = _statement_line_index(statement, base + head.start(1))
                 start = statement_start + start_index
@@ -885,9 +912,12 @@ def _module_level_assignment_spans(
                 )
                 match: re.Match[str] | None = head
                 while match is not None:
+                    claimed.add(match.start(1))
                     if match.group(1) in names:
                         bindings.append((match.group(1), start, end, column))
                     match = _CHAINED_ASSIGNMENT_TARGET_RE.match(segment, match.end())
+            if js_ts:
+                reassigned |= _js_ts_assigned_names(segment, frozenset(claimed))
     if not bindings:
         return []
     last = {name: (start, end, column) for name, start, end, column in bindings}
@@ -920,7 +950,7 @@ def _module_level_assignment_spans(
             else _assignment_span_end_line(file_text, scan_lines, start, path=path, column=column),
         )
         for name, (start, end, column) in last.items()
-        if name not in shadowed and (0, name) not in rebound and name not in destructured
+        if name not in shadowed and (0, name) not in rebound and name not in reassigned
     ]
 
 
