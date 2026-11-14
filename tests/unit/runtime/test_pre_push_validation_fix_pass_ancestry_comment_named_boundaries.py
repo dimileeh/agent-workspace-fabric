@@ -1207,6 +1207,12 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         # PRRT_kwDOSJAM6s63Zv5r: a JSX text ``//`` (a URL) opens no line comment.
         pytest.param("src/app/web/team.tsx", "<div>https://example.com</div>;", id="tsx-text-url"),
         pytest.param("src/app/web/team.jsx", "<p>a // b</p>;", id="jsx-text-double-slash"),
+        # PRRT_kwDOSJAM6s63Z51H: a unary operator roots its JSX operand.
+        pytest.param("src/app/web/team.tsx", "!<Widget />;", id="tsx-unary-not"),
+        pytest.param("src/app/web/team.jsx", "~<div>hi</div>;", id="jsx-unary-bitwise-not"),
+        pytest.param("src/app/web/team.tsx", "void <Widget />;", id="tsx-unary-void"),
+        pytest.param("src/app/web/team.jsx", "await <div>hi</div>;", id="jsx-unary-await"),
+        pytest.param("src/app/web/team.tsx", "typeof <></>;", id="tsx-unary-typeof"),
     ],
 )
 @pytest.mark.parametrize(
