@@ -317,8 +317,12 @@ def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> boo
     )
 
 
-def _js_ts_ends_with_body_head(logical: str) -> bool:
-    """Whether the masked JS/TS ``logical`` statement leaves the next one as its body."""
+def _js_ts_ends_with_body_head(logical: str, *, previous: str = "") -> bool:
+    """Whether the masked JS/TS ``logical`` statement leaves the next one as its body.
+
+    A ``while (...)`` opening ``logical`` may terminate a ``do`` block that the
+    ``previous`` statements of its line chain end with (PRRT_kwDOSJAM6s63W1Vj).
+    """
     bare = _JS_TS_BARE_BODY_HEAD_RE.search(logical)
     if bare is not None:
         return _js_ts_head_opens_statement(logical[: bare.start()])
@@ -336,7 +340,7 @@ def _js_ts_ends_with_body_head(logical: str) -> bool:
                     head is not None
                     and not (
                         head.group().startswith("while")
-                        and _js_ts_ends_with_do_block(logical[: head.start()])
+                        and _js_ts_ends_with_do_block(logical[: head.start()] or previous)
                     )
                     and _js_ts_head_opens_statement(logical[: head.start()])
                 )
@@ -699,6 +703,7 @@ def _module_level_assignment_spans(
     depth = 0
     continued = False
     in_body = False
+    previous = ""
     statement: list[str] = []
     statement_start = 1
     for index, scan in enumerate(scan_lines):
@@ -755,7 +760,7 @@ def _module_level_assignment_spans(
                 continued = True
                 continue
             is_body = in_body
-            in_body = _js_ts_ends_with_body_head(logical) or not (
+            in_body = _js_ts_ends_with_body_head(logical, previous=previous) or not (
                 _js_ts_line_ends_statement(
                     raw_lines[index],
                     scan,
@@ -764,6 +769,9 @@ def _module_level_assignment_spans(
                     jsx=_path_is_jsx(path),
                 )
             )
+            # A brace-less body continues its head's chain, which a ``do``
+            # block ends across lines (PRRT_kwDOSJAM6s63W1Vj).
+            previous = f"{previous} {logical}" if is_body else logical
             if is_body:
                 continue
         texts = (

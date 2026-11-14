@@ -1203,6 +1203,27 @@ async def test_js_ts_multi_line_jsx_opening_tag_keeps_its_statement_open(
         ),
         pytest.param(
             _WEB,
+            "do { work() }\nwhile (enabled)\nexport const LIMIT = [\n  1\n];\n",
+            4,
+            True,
+            id="js-ts-binding-after-do-while-terminator-on-next-line",
+        ),
+        pytest.param(
+            _WEB,
+            "do\n{ work() }\nwhile (enabled)\nexport const LIMIT = 1;\n",
+            4,
+            True,
+            id="js-ts-binding-after-do-while-with-wrapped-block-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nwork()\nwhile (check())\n  LIMIT = 1;\n",
+            4,
+            False,
+            id="js-ts-braceless-body-after-loop-head-on-line-after-statement",
+        ),
+        pytest.param(
+            _WEB,
             "let LIMIT = 0;\n{ work() } while (check())\n  LIMIT = 1;\n",
             3,
             False,
