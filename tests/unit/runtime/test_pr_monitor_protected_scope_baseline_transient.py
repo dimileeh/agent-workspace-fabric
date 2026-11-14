@@ -482,6 +482,16 @@ async def test_ci_repair_persistent_baseline_outage_parks_blocked_and_preserves_
         workspace.monitor_threads_addressed or {}
     )
     assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+    # The committed repair left nothing dirty, so no state marker records the park;
+    # its block columns still route the guide resume ahead of SyncBase, whose
+    # resetting push would drop the kept commit (PRRT_kwDOSJAM6s63UyV5).
+    resumed = runner._load_state(workspace)
+    assert not resumed.has_stranded_park_edits
+    assert resumed.protected_scope_baseline_park_pending
+    hint = OperatorHint(reason="baseline reachable again", reason_code="OPERATOR_GUIDE")
+    resumed.pending_operator_hint = hint
+    behind = replace(_status(), base_behind_count=2)
+    assert decide(behind, resumed, MonitorConfig(auto_merge=True)) == AddressOperatorHint(hint=hint)
 
     parked = await _events(
         factory, workspace_id, "workspace.monitor_protected_scope_diff_unavailable_parked"

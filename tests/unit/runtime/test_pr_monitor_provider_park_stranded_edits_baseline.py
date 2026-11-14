@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -374,3 +375,143 @@ async def test_a_reparked_sink_that_cannot_rerecord_keeps_the_earlier_evidence(
 
     assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_EVIDENCE_STATE_KEY] == earlier
     reparker._persist_state.assert_awaited_once_with(_WORKSPACE_ID, state)
+
+
+class _WorkerRestartError(Exception):
+    """The worker dies after the rewrite moved HEAD but before the marker drop."""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("net_change", [True, False])
+async def test_a_restart_after_the_rewrite_still_names_its_replacement(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    net_change: bool,
+) -> None:
+    # The intent reaches the row before HEAD moves, so a retry that finds HEAD
+    # already on the baseline still records what replaced the parked SHA, and a
+    # directiveless resume never looks for the removed commit (PRRT_kwDOSJAM6s63UyWC).
+    workspace_id = await seed_monitoring_workspace(factory)
+    state = await _baseline_parked_state(tmp_path)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = dict(state.threads_addressed_ids)
+        await session.commit()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    if net_change:
+        cmd.queue_result(stdout="tree-resumed\n")
+        cmd.queue_result(stdout="tree-baseline\n")
+        cmd.queue_result(stdout="fix: the agent's amended fix\n")
+        cmd.queue_result(stdout=f"{_REPARENTED_HEAD}\n")
+    else:
+        cmd.queue_result(stdout="same-tree\n")
+        cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result()  # reset --hard
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+    runner._deps = SimpleNamespace(runner=cmd, session_factory=factory)
+    drop_marker = AsyncMock(side_effect=_WorkerRestartError)
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.provider_park_stranded_edits."
+        "_drop_marker_from_workspace_row",
+        drop_marker,
+    )
+
+    with pytest.raises(_WorkerRestartError):
+        await _resume(runner, state, tmp_path, workspace_id=workspace_id)
+    monkeypatch.undo()
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        restarted = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed or {}))
+    assert restarted.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+        _PRESERVED_HEAD
+    )
+    replacement = _REPARENTED_HEAD if net_change else _BASELINE_HEAD
+    retry_cmd = FakeCommandRunner()
+    retry_cmd.queue_result()  # merge-base --is-ancestor: HEAD now descends.
+    retry = _BaselineRunner([None], retry_cmd, head=replacement)
+    retry._deps = SimpleNamespace(runner=retry_cmd, session_factory=factory)
+
+    assert await _resume(retry, restarted, tmp_path, workspace_id=workspace_id) is None
+
+    assert provider_park_resume_kept_head(restarted, _PRESERVED_HEAD) == replacement
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        reloaded = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed or {}))
+    assert provider_park_resume_kept_head(reloaded, _PRESERVED_HEAD) == replacement
+    assert PROVIDER_PARK_STRANDED_EDITS_STATE_KEY not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("row", ["write_fault", "missing"])
+async def test_the_rewrite_intent_reaches_the_row_before_head_moves(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    row: str,
+) -> None:
+    # A fault writing the intent stops the resume before any git op moves HEAD; a
+    # workspace row that is gone has nothing to record and does not block it.
+    workspace_id = await seed_monitoring_workspace(factory) if row == "write_fault" else "ws_gone"
+    state = await _baseline_parked_state(tmp_path)
+
+    def _faulting_factory() -> AsyncSession:
+        session = factory()
+
+        async def _commit() -> None:
+            raise SQLAlchemyError("connection dropped")
+
+        monkeypatch.setattr(session, "commit", _commit)
+        return session
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor: not a descendant.
+    cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result(stdout="same-tree\n")
+    cmd.queue_result()  # reset --hard
+    runner = _BaselineRunner([_dirty(["stranded_fix.py"]), None], cmd, head=_PRESERVED_HEAD)
+    runner._deps = SimpleNamespace(
+        runner=cmd, session_factory=_faulting_factory if row == "write_fault" else factory
+    )
+
+    if row == "write_fault":
+        with pytest.raises(SQLAlchemyError):
+            await _resume(runner, state, tmp_path, workspace_id=workspace_id)
+        assert _git_args(cmd) == [["merge-base", "--is-ancestor", _BASELINE_HEAD, _PRESERVED_HEAD]]
+        assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == (
+            _PRESERVED_HEAD
+        )
+    else:
+        assert await _resume(runner, state, tmp_path, workspace_id=workspace_id) is None
+        assert _git_args(cmd)[-1] == ["reset", "--hard", _BASELINE_HEAD]
+        assert provider_park_resume_kept_head(state, _PRESERVED_HEAD) == _BASELINE_HEAD
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "record",
+    [
+        "not json",
+        json.dumps({"to": _REPARENTED_HEAD}),
+        json.dumps({"from": _PRESERVED_HEAD, "to": _REPARENTED_HEAD}),
+    ],
+)
+async def test_a_descending_head_only_completes_an_open_rewrite_intent(
+    tmp_path: Path, record: str
+) -> None:
+    # A finished or unreadable record is never re-pointed at whatever HEAD the
+    # next resume finds.
+    state = await _baseline_parked_state(tmp_path)
+    state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = record
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # merge-base --is-ancestor: HEAD descends from the baseline.
+    runner = _BaselineRunner([None], cmd, head=_RESUME_COMMIT_HEAD)
+
+    assert await _resume(runner, state, tmp_path) is None
+
+    assert state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] == record

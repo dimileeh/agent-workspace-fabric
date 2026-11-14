@@ -134,7 +134,9 @@ when the resume re-parents a non-descendant HEAD onto the fix-pass baseline or
 resets a no-net-change rewrite to it. The parked SHA is then gone by design, so a
 baseline-park resume must require the replacement on the remote instead
 (PRRT_kwDOSJAM6s63OA3D). It reaches the row with the marker drop and is cleared by
-the next park.
+the next park. A ``to``-less ``{"from": ...}`` intent reaches the row before HEAD
+moves, so a retry after a restart in between completes it with the HEAD it finds
+(PRRT_kwDOSJAM6s63UyWC).
 """
 
 _RESUME_COMMIT_MESSAGE: Final = "fix: commit repair edits stranded by a managed provider key park"
@@ -632,7 +634,15 @@ async def _keep_fix_pass_baseline(
         if head == baseline or await _head_descends_from(
             runner, worktree_path=worktree_path, ancestor=baseline, descendant=head
         ):
+            _complete_interrupted_rewrite_record(state, workspace_id=workspace_id, head=head)
             return None
+        # Durable before HEAD moves: a restart before the marker drop would otherwise
+        # find HEAD on the baseline with no record of the rewritten parked SHA.
+        intent = json.dumps({"from": parked_head or head})
+        await _record_rewrite_intent_on_workspace_row(
+            runner, workspace_id=workspace_id, intent=intent
+        )
+        state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = intent
         new_head, no_net_change, failure_reason = await _reparent_fix_pass_commit(
             runner,
             workspace_id=workspace_id,
@@ -682,6 +692,33 @@ async def _keep_fix_pass_baseline(
             "fix_start_head": baseline,
             "pushed": False,
         },
+    )
+
+
+def _complete_interrupted_rewrite_record(
+    state: MonitorState, *, workspace_id: str, head: str
+) -> None:
+    """Name ``head`` as the replacement of a rewrite whose intent has no ``to`` yet.
+
+    The intent is recorded before HEAD moves and cleared by every park, so one
+    still open when HEAD already descends from the baseline means an earlier
+    resume moved HEAD and stopped before recording where it went.
+    """
+    raw = state.threads_addressed_ids.get(PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY)
+    try:
+        record = json.loads(raw) if raw else None
+    except ValueError:
+        return
+    if not isinstance(record, dict) or "to" in record or not record.get("from"):
+        return
+    state.threads_addressed_ids[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = json.dumps(
+        {"from": record["from"], "to": head}
+    )
+    _log.info(
+        "monitor.provider_park_resume_rewrite_record_completed",
+        workspace_id=workspace_id,
+        from_sha=record["from"],
+        to_sha=head,
     )
 
 
@@ -802,5 +839,26 @@ async def _drop_marker_from_workspace_row(
         threads_addressed.pop(PROVIDER_PARK_STRANDED_EDITS_BASELINE_STATE_KEY, None)
         if rewritten_head is not None:
             threads_addressed[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = rewritten_head
+        ws.monitor_threads_addressed = threads_addressed
+        await session.commit()
+
+
+async def _record_rewrite_intent_on_workspace_row(
+    runner: Any, *, workspace_id: str, intent: str
+) -> None:
+    """Write ONLY the rewrite-intent record to the persisted row, before HEAD moves.
+
+    The single-key shape ``_drop_marker_from_workspace_row`` uses. A write fault
+    propagates before any git op, so HEAD never moves without its intent recorded.
+    """
+    session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
+    if not callable(session_factory):
+        return
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        threads_addressed[PROVIDER_PARK_RESUME_REWRITTEN_HEAD_STATE_KEY] = intent
         ws.monitor_threads_addressed = threads_addressed
         await session.commit()
