@@ -425,6 +425,7 @@ NEW_CONCERNS = (
         "Retracted.",
         "Verified the fix on the current head.",
         "The fix has been verified.",
+        "Thanks for the explanation, the finding is withdrawn.",
     ],
 )
 def test_an_explicit_concurrence_is_recognised(body: str) -> None:
@@ -453,6 +454,11 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed; rename the helper.",
         "Agreed. The empty case needs a test.",
         "Agreed. It would be good to cover the empty case.",
+        # A clause led by its subject that does not concur may report a defect.
+        "Agreed. The handler crashes for empty input.",
+        "The handler crashes for empty input. Agreed.",
+        "Agreed. I found the handler crashes for empty input.",
+        "Agreed. Thanks for reporting that the handler crashes.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",

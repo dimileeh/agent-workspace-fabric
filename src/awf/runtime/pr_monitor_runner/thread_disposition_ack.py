@@ -83,18 +83,18 @@ _CONCURRENCE_RE = re.compile(
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
     r"(?:confirmed|verified) (?:the )?fix|fix (?:is |was |has been )?(?:confirmed|verified)|"
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
+    # The fix is present: the code has it, or its commit is in the revision.
+    r"(?:has|have|contains|includes) (?:the|a) (?:guard|fix|check|test)|"
+    r"commit [0-9a-f]{7,40} is (?:now )?in|"
     r"leav(?:e|ing) (?:the )?resolution to|"
     r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",
     re.I,
 )
-# Every clause must concur, thank, or be a statement led by its subject; anything else
-# (an imperative such as "Add a test") could be a new request, so the agent judges it.
+# Every clause must concur or only thank; anything else (an imperative such as "Add a
+# test", or a statement such as "The handler crashes") could be a new point, so the
+# agent judges it.
 _CLAUSE_SPLIT_RE = re.compile(r"[.!?;:,\n]+")
-_STATEMENT_CLAUSE_RE = re.compile(
-    r"(?:(?:and|so)\s+)?(?:@\S+\s+)?"
-    r"(?:the|this|that|it|its|it's|i|i'm|we|commit|thanks|thank you)\b",
-    re.I,
-)
+_THANKS_CLAUSE_RE = re.compile(r"(?:@\S+\s+)?(?:thanks|thank you)(?: for (?:the|your) \w+)?", re.I)
 
 
 def comment_identity(comment: AuditedThreadComment) -> str:
@@ -109,7 +109,7 @@ def is_bot_concurrence(body: str) -> bool:
     ``True`` means certainly a concurrence: it withdraws the finding, confirms the
     fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
     no dissent or new request, no code fence and no code reference, and every
-    clause of it either concurs, thanks, or is a statement led by its subject. HTML comments,
+    clause of it either concurs or only thanks. HTML comments,
     and ``<details>`` blocks whose summary labels them as supporting material
     (analysis, learnings, scripts, output, logs), are set aside.
     ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
@@ -130,7 +130,7 @@ def is_bot_concurrence(body: str) -> bool:
         return False
     own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
     clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
-    if not all(_CONCURRENCE_RE.search(c) or _STATEMENT_CLAUSE_RE.match(c) for c in clauses):
+    if not all(_CONCURRENCE_RE.search(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
         return False
     return _CONCURRENCE_RE.search(own) is not None
 
