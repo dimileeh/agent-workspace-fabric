@@ -128,8 +128,17 @@ def _module_scope_nodes(tree: ast.Module) -> Iterator[ast.AST]:
 
     Function, class and lambda bodies and comprehension targets bind in scopes
     of their own, so only their module-scope parts — decorators, defaults,
-    bases, a comprehension's iterables and conditions — are walked.
+    bases, a comprehension's iterables and conditions — are walked. A ``def``'s
+    parameter and return annotations run at ``def`` time too, unless the module
+    postpones them with ``from __future__ import annotations``
+    (PRRT_kwDOSJAM6s63a8O4).
     """
+    eager_annotations = not any(
+        isinstance(statement, ast.ImportFrom)
+        and statement.module == "__future__"
+        and any(alias.name == "annotations" for alias in statement.names)
+        for statement in tree.body
+    )
     stack: list[ast.AST] = list(reversed(tree.body))
     while stack:
         node = stack.pop()
@@ -141,6 +150,19 @@ def _module_scope_nodes(tree: ast.Module) -> Iterator[ast.AST]:
                 *node.args.defaults,
                 *(default for default in node.args.kw_defaults if default is not None),
             ]
+            if eager_annotations and not isinstance(node, ast.Lambda):
+                arguments = [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *filter(None, (node.args.vararg,)),
+                    *node.args.kwonlyargs,
+                    *filter(None, (node.args.kwarg,)),
+                ]
+                children += [
+                    annotation
+                    for annotation in (*(arg.annotation for arg in arguments), node.returns)
+                    if annotation is not None
+                ]
         elif isinstance(node, ast.ClassDef):
             children = [*node.decorator_list, *node.bases, *node.keywords]
         elif isinstance(node, ast.comprehension):

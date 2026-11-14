@@ -799,6 +799,14 @@ async def test_js_ts_path_named_target_is_still_evidence(path: str) -> None:
         pytest.param("OTHER = (LIMIT := 3)\n", id="walrus"),
         pytest.param("VALUES = [(LIMIT := x) for x in ()]\n", id="walrus-in-comprehension"),
         pytest.param("@register(LIMIT := 2)\ndef f():\n    pass\n", id="walrus-in-decorator"),
+        pytest.param("def f(x: (LIMIT := 2)):\n    pass\n", id="walrus-in-parameter-annotation"),
+        pytest.param(
+            "async def f() -> (LIMIT := 2):\n    pass\n", id="walrus-in-return-annotation"
+        ),
+        pytest.param(
+            "def f(*a: (LIMIT := 2), b: int, **c: int):\n    pass\n",
+            id="walrus-in-vararg-annotation",
+        ),
         pytest.param("if FLAG:\n    def LIMIT():\n        pass\n", id="guarded-def"),
     ],
 )
@@ -836,6 +844,25 @@ async def test_python_same_name_in_another_scope_keeps_the_named_definition(
         texts={_INBOUND: f"LIMIT = 1\n{other_scope}"},
         changed_paths=(_INBOUND,),
         diffs={_INBOUND: _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = 1", "+LIMIT = 2")},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low")
+
+
+@pytest.mark.unit
+async def test_python_postponed_annotations_keep_the_named_definition() -> None:
+    """Under ``from __future__ import annotations`` no annotation runs at ``def`` time."""
+    runner = _probe(
+        texts={
+            _INBOUND: (
+                "from __future__ import annotations\n"
+                "LIMIT = 1\n"
+                "def f(x: [(LIMIT := i) for i in ()]) -> int:\n"
+                "    pass\n"
+            )
+        },
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -2 +2 @@", "-LIMIT = 1", "+LIMIT = 2")},
     )
 
     assert await _changes_named_target(runner, "`LIMIT` is too low")
