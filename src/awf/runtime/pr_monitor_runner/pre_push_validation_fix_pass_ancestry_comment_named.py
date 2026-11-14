@@ -214,13 +214,15 @@ _JS_TS_ASSERTED_TYPE = rf"(?:{_JS_TS_TYPE_CHAR}|{_JS_TS_NESTED_TYPE})*?"
 # ``LIMIT! = 20`` one — a ``!=`` is an inequality — or a parenthesized
 # ``(LIMIT as number) = 20`` / ``satisfies`` one (PRRT_kwDOSJAM6s63X_At). A
 # prefix update whose operand goes on to a member (``++LIMIT.value``,
-# ``--(LIMIT)[0]``) writes the property, not the name (PRRT_kwDOSJAM6s63Y4_p).
+# ``--(LIMIT)[0]``) writes the property, not the name (PRRT_kwDOSJAM6s63Y4_p);
+# the operand is matched whole, so ``++LIMITS.value`` cannot backtrack to a
+# ``LIMIT`` (PRRT_kwDOSJAM6s63Zv5u).
 _JS_TS_ASSIGNED_TARGET_RE = re.compile(
     rf"(?<![\w$.])({_JS_IDENT})"
     rf"(?:[ \t]*(?:\)|!(?!=))|[ \t]+(?:as|satisfies)[ \t]+{_JS_TS_ASSERTED_TYPE}(?=[ \t]*\)))*"
     r"[ \t]*"
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
-    rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})"
+    rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})(?![\w$])"
     rf"(?!(?:\s*(?:\)|!(?!=))|\s+(?:as|satisfies)\s+{_JS_TS_ASSERTED_TYPE}(?=\s*\)))*\s*[.\[])"
 )
 # A ``for`` head up to the target its ``of``/``in`` writes each iteration, which

@@ -1783,6 +1783,12 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             True,
             id="prefix-member-updates-only",
         ),
+        pytest.param(
+            "export const LIMIT = 10;\nconst LIMITS = {value: 1};\n++LIMITS.value;\n"
+            "--(LIMITS)[0];\n",
+            True,
+            id="prefix-member-update-of-longer-name",
+        ),
     ],
 )
 @pytest.mark.unit
