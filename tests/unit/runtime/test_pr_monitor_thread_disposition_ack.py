@@ -459,6 +459,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "The handler crashes for empty input. Agreed.",
         "Agreed. I found the handler crashes for empty input.",
         "Agreed. Thanks for reporting that the handler crashes.",
+        # A dash, a parenthesis or "and" joins clauses too: each must still concur.
+        "Agreed - the handler crashes for empty input.",
+        "Agreed — the handler crashes for empty input.",
+        "Agreed–the handler crashes for empty input.",
+        "Agreed (the handler crashes for empty input).",
+        "Agreed and the handler crashes for empty input.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",

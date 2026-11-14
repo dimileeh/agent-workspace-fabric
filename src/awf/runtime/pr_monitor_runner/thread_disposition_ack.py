@@ -92,8 +92,8 @@ _CONCURRENCE_RE = re.compile(
 )
 # Every clause must concur or only thank; anything else (an imperative such as "Add a
 # test", or a statement such as "The handler crashes") could be a new point, so the
-# agent judges it.
-_CLAUSE_SPLIT_RE = re.compile(r"[.!?;:,\n]+")
+# agent judges it. A spaced hyphen, a dash, a bracket or "and" also joins clauses.
+_CLAUSE_SPLIT_RE = re.compile(r"(?:[.!?;:,\n()\[\]–—]|\s-+\s|\band\b)+", re.I)
 _THANKS_CLAUSE_RE = re.compile(r"(?:@\S+\s+)?(?:thanks|thank you)(?: for (?:the|your) \w+)?", re.I)
 
 
