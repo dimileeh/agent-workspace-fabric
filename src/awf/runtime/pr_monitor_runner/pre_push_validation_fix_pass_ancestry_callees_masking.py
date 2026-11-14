@@ -471,8 +471,9 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
     (PRRT_kwDOSJAM6s63Zfgo). Nor can a string literal follow a word with no gap
     unless that word is an expression-prefix keyword (``return'x'``), so the
     apostrophe of ``Don't <a href='x'>`` is JSX text even though a later quote
-    could close it. A JSX attribute string may span lines, so a quote right
-    after ``=`` still opens one.
+    could close it — but only where the JSX text pass would blank it, so
+    ``export default'helper()'`` stays a string (PRRT_kwDOSJAM6s63akNF). A JSX
+    attribute string may span lines, so a quote right after ``=`` still opens one.
     """
     quote = line[quote_index]
     if quote not in "'\"":
@@ -480,7 +481,11 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
     k = len(out) - 1
     while k >= 0 and (out[k].isalnum() or out[k] in "_$"):
         k -= 1
-    if k < len(out) - 1 and "".join(out[k + 1 :]) not in _JS_REGEX_PREFIX_KEYWORDS:
+    if (
+        k < len(out) - 1
+        and "".join(out[k + 1 :]) not in _JS_REGEX_PREFIX_KEYWORDS
+        and _jsx_text_slashes_at(out)
+    ):
         return True
     j = len(out) - 1
     while j >= 0 and out[j] in " \t\r\n":

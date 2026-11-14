@@ -885,6 +885,9 @@ def test_callee_refs_scan_code_after_a_completed_rooted_jsx_element(
         pytest.param(
             "function f() { return'helper()'; }", 1, frozenset(), id="keyword-glued-string"
         ),
+        pytest.param(
+            "export default'helper()';", 1, frozenset(), id="word-glued-string-outside-jsx"
+        ),
     ],
 )
 @pytest.mark.unit
