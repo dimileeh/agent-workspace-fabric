@@ -310,7 +310,8 @@ def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> boo
 
     Only then is it a type operator; after ``=``, a keyword operator or a line
     break it is a bare contextual identifier (PRRT_kwDOSJAM6s63WfSH). An operand
-    masked as a string, template or regex literal counts.
+    masked as a string, template or regex literal counts, as does one completed
+    by a postfix non-null assertion (``value! as``) (PRRT_kwDOSJAM6s63XU4a).
     """
     before = raw[:start].rstrip()
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
@@ -319,6 +320,8 @@ def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> boo
         return False
     if scan[len(before) - 1] != before[-1]:
         return True
+    if before.endswith("!"):
+        return _js_ts_type_operator_follows_operand(raw, scan, len(before.rstrip("!")))
     return (
         _JS_TS_OPERAND_END_RE.search(before) is not None
         and _JS_TS_TRAILING_CONTINUATION_RE.search(before) is None

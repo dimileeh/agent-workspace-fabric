@@ -780,6 +780,24 @@ async def test_js_ts_label_binds_nothing(
             id="trailing-as-after-commented-operand",
         ),
         pytest.param(
+            "export const LIMIT = value! as\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-as-after-non-null-assertion",
+        ),
+        pytest.param(
+            "export const LIMIT = items[0] /* set */ !! satisfies\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-satisfies-after-commented-non-null-assertion",
+        ),
+        pytest.param(
+            "const as = 0;\nexport const LIMIT = !as\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="negated-as-named-identifier-after-asi",
+        ),
+        pytest.param(
             "const satisfies = 0;\nexport const LIMIT = satisfies\nexport const OTHER = 1;\n",
             3,
             False,
