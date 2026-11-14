@@ -776,6 +776,36 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
         pytest.param(
             "    {cond ? x : <Icon />} helper()", frozenset(), id="ternary-colon-container-text"
         ),
+        # PRRT_kwDOSJAM6s63ZPLD: a bare element after a shorthand ``a,`` is a comma
+        # operator in a JSX container (no object member is a bare element).
+        pytest.param(
+            "    {count, <Badge />} helper()", frozenset(), id="comma-operator-container-text"
+        ),
+        pytest.param(
+            "    {[a], f(<Badge />)} helper()",
+            frozenset({(None, "f")}),
+            id="comma-call-container-text",
+        ),
+        pytest.param(
+            "    const v = { a, b: <Icon /> }; helper();",
+            frozenset({(None, "helper")}),
+            id="shorthand-then-property-value-stays-code",
+        ),
+        pytest.param(
+            "    const v = { a, ...(ok ? <Icon /> : null) }; helper();",
+            frozenset({(None, "helper")}),
+            id="shorthand-then-spread-value-stays-code",
+        ),
+        pytest.param(
+            "    const v = { a, 'b': [<Icon />] }; helper();",
+            frozenset({(None, "helper")}),
+            id="shorthand-then-quoted-key-value-stays-code",
+        ),
+        pytest.param(
+            "    const v = { a, b: [x], c: f(y, <Icon />) }; helper();",
+            frozenset({(None, "f"), (None, "helper")}),
+            id="shorthand-then-nested-value-stays-code",
+        ),
         pytest.param(
             "    const v = <Icon /> as Props; helper();",
             frozenset({(None, "helper")}),

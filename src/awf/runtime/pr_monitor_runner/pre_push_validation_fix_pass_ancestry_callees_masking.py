@@ -36,6 +36,11 @@ _JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
 # An object literal body: a spread, or a ``key:``/shorthand ``key,`` first
 # member (quoted keys are already blank) (PRRT_kwDOSJAM6s63ZGB0).
 _JS_OBJECT_LITERAL_BODY_RE = re.compile(r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\])?\s*(?::(?!:)|,))")
+# An object member that can hold a JSX element: a spread or a ``key:`` value
+# (PRRT_kwDOSJAM6s63ZPLD).
+_JS_OBJECT_VALUE_MEMBER_RE = re.compile(
+    r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\]|'[^']*'|\"[^\"]*\")?\s*:(?!:))"
+)
 # A ``{`` opening a JS block: an arrow body, a keyword block, or after the
 # ``)`` closing a control/function/method-shorthand header (PRRT_kwDOSJAM6s63ZMkA).
 _JS_BLOCK_PREFIX_RE = re.compile(r"(?:=>|(?<![\w$.])(?:else|try|finally|do))\s*$")
@@ -549,7 +554,10 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
     for k in range(start):
         if line[k] == "{":
             openers.append(
-                _JS_OBJECT_LITERAL_BODY_RE.match(line, k + 1) is not None
+                (
+                    _JS_OBJECT_LITERAL_BODY_RE.match(line, k + 1) is not None
+                    and _js_object_member_holds(line, k, start)
+                )
                 or _JS_METHOD_BODY_RE.match(line, k + 1) is not None
                 or _js_brace_opens_block(line, k)
             )
@@ -571,6 +579,25 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
             braces = max(braces - 1, 0)
         j += 1
     return None
+
+
+def _js_object_member_holds(line: str, k: int, start: int) -> bool:
+    """Whether the element at ``line[start]`` can sit in an object opened at ``line[k]``.
+
+    An object member holding an element is a spread or a ``key:`` value; a bare
+    member after a shorthand ``a,`` (``{count, <Badge />}``) is a JSX
+    container's comma operator instead (PRRT_kwDOSJAM6s63ZPLD).
+    """
+    member = k + 1
+    depth = 0
+    for p in range(k + 1, start):
+        if line[p] in "([{":
+            depth += 1
+        elif line[p] in ")]}":
+            depth -= 1
+        elif line[p] == "," and not depth:
+            member = p + 1
+    return _JS_OBJECT_VALUE_MEMBER_RE.match(line, member) is not None
 
 
 def _js_brace_opens_block(line: str, k: int) -> bool:
