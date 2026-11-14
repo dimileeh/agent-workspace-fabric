@@ -93,9 +93,12 @@ _NON_DEFINITION_NAMES = (
 # bodies never counts; ``==`` / ``+=`` are not bindings. A JS/TS statement may be
 # indented at module scope; its blocks are bracketed, so a binding inside one
 # never opens a statement (PRRT_kwDOSJAM6s63P5Zi). A standalone arrow's ``=>``
-# binds no parameter at module scope (PRRT_kwDOSJAM6s63V0Yl).
+# binds no parameter at module scope (PRRT_kwDOSJAM6s63V0Yl). An annotation's
+# function type (``name: (r: R) => S = ...``) consumes its ``=>`` before the
+# binding's ``=`` (PRRT_kwDOSJAM6s63WYf0).
+_TYPE_ANNOTATION_PATTERN = r"(?:[ \t]*:(?:[^=\n]|=>)*)?"
 _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
-    rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?![=>])"
+    rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT}){_TYPE_ANNOTATION_PATTERN}[ \t]*=(?![=>])"
 )
 # A further target of a chained binding (``A = B = 10``), matched right after
 # the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9). An arrow's ``=>`` binds
@@ -110,7 +113,7 @@ _PYTHON_INLINE_BODY_RE = re.compile(
 # A JS/TS declaration binds each declarator of ``const A = 0, B = v``; a further
 # one is matched right after a top-level ``,`` (PRRT_kwDOSJAM6s63QfAU).
 _JS_TS_DECLARATION_RE = re.compile(r"^(?:export[ \t]+)?(?:const|let|var)[ \t]")
-_JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)")
+_JS_TS_DECLARATOR_RE = re.compile(rf"[ \t]*({_JS_IDENT}){_TYPE_ANNOTATION_PATTERN}[ \t]*=(?![=>])")
 # What precedes a type-parameter list's ``<``: the start of an expression (a
 # generic arrow or function type), a ``function``/``class`` head or a construct
 # signature's ``new`` (PRRT_kwDOSJAM6s63U908). A ``<`` after an operand

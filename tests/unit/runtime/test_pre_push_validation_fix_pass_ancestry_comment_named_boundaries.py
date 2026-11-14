@@ -181,6 +181,37 @@ async def test_module_level_assignment_excludes_an_arrow(
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "export const LIMIT: (request: Request) => Response = makeHandler(\n  10\n);\n",
+            True,
+            id="function-type-annotation",
+        ),
+        pytest.param(
+            "const OTHER = 0, LIMIT: () => void = makeHandler(\n  10\n);\n",
+            True,
+            id="secondary-declarator-function-type-annotation",
+        ),
+        pytest.param(
+            "const OTHER = makeHandler(\n  10\n), LIMIT: () => void;\n",
+            False,
+            id="uninitialized-function-type-declarator",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_function_type_annotation_precedes_the_binding_assignment(
+    text: str, *, expected: bool
+) -> None:
+    """An annotation's ``=>`` is not the binding's ``=`` (PRRT_kwDOSJAM6s63WYf0)."""
+    diff = _diff(_WEB, "@@ -2 +2 @@", "-  10", "+  20")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "new", "name", "expected"),
     [
         pytest.param(
