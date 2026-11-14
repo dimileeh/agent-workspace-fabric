@@ -1288,3 +1288,62 @@ async def test_insert_after_a_complete_binding_is_not_evidence(
     )
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "expected"),
+    [
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\n({ LIMIT } = {LIMIT: 20});\n",
+            False,
+            id="js-ts-object-destructuring-reassignment",
+        ),
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\n[LIMIT] = [20];\n",
+            False,
+            id="js-ts-array-destructuring-reassignment",
+        ),
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\nwork(); ({ size: LIMIT } = options);\n",
+            False,
+            id="js-ts-renamed-destructuring-after-semicolon",
+        ),
+        pytest.param(
+            _WEB,
+            "export var LIMIT = 10;\nvar { LIMIT } = options;\n",
+            False,
+            id="js-ts-destructuring-redeclaration",
+        ),
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\nif (on)\n  [LIMIT] = [20];\n",
+            False,
+            id="js-ts-braceless-destructuring-body",
+        ),
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\n({ OTHER } = options);\n[LIMIT].map(f);\n",
+            True,
+            id="js-ts-destructuring-of-another-name",
+        ),
+        pytest.param(
+            _WEB,
+            "export let LIMIT = 10;\n[LIMIT\n",
+            True,
+            id="js-ts-unclosed-pattern-at-end-of-file",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_destructuring_reassignment_withholds_the_binding(
+    path: str, text: str, *, expected: bool
+) -> None:
+    """A module-scope destructuring target rebinds the name (PRRT_kwDOSJAM6s63W936)."""
+    old = text.splitlines()[0]
+    diff = _diff(path, "@@ -1 +1 @@", f"-{old}", f"+{old.replace('10', '11')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected

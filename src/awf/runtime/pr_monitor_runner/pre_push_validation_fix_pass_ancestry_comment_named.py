@@ -175,6 +175,13 @@ _JS_TS_LEADING_CONTINUATION_RE = re.compile(
 _JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?<![\w$])(?:else|do)$")
 _JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$")
 _JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
+# A JS/TS destructuring pattern opening a statement — after any declaration
+# keyword and the ``(`` an object pattern needs — and the ``=`` assigning it
+# (PRRT_kwDOSJAM6s63W936).
+_JS_TS_DESTRUCTURING_HEAD_RE = re.compile(
+    r"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?[ \t(]*(?=[{\[])"
+)
+_JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -508,6 +515,34 @@ def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
     return found
 
 
+def _js_ts_destructured_names(segment: str) -> set[str]:
+    """Identifiers of a destructuring pattern ``segment`` opens by assigning it.
+
+    ``({ LIMIT } = next)`` and ``[LIMIT] = next`` rebind ``LIMIT`` with no
+    ``name =`` for the plain-binding readers to match, so the earlier binding
+    looked effective while importers reach the destructured value
+    (PRRT_kwDOSJAM6s63W936). Every identifier of the pattern is returned — a
+    property key or a default's operand included — so a name it may bind fails
+    closed rather than leaving that dead binding as evidence.
+    """
+    head = _JS_TS_DESTRUCTURING_HEAD_RE.match(segment)
+    if head is None:
+        return set()
+    depth = 0
+    for position in range(head.end(), len(segment)):
+        if segment[position] in "([{":
+            depth += 1
+        elif segment[position] in ")]}":
+            depth -= 1
+            if not depth:
+                break
+    else:
+        return set()
+    if _JS_TS_DESTRUCTURING_EQUALS_RE.match(segment, position + 1) is None:
+        return set()
+    return set(re.findall(_JS_IDENT, segment[head.end() : position + 1]))
+
+
 def _annotation_binding_equals(text: str, start: int) -> int | None:
     """Index of the ``=`` binding an annotation that begins at ``text[start]``.
 
@@ -687,7 +722,8 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63TdLt), which ends on the line closing it even with no
     ``;`` (PRRT_kwDOSJAM6s63Tr7E). Each ``;``-separated statement of a line binds over
     its own lines too, unless the line is a Python compound head's body
-    (PRRT_kwDOSJAM6s63Sh3G).
+    (PRRT_kwDOSJAM6s63Sh3G). A JS/TS destructuring assignment of the name,
+    which no ``name =`` reader matches, withholds it too (PRRT_kwDOSJAM6s63W936).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     typescript = Path(path).suffix.lower() in _TS_SUFFIXES
@@ -700,6 +736,7 @@ def _module_level_assignment_spans(
         ).split("\n")
     ]
     bindings: list[tuple[str, int, int | None, int]] = []
+    destructured: set[str] = set()
     depth = 0
     continued = False
     in_body = False
@@ -772,6 +809,8 @@ def _module_level_assignment_spans(
             # A brace-less body continues its head's chain, which a ``do``
             # block ends across lines (PRRT_kwDOSJAM6s63W1Vj).
             previous = f"{previous} {logical}" if is_body else logical
+            for segment in _simple_statement_segments(logical):
+                destructured |= _js_ts_destructured_names(segment.lstrip(" \t"))
             if is_body:
                 continue
         texts = (
@@ -853,7 +892,7 @@ def _module_level_assignment_spans(
             else _assignment_span_end_line(file_text, scan_lines, start, path=path, column=column),
         )
         for name, (start, end, column) in last.items()
-        if name not in shadowed and (0, name) not in rebound
+        if name not in shadowed and (0, name) not in rebound and name not in destructured
     ]
 
 
