@@ -1025,6 +1025,37 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
 
 
 @pytest.mark.parametrize(
+    "operator",
+    [
+        pytest.param("as\n  Expected", id="as-continued-on-next-line"),
+        pytest.param("as Expected", id="as-same-line"),
+        pytest.param("satisfies\n  Expected", id="satisfies-continued-on-next-line"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("comment", "expected"),
+    [
+        pytest.param("`VIEW` is wrong", False, id="unchanged-jsx-binding"),
+        pytest.param("`OTHER` is wrong", True, id="changed-next-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_tsx_type_operator_after_completed_jsx_element_stays_code(
+    operator: str, comment: str, *, expected: bool
+) -> None:
+    """``<Widget /> as T`` keeps ``as`` code, not JSX text (PRRT_kwDOSJAM6s63XLQg)."""
+    path = "src/app/web/team.tsx"
+    text = f"export const VIEW = <Widget /> {operator};\nexport const OTHER = 1;\n"
+    line = text.count("\n")
+    diff = _diff(
+        path, f"@@ -{line} +{line} @@", "-export const OTHER = 1;", "+export const OTHER = 2;"
+    )
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, comment) is expected
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(

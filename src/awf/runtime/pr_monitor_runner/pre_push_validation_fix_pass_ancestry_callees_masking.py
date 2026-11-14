@@ -29,6 +29,9 @@ def _mask_char_preserving_splitlines_separators(ch: str) -> str:
 # What precedes a JSX element opened as an expression (``= <A />``,
 # ``return (<div>``, ``cond && <A />``): its completion ends the JSX.
 _JSX_ROOT_PREFIX_RE = re.compile(r"(?:[=(,?:\[{&|]|(?<![\w$])(?:return|yield|default))\s*$")
+# TypeScript type operators that code may put after a completed element
+# (``<Widget /> as Props``) (PRRT_kwDOSJAM6s63XLQg).
+_JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -482,7 +485,8 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     """Where JSX text resumes after a rooted element ending at ``end``; ``None`` if code.
 
     Code cannot put an identifier right after a completed element
-    (``a = <Icon /> helper()``), and a ``}`` closing a brace opened before it
+    (``a = <Icon /> helper()``) other than a type operator
+    (``<Icon /> as Props``), and a ``}`` closing a brace opened before it
     ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
     so text follows. Line-local: the look-ahead stops at a line separator.
     """
@@ -490,7 +494,11 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     j = end
     while j < n and line[j] in " \t)]":
         j += 1
-    if j < n and (line[j].isalnum() or line[j] in "_$"):
+    if (
+        j < n
+        and (line[j].isalnum() or line[j] in "_$")
+        and _JSX_TYPE_OPERATOR_RE.match(line, j) is None
+    ):
         return end
     braces = 0
     while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:

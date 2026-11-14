@@ -722,6 +722,22 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             frozenset({(None, "run"), (None, "helper")}),
             id="balanced-braces-stay-code",
         ),
+        pytest.param(
+            "    const v = <Icon /> as Props; helper();",
+            frozenset({(None, "helper")}),
+            id="as-assertion-after-element",
+        ),
+        pytest.param(
+            "    const v = <Icon /> satisfies Props; helper();",
+            frozenset({(None, "helper")}),
+            id="satisfies-after-element",
+        ),
+        pytest.param(
+            "    const v = (<Icon />) as\n",
+            frozenset(),
+            id="line-ending-as-after-element",
+        ),
+        pytest.param("    a = <Icon /> assist()", frozenset(), id="as-prefixed-identifier-text"),
     ],
 )
 @pytest.mark.unit
