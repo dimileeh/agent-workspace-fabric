@@ -332,7 +332,39 @@ def _js_ts_ends_with_body_head(logical: str) -> bool:
             depth -= 1
             if not depth:
                 head = _JS_TS_CONTROL_HEAD_RE.search(logical[:position])
-                return head is not None and _js_ts_head_opens_statement(logical[: head.start()])
+                return (
+                    head is not None
+                    and not (
+                        head.group().startswith("while")
+                        and _js_ts_ends_with_do_block(logical[: head.start()])
+                    )
+                    and _js_ts_head_opens_statement(logical[: head.start()])
+                )
+    return False
+
+
+def _js_ts_ends_with_do_block(prefix: str) -> bool:
+    """Whether the masked JS/TS ``prefix`` ends with a ``do`` statement's block body.
+
+    A ``while (...)`` after it terminates that ``do`` rather than heading a loop
+    that takes the next statement as its body (PRRT_kwDOSJAM6s63Wpy7).
+    """
+    prefix = prefix.rstrip(" \t")
+    if not prefix.endswith("}"):
+        return False
+    depth = 0
+    for position in range(len(prefix) - 1, -1, -1):
+        if prefix[position] in ")]}":
+            depth += 1
+        elif prefix[position] in "([{":
+            depth -= 1
+            if not depth:
+                head = _JS_TS_BARE_BODY_HEAD_RE.search(prefix[:position].rstrip(" \t"))
+                return (
+                    head is not None
+                    and head.group() == "do"
+                    and _js_ts_head_opens_statement(prefix[: head.start()])
+                )
     return False
 
 

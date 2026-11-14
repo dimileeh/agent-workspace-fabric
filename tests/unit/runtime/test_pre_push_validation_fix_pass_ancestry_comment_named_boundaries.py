@@ -1187,6 +1187,34 @@ async def test_js_ts_multi_line_jsx_opening_tag_keeps_its_statement_open(
             False,
             id="js-ts-braceless-body-after-nested-labelled-loop-head",
         ),
+        pytest.param(
+            _WEB,
+            "do { work() } while (enabled)\nexport const LIMIT = [\n  1\n];\n",
+            3,
+            True,
+            id="js-ts-binding-after-do-while-terminator",
+        ),
+        pytest.param(
+            _WEB,
+            "do {\n  work()\n} while (enabled)\nexport const LIMIT = 1;\n",
+            4,
+            True,
+            id="js-ts-binding-after-multiline-do-while-terminator",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\n{ work() } while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-loop-head-following-a-block",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\n} while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-loop-head-following-a-stray-close",
+        ),
     ],
 )
 @pytest.mark.unit
