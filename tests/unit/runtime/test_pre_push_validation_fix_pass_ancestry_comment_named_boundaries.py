@@ -1787,3 +1787,39 @@ async def test_js_ts_loop_target_withholds_the_binding(text: str, *, expected: b
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "export function handler() {\n  return 10;\n}\nif (true) handler = () => 20;\n",
+            False,
+            id="inline-assignment",
+        ),
+        pytest.param(
+            "export function handler() {\n  return 10;\n}\n({ handler } = other);\n",
+            False,
+            id="destructuring-assignment",
+        ),
+        pytest.param(
+            "export function handler() {\n  return 10;\n}\nfor (handler of [() => 20]) {}\n",
+            False,
+            id="for-of-target",
+        ),
+        pytest.param(
+            "export function handler() {\n  return 10;\n}\nif (on) other = handler;\n",
+            True,
+            id="reads-only",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_reassignment_withholds_the_definition_head(
+    text: str, *, expected: bool
+) -> None:
+    """A JS/TS rebinding withholds a ``function`` head too (PRRT_kwDOSJAM6s63YX72)."""
+    diff = _diff(_WEB, "@@ -2 +2 @@", "-  return 10;", "+  return 11;")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`handler` is too low") is expected

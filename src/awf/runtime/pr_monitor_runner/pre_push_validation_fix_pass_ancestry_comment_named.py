@@ -858,8 +858,11 @@ def _assignment_span_end_line(
 
 def _module_level_assignment_spans(
     file_text: str, names: frozenset[str], *, path: str
-) -> list[tuple[int, int]]:
+) -> tuple[list[tuple[int, int]], set[str]]:
     """Spans of effective module-level plain bindings of ``names``, multi-line literals included.
+
+    Also returns the names a JS/TS statement rebinds without a binding this
+    reader matches, so the caller withholds definition heads of them too.
 
     The module body runs its column-0 bindings in order, so only the last one of
     a name is the value importers reach; an earlier one is dead, and an edit
@@ -1029,7 +1032,7 @@ def _module_level_assignment_spans(
             if js_ts:
                 reassigned |= _js_ts_assigned_names(segment, frozenset(claimed))
     if not bindings:
-        return []
+        return [], reassigned
     last = {name: (start, end, column) for name, start, end, column in bindings}
     starts = frozenset(start for _name, start, _end, _column in bindings)
     all_spans = _iter_definition_spans(file_text, path=path)
@@ -1061,7 +1064,7 @@ def _module_level_assignment_spans(
         )
         for name, (start, end, column) in last.items()
         if name not in shadowed and (0, name) not in rebound and name not in reassigned
-    ]
+    ], reassigned
 
 
 def _without_trailing_gaps(
@@ -1279,10 +1282,14 @@ def _named_definition_spans(
 
     A backticked name carries no receiver, so it is held to the bare-name
     module-scope rule: a same-named method of some class in a changed file is
-    not the definition the reviewer named (PRRT_kwDOSJAM6s63LVep).
+    not the definition the reviewer named (PRRT_kwDOSJAM6s63LVep). A JS/TS
+    rebinding the plain-binding reader withholds a name for, such as an inline
+    ``if (on) handler = next``, withholds its ``function`` head too: importers
+    reach the new value (PRRT_kwDOSJAM6s63YX72).
     """
     if not file_text:
         return [], []
+    bindings, reassigned = _module_level_assignment_spans(file_text, names, path=path)
     return _importable_definition_spans_for_names(
-        file_text, frozenset(), path=path, bare_names=names
-    ), _module_level_assignment_spans(file_text, names, path=path)
+        file_text, frozenset(), path=path, bare_names=names - reassigned
+    ), bindings
