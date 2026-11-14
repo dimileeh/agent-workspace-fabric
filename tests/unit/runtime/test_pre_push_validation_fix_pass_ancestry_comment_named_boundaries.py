@@ -1190,6 +1190,15 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param(
             "src/app/web/team.tsx", "{ node: c ? <A /> : (<B />) };", id="tsx-object-ternary-value"
         ),
+        # PRRT_kwDOSJAM6s63Zfgo: a JSX text apostrophe opens no string literal.
+        pytest.param(
+            "src/app/web/team.tsx",
+            "<div>Don't call helper()</div>;",
+            id="tsx-text-apostrophe",
+        ),
+        pytest.param(
+            "src/app/web/team.jsx", '<p>Say "hi</p>;', id="jsx-text-unpaired-double-quote"
+        ),
     ],
 )
 @pytest.mark.parametrize(

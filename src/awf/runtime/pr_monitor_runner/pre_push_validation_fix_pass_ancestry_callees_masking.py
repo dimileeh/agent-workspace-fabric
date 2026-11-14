@@ -398,12 +398,17 @@ def _mask_comments_and_string_literals_for_callee_scan(
         return line
     allow_js_private_fields = _path_allows_js_private_fields(path)
     slash_comments = not _path_is_python(path)
+    jsx = _path_is_jsx(path)
     out: list[str] = []
     i = 0
     n = len(line)
     while i < n:
         ch = line[i]
         if ch in "'\"`":
+            if jsx and _jsx_text_quote_at(line, i, out):
+                out.append(ch)
+                i += 1
+                continue
             i = _append_masked_quote_at_for_callee_scan(
                 line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
             )
@@ -430,9 +435,40 @@ def _mask_comments_and_string_literals_for_callee_scan(
         out.append(ch)
         i += 1
     masked = "".join(out)
-    if _path_is_jsx(path):
+    if jsx:
         return _mask_jsx_text_nodes_for_callee_scan(masked)
     return masked
+
+
+def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
+    """Whether a ``'``/``"`` at ``quote_index`` is JSX text rather than a string opener.
+
+    A JS/TS ``'``/``"`` string cannot run past its line without a ``\\``
+    continuation, so a quote left open there is JSX text such as ``Don't``,
+    and opening a string at it would blank the rest of the file
+    (PRRT_kwDOSJAM6s63Zfgo). A JSX attribute string may span lines, so a quote
+    right after ``=`` still opens one.
+    """
+    quote = line[quote_index]
+    if quote not in "'\"":
+        return False
+    j = len(out) - 1
+    while j >= 0 and out[j] in " \t\r\n":
+        j -= 1
+    if j >= 0 and out[j] == "=":
+        return False
+    i = quote_index + 1
+    n = len(line)
+    while i < n:
+        if line[i] == "\\":
+            i += 3 if line.startswith("\r\n", i + 1) else 2
+        elif line[i] == quote:
+            return False
+        elif line[i] in "\r\n":
+            return True
+        else:
+            i += 1
+    return True
 
 
 def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:

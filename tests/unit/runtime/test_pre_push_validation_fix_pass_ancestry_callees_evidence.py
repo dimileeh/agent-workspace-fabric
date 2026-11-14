@@ -853,6 +853,42 @@ def test_callee_refs_scan_code_after_a_completed_rooted_jsx_element(
     assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "line_no", "expected"),
+    [
+        pytest.param(
+            "const v = (\n  <p>\n    Don't call\n  </p>\n);\nhelper();\n",
+            6,
+            frozenset({(None, "helper")}),
+            id="multi-line-text-apostrophe",
+        ),
+        pytest.param(
+            "const v = <p>Don't</p>;\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="same-line-text-apostrophe",
+        ),
+        pytest.param(
+            'const v = <a title="x\n  helper()">;\n', 2, frozenset(), id="multi-line-attribute"
+        ),
+        pytest.param("f('a\\\n  helper()');\n", 2, frozenset(), id="continued-string-stays-masked"),
+        pytest.param(
+            "const v = <p>Don't</p>; helper();", 1, frozenset({(None, "helper")}), id="eof-text"
+        ),
+        pytest.param("run(`helper()`);\n", 1, frozenset({(None, "run")}), id="template-literal"),
+    ],
+)
+@pytest.mark.unit
+def test_callee_refs_jsx_text_quote_opens_no_string(
+    text: str, line_no: int, expected: frozenset[tuple[str | None, str]]
+) -> None:
+    """A quote left open at its line end is JSX text, not a string (PRRT_kwDOSJAM6s63Zfgo).
+
+    A JSX attribute string or a ``\\``-continued string may still span lines.
+    """
+    assert callees._callee_refs_from_file_line(text, line_no, path="src/mod.tsx") == expected
+
+
 @pytest.mark.unit
 def test_callee_refs_mask_js_block_comments_and_prefix_poison() -> None:
     """``/* */`` must blank decoys and must not leave quotes that poison later lines."""
