@@ -888,6 +888,31 @@ def test_callee_refs_scan_code_after_a_completed_rooted_jsx_element(
         pytest.param(
             "export default'helper()';", 1, frozenset(), id="word-glued-string-outside-jsx"
         ),
+        # PRRT_kwDOSJAM6s63arR0: a JSX text backtick opens no template literal.
+        pytest.param(
+            "const v = <div>`hello</div>;\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="text-backtick",
+        ),
+        pytest.param(
+            "const v = (\n  <p>\n`x\n  </p>\n);\nhelper();\n",
+            6,
+            frozenset({(None, "helper")}),
+            id="line-start-text-backtick",
+        ),
+        pytest.param(
+            "const v = <p>Use `helper()` here</p>;\n", 1, frozenset(), id="text-backticks-stay-text"
+        ),
+        pytest.param(
+            "const v = <A />; run(`x\nhelper()`);\n",
+            2,
+            frozenset(),
+            id="template-after-element",
+        ),
+        pytest.param(
+            "f(\n`<b>\nhelper()`);\n", 3, frozenset(), id="line-start-template-outside-jsx"
+        ),
     ],
 )
 @pytest.mark.unit

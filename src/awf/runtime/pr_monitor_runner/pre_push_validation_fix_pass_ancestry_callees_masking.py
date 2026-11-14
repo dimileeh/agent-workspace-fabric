@@ -474,8 +474,12 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
     could close it — but only where the JSX text pass would blank it, so
     ``export default'helper()'`` stays a string (PRRT_kwDOSJAM6s63akNF). A JSX
     attribute string may span lines, so a quote right after ``=`` still opens one.
+    A template literal may span lines too, so a backtick is JSX text only where
+    the JSX text pass would blank it (PRRT_kwDOSJAM6s63arR0).
     """
     quote = line[quote_index]
+    if quote == "`":
+        return _jsx_text_slashes_at(out, line_start=_template_spans_tag(line, quote_index))
     if quote not in "'\"":
         return False
     k = len(out) - 1
@@ -510,6 +514,12 @@ def _block_comment_spans_tag(line: str, start: int) -> bool:
     """Whether the ``/*`` at ``start`` would blank a ``<`` before its ``*/`` (or EOF)."""
     end = line.find("*/", start + 2)
     return "<" in line[start + 2 : end if end >= 0 else len(line)]
+
+
+def _template_spans_tag(line: str, start: int) -> bool:
+    """Whether the backtick at ``start`` would blank a ``<`` before its closing backtick (or EOF)."""
+    end = line.find("`", start + 1)
+    return "<" in line[start + 1 : end if end >= 0 else len(line)]
 
 
 def _line_comment_spans_tag(line: str, start: int) -> bool:

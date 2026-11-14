@@ -1204,6 +1204,9 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
             "<div>Don't <a href='x'>y</a></div>;",
             id="tsx-text-apostrophe-before-attribute-string",
         ),
+        # PRRT_kwDOSJAM6s63arR0: a JSX text backtick opens no template literal.
+        pytest.param("src/app/web/team.tsx", "<div>`hello</div>;", id="tsx-text-backtick"),
+        pytest.param("src/app/web/team.jsx", "<p>Use `npm` here</p>;", id="jsx-text-backtick-pair"),
         # PRRT_kwDOSJAM6s63Zv5r: a JSX text ``//`` (a URL) opens no line comment.
         pytest.param("src/app/web/team.tsx", "<div>https://example.com</div>;", id="tsx-text-url"),
         pytest.param("src/app/web/team.jsx", "<p>a // b</p>;", id="jsx-text-double-slash"),
