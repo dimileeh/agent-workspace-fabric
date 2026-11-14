@@ -212,6 +212,44 @@ async def test_function_type_annotation_precedes_the_binding_assignment(
 
 
 @pytest.mark.parametrize(
+    ("text", "diff", "expected"),
+    [
+        pytest.param(
+            "let LIMIT: () => void, OTHER = 10;\n",
+            _diff(
+                _WEB,
+                "@@ -1 +1 @@",
+                "-let LIMIT: () => void, OTHER = 10;",
+                "+let LIMIT: () => void, OTHER = 20;",
+            ),
+            False,
+            id="later-declarator-initializer",
+        ),
+        pytest.param(
+            "let LIMIT: <T = number>(\n  x: T\n) => T;\n",
+            _diff(_WEB, "@@ -2 +2 @@", "-  x: T", "+  x: T[]"),
+            False,
+            id="generic-default-in-uninitialized-annotation",
+        ),
+        pytest.param(
+            "export const LIMIT: <T = number>(x: T) => T = (\n  x\n) => x;\n",
+            _diff(_WEB, "@@ -2 +2 @@", "-  x", "+  x ?? 10"),
+            True,
+            id="generic-default-before-binding-assignment",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_annotation_binds_only_its_own_top_level_assignment(
+    text: str, diff: str, *, expected: bool
+) -> None:
+    """A later declarator's or generic default's ``=`` initializes no annotated name (PRRT_kwDOSJAM6s63WhGd)."""
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "line", "new", "name", "expected"),
     [
         pytest.param(

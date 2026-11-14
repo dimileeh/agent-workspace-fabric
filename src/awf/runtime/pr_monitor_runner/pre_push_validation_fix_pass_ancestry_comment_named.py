@@ -95,8 +95,11 @@ _NON_DEFINITION_NAMES = (
 # never opens a statement (PRRT_kwDOSJAM6s63P5Zi). A standalone arrow's ``=>``
 # binds no parameter at module scope (PRRT_kwDOSJAM6s63V0Yl). An annotation's
 # function type (``name: (r: R) => S = ...``) consumes its ``=>`` before the
-# binding's ``=`` (PRRT_kwDOSJAM6s63WYf0).
-_TYPE_ANNOTATION_PATTERN = r"(?:[ \t]*:(?:[^=\n]|=>)*)?"
+# binding's ``=`` (PRRT_kwDOSJAM6s63WYf0). The annotation (group 2 is its ``:``)
+# ends at its own top-level ``=``, which ``_binding_match`` locates: a generic
+# default's ``=`` or a later declarator's never initializes the name
+# (PRRT_kwDOSJAM6s63WhGd).
+_TYPE_ANNOTATION_PATTERN = r"(?:[ \t]*(:)[^\n]*)?"
 _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
     rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT}){_TYPE_ANNOTATION_PATTERN}[ \t]*=(?![=>])"
 )
@@ -397,10 +400,44 @@ def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
         elif depth == 0 and char == ";":
             break
         elif depth == 0 and char == ",":
-            match = _JS_TS_DECLARATOR_RE.match(logical, position + 1)
+            match = _binding_match(_JS_TS_DECLARATOR_RE, logical, position + 1)
             if match is not None:
                 found.append(match)
     return found
+
+
+def _annotation_binding_equals(text: str, start: int) -> int | None:
+    """Index of the ``=`` binding an annotation that begins at ``text[start]``.
+
+    That is its first ``=`` outside brackets and type-argument lists, skipping a
+    function type's ``=>``. A top-level ``,`` or ``;`` first ends an
+    uninitialized declarator, and ``==`` binds nothing: ``None``.
+    """
+    depth = 0
+    for position in range(start, len(text)):
+        char = text[position]
+        if text.startswith("=>", position) or (char == ">" and text[position - 1] == "="):
+            continue
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth = max(depth - 1, 0)
+        elif depth:
+            continue
+        elif char in ",;":
+            return None
+        elif char == "=":
+            return None if text.startswith("==", position) else position
+    return None
+
+
+def _binding_match(pattern: re.Pattern[str], text: str, pos: int = 0) -> re.Match[str] | None:
+    """``pattern``'s binding at ``pos``, an annotated one ending at its own ``=``."""
+    match = pattern.match(text, pos)
+    if match is None or match.start(2) < 0:
+        return match
+    equals = _annotation_binding_equals(text, match.end(2))
+    return None if equals is None else pattern.fullmatch(text, pos, equals + 1)
 
 
 def _statement_line_index(statement: list[str], offset: int) -> int:
@@ -643,7 +680,7 @@ def _module_level_assignment_spans(
             stop = begin + len(text)
             begin = stop + 1
             declares = js_ts and _JS_TS_DECLARATION_RE.match(segment) is not None
-            first = _MODULE_LEVEL_ASSIGNMENT_RE.match(segment)
+            first = _binding_match(_MODULE_LEVEL_ASSIGNMENT_RE, segment)
             # A JS/TS ``name: ... =`` outside a declaration is a labelled
             # statement, which binds no ``name`` (PRRT_kwDOSJAM6s63SzHq).
             if (
