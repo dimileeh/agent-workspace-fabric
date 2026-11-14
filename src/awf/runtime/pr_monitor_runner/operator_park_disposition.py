@@ -271,12 +271,18 @@ def _ruling_already_applied(
 
     A guide whose other thread failed to resolve is retried by sending it again
     (PRRT_kwDOSJAM6s62f9ot): the thread it did close is satisfied, not refused as
-    ``not_mutation_park``. A different ruling, or a reopened thread, is not.
+    ``not_mutation_park``. A different ruling, or a reopened thread, is not; nor is
+    one the gate flagged again, whose feedback came after the ruling's reply and
+    before any audit bound it (PRRT_kwDOSJAM6s63YWAU).
     """
     disposition = read_item_disposition(state, thread_id)
     if disposition is None or disposition.source != _DISPOSITION_SOURCE:
         return False
-    if not disposition.resolved or _listed_open(status, thread_id):
+    if (
+        not disposition.resolved
+        or _listed_open(status, thread_id)
+        or _is_gate_flagged(state, thread_id)
+    ):
         return False
     if ruling.sha is None:
         return disposition.disposition_class == "false_positive"

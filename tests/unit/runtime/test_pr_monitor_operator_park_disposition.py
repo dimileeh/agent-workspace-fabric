@@ -1299,3 +1299,48 @@ async def test_ruling_on_a_gate_flagged_thread_is_refused_when_feedback_lands_be
     assert disposition.reply_comment_id is None and disposition.resolved is False
     blocked = await _audit_gate(runner, workspace_id, state)
     assert blocked.unverified == (_THREAD,)
+
+
+@pytest.mark.unit
+async def test_repeat_ruling_on_a_thread_the_gate_flagged_again_replies_anew(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+    applied = read_item_disposition(state, _THREAD)
+    assert applied is not None and applied.resolved and not applied.is_bound
+
+    # The bot answers the ruling's reply before any audit bound it: the gate
+    # keeps the unbound record but flags the thread again.
+    nodes = gh.review_threads[_THREAD]["comments"]["nodes"]
+    nodes.append(
+        {
+            "id": "c-5",
+            "body": "Still not a false positive.",
+            "bodyText": "Still not a false positive.",
+            "viewerDidAuthor": False,
+            "createdAt": "2026-11-05T00:00:00+00:00",
+            "author": _BOT,
+        }
+    )
+    audit = await gh.fetch_review_thread_audit(repo=_REPO, pr_number=42)
+    record_ack_judgment(state, _THREAD, audit.threads[0].trailing_comments[-1], UNJUDGED)
+    blocked = await _audit_gate(runner, workspace_id, state)
+    assert blocked.unverified == (_THREAD,)
+    assert read_item_disposition(state, _THREAD) == applied
+
+    # The same ruling again is no no-op: it answers the current conversation.
+    gh.events.clear()
+    _arm(state, _false_positive(), operation_id="op_guide_1238_reflagged")
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    renewed = read_item_disposition(state, _THREAD)
+    assert renewed is not None and renewed.resolved
+    assert renewed.reply_comment_id != applied.reply_comment_id
+    certified = await _audit_gate(runner, workspace_id, state)
+    assert certified.blocker is None and certified.unverified == ()
