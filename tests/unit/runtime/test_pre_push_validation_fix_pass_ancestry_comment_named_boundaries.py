@@ -1810,6 +1810,57 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
 
 
 @pytest.mark.parametrize(
+    ("path", "text", "expected"),
+    [
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const LIMIT = 10;\nexport const VIEW = <Widget LIMIT={LIMIT} />;\n",
+            True,
+            id="tsx-attribute-name",
+        ),
+        pytest.param(
+            "src/app/web/team.jsx",
+            "export const LIMIT = 10;\nexport const VIEW = (\n  <Widget\n    data-LIMIT='a'\n"
+            "    LIMIT={LIMIT}\n  >\n    <Item LIMIT={1} />\n  </Widget>\n);\n",
+            True,
+            id="jsx-multi-line-attribute-names",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export let LIMIT = 10;\nexport const VIEW = <Widget value={LIMIT = 20} />;\n",
+            False,
+            id="tsx-attribute-expression-write",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export let LIMIT = 10;\nexport const VIEW = <Widget on={() => { LIMIT = 20; }} />;\n",
+            False,
+            id="tsx-attribute-arrow-body-write",
+        ),
+        pytest.param(
+            "src/app/web/team.ts",
+            "export let LIMIT = 10;\nexport const VIEW = x <Widget LIMIT= 20;\n",
+            False,
+            id="ts-comparison-is-no-tag",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_jsx_attribute_name_does_not_withhold_the_binding(
+    path: str, text: str, *, expected: bool
+) -> None:
+    """A JSX attribute name is no assignment target (PRRT_kwDOSJAM6s63Z51K).
+
+    A write inside the attribute's ``{...}`` expression still rebinds the name.
+    """
+    old = text.splitlines()[0]
+    diff = _diff(path, "@@ -1 +1 @@", f"-{old}", f"+{old.replace('10', '11')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
     ("text", "expected"),
     [
         pytest.param("export let LIMIT = 10;\nfor (LIMIT of [20]) {}\n", False, id="for-of"),

@@ -408,10 +408,12 @@ def _js_ts_line_ends_statement(
     )
 
 
-def _jsx_opening_tag_is_open(code: str) -> bool:
+def _jsx_opening_tag_is_open(code: str, *, at_attribute: bool = False) -> bool:
     """Whether the masked JSX ``code`` ends inside an opening tag, before its ``>``.
 
     A ``>`` inside the tag's ``{...}`` attribute expressions closes nothing.
+    ``at_attribute`` further requires ``code`` to end outside those expressions,
+    where an attribute name may follow.
     """
     open_tag = False
     depth = 0
@@ -428,7 +430,7 @@ def _jsx_opening_tag_is_open(code: str) -> bool:
             depth = max(depth - 1, 0)
         elif char == ">" and not depth:
             open_tag = False
-    return open_tag
+    return open_tag and not (at_attribute and depth)
 
 
 def _js_ts_ends_unfinished_type_operand(
@@ -723,7 +725,9 @@ def _js_ts_secondary_declarators(logical: str) -> list[re.Match[str]]:
     return found
 
 
-def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -> set[str]:
+def _js_ts_assigned_names(
+    segment: str, claimed: frozenset[int] = frozenset(), *, jsx: bool = False
+) -> set[str]:
     """Identifiers the JS/TS statement ``segment`` assigns past its ``claimed`` heads.
 
     ``({ LIMIT } = next)`` and ``[LIMIT] = next`` rebind ``LIMIT`` with no
@@ -740,6 +744,8 @@ def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -
     fails closed rather than leaving that dead binding as evidence. Only the
     binding heads the caller reads itself, at offsets ``claimed``, are skipped,
     as is a property a spaced ``obj. LIMIT = 20`` writes (PRRT_kwDOSJAM6s63X_Aw).
+    In ``jsx`` code so is an attribute name (``<Widget LIMIT={LIMIT} />``),
+    though not a write inside its ``{...}`` expression (PRRT_kwDOSJAM6s63Z51K).
     """
     found = {
         match.group(group)
@@ -748,6 +754,7 @@ def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -
         if match.group(group) is not None
         and match.start(group) not in claimed
         and not segment[: match.start(group)].rstrip().endswith(".")
+        and not (jsx and _jsx_opening_tag_is_open(segment[: match.start(group)], at_attribute=True))
     }
     previous = -1
     for opener, char in enumerate(segment):
@@ -1074,7 +1081,7 @@ def _module_level_assignment_spans(
             previous = f"{previous} {logical}" if is_body else logical
             if is_body:
                 for segment in _simple_statement_segments(logical):
-                    reassigned |= _js_ts_assigned_names(segment)
+                    reassigned |= _js_ts_assigned_names(segment, jsx=_path_is_jsx(path))
                 continue
         texts = (
             list(_simple_statement_segments(logical))
@@ -1126,7 +1133,9 @@ def _module_level_assignment_spans(
                         bindings.append((match.group(1), start, end, column))
                     match = _CHAINED_ASSIGNMENT_TARGET_RE.match(segment, match.end())
             if js_ts:
-                reassigned |= _js_ts_assigned_names(segment, frozenset(claimed))
+                reassigned |= _js_ts_assigned_names(
+                    segment, frozenset(claimed), jsx=_path_is_jsx(path)
+                )
     if not bindings:
         return [], reassigned
     last = {name: (start, end, column) for name, start, end, column in bindings}
