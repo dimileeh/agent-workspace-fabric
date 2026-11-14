@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ack_reply_fits,
     acknowledgement_views,
     comment_identity,
+    is_bot_concurrence,
     parse_ack_answer,
     record_ack_judgment,
 )
@@ -383,3 +384,177 @@ def test_the_refetch_cap_fails_only_the_comments_still_unjudged() -> None:
         UNJUDGED
     )
     assert _disposition_ack_pending_key(_SILENT) not in state.threads_addressed_ids
+
+
+# --- #1238: the deterministic concurrence check -------------------------------
+
+_ANALYSIS_CHAIN = (
+    "<details>\n<summary>🧩 Analysis chain</summary>\n\n"
+    "🏁 Script executed:\n```shell\nrg -n 'payload is None' src/app.py\n```\n"
+    "Output: src/app.py:12: if payload is None: should we raise?\n</details>"
+)
+_CODERABBIT_FOOTER = "<!-- This is an auto-generated reply by CodeRabbit -->"
+# The three replies from the issue: each concurs with AWF's disposition.
+CONCURRENCES = (
+    "Agreed. The finding remains withdrawn.",
+    "The current code has the guard, and the regression test covers this case... "
+    "this is a fix rather than a false positive.",
+    "I verified that commit 4827270 is in the current revision... I\u2019m leaving "
+    "resolution to the AWF monitor.",
+)
+# A bot agreeing with AWF's false-positive disposition in its own words.
+FALSE_POSITIVE_CONCURRENCE = "Agreed, this is a false positive."
+# One of them as the bot posts it: supporting material folded away, plus a footer.
+CONCURRENCE_WITH_ANALYSIS = (
+    f"@awf-operator Agreed. The finding remains withdrawn.\n\n{_ANALYSIS_CHAIN}\n\n"
+    f"<details>\n<summary>✏️ Learnings added</summary>\n\n{'Learnt from: x. ' * 300}"
+    f"\n</details>\n\n{_CODERABBIT_FOOTER}"
+)
+NEW_CONCERNS = (
+    "Agreed, but the error path still lacks a test.",
+    "Verified the guard. Could you also handle `None` in foo.py:42?",
+    "Agreed. The finding remains withdrawn.\n\n<details>\n<summary>Proposed fix</summary>"
+    "\n\n```suggestion\nif payload is None:\n    raise ValueError\n```\n</details>",
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        *CONCURRENCES,
+        CONCURRENCE_WITH_ANALYSIS,
+        "LGTM, the fix is confirmed.",
+        "Retracted.",
+        "Verified the fix on the current head.",
+        "The fix has been verified.",
+        "Thanks for the explanation, the finding is withdrawn.",
+        "I verified the null dereference is fixed.",
+        "I have confirmed that the bug is resolved.",
+        "I verified the fix.",
+        "I've confirmed the fix on the latest head.",
+        "The null pointer dereference is fixed.",
+        FALSE_POSITIVE_CONCURRENCE,
+        "This was a false positive.",
+    ],
+)
+def test_an_explicit_concurrence_is_recognised(body: str) -> None:
+    assert is_bot_concurrence(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        *NEW_CONCERNS,
+        "",
+        "   \n ",
+        BOT_ACK,  # thanks alone is no explicit concurrence: the agent judges it
+        "The issue remains.",
+        "Agreed that the bug persists.",
+        "Agreed it is not fixed yet.",
+        "I disagree; the finding stands.",
+        "Agreed.\n```python\nx = 1\n```",
+        "Agreed.\n~~~\nx = 1\n~~~",
+        "Agreed; see line 42.",
+        "Agreed. Please add a test.",
+        "Agreed. Also, consider the empty case.",
+        # Every clause must concur or state a fact: a new request alongside is a new point.
+        "Agreed. Add a regression test for empty input.",
+        "Agreed, add a test.",
+        "Agreed; rename the helper.",
+        "Agreed. The empty case needs a test.",
+        "Agreed. It would be good to cover the empty case.",
+        # A clause led by its subject that does not concur may report a defect.
+        "Agreed. The handler crashes for empty input.",
+        "The handler crashes for empty input. Agreed.",
+        "Agreed. I found the handler crashes for empty input.",
+        "Agreed. Thanks for reporting that the handler crashes.",
+        # A dash, a parenthesis or "and" joins clauses too: each must still concur.
+        "Agreed - the handler crashes for empty input.",
+        "Agreed — the handler crashes for empty input.",
+        "Agreed–the handler crashes for empty input.",
+        "Agreed (the handler crashes for empty input).",
+        "Agreed and the handler crashes for empty input.",
+        # The whole clause must concur: an agreement word does not cover its complement.
+        "Agreed that the handler crashes for empty input.",
+        "I agree the handler crashes for empty input.",
+        "You're right that the handler crashes for empty input.",
+        "LGTM except the handler crashes for empty input.",
+        "Verified the fix leaves the handler crashing for empty input.",
+        # A concurrence conditional on a fix that has not landed is no concurrence.
+        "LGTM once the null dereference is fixed.",
+        "Agreed if the handler is fixed.",
+        "Withdrawn when the guard is fixed.",
+        "Withdrawn after the test is addressed.",
+        "LGTM provided it is resolved.",
+        "LGTM until it is resolved.",
+        "LGTM as soon as the null dereference is fixed.",
+        "LGTM the moment it is fixed.",
+        "Looks good to me in case it is fixed.",
+        "As long as the null dereference is fixed.",
+        "Agreed, subject to the bug is fixed.",
+        # Unbalanced or unterminated markup could hide a request: fail closed.
+        "Agreed. <details><summary>More</summary>Add a test for the empty case.",
+        "Agreed. </details> Add a test.",
+        "Agreed. <!-- the rest is hidden",
+        # A verification that confirms the finding, not the fix, is no concurrence.
+        "Verified: the null dereference reproduces on the current head.",
+        "Confirmed: the race reproduces.",
+        # Presence of a guard or test concurs only as the whole claim of its clause.
+        "The handler has a guard that crashes on empty input.",
+        "The code includes a test that reproduces the crash.",
+        "The code includes the test that reproduces the crash.",
+        "The code includes a test.",
+        # A predicate concurs only after an affirmative subject: a negated claim, a
+        # request or a hedge ahead of it may report missing work.
+        "No regression test covers this case.",
+        "Nothing is fixed.",
+        "Ensure the null dereference is fixed.",
+        "Make sure the fix is confirmed.",
+        "I doubt the null dereference is fixed.",
+        "It is unclear whether the bug is fixed.",
+        "That's right the moment it is fixed.",
+        # Only a verification leads an "I" claim: an unconfirmed or hoped-for fix is no fix.
+        "I cannot confirm the null dereference is fixed.",
+        "I can not confirm the null dereference is fixed.",
+        "I hope the null dereference is fixed.",
+        "I think it is fixed.",
+        "I'm unable to confirm the null dereference is fixed.",
+        "The bot cannot confirm it is fixed.",
+        "It hopefully is fixed.",
+        "This probably is fixed.",
+        "The guard seems to have the fix is resolved.",
+        # A predicate's subject is a short noun phrase: a defect report joined to it is no fix.
+        "The handler crashes even though the null dereference is fixed.",
+        "It crashes though it is fixed.",
+        "The app crashes yet is fixed.",
+        "The handler crashes the fix is confirmed.",
+        # A qualifier in the subject limits the fix: a partial remediation is no fix.
+        "This only partially covers this case.",
+        "The test partly covers this case.",
+        "The patch almost covers this case.",
+        "The partial fix is fixed.",
+        "It mostly is fixed.",
+        "It is probably a false positive.",
+        # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
+        "LGTM, the moment it is fixed.",
+        "Withdrawn, the minute it is fixed.",
+        "This is withdrawn the instant it is fixed.",
+        "The finding is retracted the moment it is fixed.",
+        "This is withdrawn the day it is fixed.",
+        "LGTM, the day it is fixed.",
+        "Withdrawn, the second it is fixed.",
+        "Agreed, the time that the bug is fixed.",
+        # A concurrence only in quoted text is not the bot's own.
+        "> Verified: the guard exists.\n\nHmm.",
+        # A proposed change, even folded into a details block or a diff, is a new point.
+        "Confirmed.\n<details><summary>Diff</summary>\n\n```diff\n-a\n+b\n```\n</details>",
+        # A fold not labelled as supporting material could hold a request: the agent judges.
+        "Agreed. <details><summary>New concern</summary>Please handle the empty input.</details>",
+        "Agreed. <details><summary>Nit</summary>Rename the helper.</details>",
+        "Agreed. <details>Rename the helper.</details>",
+        "Agreed.\n<details><summary>🧩 Analysis chain</summary>\n"
+        "<details><summary>Nit</summary>Rename the helper.</details>\n</details>",
+    ],
+)
+def test_anything_short_of_an_explicit_concurrence_is_not_recognised(body: str) -> None:
+    assert is_bot_concurrence(body) is False

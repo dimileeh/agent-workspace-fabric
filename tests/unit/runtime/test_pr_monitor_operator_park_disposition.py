@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeComma
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import _disposition_unverified_key
 from awf.runtime.operator_hints import operator_hint_processed_key
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
@@ -65,6 +67,11 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
     record_item_disposition,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_ack import UNJUDGED, record_ack_judgment
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
+    DispositionGateResult,
+    review_thread_disposition_gate,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -72,7 +79,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
-from tests.unit.runtime._thread_disposition_fixtures import OrderedForge
+from tests.unit.runtime._thread_disposition_fixtures import (
+    OrderedForge,
+    settled_baseline_state,
+)
+from tests.unit.runtime.test_pr_monitor_thread_disposition_gate import _marker
 
 _REPO = RepoRef(owner="acme", name="widgets")
 _ROLLBACK = "0a1b2c3d4e5f" + "0" * 28
@@ -1064,3 +1075,320 @@ async def test_refused_reply_keeps_the_thread_open_under_its_own_park(
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         assert dict(ws.monitor_threads_addressed or {})[_THREAD] == "needs_human"
+
+
+# --- #1238: a ruling settles a thread the disposition gate flagged ------------------
+
+_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
+_BOT = {"login": "review-bot", "__typename": "Bot"}
+
+
+def _resolved_with_bot_reply(
+    gh: OrderedForge, thread_id: str = _THREAD, *, resolved_by: str = "awf-test-bot"
+) -> None:
+    """AWF replied FALSE POSITIVE and resolved; the opening bot then replied after it."""
+    nodes = [
+        ("c-1", "guard the None payload", False, "2026-11-01T00:00:00+00:00"),
+        ("reply-0", _marker("false_positive", thread_id), True, "2026-11-02T00:00:00+00:00"),
+        ("c-3", "This is a fix rather than a false positive.", False, "2026-11-03T00:00:00+00:00"),
+    ]
+    gh.review_threads[thread_id] = {
+        "id": thread_id,
+        "isResolved": True,
+        "isOutdated": False,
+        "resolvedBy": {"login": resolved_by},
+        "comments": {
+            "nodes": [
+                {
+                    "id": node_id,
+                    "body": body,
+                    "bodyText": body,
+                    "viewerDidAuthor": viewer,
+                    "createdAt": created_at,
+                    **({} if viewer else {"author": _BOT}),
+                }
+                for node_id, body, viewer, created_at in nodes
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
+
+
+async def _audit_gate(runner: Any, workspace_id: str, state: MonitorState) -> DispositionGateResult:
+    return await review_thread_disposition_gate(
+        runner,
+        workspace_id=workspace_id,
+        repo=_REPO,
+        pr_number=42,
+        status=_status(),
+        state=state,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        monitor_log=None,
+    )
+
+
+async def _gate_flagged(
+    runner: Any, workspace_id: str, gh: OrderedForge, thread_id: str = _THREAD
+) -> MonitorState:
+    """The issue's park: AWF's FALSE POSITIVE stands, the bot's reply was never kept."""
+    state = settled_baseline_state()
+    state.mark_addressed(thread_id, "false_positive")
+    state.mark_addressed(f"__review_thread_body_hash__:{thread_id}", "f" * 64)
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=thread_id,
+            disposition_class="false_positive",
+            verdict="false_positive",
+            reason="the caller already rejects None payloads",
+            reply_comment_id="reply-0",
+            resolved=True,
+            conversation_digest="c" * 64,
+        ),
+    )
+    audit = await gh.fetch_review_thread_audit(repo=_REPO, pr_number=42)
+    [bot_reply] = audit.threads[0].trailing_comments
+    record_ack_judgment(state, thread_id, bot_reply, UNJUDGED)
+    blocked = await _audit_gate(runner, workspace_id, state)
+    assert blocked.unverified == (thread_id,)
+    assert state.threads_addressed_ids[_disposition_unverified_key(thread_id)] == _UNVERIFIED
+    return state
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ruling", "verdict", "disposition_class"),
+    [
+        (_false_positive(), "false_positive", "false_positive"),
+        (_fixed(), "fix_committed", "fixed"),
+    ],
+    ids=["false-positive", "fixed"],
+)
+async def test_ruling_on_a_gate_flagged_resolved_thread_settles_it_and_the_gate_certifies(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    ruling: str,
+    verdict: str,
+    disposition_class: str,
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, ruling)
+
+    terminal = await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert terminal is False
+    assert cycle.calls == []  # no agent
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids[_THREAD] == verdict
+    disposition = read_item_disposition(state, _THREAD)
+    assert disposition is not None
+    assert disposition.disposition_class == disposition_class
+    assert disposition.source == "operator_disposition"
+    assert disposition.reply_comment_id is not None and disposition.resolved is True
+    assert disposition.thread_body_hash == "f" * 64
+    replies = gh.replies()
+    assert [tid for tid, _ in replies] == [_THREAD]
+    assert f"class={disposition_class}" in replies[0][1]
+    assert gh.events[-1] == ("resolve", _THREAD)
+    events = await _disposition_events(factory, workspace_id)
+    assert [event.reason_code for event in events] == [OPERATOR_PARK_DISPOSITION_APPLIED]
+    assert events[0].payload["evidence"]["thread_id"] == _THREAD
+
+    certified = await _audit_gate(runner, workspace_id, state)
+
+    assert certified.blocker is None and certified.count_rows is not None
+    assert certified.unverified == ()
+    assert _disposition_unverified_key(_THREAD) not in state.threads_addressed_ids
+
+    # The same guide again is satisfied: nothing is posted or resolved twice.
+    gh.events.clear()
+    _arm(state, ruling, operation_id="op_guide_1238_repeat")
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+    assert cycle.calls == [] and gh.events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup", "detail"),
+    [
+        ("listed_open", "flagged_thread_open"),
+        ("resolved_by_other", "flagged_thread_not_resolved_by_awf"),
+        ("audit_fault", "flagged_thread_unreadable"),
+        ("audit_unsupported", "flagged_thread_unreadable"),
+        ("thread_missing", "flagged_thread_unreadable"),
+        ("not_ancestor", "sha_not_ancestor"),
+    ],
+)
+async def test_ruling_on_a_gate_flagged_thread_fails_closed_when_it_cannot_be_proven(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, setup: str, detail: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(
+        factory, tmp_path, ancestor=1 if setup == "not_ancestor" else 0
+    )
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    status = _status()
+    if setup == "listed_open":
+        status = _status(_thread())
+    elif setup == "resolved_by_other":
+        gh.review_threads[_THREAD]["resolvedBy"] = {"login": "octocat"}
+    elif setup in {"audit_fault", "audit_unsupported", "thread_missing"}:
+        audit = await gh.fetch_review_thread_audit(repo=_REPO, pr_number=42)
+
+        async def _read(**_kwargs: Any) -> Any:
+            if setup == "audit_fault":
+                raise GitHubClientError(
+                    operation="fetch_review_thread_audit", returncode=1, stderr="HTTP 502"
+                )
+            return replace(audit, supported=setup == "thread_missing", threads=())
+
+        gh.fetch_review_thread_audit = _read  # type: ignore[method-assign]
+    _arm(state, _fixed() if setup == "not_ancestor" else _false_positive())
+
+    await _guide_poll(runner, workspace_id, gh, state, status)
+
+    assert cycle.calls == []
+    assert gh.events == []
+    assert state.threads_addressed_ids[_THREAD] == "false_positive"
+    assert state.threads_addressed_ids[_disposition_unverified_key(_THREAD)] == _UNVERIFIED
+    hint = state.pending_operator_hint
+    assert hint is not None and hint.status_reason is not None
+    assert f"({detail})" in hint.status_reason
+    assert OPERATOR_PARK_DISPOSITION_UNAPPLIED in hint.status_reason
+    events = await _disposition_events(factory, workspace_id)
+    assert [event.payload["evidence"]["detail"] for event in events] == [detail]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("change", ["added", "edited"])
+async def test_ruling_on_a_gate_flagged_thread_is_refused_when_feedback_lands_before_its_reply(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, change: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    post = gh.reply_to_thread
+
+    async def _feedback_then_reply(*, thread_id: str, body: str) -> str:
+        # The reviewer writes after the ruling's audit but before AWF's reply.
+        nodes = gh.review_threads[thread_id]["comments"]["nodes"]
+        if change == "added":
+            nodes.append(
+                {**nodes[-1], "id": "c-4", "body": "Still wrong.", "bodyText": "Still wrong."}
+            )
+        else:
+            nodes[-1] = {
+                **nodes[-1],
+                "body": "Edited: still wrong.",
+                "bodyText": "Edited: still wrong.",
+            }
+        return await post(thread_id=thread_id, body=body)
+
+    gh.reply_to_thread = _feedback_then_reply  # type: ignore[method-assign]
+
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert [event[0] for event in gh.events] == ["reply"]  # never resolved on it
+    disposition = read_item_disposition(state, _THREAD)
+    assert disposition is not None  # the ruling's reply is retired, never its answer
+    assert disposition.reply_comment_id is None and disposition.resolved is False
+    blocked = await _audit_gate(runner, workspace_id, state)
+    assert blocked.unverified == (_THREAD,)
+
+
+@pytest.mark.unit
+async def test_repeat_ruling_on_a_thread_the_gate_flagged_again_replies_anew(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+    applied = read_item_disposition(state, _THREAD)
+    assert applied is not None and applied.resolved and not applied.is_bound
+
+    # The bot answers the ruling's reply before any audit bound it: the gate
+    # keeps the unbound record but flags the thread again.
+    nodes = gh.review_threads[_THREAD]["comments"]["nodes"]
+    nodes.append(
+        {
+            "id": "c-5",
+            "body": "Still not a false positive.",
+            "bodyText": "Still not a false positive.",
+            "viewerDidAuthor": False,
+            "createdAt": "2026-11-05T00:00:00+00:00",
+            "author": _BOT,
+        }
+    )
+    audit = await gh.fetch_review_thread_audit(repo=_REPO, pr_number=42)
+    record_ack_judgment(state, _THREAD, audit.threads[0].trailing_comments[-1], UNJUDGED)
+    blocked = await _audit_gate(runner, workspace_id, state)
+    assert blocked.unverified == (_THREAD,)
+    assert read_item_disposition(state, _THREAD) == applied
+
+    # The same ruling again is no no-op: it answers the current conversation.
+    gh.events.clear()
+    _arm(state, _false_positive(), operation_id="op_guide_1238_reflagged")
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    renewed = read_item_disposition(state, _THREAD)
+    assert renewed is not None and renewed.resolved
+    assert renewed.reply_comment_id != applied.reply_comment_id
+    certified = await _audit_gate(runner, workspace_id, state)
+    assert certified.blocker is None and certified.unverified == ()
+
+
+@pytest.mark.unit
+async def test_repeat_ruling_before_any_gate_run_is_a_no_op(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+    applied = read_item_disposition(state, _THREAD)
+    assert applied is not None and applied.resolved and applied.reply_comment_id is not None
+    # The applied ruling is the thread's disposition: the gate's flag is settled.
+    assert _disposition_unverified_key(_THREAD) not in state.threads_addressed_ids
+
+    # The same guide again, before the gate re-audits, answers nothing new
+    # (PRRT_kwDOSJAM6s63YizI): no second reply, and the first one is kept.
+    gh.events.clear()
+    _arm(state, _false_positive(), operation_id="op_guide_1238_repeat_early")
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == [] and gh.events == []
+    assert state.pending_operator_hint is None
+    assert read_item_disposition(state, _THREAD) == applied
+    events = await _disposition_events(factory, workspace_id)
+    assert [event.reason_code for event in events] == [OPERATOR_PARK_DISPOSITION_APPLIED]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fault", ["reply", "resolve"])
+async def test_ruling_that_does_not_land_keeps_the_gate_flag(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, fault: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    error = GitHubClientError(operation=fault, returncode=1, stderr="HTTP 502: bad gateway")
+    if fault == "reply":
+        gh.reply_error = error
+    else:
+        gh.resolve_error = error
+    _arm(state, _false_positive())
+
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert state.threads_addressed_ids[_disposition_unverified_key(_THREAD)] == _UNVERIFIED

@@ -1,4 +1,4 @@
-"""One-time agent check of a review bot's reply after AWF's disposition (#1138, D1).
+"""One-time check of a review bot's reply after AWF's disposition (#1138, D1; #1238).
 
 Review bots often answer AWF's disposition reply ("Agreed — this is a false
 positive"). The #1018 gate counts any comment after the marker as newer
@@ -8,10 +8,12 @@ a full re-triage. This module is the pure policy in front of that fallback.
 A thread is eligible only when it is resolved by AWF's identity, its opener is a
 forge Bot account (the forge's own account type; no bot names or text patterns),
 every comment after AWF's newest reply is by that same bot, and that newest
-reply is a current marker once those comments are set aside. For each such
-comment the agent's judgment is recorded under its identity
+reply is a current marker once those comments are set aside. Each such comment
+is judged by a deterministic concurrence check (:func:`is_bot_concurrence`),
+else by the agent, and the judgment is recorded under its identity
 (:func:`comment_identity`; an edit is a new identity), so the check runs at most
-once per identity, across re-adoption too:
+once per identity, across re-adoption too. A bot that concurs again after a
+re-triage posts a new identity, which is judged afresh (#1238):
 
 * every comment ``ACKNOWLEDGES``: the gate reads the thread without them, so the
   existing marker stays the disposition. No reply is posted and nothing reopens.
@@ -56,12 +58,117 @@ ACK_JUDGMENTS: frozenset[str] = frozenset({ACKNOWLEDGES, NEW_POINT, UNJUDGED})
 MAX_ACK_REFETCH_FAILURES = 3
 _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
+# #1238: the deterministic concurrence check. Generic wording only, no reviewer names.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# An innermost collapsed block. It is set aside only when its summary labels it as
+# supporting material; any other fold could hold a request, so the agent judges it.
+_DETAILS_RE = re.compile(r"<details\b[^>]*>((?:(?!<details\b).)*?)</details\s*>", re.DOTALL | re.I)
+_SUPPORTING_FOLD_RE = re.compile(
+    r"\s*<summary\b[^>]*>[^<]*\b(?:analysis|learnings?|scripts?|outputs?|logs?)\b[^<]*</summary",
+    re.I,
+)
+_PROPOSED_CHANGE_RE = re.compile(r"^\s*(?:```|~~~)\s*(?:suggestion|diff)\b", re.M | re.I)
+_CODE_REFERENCE_RE = re.compile(r"```|~~~|\b[\w./-]+\.\w+:\d+|\blines?\s+\d+", re.I)
+_DISSENT_RE = re.compile(
+    r"\?|\b(?:however|but|still|should|please|consider|suggest|recommend|missing|"
+    r"disagree|incorrect|wrong|also|additionally|another|not|never|"
+    r"would|might|needs|need to|requires|lacks|worth|nit|"
+    # A conditional concurrence ("LGTM once it is fixed") awaits a fix that may not have landed.
+    r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending|upon|"
+    r"as soon as|as long as|so long as|in case|subject to|contingent|conditional|"
+    r"the (?:moment|minute|instant)|"
+    # So is any time noun ahead of a subject: "LGTM, the day it is fixed".
+    r"the (?:second|hour|day|week|time)(?=\s+(?:that\s+)?(?:it|this|that|these|those|they|the|"
+    r"its|our|your|my)\b))\b|n't\b|"
+    r"\b(?:could|can) you\b|"
+    r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
+    re.I,
+)
+# A clause concurs only as a whole (it is matched in full): "Agreed that the handler
+# crashes" or "has a guard that crashes" may report a defect, so the agent judges it.
+_CONCURRENCE_RE = re.compile(
+    r"(?:@\S+\s+)?(?:"
+    # An agreement word concurs only alone.
+    r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
+    r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
+    # A predicate concurs only as the end of its clause, after no subject or an
+    # affirmative one: "I" only as a verification ("I verified that", "I verified the
+    # fix"), else a short noun phrase, a determiner and at most three words free of
+    # agreement, negation, hedge, qualifier and joining words and of a second subject. "LGTM the moment it is fixed", "No test
+    # covers this case", "Ensure it is fixed", "I doubt it is fixed", "I cannot confirm
+    # it is fixed" or "The handler crashes though the bug is fixed" may report missing
+    # work, so the agent judges them.
+    r"(?:i(?:'m| am) (?=leav)|i(?:'ve| have)? (?=(?:confirmed|verified) (?:the )?fix\b)|"
+    r"i(?:'ve| have| can)? (?:verified|confirmed|checked|verify|confirm) "
+    r"(?:that )?)?"
+    r"(?:(?:the|this|that|it|its|my|our)(?:\s+(?!(?:agreed?|lgtm|looks|withdrawn|"
+    r"retracted|you're|"
+    r"that's|no|none|nothing|nobody|neither|nor|without|whether|doubt|unclear|unsure|"
+    r"uncertain|cannot|unable|fail(?:s|ed)?|hope|hopefully|think|believe|guess|suppose|"
+    r"assume|expect|suspect|maybe|perhaps|probably|possibly|presumably|likely|apparently|"
+    r"seem(?:s|ingly)?|appears?|supposedly|unconfirmed|unverified|"
+    # A qualifier ("only partially", "almost", "the partial fix") limits the claim.
+    r"[\w`'-]*ly|almost|somewhat|half|quite|just|rather|partial|incomplete|some|most|"
+    r"though|although|even|despite|yet|while|whilst|whereas|except|so|because|since|or|"
+    r"the|this|that|these|those|it|its|they|we|i|my|our)(?![\w`'-]))[\w`'-]+){0,3}\s+)?"
+    r"\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
+    # A verification concurs only when it is of the fix: a bare one may confirm the finding.
+    r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
+    r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"
+    r"is (?:now )?(?:fixed|addressed|resolved)|is a fix(?: rather than a false positive)?|"
+    # Agreeing with a false-positive disposition: "Agreed, this is a false positive."
+    r"(?:is|was) a false positive|"
+    r"covers this case|"
+    # The fix is present: the code has it, or its commit is in the revision.
+    r"(?:has|have|contains|includes) the (?:guard|fix|check|test)|"
+    r"commit [0-9a-f]{7,40} is (?:now )?in(?: the (?:current|latest) (?:head|revision))?|"
+    r"leav(?:e|ing) (?:the )?resolution to (?:the )?(?:awf(?: monitor)?|monitor|you|@\S+)|"
+    r"no further (?:action|changes?) (?:is |are )?(?:needed|required)))",
+    re.I,
+)
+# Every clause must concur or only thank; anything else (an imperative such as "Add a
+# test", or a statement such as "The handler crashes") could be a new point, so the
+# agent judges it. A spaced hyphen, a dash, a bracket or "and" also joins clauses.
+_CLAUSE_SPLIT_RE = re.compile(r"(?:[.!?;:,\n()\[\]–—]|\s-+\s|\band\b)+", re.I)
+_THANKS_CLAUSE_RE = re.compile(r"(?:@\S+\s+)?(?:thanks|thank you)(?: for (?:the|your) \w+)?", re.I)
 
 
 def comment_identity(comment: AuditedThreadComment) -> str:
     """SHA-256 hex of the comment's id, author and body: an edit is a new identity."""
     identity = [comment.comment_id, comment.author_login, comment.body]
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+def is_bot_concurrence(body: str) -> bool:
+    """Whether ``body`` only concurs with AWF's disposition, decided without the agent.
+
+    ``True`` means certainly a concurrence: it withdraws the finding, confirms the
+    fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
+    no dissent or new request, no code fence and no code reference, and every
+    clause of it either concurs or only thanks. HTML comments,
+    and ``<details>`` blocks whose summary labels them as supporting material
+    (analysis, learnings, scripts, output, logs), are set aside.
+    ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
+    ambiguous (a proposed change anywhere, unbalanced markup, any other fold) is
+    ``False``.
+    """
+    if _PROPOSED_CHANGE_RE.search(body):
+        return False
+    prose = _HTML_COMMENT_RE.sub(" ", body)
+    while fold := _DETAILS_RE.search(prose):
+        if not _SUPPORTING_FOLD_RE.match(fold.group(1)):
+            return False  # a fold not labelled as supporting material could hold a request
+        prose = f"{prose[: fold.start()]} {prose[fold.end() :]}"
+    prose = prose.replace("\u2019", "'")
+    if re.search(r"<!--|</?details\b", prose, re.I):
+        return False  # unbalanced or unterminated: it could hide a request
+    if _CODE_REFERENCE_RE.search(prose) or _DISSENT_RE.search(prose):
+        return False
+    own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
+    if not all(_CONCURRENCE_RE.fullmatch(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
+        return False
+    return any(_CONCURRENCE_RE.fullmatch(c) for c in clauses)
 
 
 def acknowledgement_view(thread: AuditedReviewThread, *, viewer: str) -> AuditedReviewThread | None:

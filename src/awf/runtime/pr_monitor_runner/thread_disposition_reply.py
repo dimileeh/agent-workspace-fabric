@@ -104,12 +104,15 @@ async def reply_before_resolve(
     source_head_sha: str | None = None,
     repo: RepoRef | None = None,
     retry: bool = True,
+    audited_comments: tuple[str, ...] = (),
 ) -> ThreadDisposition | None:
     """Post the thread's disposition reply; ``None`` means do NOT resolve.
 
     With ``repo``, a fresh reply is checked against the live thread before it is
     returned (:func:`_reread_thread_after_reply`); ``thread`` is the thread as the
-    monitor listed it, whose outside comments that check compares when given.
+    monitor listed it, whose outside comments that check compares when given;
+    without one, ``audited_comments`` are the outside comments an audit read
+    (a resolved thread the monitor does not list, #1238).
     ``retry=False`` (outdated hygiene under
     ``serialized_merge``) makes that re-read fail fast, and a fault requeues the
     thread for the next poll instead of parking it.
@@ -173,6 +176,7 @@ async def reply_before_resolve(
                 thread=thread,
                 reply_comment_id=posted.reply_comment_id,
                 retry=retry,
+                audited_comments=audited_comments,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -307,6 +311,7 @@ async def _reread_thread_after_reply(
     thread: ReviewThread | None,
     reply_comment_id: str | None,
     retry: bool,
+    audited_comments: tuple[str, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -332,7 +337,7 @@ async def _reread_thread_after_reply(
     live = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if live is None:
         raise _StaleRereadError(f"the re-read does not show thread {thread_id} yet")
-    moved = _conversation_moved(thread, live, reply_comment_id)
+    moved = _conversation_moved(thread, live, reply_comment_id, audited_comments)
     if moved is None and reply_comment_id not in live.viewer_comment_ids:
         raise _StaleRereadError(f"the re-read does not show reply {reply_comment_id} yet")
     if live.viewer_comment_ids[-1:] != (reply_comment_id,):
@@ -341,7 +346,10 @@ async def _reread_thread_after_reply(
 
 
 def _conversation_moved(
-    thread: ReviewThread | None, live: AuditedReviewThread, reply_comment_id: str | None
+    thread: ReviewThread | None,
+    live: AuditedReviewThread,
+    reply_comment_id: str | None,
+    audited_comments: tuple[str, ...] = (),
 ) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
@@ -358,8 +366,9 @@ def _conversation_moved(
     the re-triage behind this reply may answer only that feedback, as after a park
     that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
     comments that differ from the listed ones are
-    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; a snapshot without comments, or no
-    listed copy at all, proves no such difference. The unread check needs only
+    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; without a listed copy the audited
+    ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). A snapshot
+    without comments, or neither copy at all, proves no such difference. The unread check needs only
     ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
@@ -378,7 +387,11 @@ def _conversation_moved(
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:
             break  # AWF's previous reply, still current
-    listed = tuple(comment.body for comment in thread.comments) if thread is not None else ()
+    listed = (
+        tuple(comment.body for comment in thread.comments)
+        if thread is not None
+        else audited_comments
+    )
     if listed and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION
     return None
