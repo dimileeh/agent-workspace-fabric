@@ -116,6 +116,8 @@ _CONCURRENCE_RE = re.compile(
     r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
     r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix(?: rather than a false positive)?|"
+    # Agreeing with a false-positive disposition: "Agreed, this is a false positive."
+    r"(?:is|was) a false positive|"
     r"covers this case|"
     # The fix is present: the code has it, or its commit is in the revision.
     r"(?:has|have|contains|includes) the (?:guard|fix|check|test)|"

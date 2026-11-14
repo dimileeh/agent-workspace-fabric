@@ -69,6 +69,7 @@ from tests.unit.runtime._thread_disposition_fixtures import (
 from tests.unit.runtime.test_pr_monitor_thread_disposition_ack import (
     CONCURRENCE_WITH_ANALYSIS,
     CONCURRENCES,
+    FALSE_POSITIVE_CONCURRENCE,
     NEW_CONCERNS,
 )
 from tests.unit.runtime.test_pr_monitor_thread_disposition_gate import (
@@ -629,6 +630,7 @@ async def test_a_reply_too_long_to_quote_whole_fails_the_check_without_running_t
         # Both were UNJUDGED before the agent was ever asked: too long, or hosted.
         pytest.param(CONCURRENCE_WITH_ANALYSIS, False, id="analysis-chain-over-the-cap"),
         pytest.param(CONCURRENCES[0], True, id="hosted-adapter"),
+        pytest.param(FALSE_POSITIVE_CONCURRENCE, True, id="hosted-adapter-false-positive"),
     ],
 )
 async def test_a_bot_concurrence_passes_the_gate_without_the_agent_or_a_reopen(

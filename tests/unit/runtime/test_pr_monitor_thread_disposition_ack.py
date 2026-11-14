@@ -402,6 +402,8 @@ CONCURRENCES = (
     "I verified that commit 4827270 is in the current revision... I\u2019m leaving "
     "resolution to the AWF monitor.",
 )
+# A bot agreeing with AWF's false-positive disposition in its own words.
+FALSE_POSITIVE_CONCURRENCE = "Agreed, this is a false positive."
 # One of them as the bot posts it: supporting material folded away, plus a footer.
 CONCURRENCE_WITH_ANALYSIS = (
     f"@awf-operator Agreed. The finding remains withdrawn.\n\n{_ANALYSIS_CHAIN}\n\n"
@@ -431,6 +433,8 @@ NEW_CONCERNS = (
         "I verified the fix.",
         "I've confirmed the fix on the latest head.",
         "The null pointer dereference is fixed.",
+        FALSE_POSITIVE_CONCURRENCE,
+        "This was a false positive.",
     ],
 )
 def test_an_explicit_concurrence_is_recognised(body: str) -> None:
@@ -530,6 +534,7 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "The patch almost covers this case.",
         "The partial fix is fixed.",
         "It mostly is fixed.",
+        "It is probably a false positive.",
         # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
         "LGTM, the moment it is fixed.",
         "Withdrawn, the minute it is fixed.",
