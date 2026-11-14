@@ -664,3 +664,32 @@ async def test_keep_self_cited_item_commit_fails_closed_on_floor_probe_error(
     assert result is None
     assert runner.reset_targets == []
     assert _events(captured, "monitor.agent_verdict_correction_self_cite_floor_unreadable")
+
+
+@pytest.mark.unit
+async def test_keep_self_cited_item_commit_refuses_a_side_branch_commit_off_the_item_start(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s63brGg: never reset onto a cited commit that drops the item start.
+
+    E merges B with side commit S, which forked from P before item start A. The
+    full-DAG ``A..E`` range lists S, but resetting onto it would discard A's
+    history (earlier accepted items' fixes), so the ordinary mutation park wins.
+    """
+    side = "5" * 40
+    fork_point = "9" * 40
+    runner = _runner(
+        tmp_path,
+        correction="unused",
+        correction_head=_E,
+        parents={_A: fork_point, side: fork_point, _B: _A, _E: _B},
+    )
+    runner._range = lambda _spec: [_E, side, _B]  # type: ignore[method-assign]
+    runner.current_head = _E
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _keep(runner, reason=f"already addressed by {side}")
+
+    assert result is None
+    assert runner.reset_targets == []
+    assert not _events(captured, _PARTIAL_EVENT)

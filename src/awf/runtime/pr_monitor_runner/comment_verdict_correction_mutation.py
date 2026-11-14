@@ -181,7 +181,8 @@ async def keep_self_cited_item_commit(
 
     Returns ``None`` — the caller's ordinary mutation park — when nothing in the
     item's range is cited (a pre-existing or foreign commit, or no citation),
-    when the floor ancestry probe fails, or when a hosted remote already
+    when the floor ancestry probe fails, when the cited commit does not descend
+    from the item start (a merged side branch), or when a hosted remote already
     advanced: the rollback would restore the item-start push state while the
     remote sits at the kept commit. Cited commits on two merge sides keep only
     the newest one's ancestry. A failed rollback raises the mutation reason code.
@@ -217,8 +218,11 @@ async def keep_self_cited_item_commit(
     if cited is None:
         return None
     kept_head = cited
-    floor = rollback_floor_head
-    if floor is not None and floor.lower() not in (item_start_head.lower(), cited.lower()):
+    # The full-DAG item range can list a merged side-branch commit that forked
+    # before the item start, so the ancestry probe runs even when the floor is
+    # the item start (PRRT_kwDOSJAM6s63brGg).
+    floor = rollback_floor_head or item_start_head
+    if floor.lower() != cited.lower():
         try:
             cited_above_floor = await runner._head_descends_from(
                 worktree_path=worktree_path,
@@ -232,6 +236,16 @@ async def keep_self_cited_item_commit(
                 rollback_floor_head=floor,
                 cited_commit=cited,
                 exc_type=type(exc).__name__,
+            )
+            return None
+        if not cited_above_floor and floor.lower() == item_start_head.lower():
+            # Resetting onto a side-branch commit would discard the item start's
+            # history — earlier accepted items' fixes included.
+            _log.warning(
+                "monitor.agent_verdict_correction_self_cite_off_item_start",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                cited_commit=cited,
             )
             return None
         if not cited_above_floor:
