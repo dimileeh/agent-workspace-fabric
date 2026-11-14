@@ -282,7 +282,9 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
     the body (PRRT_kwDOSJAM6s63Yl_Z). Nor does a type literal's ``{`` in a TS
     return-type annotation, where it follows the annotation's ``:``, a ``|``,
     ``&``, ``<``, ``,`` or a function type's ``=>`` (PRRT_kwDOSJAM6s63Yomw), or
-    a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP).
+    a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP). Only a ``;`` outside
+    them ends the head; one delimits a type literal's members
+    (PRRT_kwDOSJAM6s63Yt-L).
     """
     for head in _JS_TS_EXPRESSION_HEAD_RE.finditer(code):
         depth = 0
@@ -294,7 +296,7 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
                 depth += 1
             elif char in ")]" or (char == "}" and depth):
                 depth = max(depth - 1, 0)
-            elif char == ";" or char in "{}":
+            elif (char == ";" and not depth) or char in "{}":
                 break
             elif char == ":" and depth == 0:
                 annotated = True

@@ -1942,6 +1942,16 @@ async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
             ("@@ -3 +3 @@", "-  return { value: 10 };", "+  return { value: 11 };"),
             id="conditional-return-type",
         ),
+        pytest.param(
+            "export const handler = function (): { value: number; label: string }\n"
+            "{\n  return { value: 10, label: 'a' };\n};\n",
+            (
+                "@@ -3 +3 @@",
+                "-  return { value: 10, label: 'a' };",
+                "+  return { value: 11, label: 'a' };",
+            ),
+            id="semicolon-delimited-type-literal-return-type",
+        ),
     ],
 )
 @pytest.mark.unit
