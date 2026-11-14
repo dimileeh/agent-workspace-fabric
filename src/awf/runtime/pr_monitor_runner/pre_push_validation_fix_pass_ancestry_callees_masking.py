@@ -438,9 +438,15 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             start = i
-            # Advance through the tag to its closing ``>`` (strings already blank).
+            # Advance through the tag to its closing ``>`` (strings already blank),
+            # past any ``>`` in a ``{...}`` attribute expression (PRRT_kwDOSJAM6s63YQ8-).
             i += 1
-            while i < n and line[i] != ">":
+            attribute_braces = 0
+            while i < n and (attribute_braces or line[i] != ">"):
+                if line[i] == "{":
+                    attribute_braces += 1
+                elif line[i] == "}" and attribute_braces:
+                    attribute_braces -= 1
                 i += 1
             if i >= n:
                 break

@@ -1223,6 +1223,26 @@ async def test_tsx_wrapped_type_operator_after_completed_jsx_element_continues(
 
 
 @pytest.mark.parametrize(
+    "element",
+    [
+        pytest.param("<Widget value={a > b} />", id="comparison"),
+        pytest.param("<Widget render={() => <Icon />} />", id="nested-element"),
+        pytest.param("<Widget style={{ gap: a > b ? 1 : 2 }} />", id="nested-braces"),
+    ],
+)
+@pytest.mark.unit
+async def test_tsx_attribute_expression_gt_does_not_end_the_opening_tag(element: str) -> None:
+    """A ``>`` inside ``{...}`` keeps the tag open (PRRT_kwDOSJAM6s63YQ8-)."""
+    path = "src/app/web/team.tsx"
+    text = f"export const VIEW = {element}\nexport const OTHER = 1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`VIEW` is wrong") is False
+    assert await _changes_named_target(runner, "`OTHER` is wrong") is True
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(
