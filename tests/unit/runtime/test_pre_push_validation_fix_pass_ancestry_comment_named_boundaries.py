@@ -1195,6 +1195,28 @@ async def test_tsx_type_operator_after_completed_jsx_element_stays_code(
 
 
 @pytest.mark.parametrize(
+    "element",
+    [
+        pytest.param("<Widget />", id="self-closing"),
+        pytest.param("<div>hi</div>", id="closing-tag"),
+        pytest.param("<></>", id="fragment"),
+    ],
+)
+@pytest.mark.parametrize("operator", ["as", "satisfies"])
+@pytest.mark.unit
+async def test_tsx_wrapped_type_operator_after_completed_jsx_element_continues(
+    element: str, operator: str
+) -> None:
+    """``<Widget /> as`` wraps to its type line (PRRT_kwDOSJAM6s63YMpb)."""
+    path = "src/app/web/team.tsx"
+    text = f"export const VIEW = {element} {operator}\n  Expected1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-  Expected1;", "+  Expected2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`VIEW` is wrong") is True
+
+
+@pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
         pytest.param(

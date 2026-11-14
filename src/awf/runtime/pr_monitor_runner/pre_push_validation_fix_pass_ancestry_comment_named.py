@@ -312,7 +312,7 @@ def _js_ts_line_ends_statement(
         or (
             trailing.group() in {"satisfies", "as"}
             and not _js_ts_type_operator_follows_operand(
-                raw, scan, trailing.start(), typescript=typescript, statement=statement
+                raw, scan, trailing.start(), typescript=typescript, statement=statement, jsx=jsx
             )
         )
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
@@ -372,7 +372,13 @@ def _js_ts_ends_unfinished_type_operand(
 
 
 def _js_ts_type_operator_follows_operand(
-    raw: str, scan: str, start: int, *, typescript: bool, statement: Sequence[str] = ()
+    raw: str,
+    scan: str,
+    start: int,
+    *,
+    typescript: bool,
+    statement: Sequence[str] = (),
+    jsx: bool = False,
 ) -> bool:
     """Whether the ``satisfies``/``as`` at ``start`` follows an operand on its line.
 
@@ -382,7 +388,8 @@ def _js_ts_type_operator_follows_operand(
     by a postfix non-null assertion (``value! as``) (PRRT_kwDOSJAM6s63XU4a). In
     ``typescript`` code so does an instantiation expression completed by its
     type arguments (``fn<number> as``), which may wrap across the masked lines
-    of the ``statement`` (PRRT_kwDOSJAM6s63YH3s).
+    of the ``statement`` (PRRT_kwDOSJAM6s63YH3s). In ``jsx`` code so does a
+    completed JSX element (``<Widget /> as``) (PRRT_kwDOSJAM6s63YMpb).
     """
     before = raw[:start].rstrip()
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
@@ -393,8 +400,10 @@ def _js_ts_type_operator_follows_operand(
         return True
     if before.endswith("!"):
         return _js_ts_type_operator_follows_operand(
-            raw, scan, len(before.rstrip("!")), typescript=typescript, statement=statement
+            raw, scan, len(before.rstrip("!")), typescript=typescript, statement=statement, jsx=jsx
         )
+    if jsx and _JSX_COMPLETED_ELEMENT_RE.search(scan[: len(before)]) is not None:
+        return True
     if typescript and _js_ts_ends_type_arguments(" ".join([*statement, scan[: len(before)]])):
         return True
     return (
