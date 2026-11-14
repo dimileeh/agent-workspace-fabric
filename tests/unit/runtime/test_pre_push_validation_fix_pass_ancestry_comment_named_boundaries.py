@@ -1221,6 +1221,13 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param("src/app/web/team.tsx", "void <Widget />;", id="tsx-unary-void"),
         pytest.param("src/app/web/team.jsx", "await <div>hi</div>;", id="jsx-unary-await"),
         pytest.param("src/app/web/team.tsx", "typeof <></>;", id="tsx-unary-typeof"),
+        # PRRT_kwDOSJAM6s63aSxn: a binary operator roots its JSX right operand.
+        pytest.param("src/app/web/team.tsx", '"prefix" + <Widget />;', id="tsx-binary-plus"),
+        pytest.param("src/app/web/team.jsx", "n - <div>hi</div>;", id="jsx-binary-minus"),
+        pytest.param("src/app/web/team.tsx", "n * <Widget />;", id="tsx-binary-times"),
+        pytest.param("src/app/web/team.jsx", "n % <div>hi</div>;", id="jsx-binary-remainder"),
+        pytest.param("src/app/web/team.tsx", "n ^ <Widget />;", id="tsx-binary-xor"),
+        pytest.param("src/app/web/team.tsx", "n ** <Widget />;", id="tsx-binary-exponent"),
     ],
 )
 @pytest.mark.parametrize(

@@ -28,10 +28,11 @@ def _mask_char_preserving_splitlines_separators(ch: str) -> str:
 
 # What precedes a JSX element opened as an expression (``= <A />``,
 # ``return (<div>``, ``cond && <A />``, ``() => <A />`` (PRRT_kwDOSJAM6s63Y_3L),
-# or a unary operand ``!<A />``/``void <A />`` (PRRT_kwDOSJAM6s63Z51H), but not a
-# TypeScript non-null ``a! <b``): its completion ends the JSX.
+# a unary operand ``!<A />``/``void <A />`` (PRRT_kwDOSJAM6s63Z51H), or a binary
+# right operand ``"a" + <A />`` (PRRT_kwDOSJAM6s63aSxn), but not a TypeScript
+# non-null ``a! <b`` or a postfix ``a++ <b``): its completion ends the JSX.
 _JSX_ROOT_PREFIX_RE = re.compile(
-    r"(?:=>|[=(,?:\[{&|~]|(?<![\w$)\]])!"
+    r"(?:=>|[=(,?:\[{&|~*%^]|(?<!\+)\+|(?<!-)-|(?<![\w$)\]])!"
     r"|(?<![\w$])(?:return|yield|default|void|await|typeof|delete|throw))\s*$"
 )
 # TypeScript type operators that code may put after a completed element
