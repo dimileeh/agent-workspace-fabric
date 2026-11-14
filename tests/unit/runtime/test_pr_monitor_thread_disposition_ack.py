@@ -504,6 +504,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "I doubt the null dereference is fixed.",
         "It is unclear whether the bug is fixed.",
         "That's right the moment it is fixed.",
+        # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
+        "LGTM, the moment it is fixed.",
+        "Withdrawn, the minute it is fixed.",
+        "This is withdrawn the instant it is fixed.",
+        "The finding is retracted the moment it is fixed.",
+        "This is withdrawn the day it is fixed.",
         # A concurrence only in quoted text is not the bot's own.
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.

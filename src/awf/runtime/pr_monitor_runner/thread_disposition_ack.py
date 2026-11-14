@@ -75,7 +75,8 @@ _DISSENT_RE = re.compile(
     r"would|might|needs|need to|requires|lacks|worth|nit|"
     # A conditional concurrence ("LGTM once it is fixed") awaits a fix that may not have landed.
     r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending|upon|"
-    r"as soon as|as long as|so long as|in case|subject to|contingent|conditional)\b|n't\b|"
+    r"as soon as|as long as|so long as|in case|subject to|contingent|conditional|"
+    r"the (?:moment|minute|instant))\b|n't\b|"
     r"\b(?:could|can) you\b|"
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,
@@ -91,7 +92,8 @@ _CONCURRENCE_RE = re.compile(
     # affirmative one: led by "I" or a determiner, free of agreement, negation and hedge
     # words. "LGTM the moment it is fixed", "No test covers this case", "Ensure it is
     # fixed" or "I doubt it is fixed" may report missing work, so the agent judges them.
-    r"(?:(?=(?:i|the|this|that|it|its|my|our)\b)(?:(?!\b(?:agreed?|lgtm|looks good|you're|"
+    r"(?:(?=(?:i|the|this|that|it|its|my|our)\b)(?:(?!\b(?:agreed?|lgtm|looks good|withdrawn|"
+    r"retracted|you're|"
     r"that's|no|none|nothing|nobody|neither|nor|without|whether|doubt|unclear|unsure|"
     r"uncertain)\b).)*?)?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
