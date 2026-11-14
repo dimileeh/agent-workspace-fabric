@@ -150,8 +150,11 @@ _JS_TS_LEADING_CONTINUATION_RE = re.compile(
 )
 # A JS/TS statement that leaves the next one as its brace-less body: an
 # ``if``/``for``/``while``/``with`` head, ``else`` or ``do`` (PRRT_kwDOSJAM6s63QK8_).
-_JS_TS_BODY_HEAD_RE = re.compile(
-    r"(?:^|[;}])[ \t]*(?:(?:else[ \t]+)?(?:if|for|while|with)\b.*\)|else|do)$"
+# The head's ``(`` must match the statement's final ``)``, so a body already
+# completed on the line (``if (on) init()``) leaves none (PRRT_kwDOSJAM6s63VYOX).
+_JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?:^|[;}])[ \t]*(?:else|do)$")
+_JS_TS_CONTROL_HEAD_RE = re.compile(
+    r"(?:^|[;}])[ \t]*(?:else[ \t]+)?(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$"
 )
 
 
@@ -231,6 +234,23 @@ def _js_ts_line_ends_statement(
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
         or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
     )
+
+
+def _js_ts_ends_with_body_head(logical: str) -> bool:
+    """Whether the masked JS/TS ``logical`` statement leaves the next one as its body."""
+    if _JS_TS_BARE_BODY_HEAD_RE.search(logical) is not None:
+        return True
+    if not logical.endswith(")"):
+        return False
+    depth = 0
+    for position in range(len(logical) - 1, -1, -1):
+        if logical[position] in ")]}":
+            depth += 1
+        elif logical[position] in "([{":
+            depth -= 1
+            if not depth:
+                return _JS_TS_CONTROL_HEAD_RE.search(logical[:position]) is not None
+    return False
 
 
 def _js_ts_next_line_continues(
@@ -568,7 +588,7 @@ def _module_level_assignment_spans(
                 continued = True
                 continue
             is_body = in_body
-            in_body = _JS_TS_BODY_HEAD_RE.search(logical) is not None or not (
+            in_body = _js_ts_ends_with_body_head(logical) or not (
                 _js_ts_line_ends_statement(
                     raw_lines[index],
                     scan,

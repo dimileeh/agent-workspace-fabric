@@ -1400,6 +1400,34 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
             False,
             id="js-ts-braceless-write-after-binding",
         ),
+        pytest.param(
+            _WEB,
+            "if (enabled) initialize()\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-completed-conditional-body",
+        ),
+        pytest.param(
+            _WEB,
+            "if (enabled) initialize()\nexport const LIMIT = [\n  1,\n];\n",
+            3,
+            True,
+            id="js-ts-multiline-binding-after-completed-conditional-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (check(on))\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-call-head",
+        ),
+        pytest.param(
+            _WEB,
+            "init())\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-unbalanced-close",
+        ),
     ],
 )
 @pytest.mark.unit
@@ -1409,7 +1437,9 @@ async def test_indented_binding_counts_only_at_js_ts_module_scope(
     """Leading whitespace is valid at JS/TS module scope (PRRT_kwDOSJAM6s63P5Zi).
 
     A brace-less control or concise-arrow body is not a statement of its own, so
-    a write there is no binding (PRRT_kwDOSJAM6s63QK8_).
+    a write there is no binding (PRRT_kwDOSJAM6s63QK8_). A head whose body
+    already follows its condition leaves the next statement at module scope
+    (PRRT_kwDOSJAM6s63VYOX).
     """
     old = text.splitlines()[line - 1]
     diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
