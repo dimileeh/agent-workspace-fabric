@@ -752,7 +752,8 @@ def _js_ts_assigned_names(
     parameter default or a shadowing local, so a name the statement may bind
     fails closed rather than leaving that dead binding as evidence. Only the
     binding heads the caller reads itself, at offsets ``claimed``, are skipped,
-    as is a property a spaced ``obj. LIMIT = 20`` writes (PRRT_kwDOSJAM6s63X_Aw).
+    as is a property a spaced ``obj. LIMIT = 20`` writes (PRRT_kwDOSJAM6s63X_Aw)
+    or a private field ``this.#LIMIT = 20`` writes (PRRT_kwDOSJAM6s63akNJ).
     In ``jsx`` code so is an attribute name (``<Widget LIMIT={LIMIT} />``),
     though not a write inside its ``{...}`` expression (PRRT_kwDOSJAM6s63Z51K).
     """
@@ -762,7 +763,7 @@ def _js_ts_assigned_names(
         for group in (1, 2)
         if match.group(group) is not None
         and match.start(group) not in claimed
-        and not segment[: match.start(group)].rstrip().endswith(".")
+        and not segment[: match.start(group)].rstrip().endswith((".", "#"))
         and not (jsx and _jsx_opening_tag_is_open(segment[: match.start(group)], at_attribute=True))
     }
     previous = -1

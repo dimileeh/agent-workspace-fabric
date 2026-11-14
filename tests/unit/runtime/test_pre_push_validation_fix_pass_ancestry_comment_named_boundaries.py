@@ -1839,6 +1839,12 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             id="spaced-member-assignments-only",
         ),
         pytest.param(
+            "export const LIMIT = 10;\nclass C {\n  #LIMIT;\n"
+            "  set() { this.#LIMIT = 20; this.#LIMIT++; this.#LIMIT += 1; }\n}\n",
+            True,
+            id="private-field-assignments-only",
+        ),
+        pytest.param(
             "export const LIMIT = {value: 10};\n++LIMIT.value;\n--LIMIT[0];\n"
             "++(LIMIT).value;\n--LIMIT!.value;\n++(LIMIT as Box)\n  [0];\n",
             True,
