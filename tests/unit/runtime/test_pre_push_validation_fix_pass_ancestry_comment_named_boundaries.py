@@ -1228,6 +1228,9 @@ async def test_tsx_wrapped_type_operator_after_completed_jsx_element_continues(
         pytest.param("<Widget value={a > b} />", id="comparison"),
         pytest.param("<Widget render={() => <Icon />} />", id="nested-element"),
         pytest.param("<Widget style={{ gap: a > b ? 1 : 2 }} />", id="nested-braces"),
+        # PRRT_kwDOSJAM6s63Yzs5: a JSX type argument's ``>`` does not end the tag.
+        pytest.param("<Widget<Props> value={10} />", id="type-argument"),
+        pytest.param("<Widget<Map<K, V>> value={10} />", id="nested-type-arguments"),
     ],
 )
 @pytest.mark.unit

@@ -439,14 +439,19 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             start = i
             # Advance through the tag to its closing ``>`` (strings already blank),
-            # past any ``>`` in a ``{...}`` attribute expression (PRRT_kwDOSJAM6s63YQ8-).
+            # past any ``>`` in a ``{...}`` attribute expression (PRRT_kwDOSJAM6s63YQ8-)
+            # or closing a ``<Widget<Props>`` type argument (PRRT_kwDOSJAM6s63Yzs5).
             i += 1
-            attribute_braces = 0
-            while i < n and (attribute_braces or line[i] != ">"):
+            attribute_braces = type_angles = 0
+            while i < n and (attribute_braces or type_angles or line[i] != ">"):
                 if line[i] == "{":
                     attribute_braces += 1
                 elif line[i] == "}" and attribute_braces:
                     attribute_braces -= 1
+                elif not attribute_braces and line[i] == "<":
+                    type_angles += 1
+                elif not attribute_braces and line[i] == ">":
+                    type_angles -= 1
                 i += 1
             if i >= n:
                 break
