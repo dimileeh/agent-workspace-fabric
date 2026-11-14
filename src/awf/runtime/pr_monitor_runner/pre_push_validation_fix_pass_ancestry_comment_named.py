@@ -413,22 +413,31 @@ def _jsx_opening_tag_is_open(code: str, *, at_attribute: bool = False) -> bool:
 
     A ``>`` inside the tag's ``{...}`` attribute expressions closes nothing.
     ``at_attribute`` further requires ``code`` to end outside those expressions,
-    where an attribute name may follow.
+    where an attribute name may follow. Nor does the ``>`` closing a generic
+    component's type arguments (``<Widget<Props> ...``) or a ``=>`` within them
+    (PRRT_kwDOSJAM6s63aJlE).
     """
     open_tag = False
     depth = 0
+    angles = 0
     for position, char in enumerate(code):
         if not open_tag:
             open_tag = (
                 _JSX_OPENING_TAG_RE.match(code, position) is not None
                 and _JSX_OPENING_TAG_OPENER_RE.search(code, 0, position) is not None
             )
-            depth = 0
+            depth = angles = 0
         elif char in "([{":
             depth += 1
         elif char in ")]}":
             depth = max(depth - 1, 0)
-        elif char == ">" and not depth:
+        elif depth:
+            continue
+        elif char == "<":
+            angles += 1
+        elif char == ">" and angles:
+            angles -= code[position - 1] != "="
+        elif char == ">":
             open_tag = False
     return open_tag and not (at_attribute and depth)
 

@@ -1843,6 +1843,25 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
             id="tsx-attribute-arrow-body-write",
         ),
         pytest.param(
+            "src/app/web/team.tsx",
+            "export const LIMIT = 10;\nexport const VIEW = <Widget<Props> LIMIT={LIMIT} />;\n",
+            True,
+            id="tsx-generic-component-attribute-name",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const LIMIT = 10;\n"
+            "export const VIEW = <Widget<Map<K, (x: V) => V>> LIMIT={LIMIT} />;\n",
+            True,
+            id="tsx-nested-generic-component-attribute-name",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export let LIMIT = 10;\nexport const VIEW = <Widget<Props> value={LIMIT = 20} />;\n",
+            False,
+            id="tsx-generic-component-attribute-expression-write",
+        ),
+        pytest.param(
             "src/app/web/team.ts",
             "export let LIMIT = 10;\nexport const VIEW = x <Widget LIMIT= 20;\n",
             False,
