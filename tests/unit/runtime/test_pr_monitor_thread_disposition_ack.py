@@ -495,6 +495,15 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "The code includes a test that reproduces the crash.",
         "The code includes the test that reproduces the crash.",
         "The code includes a test.",
+        # A predicate concurs only after an affirmative subject: a negated claim, a
+        # request or a hedge ahead of it may report missing work.
+        "No regression test covers this case.",
+        "Nothing is fixed.",
+        "Ensure the null dereference is fixed.",
+        "Make sure the fix is confirmed.",
+        "I doubt the null dereference is fixed.",
+        "It is unclear whether the bug is fixed.",
+        "That's right the moment it is fixed.",
         # A concurrence only in quoted text is not the bot's own.
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.

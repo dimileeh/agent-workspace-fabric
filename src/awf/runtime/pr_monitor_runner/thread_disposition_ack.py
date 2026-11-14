@@ -87,9 +87,13 @@ _CONCURRENCE_RE = re.compile(
     # An agreement word concurs only alone.
     r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
     r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
-    # A predicate concurs only as the end of its clause, whatever its subject, unless
-    # that subject holds an agreement word: "LGTM the moment it is fixed" qualifies it.
-    r"(?:(?!\b(?:agreed?|lgtm|looks good|you're|that's)\b).)*?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
+    # A predicate concurs only as the end of its clause, after no subject or an
+    # affirmative one: led by "I" or a determiner, free of agreement, negation and hedge
+    # words. "LGTM the moment it is fixed", "No test covers this case", "Ensure it is
+    # fixed" or "I doubt it is fixed" may report missing work, so the agent judges them.
+    r"(?:(?=(?:i|the|this|that|it|its|my|our)\b)(?:(?!\b(?:agreed?|lgtm|looks good|you're|"
+    r"that's|no|none|nothing|nobody|neither|nor|without|whether|doubt|unclear|unsure|"
+    r"uncertain)\b).)*?)?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
     r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
     r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"
