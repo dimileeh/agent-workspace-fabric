@@ -1,0 +1,1087 @@
+"""Comment-named identifier statement boundaries (issue #1232).
+
+Split from ``test_pre_push_validation_fix_pass_ancestry_comment_named.py``: these
+cases pin where a named identifier's binding statement ends — column-0 literals,
+continuations, chained and semicolon-separated assignments, JS/TS declarators,
+labels, type arguments, JSX initializers and module-scope indentation — so an
+edit just past the binding is not mistaken for a change to its definition.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import _LEFT, _RIGHT, _Probe
+from tests.unit.runtime._pre_push_comment_named_helpers import (
+    _INBOUND,
+    _WEB,
+    _changes_named_target,
+    _diff,
+    _probe,
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "diff"),
+    [
+        pytest.param(
+            _INBOUND,
+            '_TASK_INBOUND_TYPES = ("a",)\n"""Trailing note."""\nVALUE = 1\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-"""Trailing note."""', '+"""Reworded note."""'),
+            id="column-0-string-literal",
+        ),
+        pytest.param(
+            _INBOUND,
+            '_TASK_INBOUND_TYPES = """\na\n"""\n"""Trailing\nnote."""\n',
+            _diff(_INBOUND, "@@ -5 +5 @@", '-note."""', '+notes."""'),
+            id="string-literal-after-multi-line-string",
+        ),
+        pytest.param(
+            _WEB,
+            'const _TASK_INBOUND_TYPES = ["a"];\n/* Trailing\n   note. */\nconst other = 1;\n',
+            _diff(_WEB, "@@ -3 +3 @@", "-   note. */", "+   notes. */"),
+            id="column-0-block-comment",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_column_0_literals_after_a_binding_are_not_evidence(
+    path: str, text: str, diff: str
+) -> None:
+    """Masked blanks still open a new statement at column 0 (PRRT_kwDOSJAM6s63MDQr)."""
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
+
+
+@pytest.mark.parametrize(
+    ("text", "diff", "expected"),
+    [
+        pytest.param(
+            '_TASK_INBOUND_TYPES = "a\\\nb"\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-b"', '+c"'),
+            True,
+            id="last-statement-continued-line",
+        ),
+        pytest.param(
+            '_TASK_INBOUND_TYPES = ("a\\\nb",\n    1)\nother = 1\n',
+            _diff(_INBOUND, "@@ -4 +4 @@", "-other = 1", "+other = 2"),
+            False,
+            id="statement-after-bracketed-continuation",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_backslash_continued_string_keeps_binding_lines_aligned(
+    text: str, diff: str, *, expected: bool
+) -> None:
+    """An escaped newline in a string keeps its raw line (PRRT_kwDOSJAM6s63MUc8)."""
+    runner = _probe(texts={_INBOUND: text}, changed_paths=(_INBOUND,), diffs={_INBOUND: diff})
+
+    assert await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` is wrong") is expected
+
+
+@pytest.mark.parametrize(
+    ("diff", "expected"),
+    [
+        pytest.param(
+            _diff(_INBOUND, "@@ -2 +2 @@", "-OTHER = 1", "+OTHER = 2"), False, id="next-binding"
+        ),
+        pytest.param(
+            _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = (10 // 2)", "+LIMIT = (10 // 1)"),
+            True,
+            id="own-binding",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_python_floor_division_does_not_extend_a_binding(
+    diff: str, *, expected: bool
+) -> None:
+    """``//`` is an operator in Python, not a comment (PRRT_kwDOSJAM6s63OADy)."""
+    runner = _probe(
+        texts={_INBOUND: "LIMIT = (10 // 2)\nOTHER = 1\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("diff", "expected"),
+    [
+        pytest.param(
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                "-DEFAULT_LIMIT = LIMIT = 10",
+                "+DEFAULT_LIMIT = LIMIT = 20",
+            ),
+            True,
+            id="chained-binding",
+        ),
+        pytest.param(
+            _diff(_INBOUND, "@@ -2 +2 @@", "-OTHER = LIMIT == 1", "+OTHER = LIMIT == 2"),
+            False,
+            id="comparison-is-not-a-target",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_chained_assignment_binds_every_target(diff: str, *, expected: bool) -> None:
+    """A secondary target of ``A = B = v`` is bound too (PRRT_kwDOSJAM6s63PKQ9)."""
+    runner = _probe(
+        texts={_INBOUND: "DEFAULT_LIMIT = LIMIT = 10\nOTHER = LIMIT == 1\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("line", "new", "expected"),
+    [
+        pytest.param(3, "  2", False, id="arrow-parameter-is-not-a-target"),
+        pytest.param(1, "export const LIMIT = 20;", True, id="own-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_chained_assignment_target_excludes_an_arrow(
+    line: int, new: str, *, expected: bool
+) -> None:
+    """The ``=`` of ``=>`` binds no arrow parameter (PRRT_kwDOSJAM6s63VYOS)."""
+    text = "export const LIMIT = 10;\nconst unrelated = LIMIT => (\n  1\n);\n"
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{new}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("line", "new", "expected"),
+    [
+        pytest.param(3, "  2", False, id="arrow-parameter-is-not-a-target"),
+        pytest.param(1, "export const LIMIT = 20;", True, id="own-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_module_level_assignment_excludes_an_arrow(
+    line: int, new: str, *, expected: bool
+) -> None:
+    """A standalone arrow's ``=>`` binds no parameter (PRRT_kwDOSJAM6s63V0Yl)."""
+    text = "export const LIMIT = 10;\nLIMIT => (\n  1\n);\n"
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{new}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "line", "new", "name", "expected"),
+    [
+        pytest.param(
+            "const OTHER = 0, LIMIT = [\n  10,\n];\n",
+            2,
+            "  20,",
+            "LIMIT",
+            True,
+            id="secondary-declarator",
+        ),
+        pytest.param(
+            "const OTHER = 0, LIMIT = [\n  10,\n];\n",
+            2,
+            "  20,",
+            "OTHER",
+            False,
+            id="first-declarator-ends-at-its-comma",
+        ),
+        pytest.param(
+            "const OTHER = 0,\n  LIMIT = [\n    10,\n  ];\n",
+            3,
+            "    20,",
+            "LIMIT",
+            True,
+            id="declarator-on-its-own-line",
+        ),
+        pytest.param(
+            "const OTHER = 0,\n  LIMIT = [\n    10,\n  ];\n",
+            1,
+            "const OTHER = 1,",
+            "LIMIT",
+            False,
+            id="previous-declarator-is-not-the-binding",
+        ),
+        pytest.param(
+            "let first,\n  // the cap\n\n  LIMIT = 10;\n",
+            4,
+            "  LIMIT = 20;",
+            "LIMIT",
+            True,
+            id="after-uninitialized-declarator-and-gap",
+        ),
+        pytest.param(
+            "const m: Map<string, number> = new Map(), LIMIT = 10;\n",
+            1,
+            "const m: Map<string, number> = new Map(), LIMIT = 20;",
+            "LIMIT",
+            True,
+            id="after-generic-annotation",
+        ),
+        pytest.param(
+            "const OTHER = f(a, LIMIT = 10);\n",
+            1,
+            "const OTHER = f(a, LIMIT = 20);",
+            "LIMIT",
+            False,
+            id="bracketed-comma-is-not-a-declarator",
+        ),
+        pytest.param(
+            "export const LIMIT = 10;\nconst identity = <T, LIMIT = number>(x: T) => x;\n",
+            2,
+            "const identity = <T, LIMIT = string>(x: T) => x;",
+            "LIMIT",
+            False,
+            id="generic-arrow-type-parameter-is-not-a-declarator",
+        ),
+        pytest.param(
+            "export const LIMIT = 10;\nconst f = <T, LIMIT = (a: T) => void>(x: T) => x;\n",
+            2,
+            "const f = <T, LIMIT = (a: T) => string>(x: T) => x;",
+            "LIMIT",
+            False,
+            id="generic-default-with-arrow-type",
+        ),
+        pytest.param(
+            "export const LIMIT = 10;\nconst f = function <T, LIMIT = number>(x: T) { return x; };\n",
+            2,
+            "const f = function <T, LIMIT = string>(x: T) { return x; };",
+            "LIMIT",
+            False,
+            id="generic-function-expression-type-parameter",
+        ),
+        pytest.param(
+            "export const LIMIT = 10;\nlet make: new <T, LIMIT = number>(x: T) => T;\n",
+            2,
+            "let make: new <T, LIMIT = string>(x: T) => T;",
+            "LIMIT",
+            False,
+            id="construct-signature-type-parameter",
+        ),
+        pytest.param(
+            "const OTHER = renew < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = renew < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="new-suffixed-operand-is-not-a-construct-signature",
+        ),
+        pytest.param(
+            "const g = <T,>(x: T) => x, LIMIT = 10;\n",
+            1,
+            "const g = <T,>(x: T) => x, LIMIT = 20;",
+            "LIMIT",
+            True,
+            id="declarator-after-generic-arrow",
+        ),
+        pytest.param(
+            "const ok = a < b, LIMIT = 10\n",
+            1,
+            "const ok = a < b, LIMIT = 20",
+            "LIMIT",
+            True,
+            id="less-than-comparison-is-not-a-generic",
+        ),
+        pytest.param(
+            "export const LIMIT = 10;\nconst f = <T, LIMIT = Map<string, number>>(x: T) => x;\n",
+            2,
+            "const f = <T, LIMIT = Map<string, string>>(x: T) => x;",
+            "LIMIT",
+            False,
+            id="nested-generic-type-parameter-default",
+        ),
+        pytest.param(
+            "const ok = a < b, LIMIT = 10; f > (x);\n",
+            1,
+            "const ok = a < b, LIMIT = 20; f > (x);",
+            "LIMIT",
+            True,
+            id="comparison-ends-at-semicolon",
+        ),
+        pytest.param(
+            "const OTHER = 1 < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = 1 < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="comparisons-around-declarator-are-not-a-generic",
+        ),
+        pytest.param(
+            "const OTHER = 1 < 2, LIMIT = 3 > (\n  4\n);\n",
+            2,
+            "  5",
+            "LIMIT",
+            True,
+            id="comparisons-around-declarator-with-multiline-operand",
+        ),
+        pytest.param(
+            "const OTHER = className < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = className < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="class-prefixed-operand-is-not-a-class-head",
+        ),
+        pytest.param(
+            "const OTHER = functional < 2, LIMIT = 3 > (4);\n",
+            1,
+            "const OTHER = functional < 2, LIMIT = 5 > (4);",
+            "LIMIT",
+            True,
+            id="function-prefixed-operand-is-not-a-function-head",
+        ),
+        pytest.param(
+            "const OTHER = base\n  .method(), LIMIT = [\n  10,\n];\n",
+            3,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-leading-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\n  /*\n   * note\n   */\n  .method(), LIMIT = [\n  10,\n];\n",
+            6,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-comment-and-leading-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\n/* explanation\n note */ .method(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            True,
+            id="declarator-after-unstarred-comment-close-continuation",
+        ),
+        pytest.param(
+            "const OTHER = base\n/* explanation\n note */ foo(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-unstarred-comment-close",
+        ),
+        pytest.param(
+            "const OTHER = base\nfoo(), LIMIT = [\n  10,\n];\n",
+            3,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-complete-declaration",
+        ),
+        pytest.param(
+            "const OTHER = `hello\nworld`, LIMIT = [\n  10\n];\n",
+            3,
+            "  20",
+            "LIMIT",
+            True,
+            id="declarator-after-multiline-template",
+        ),
+        pytest.param(
+            "const OTHER = `a ${x}\nb ${y}\nc`, LIMIT = [\n  10\n];\n",
+            4,
+            "  20",
+            "LIMIT",
+            True,
+            id="declarator-after-template-interpolation-line",
+        ),
+        pytest.param(
+            "const OTHER = 1 /* note\n  more */\nfoo(), LIMIT = [\n  10,\n];\n",
+            4,
+            "  20,",
+            "LIMIT",
+            False,
+            id="new-statement-after-declaration-block-comment",
+        ),
+        pytest.param(
+            "const OTHER =\n`a\nb`\nconst LIMIT = 1;\n",
+            4,
+            "const LIMIT = 2;",
+            "LIMIT",
+            True,
+            id="declaration-after-semicolon-free-multiline-template",
+        ),
+        pytest.param(
+            "const OTHER =\n`a\nb`\nconst LIMIT = 1;\n",
+            4,
+            "const LIMIT = 2;",
+            "OTHER",
+            False,
+            id="semicolon-free-multiline-template-ends-declaration",
+        ),
+        pytest.param(
+            'const OTHER =\n  "hello"\nconst LIMIT = [\n  10\n];\n',
+            4,
+            "  20",
+            "LIMIT",
+            True,
+            id="declaration-after-standalone-string-operand",
+        ),
+        pytest.param(
+            'const OTHER =\n  "hello"\nconst LIMIT = [\n  10\n];\n',
+            4,
+            "  20",
+            "OTHER",
+            False,
+            id="standalone-string-operand-ends-declaration",
+        ),
+        pytest.param(
+            "const LIMIT = `a\n// cleanup`\nconst OTHER = 1;\n",
+            2,
+            "// teardown`",
+            "LIMIT",
+            True,
+            id="semicolon-free-multiline-template-closing-comment-marker",
+        ),
+        pytest.param(
+            "const LIMIT =\n`a\n// cleanup`\nconst OTHER = 1;\n",
+            3,
+            "// teardown`",
+            "LIMIT",
+            True,
+            id="wrapped-semicolon-free-multiline-template-closing-comment-marker",
+        ),
+        pytest.param(
+            "const OTHER = `hello\nworld`, LIMIT = 10\nconst NEXT = 3;\n",
+            3,
+            "const NEXT = 4;",
+            "LIMIT",
+            False,
+            id="declarator-on-multiline-template-closing-line",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_declaration_binds_every_declarator(
+    text: str, line: int, new: str, name: str, *, expected: bool
+) -> None:
+    """Each declarator of ``const A = 0, B = v`` is bound to its own initializer span.
+
+    (PRRT_kwDOSJAM6s63QfAU)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{new}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, f"`{name}` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_INBOUND, "LIMIT = 10; OTHER = (\n    1\n)\n", 2, False, id="python-next"),
+        pytest.param(_INBOUND, "LIMIT = 10; OTHER = (\n    1\n)\n", 1, True, id="python-own"),
+        pytest.param(
+            _INBOUND, "LIMIT = (\n    1\n); OTHER = (\n    1\n)\n", 4, False, id="python-wrapped"
+        ),
+        pytest.param(
+            _WEB, "export const LIMIT = 10; const OTHER = [\n  1,\n];\n", 2, False, id="js-ts-next"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_binding_ends_at_its_semicolon_boundary(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A ``;``-separated next statement is not the binding's (PRRT_kwDOSJAM6s63Pd7z)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_INBOUND, "OTHER = 0; LIMIT = (\n    10\n)\n", 2, True, id="python-later"),
+        pytest.param(
+            _INBOUND, "OTHER = 0; LIMIT = 0; X = (\n    10\n)\n", 2, False, id="python-middle"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = (\n    0\n); LIMIT = [\n    10\n]\n", 4, True, id="python-wrapped"
+        ),
+        pytest.param(
+            _INBOUND, "LIMIT = 0; LIMIT = (\n    10\n)\n", 2, True, id="python-last-rebinding"
+        ),
+        pytest.param(
+            _INBOUND, "if ready: OTHER = 0; LIMIT = (\n    10\n)\n", 2, False, id="python-body"
+        ),
+        pytest.param(
+            _INBOUND, "class C: OTHER = 0; LIMIT = (\n    10\n)\n", 2, False, id="class-body"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = ';'; LIMIT = (\n    10\n)\n", 2, True, id="python-string-semicolon"
+        ),
+        pytest.param(
+            _INBOUND, "OTHER = 'é'; LIMIT = (\n    10\n)\n", 2, True, id="python-non-ascii-column"
+        ),
+        pytest.param(
+            _INBOUND,
+            "OTHER = 0; LIMIT = (\n    10\n)\nfor LIMIT in ():\n    pass\n",
+            2,
+            False,
+            id="python-rebound-later",
+        ),
+        pytest.param(
+            _WEB, "const OTHER = 0; const LIMIT = [\n  10,\n];\n", 2, True, id="js-ts-later"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_semicolon_separated_statements_each_bind(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A binding after a ``;`` on the same line is found, over its own lines.
+
+    (PRRT_kwDOSJAM6s63Sh3G)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(
+            _WEB,
+            "export const LIMIT = 10;\nlet unrelated;\nLIMIT: unrelated = (\n  1\n);\n",
+            4,
+            False,
+            id="js-ts-label",
+        ),
+        pytest.param(_WEB, "export const LIMIT: number = (\n  1\n);\n", 2, True, id="js-ts-typed"),
+        pytest.param(_INBOUND, "LIMIT: int = (\n    1\n)\n", 2, True, id="python-annotated"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_label_binds_nothing(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A JS/TS ``LIMIT: target = ...`` labels a statement and binds no ``LIMIT``.
+
+    (PRRT_kwDOSJAM6s63SzHq)
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "line", "expected"),
+    [
+        pytest.param(
+            "export const LIMIT = 10;\n  export function limit() {\n    return 1;\n  }\n",
+            3,
+            False,
+            id="indented-statement-after-semicolon",
+        ),
+        pytest.param(
+            'export const LIMIT = "10"\n  export function limit() {\n    return 1;\n  }\n',
+            3,
+            False,
+            id="indented-statement-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = 10; // max\n  limit();\n", 2, False, id="trailing-comment"
+        ),
+        pytest.param("export const LIMIT =\n  10;\n", 2, True, id="operator-continuation"),
+        pytest.param(
+            "export const LIMIT = base\n  .scaled(10);\n", 2, True, id="leading-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT =\n10;\n", 2, True, id="column-zero-operator-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = base\n.scaled(10);\n",
+            2,
+            True,
+            id="column-zero-leading-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = 10\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="column-zero-statement-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = 10\n++counter1;\n", 2, False, id="prefix-increment-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = 10\n  --counter1;\n", 2, False, id="prefix-decrement-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = base\n+ step1;\n", 2, True, id="leading-binary-plus-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = value\n  instanceof Expected1;\n",
+            2,
+            True,
+            id="leading-instanceof-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = key\n  in table1;\n", 2, True, id="leading-in-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = 10\ninner1();\n", 2, False, id="in-prefixed-identifier-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = await\n  loadLimit(10);\n",
+            2,
+            True,
+            id="trailing-await-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = typeof\n  limit1;\n", 2, True, id="trailing-typeof-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = new\n  Limit(10);\n", 2, True, id="trailing-new-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = cache.delete\nrun1();\n",
+            2,
+            False,
+            id="keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache. delete\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="spaced-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache. /* key */ delete\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="commented-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  delete\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  // key\n  delete\nexport const OTHER = 1;\n",
+            4,
+            False,
+            id="comment-wrapped-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  delete\n  (1);\n", 3, True, id="wrapped-property-call"
+        ),
+        pytest.param(
+            "export const LIMIT = renew\nrun1();\n", 2, False, id="keyword-suffixed-identifier"
+        ),
+        pytest.param(
+            "export const LIMIT = value satisfies\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-satisfies-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value as\n  Expected1;\n", 2, True, id="trailing-as-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = config.as\nrun1();\n", 2, False, id="as-named-property-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = alias\nrun1();\n", 2, False, id="as-suffixed-identifier"
+        ),
+        pytest.param(
+            "export const LIMIT = value as Array<number>\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value as Map<string, Array<(a: number) => void>>\nrun1();\n",
+            2,
+            False,
+            id="nested-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value as Array<\n  number>\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value as Array<\n  number>\nrun1();\n",
+            3,
+            False,
+            id="wrapped-closing-type-arguments-before-statement",
+        ),
+        pytest.param(
+            "export const LIMIT = a <\n  b >\n  c1;\n",
+            3,
+            True,
+            id="wrapped-trailing-comparison-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = a < b >\n  c1;\n", 2, True, id="trailing-comparison-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = a >>\n  b1;\n", 2, True, id="trailing-shift-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = (a) =>\n  a1;\n", 2, True, id="trailing-arrow-continuation"
+        ),
+        pytest.param(
+            "export const LIMIT = !\n    Boolean(10);\n",
+            2,
+            True,
+            id="trailing-unary-negation-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = !!\n    Boolean(10);\n",
+            2,
+            True,
+            id="trailing-double-negation-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value!\nrun1();\n", 2, False, id="non-null-assertion-after-asi"
+        ),
+        pytest.param(
+            "export const LIMIT = items[0] !\nrun1();\n",
+            2,
+            False,
+            id="spaced-non-null-assertion-after-asi",
+        ),
+        pytest.param(
+            'export const LIMIT = "a"!\nrun1();\n', 2, False, id="string-non-null-assertion"
+        ),
+        pytest.param(
+            "export const LIMIT = `a${b}` !\nrun1();\n",
+            2,
+            False,
+            id="template-non-null-assertion",
+        ),
+        pytest.param(
+            "export const LIMIT = /a/g!\nrun1();\n", 2, False, id="regex-non-null-assertion"
+        ),
+        pytest.param(
+            'export const LIMIT = "a" /* x */ /* y */!\nrun1();\n',
+            2,
+            False,
+            id="commented-string-non-null-assertion",
+        ),
+        pytest.param(
+            "export const LIMIT = /* why */ !\n    Boolean(10);\n",
+            2,
+            True,
+            id="comment-then-unary-negation-continuation",
+        ),
+        pytest.param("export const LIMIT = `a\n  b`;\n", 2, True, id="template-literal"),
+        pytest.param(
+            "export const LIMIT = 1\n  /* unrelated\n     note 1 */\n  export const OTHER = 2;\n",
+            3,
+            False,
+            id="standalone-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = 2\n/* unrelated, and\n */ export const OTHER = 1;\n",
+            3,
+            False,
+            id="statement-after-block-comment-close",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* scale\n   note */ .scaled(10);\n",
+            3,
+            True,
+            id="continuation-after-block-comment-close",
+        ),
+        pytest.param(
+            "export const LIMIT = 2 /* unrelated\n*/ export const OTHER = 1;\n",
+            2,
+            False,
+            id="statement-after-trailing-block-comment-close",
+        ),
+        pytest.param(
+            "export const LIMIT = 2 /* unrelated\n   note */\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="statement-after-trailing-multi-line-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = base /* scale\n */ .scaled(10);\n",
+            2,
+            True,
+            id="continuation-after-trailing-block-comment-close",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n  /* why */ .scaled(10);\n",
+            2,
+            True,
+            id="block-comment-then-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* scale for production */\n.scaled(10);\n",
+            3,
+            True,
+            id="standalone-block-comment-then-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n  /* scale\n     note */\n  .scaled(10);\n",
+            4,
+            True,
+            id="multi-line-block-comment-then-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = base +\n/* why */\n10;\n",
+            3,
+            True,
+            id="operator-then-block-comment",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* note 1 */\nlimit();\n",
+            2,
+            False,
+            id="block-comment-before-next-statement",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n/* note 1 */\n", 2, False, id="trailing-block-comment"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_binding_ends_at_its_statement_boundary(
+    text: str, line: int, *, expected: bool
+) -> None:
+    """Indentation is not scope in JS/TS (PRRT_kwDOSJAM6s63PU_-)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(_WEB, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        pytest.param("src/app/web/team.js", True, id="javascript-comparison"),
+        pytest.param(_WEB, False, id="typescript-instantiation-expression"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_compact_trailing_angle_is_type_arguments_only_in_typescript(
+    path: str, *, expected: bool
+) -> None:
+    """JavaScript has no type arguments: ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy)."""
+    text = "export const LIMIT = a<b >\n  c1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-  c1;", "+  c2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "element"),
+    [
+        pytest.param("src/app/web/team.tsx", "<Widget />", id="tsx-self-closing"),
+        pytest.param("src/app/web/team.jsx", "<></>", id="jsx-fragment"),
+        pytest.param("src/app/web/team.tsx", "<div>hi</div>", id="tsx-closing-tag"),
+        pytest.param("src/app/web/team.jsx", "<ui.Panel open />", id="jsx-member-tag"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("comment", "expected"),
+    [
+        pytest.param("`VIEW` is wrong", False, id="unchanged-jsx-binding"),
+        pytest.param("`OTHER` is wrong", True, id="changed-next-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_completed_jsx_initializer_ends_its_statement(
+    path: str, element: str, comment: str, *, expected: bool
+) -> None:
+    """A completed JSX element's ``>`` is no comparison (PRRT_kwDOSJAM6s63VJ_g)."""
+    text = f"export const VIEW = {element}\nexport const OTHER = 1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, comment) is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
+        pytest.param(_WEB, "  export const LIMIT = 1;\n", 1, True, id="js-ts-indented-module"),
+        pytest.param(
+            _WEB, "const a = 0;\n    LIMIT = 1;\n", 2, True, id="js-ts-indented-reassignment"
+        ),
+        pytest.param(
+            _WEB,
+            "export function f() {\n  const LIMIT = 1;\n}\n",
+            2,
+            False,
+            id="js-ts-function-body",
+        ),
+        pytest.param(_WEB, "if (on) {\n  LIMIT = 1;\n}\n", 2, False, id="js-ts-block-body"),
+        pytest.param(_INBOUND, "if on:\n    LIMIT = 1\n", 2, False, id="python-indented"),
+        pytest.param(_WEB, "if (on)\n  LIMIT = 1;\n", 2, False, id="js-ts-braceless-if"),
+        pytest.param(_WEB, "if (on)\nLIMIT = 1;\n", 2, False, id="js-ts-braceless-col0"),
+        pytest.param(
+            _WEB,
+            "for (let i = 0; i < n; i++)\n  LIMIT = 1;\n",
+            2,
+            False,
+            id="js-ts-braceless-for",
+        ),
+        pytest.param(_WEB, "if (on) {\n  a();\n} else\n  LIMIT = 1;\n", 4, False, id="js-ts-else"),
+        pytest.param(_WEB, "const f = () =>\n  LIMIT = 1;\n", 2, False, id="js-ts-arrow-body"),
+        pytest.param(
+            _WEB,
+            "if (on)\n  a = 0;\n  LIMIT = 1;\n",
+            3,
+            True,
+            id="js-ts-after-braceless-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 1;\nif (on)\n  LIMIT = 3;\n",
+            3,
+            False,
+            id="js-ts-braceless-write-after-binding",
+        ),
+        pytest.param(
+            _WEB,
+            "if (enabled) initialize()\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-completed-conditional-body",
+        ),
+        pytest.param(
+            _WEB,
+            "if (enabled) initialize()\nexport const LIMIT = [\n  1,\n];\n",
+            3,
+            True,
+            id="js-ts-multiline-binding-after-completed-conditional-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (check(on))\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-call-head",
+        ),
+        pytest.param(
+            _WEB,
+            "init())\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-unbalanced-close",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-loop-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) for (const x of xs)\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-for-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) do\n  LIMIT = 1;\nwhile (check());\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-do-head",
+        ),
+        pytest.param(
+            _WEB,
+            "if (on) while (check()) step()\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-completed-nested-loop-body",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nouter: while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-labelled-loop-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) outer: for (const x of xs)\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-labelled-loop-head",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_indented_binding_counts_only_at_js_ts_module_scope(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """Leading whitespace is valid at JS/TS module scope (PRRT_kwDOSJAM6s63P5Zi).
+
+    A brace-less control or concise-arrow body is not a statement of its own, so
+    a write there is no binding (PRRT_kwDOSJAM6s63QK8_). A head whose body
+    already follows its condition leaves the next statement at module scope
+    (PRRT_kwDOSJAM6s63VYOX); one nested in another brace-less head still
+    leaves it as a body (PRRT_kwDOSJAM6s63V2yC).
+    """
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("left_text", "right_text", "diff", "expected"),
+    [
+        pytest.param(
+            "export const LIMIT = 1;\n",
+            "export const LIMIT = 1;\n  export const OTHER = 2;\n",
+            _diff(_WEB, "@@ -1,0 +2 @@", "+  export const OTHER = 2;"),
+            False,
+            id="js-ts-indented-statement-after-binding",
+        ),
+        pytest.param(
+            "export const LIMIT = base\n",
+            "export const LIMIT = base\n  .scaled(10)\n",
+            _diff(_WEB, "@@ -1,0 +2 @@", "+  .scaled(10)"),
+            True,
+            id="js-ts-insert-continuing-binding",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_insert_after_a_complete_binding_is_not_evidence(
+    left_text: str, right_text: str, diff: str, *, expected: bool
+) -> None:
+    """Deeper indent does not extend an assignment (PRRT_kwDOSJAM6s63P5ZX)."""
+    runner = _Probe(
+        texts={(_LEFT, _WEB): left_text, (_RIGHT, _WEB): right_text},
+        changed_paths=(_WEB,),
+        diffs={_WEB: diff},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
