@@ -2058,6 +2058,17 @@ async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
             ("@@ -3 +3 @@", "-  return input !== null;", "+  return input != null;"),
             id="type-predicate-type-literal-return-type",
         ),
+        pytest.param(
+            "export const handler = function <T extends {}>()\n{\n  return 10;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10;", "+  return 11;"),
+            id="type-parameter-constraint-type-literal",
+        ),
+        pytest.param(
+            "export const handler = function <T extends Array<{ v: number }> = () => {}>()\n"
+            "{\n  return 10;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10;", "+  return 11;"),
+            id="nested-type-parameter-constraint-type-literal",
+        ),
     ],
 )
 @pytest.mark.unit

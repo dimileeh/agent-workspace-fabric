@@ -302,15 +302,31 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
     a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP), or a ``keyof``,
     ``extends`` or type-predicate ``is`` operator (PRRT_kwDOSJAM6s63ZGB2). Only
     a ``;`` outside them ends the head; one delimits a type literal's members
-    (PRRT_kwDOSJAM6s63Yt-L).
+    (PRRT_kwDOSJAM6s63Yt-L). Nor does one in the head's type-parameter list
+    (``function <T extends {}>()``), whose ``<`` follows ``function``, a ``*`` or
+    the name, and whose ``>`` is not an ``=>`` (PRRT_kwDOSJAM6s63Zfgu).
     """
     for head in _JS_TS_EXPRESSION_HEAD_RE.finditer(code):
-        depth = 0
+        depth = angle = 0
         annotated = False
         previous = last = ""
         for char in code[head.end() :]:
             type_literal = annotated and previous in _JS_TS_TYPE_LITERAL_PRECEDERS
-            if char in "([" or (char == "{" and (depth or type_literal)):
+            if angle or (
+                char == "<"
+                and not depth
+                and not annotated
+                and (previous[-1:] in {"", "*", "_", "$"} or previous[-1:].isalnum())
+            ):
+                if char == "<":
+                    angle += 1
+                elif char == ">" and previous != "=":
+                    angle -= 1
+                elif char in "([{":
+                    depth += 1
+                elif char in ")]}":
+                    depth = max(depth - 1, 0)
+            elif char in "([" or (char == "{" and (depth or type_literal)):
                 depth += 1
             elif char in ")]" or (char == "}" and depth):
                 depth = max(depth - 1, 0)
