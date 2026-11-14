@@ -1240,6 +1240,26 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
 
 
 @pytest.mark.parametrize(
+    ("comment", "expected"),
+    [
+        pytest.param("`VIEW` is wrong", False, id="unchanged-jsx-binding"),
+        pytest.param("`OTHER` is wrong", True, id="changed-next-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_line_start_jsx_text_block_comment_opener_ends_no_statement(
+    comment: str, *, expected: bool
+) -> None:
+    """A ``/*`` starting a JSX text line opens no block comment (PRRT_kwDOSJAM6s63aHzN)."""
+    path = "src/app/web/team.tsx"
+    text = "export const VIEW = <div>\n/* helper()\n</div>;\nexport const OTHER = 1;\n"
+    diff = _diff(path, "@@ -4 +4 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, comment) is expected
+
+
+@pytest.mark.parametrize(
     "operator",
     [
         pytest.param("as\n  Expected", id="as-continued-on-next-line"),

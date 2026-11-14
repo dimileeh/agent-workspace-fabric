@@ -956,6 +956,19 @@ def test_callee_refs_jsx_text_quote_opens_no_string(
             frozenset({(None, "helper")}),
             id="line-start-block-comment",
         ),
+        # PRRT_kwDOSJAM6s63aHzN: a line-leading JSX text ``/*`` that would swallow a tag is text.
+        pytest.param(
+            "const v = <div>\n/* x\n</div>;\nhelper();\n",
+            4,
+            frozenset({(None, "helper")}),
+            id="line-start-text-block-comment-opener",
+        ),
+        pytest.param(
+            "const v = <div />;\n/* <b> */\nhelper();\n",
+            3,
+            frozenset({(None, "helper")}),
+            id="line-start-block-comment-after-element",
+        ),
     ],
 )
 @pytest.mark.unit

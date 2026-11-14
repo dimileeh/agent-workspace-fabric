@@ -440,7 +440,7 @@ def _mask_comments_and_string_literals_for_callee_scan(
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
         if ch == "/" and i + 1 < n and line[i + 1] == "*":
-            if jsx and _jsx_text_slashes_at(out):
+            if jsx and _jsx_text_slashes_at(out, line_start=_block_comment_spans_tag(line, i)):
                 out.extend("/*")
                 i += 2
                 continue
@@ -496,20 +496,27 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
     return True
 
 
-def _jsx_text_slashes_at(out: list[str]) -> bool:
+def _block_comment_spans_tag(line: str, start: int) -> bool:
+    """Whether the ``/*`` at ``start`` would blank a ``<`` before its ``*/`` (or EOF)."""
+    end = line.find("*/", start + 2)
+    return "<" in line[start + 2 : end if end >= 0 else len(line)]
+
+
+def _jsx_text_slashes_at(out: list[str], *, line_start: bool = False) -> bool:
     """Whether a ``//`` or ``/*`` after masked ``out`` is JSX text rather than a comment.
 
     JSX text such as ``<a>https://x.dev</a>`` holds no comments; masking its
     ``//`` as one would blank the closing tag, and the JSX text pass would then
     blank every later line (PRRT_kwDOSJAM6s63Zv5r); a text ``/*`` with no
     ``*/`` would blank the rest of the file (PRRT_kwDOSJAM6s63Z51N). The opener
-    is text when the JSX text pass would blank it. One starting its line stays a comment, and
-    the check reads only from the column-0 declaration holding it, so ordinary
-    comments stay cheap.
+    is text when the JSX text pass would blank it. One starting its line stays a
+    comment unless ``line_start`` (a ``/*`` that would blank a closing tag,
+    PRRT_kwDOSJAM6s63aHzN), and the check reads only from the column-0
+    declaration holding it, so ordinary comments stay cheap.
     """
     prefix = "".join(out)
-    line_start = max(prefix.rfind("\n"), prefix.rfind("\r")) + 1
-    if not prefix[line_start:].strip() or "<" not in prefix:
+    line_begin = max(prefix.rfind("\n"), prefix.rfind("\r")) + 1
+    if (not line_start and not prefix[line_begin:].strip()) or "<" not in prefix:
         return False
     start = 0
     for declaration in _JS_TOP_LEVEL_DECLARATION_RE.finditer(prefix):
