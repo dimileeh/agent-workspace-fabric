@@ -1,4 +1,4 @@
-"""One-time agent check of a review bot's reply after AWF's disposition (#1138, D1).
+"""One-time check of a review bot's reply after AWF's disposition (#1138, D1; #1238).
 
 Review bots often answer AWF's disposition reply ("Agreed — this is a false
 positive"). The #1018 gate counts any comment after the marker as newer
@@ -8,10 +8,12 @@ a full re-triage. This module is the pure policy in front of that fallback.
 A thread is eligible only when it is resolved by AWF's identity, its opener is a
 forge Bot account (the forge's own account type; no bot names or text patterns),
 every comment after AWF's newest reply is by that same bot, and that newest
-reply is a current marker once those comments are set aside. For each such
-comment the agent's judgment is recorded under its identity
+reply is a current marker once those comments are set aside. Each such comment
+is judged by a deterministic concurrence check (:func:`is_bot_concurrence`),
+else by the agent, and the judgment is recorded under its identity
 (:func:`comment_identity`; an edit is a new identity), so the check runs at most
-once per identity, across re-adoption too:
+once per identity, across re-adoption too. A bot that concurs again after a
+re-triage posts a new identity, which is judged afresh (#1238):
 
 * every comment ``ACKNOWLEDGES``: the gate reads the thread without them, so the
   existing marker stays the disposition. No reply is posted and nothing reopens.
@@ -56,12 +58,57 @@ ACK_JUDGMENTS: frozenset[str] = frozenset({ACKNOWLEDGES, NEW_POINT, UNJUDGED})
 MAX_ACK_REFETCH_FAILURES = 3
 _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
+# #1238: the deterministic concurrence check. Generic wording only, no reviewer names.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# An innermost collapsed block: folded supporting material, not the reply's message.
+_DETAILS_RE = re.compile(r"<details\b[^>]*>(?:(?!<details\b).)*?</details\s*>", re.DOTALL | re.I)
+_PROPOSED_CHANGE_RE = re.compile(r"^\s*(?:```|~~~)\s*(?:suggestion|diff)\b", re.M | re.I)
+_CODE_REFERENCE_RE = re.compile(r"```|~~~|\b[\w./-]+\.\w+:\d+|\blines?\s+\d+", re.I)
+_DISSENT_RE = re.compile(
+    r"\?|\b(?:however|but|still|should|please|consider|suggest|recommend|missing|"
+    r"disagree|incorrect|wrong|also|additionally|another|not|never)\b|n't\b|"
+    r"\b(?:could|would|can) you\b|"
+    r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
+    re.I,
+)
+_CONCURRENCE_RE = re.compile(
+    r"\b(?:agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
+    r"withdrawn|withdraw(?:ing)?|retract(?:ed|ing)?|confirmed|verified|"
+    r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
+    r"leav(?:e|ing) (?:the )?resolution to|"
+    r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",
+    re.I,
+)
 
 
 def comment_identity(comment: AuditedThreadComment) -> str:
     """SHA-256 hex of the comment's id, author and body: an edit is a new identity."""
     identity = [comment.comment_id, comment.author_login, comment.body]
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+def is_bot_concurrence(body: str) -> bool:
+    """Whether ``body`` only concurs with AWF's disposition, decided without the agent.
+
+    ``True`` means certainly a concurrence: it withdraws the finding, confirms the
+    fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
+    no dissent or new request, no code fence and no code reference. Collapsed
+    ``<details>`` blocks and HTML comments are set aside as supporting material.
+    ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
+    ambiguous (a proposed change anywhere, unbalanced markup) is ``False``.
+    """
+    if _PROPOSED_CHANGE_RE.search(body):
+        return False
+    prose = _HTML_COMMENT_RE.sub(" ", body)
+    while (stripped := _DETAILS_RE.sub(" ", prose)) != prose:
+        prose = stripped
+    prose = prose.replace("\u2019", "'")
+    if re.search(r"<!--|</?details\b", prose, re.I):
+        return False  # unbalanced or unterminated: it could hide a request
+    if _CODE_REFERENCE_RE.search(prose) or _DISSENT_RE.search(prose):
+        return False
+    own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
+    return _CONCURRENCE_RE.search(own) is not None
 
 
 def acknowledgement_view(thread: AuditedReviewThread, *, viewer: str) -> AuditedReviewThread | None:

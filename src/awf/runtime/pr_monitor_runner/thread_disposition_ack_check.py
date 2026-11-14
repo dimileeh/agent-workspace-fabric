@@ -1,10 +1,12 @@
-"""Runner step: the one-time agent check of a bot reply after AWF's marker (#1138, D1).
+"""Runner step: the one-time check of a bot reply after AWF's marker (#1138, D1; #1238).
 
 The disposition gate flags a thread whose opening bot replied after AWF's
 disposition (:mod:`~.thread_disposition_ack`) and re-polls. This step runs on the
 next poll, before ``decide()``, where no merge lock is held. For each flagged
-thread it re-reads that one thread, and for each of the bot's comments with no
-judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
+thread it re-reads that one thread, and judges each of the bot's comments with no
+judgment yet: a reply that plainly concurs
+(:func:`~.thread_disposition_ack.is_bot_concurrence`) is ``ACKNOWLEDGES`` without
+the agent; any other runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
 ``NEW_POINT``, or ``UNJUDGED`` when the adapter is hosted, the reply is too long to
 quote whole, or the agent failed, answered unusably or changed the worktree) is
 persisted at once, so a restart cannot re-run it, and gets one reason-coded log
@@ -88,6 +90,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ack_reply_fits,
     acknowledgement_view,
     comment_identity,
+    is_bot_concurrence,
     parse_ack_answer,
     read_ack_judgment,
     record_ack_judgment,
@@ -244,7 +247,13 @@ async def _judge(
     reply: str,
     prompt: str,
 ) -> tuple[AckJudgment, str]:
-    """Run the judgment-only agent check; return the judgment and why."""
+    """Judge the reply, deterministically when it plainly concurs, else by the agent.
+
+    Returns the judgment and why.
+    """
+    if is_bot_concurrence(reply):
+        # #1238: no agent run, so no hosted, length or worktree limit applies.
+        return ACKNOWLEDGES, "concurrence"
     if self._deps.adapter.is_hosted:
         # A hosted run publishes to the PR head: never asked, the fallback re-triages.
         return UNJUDGED, "hosted_adapter"

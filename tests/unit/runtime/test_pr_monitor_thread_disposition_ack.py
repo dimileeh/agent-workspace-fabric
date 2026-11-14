@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ack_reply_fits,
     acknowledgement_views,
     comment_identity,
+    is_bot_concurrence,
     parse_ack_answer,
     record_ack_judgment,
 )
@@ -383,3 +384,71 @@ def test_the_refetch_cap_fails_only_the_comments_still_unjudged() -> None:
         UNJUDGED
     )
     assert _disposition_ack_pending_key(_SILENT) not in state.threads_addressed_ids
+
+
+# --- #1238: the deterministic concurrence check -------------------------------
+
+_ANALYSIS_CHAIN = (
+    "<details>\n<summary>🧩 Analysis chain</summary>\n\n"
+    "🏁 Script executed:\n```shell\nrg -n 'payload is None' src/app.py\n```\n"
+    "Output: src/app.py:12: if payload is None: should we raise?\n</details>"
+)
+_CODERABBIT_FOOTER = "<!-- This is an auto-generated reply by CodeRabbit -->"
+# The three replies from the issue: each concurs with AWF's disposition.
+CONCURRENCES = (
+    "Agreed. The finding remains withdrawn.",
+    "The current code has the guard, and the regression test covers this case... "
+    "this is a fix rather than a false positive.",
+    "I verified that commit 4827270 is in the current revision... I\u2019m leaving "
+    "resolution to the AWF monitor.",
+)
+# One of them as the bot posts it: supporting material folded away, plus a footer.
+CONCURRENCE_WITH_ANALYSIS = (
+    f"@awf-operator Agreed. The finding remains withdrawn.\n\n{_ANALYSIS_CHAIN}\n\n"
+    f"<details>\n<summary>✏️ Learnings added</summary>\n\n{'Learnt from: x. ' * 300}"
+    f"\n</details>\n\n{_CODERABBIT_FOOTER}"
+)
+NEW_CONCERNS = (
+    "Agreed, but the error path still lacks a test.",
+    "Verified the guard. Could you also handle `None` in foo.py:42?",
+    "Agreed. The finding remains withdrawn.\n\n<details>\n<summary>Proposed fix</summary>"
+    "\n\n```suggestion\nif payload is None:\n    raise ValueError\n```\n</details>",
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [*CONCURRENCES, CONCURRENCE_WITH_ANALYSIS, "LGTM, the fix is confirmed.", "Retracted."],
+)
+def test_an_explicit_concurrence_is_recognised(body: str) -> None:
+    assert is_bot_concurrence(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        *NEW_CONCERNS,
+        "",
+        "   \n ",
+        BOT_ACK,  # thanks alone is no explicit concurrence: the agent judges it
+        "The issue remains.",
+        "Agreed that the bug persists.",
+        "Agreed it is not fixed yet.",
+        "I disagree; the finding stands.",
+        "Agreed.\n```python\nx = 1\n```",
+        "Agreed.\n~~~\nx = 1\n~~~",
+        "Agreed; see line 42.",
+        "Agreed. Please add a test.",
+        "Agreed. Also, consider the empty case.",
+        # Unbalanced or unterminated markup could hide a request: fail closed.
+        "Agreed. <details><summary>More</summary>Add a test for the empty case.",
+        "Agreed. </details> Add a test.",
+        "Agreed. <!-- the rest is hidden",
+        # A concurrence only in quoted text is not the bot's own.
+        "> Verified: the guard exists.\n\nHmm.",
+        # A proposed change, even folded into a details block or a diff, is a new point.
+        "Confirmed.\n<details><summary>Diff</summary>\n\n```diff\n-a\n+b\n```\n</details>",
+    ],
+)
+def test_anything_short_of_an_explicit_concurrence_is_not_recognised(body: str) -> None:
+    assert is_bot_concurrence(body) is False
