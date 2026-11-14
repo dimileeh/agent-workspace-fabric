@@ -351,7 +351,8 @@ def _js_ts_ends_unfinished_type_operand(
     Only after a type operator that follows an operand is the ``keyof`` or
     ``readonly`` a type operator rather than a contextual identifier
     (PRRT_kwDOSJAM6s63XaW6). That operator may end the last masked line of the
-    ``statement`` (``value as`` wrapping before ``keyof``).
+    ``statement`` (``value as`` wrapping before ``keyof``), whose earlier lines
+    still carry its operand's wrapped type arguments (PRRT_kwDOSJAM6s63YOk1).
     """
     prefix = _JS_TS_TRAILING_TYPE_PREFIX_RE.search(code)
     if prefix is None:
@@ -360,10 +361,13 @@ def _js_ts_ends_unfinished_type_operand(
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
         before = before[: comment.start()].rstrip()
     if not before:
-        previous = next((line.rstrip() for line in reversed(statement) if line.strip()), "")
+        index = next(
+            (i for i in reversed(range(len(statement))) if statement[i].strip()), len(statement)
+        )
+        previous = "".join(statement[index : index + 1]).rstrip()
         operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(previous)
         return operator is not None and _js_ts_type_operator_follows_operand(
-            previous, previous, operator.start(), typescript=True
+            previous, previous, operator.start(), typescript=True, statement=statement[:index]
         )
     operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(before)
     return operator is not None and _js_ts_type_operator_follows_operand(
