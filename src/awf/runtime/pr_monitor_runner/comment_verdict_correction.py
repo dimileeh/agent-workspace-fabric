@@ -47,13 +47,13 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 * **Comment-named target evidence on the correction** (#1232) — after all four
   anchor-derived checks have failed, the same item-own range is accepted when
   it changes a target the *reviewer's* comment text names: a repo-relative path
-  (near the named line when ``:line`` is given), or the definition of a
-  backticked identifier. Reviewers anchor at a usage site and name the fix
-  target in the body; three genuine fixes of that shape escalated on
-  2026-11-13. AWF-authored replies and the agent's reason are never evidence,
-  attempt 0 stays strict, commits that change no named target keep escalating
-  with the commit preserved, and the unmappable-anchor sentinel stays
-  fail-closed.
+  (near the named line when ``:line`` is given), or the Python definition of a
+  backticked identifier (a JS/TS one yields no evidence). Reviewers anchor at a
+  usage site and name the fix target in the body; three genuine fixes of that
+  shape escalated on 2026-11-13. AWF-authored replies and the agent's reason
+  are never evidence, attempt 0 stays strict, commits that change no named
+  target keep escalating with the commit preserved, and the unmappable-anchor
+  sentinel stays fail-closed.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
@@ -486,8 +486,8 @@ async def comment_named_target_item_fix_evidence(
     requirement as the four anchor-derived gates, with the scope taken from the
     reviewer's own comment text instead of the anchor. The range is accepted
     when it changes a repo-relative path the comment names (near the named line
-    when ``:line`` is given) or the definition of an identifier the comment
-    backticks (``_commit_range_changes_comment_named_target``).
+    when ``:line`` is given) or the Python definition of an identifier the
+    comment backticks (``_commit_range_changes_comment_named_target``).
 
     Why this is safe, and why it is needed (issue #1232): reviewers anchor at a
     usage site and name the fix target in the body — a runbook line, the route

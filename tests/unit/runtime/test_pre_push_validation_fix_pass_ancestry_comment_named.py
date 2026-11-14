@@ -98,11 +98,11 @@ def test_comment_named_paths_deduplicates_in_order() -> None:
 def test_comment_named_identifiers_accepts_single_backtick_names_and_calls() -> None:
     text = (
         "Add it to `_TASK_INBOUND_TYPES` and honour it in "
-        "`_agent_message_visibility_clause()`; JS uses `$helper` and ` padded `."
+        "`_agent_message_visibility_clause()`; also ` padded `."
     )
 
     assert comment_named._comment_named_identifiers(text) == frozenset(
-        {"_TASK_INBOUND_TYPES", "_agent_message_visibility_clause", "$helper", "padded"}
+        {"_TASK_INBOUND_TYPES", "_agent_message_visibility_clause", "padded"}
     )
 
 
@@ -111,7 +111,7 @@ def test_comment_named_identifiers_rejects_dotted_argumented_fenced_and_keyword_
     text = (
         "Not `Foo.bar`, `run(x)`, `two words`, `src/app/a.py`, `9lives`, "
         "``double``, nor `None`, `True`, `self`, `cls`, `this`, `null`, "
-        "`undefined`, `return`, `def`, `function`.\n"
+        "`undefined`, `return`, `def`, `function`, nor the JS-only `$helper`.\n"
         "```python\nfenced_name\n```\n"
         "```\n`fenced_inline`\n```"
     )
@@ -322,18 +322,37 @@ _INBOUND_INSERT = _diff(_INBOUND, "@@ -3,0 +4 @@", '+    "c",')
             id="decorator-added",
         ),
         pytest.param(
-            _WEB,
-            "export function memberWorkload(team) {\n  return team.load;\n}\n",
-            _diff(_WEB, "@@ -2 +2 @@", "-  return team.load;", "+  return team.load();"),
-            "`memberWorkload()` ignores paused members",
-            id="js-export-function",
+            _ROUTES,
+            "@functools.cache\ndef member_workload(team):\n    return team.load\n",
+            _diff(_ROUTES, "@@ -1 +1 @@", "-@functools.cache", "+@functools.lru_cache(8)"),
+            "`member_workload` should be bounded",
+            id="decorator-edited",
         ),
         pytest.param(
-            _WEB,
-            "export const memberWorkload = (team) => {\n  return team.load;\n};\n",
-            _diff(_WEB, "@@ -2 +2 @@", "-  return team.load;", "+  return team.load();"),
-            "`memberWorkload` ignores paused members",
-            id="js-export-const-arrow",
+            _ROUTES,
+            "async def member_workload(team):\n    return team.load\n",
+            _diff(_ROUTES, "@@ -2 +2 @@", "-    return team.load", "+    return team.load()"),
+            "`member_workload()` ignores the paused members",
+            id="python-async-def",
+        ),
+        pytest.param(
+            _INBOUND,
+            "DEFAULT_LIMIT = LIMIT = 10\nOTHER = LIMIT == 1\n",
+            _diff(
+                _INBOUND,
+                "@@ -1 +1 @@",
+                "-DEFAULT_LIMIT = LIMIT = 10",
+                "+DEFAULT_LIMIT = LIMIT = 20",
+            ),
+            "`LIMIT` is too low",
+            id="chained-assignment-target",
+        ),
+        pytest.param(
+            _INBOUND,
+            "OTHER = 0; LIMIT = (\n    10\n)\n",
+            _diff(_INBOUND, "@@ -2 +2 @@", "-    10", "+    20"),
+            "`LIMIT` is too low",
+            id="statement-after-semicolon",
         ),
         pytest.param(
             _INBOUND,
@@ -483,6 +502,16 @@ async def test_named_identifier_definition_changed_by_the_range_is_evidence(
             id="unindented-keyword-argument",
         ),
         pytest.param(
+            '_TASK_INBOUND_TYPES = ("a",)\n"""Trailing note."""\nVALUE = 1\n',
+            _diff(_INBOUND, "@@ -2 +2 @@", '-"""Trailing note."""', '+"""Reworded note."""'),
+            id="column-0-string-after-binding",
+        ),
+        pytest.param(
+            "_TASK_INBOUND_TYPES = 0; OTHER = 0; X = (\n    1\n)\n",
+            _diff(_INBOUND, "@@ -2 +2 @@", "-    1", "+    2"),
+            id="statement-after-semicolon-is-not-the-binding",
+        ),
+        pytest.param(
             "CONFIG = 1 + \\\n_TASK_INBOUND_TYPES=1\n",
             _diff(_INBOUND, "@@ -2 +2 @@", "-_TASK_INBOUND_TYPES=1", "+_TASK_INBOUND_TYPES=2"),
             id="backslash-continuation-line",
@@ -630,13 +659,6 @@ async def test_gap_edits_trailing_a_left_side_definition_are_not_evidence(
             _diff(_INBOUND, "@@ -2 +2 @@", '-# cleanup"""', '+# teardown"""'),
             id="python-triple-quoted",
         ),
-        pytest.param(
-            _WEB,
-            "const _TASK_INBOUND_TYPES = `echo start\n// cleanup`;\n",
-            "const _TASK_INBOUND_TYPES = `echo start\n// teardown`;\n",
-            _diff(_WEB, "@@ -2 +2 @@", "-// cleanup`;", "+// teardown`;"),
-            id="js-ts-template-literal",
-        ),
     ],
 )
 @pytest.mark.unit
@@ -714,6 +736,120 @@ async def test_non_source_paths_do_not_spend_the_identifier_candidate_budget() -
 
     assert await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
     assert set(runner.shows) == {_INBOUND}
+
+
+# --- JS/TS: path-named only (owner scope cut for #1232) ----------------------------
+
+_JS_TS_PATHS = [
+    pytest.param(_WEB, id="ts"),
+    pytest.param("src/app/web/team.tsx", id="tsx"),
+    pytest.param("src/app/web/team.js", id="js"),
+    pytest.param("src/app/web/team.jsx", id="jsx"),
+    pytest.param("src/app/web/team.mjs", id="mjs"),
+    pytest.param("src/app/web/team.cjs", id="cjs"),
+]
+
+
+@pytest.mark.parametrize("path", _JS_TS_PATHS)
+@pytest.mark.unit
+async def test_js_ts_identifier_named_target_is_never_evidence(path: str) -> None:
+    """A backticked JS/TS definition the range really changes still fails closed."""
+    left_text = "export function memberWorkload(team) {\n  return team.load;\n}\n"
+    runner = _Probe(
+        texts={(_LEFT, path): left_text, (_RIGHT, path): left_text.replace("load;", "load();")},
+        changed_paths=(path,),
+        diffs={path: _diff(path, "@@ -2 +2 @@", "-  return team.load;", "+  return team.load();")},
+    )
+
+    assert not await _changes_named_target(runner, "`memberWorkload()` ignores paused members")
+    # No JS/TS source is read: the identifier gate has no reader for it.
+    assert runner.shows == []
+
+
+@pytest.mark.parametrize("path", _JS_TS_PATHS)
+@pytest.mark.unit
+async def test_js_ts_path_named_target_is_still_evidence(path: str) -> None:
+    runner = _probe(
+        changed_paths=(path,),
+        diffs={path: _diff(path, "@@ -2 +2 @@", "-  return team.load;", "+  return team.load();")},
+    )
+
+    assert await _changes_named_target(runner, f"`{path}:2` ignores paused members")
+
+
+# --- Python module scope, read from the ast ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        pytest.param("import LIMIT\n", id="import"),
+        pytest.param("from app.limits import *\n", id="star-import"),
+        pytest.param("def f():\n    global LIMIT\n    LIMIT = 2\n", id="global-in-function"),
+        pytest.param("for LIMIT in ():\n    pass\n", id="loop-target"),
+        pytest.param("with open('x') as LIMIT:\n    pass\n", id="with-target"),
+        pytest.param("LIMIT, OTHER = 1, 2\n", id="unpacking-target"),
+        pytest.param("LIMIT += 1\n", id="augmented"),
+        pytest.param("del LIMIT\n", id="delete"),
+        pytest.param("LIMIT: int\n", id="bare-annotation"),
+        pytest.param("try:\n    pass\nexcept ValueError as LIMIT:\n    pass\n", id="except-as"),
+        pytest.param("match x:\n    case [*LIMIT]:\n        pass\n", id="match-star"),
+        pytest.param("match x:\n    case {**LIMIT}:\n        pass\n", id="match-mapping-rest"),
+        pytest.param("match x:\n    case LIMIT:\n        pass\n", id="match-capture"),
+        pytest.param("OTHER = (LIMIT := 3)\n", id="walrus"),
+        pytest.param("VALUES = [(LIMIT := x) for x in ()]\n", id="walrus-in-comprehension"),
+        pytest.param("@register(LIMIT := 2)\ndef f():\n    pass\n", id="walrus-in-decorator"),
+        pytest.param("if FLAG:\n    def LIMIT():\n        pass\n", id="guarded-def"),
+    ],
+)
+@pytest.mark.unit
+async def test_python_module_scope_rebinding_withholds_the_named_definition(
+    rebinding: str,
+) -> None:
+    """A name module scope also binds another way has no single definition."""
+    runner = _probe(
+        texts={_INBOUND: f"LIMIT = 1\n{rebinding}"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = 1", "+LIMIT = 2")},
+    )
+
+    assert not await _changes_named_target(runner, "`LIMIT` is too low")
+
+
+@pytest.mark.parametrize(
+    "other_scope",
+    [
+        pytest.param("def f(LIMIT=0, *, a, b=1):\n    LIMIT = 2\n", id="function-local"),
+        pytest.param("f = lambda LIMIT=1, *, a: LIMIT\n", id="lambda-parameter"),
+        pytest.param("class C(Base, metaclass=Meta):\n    LIMIT = 2\n", id="class-attribute"),
+        pytest.param("VALUES = [LIMIT for LIMIT in range(3) if LIMIT]\n", id="comprehension"),
+        pytest.param("try:\n    pass\nexcept ValueError:\n    pass\n", id="bare-except"),
+        pytest.param("match x:\n    case {'a': 1}:\n        pass\n", id="match-mapping"),
+        pytest.param("OTHER = LIMIT == 1\n", id="comparison"),
+    ],
+)
+@pytest.mark.unit
+async def test_python_same_name_in_another_scope_keeps_the_named_definition(
+    other_scope: str,
+) -> None:
+    runner = _probe(
+        texts={_INBOUND: f"LIMIT = 1\n{other_scope}"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = 1", "+LIMIT = 2")},
+    )
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low")
+
+
+@pytest.mark.unit
+async def test_unparsable_python_source_fails_closed() -> None:
+    runner = _probe(
+        texts={_INBOUND: "LIMIT = 1\ndef broken(:\n"},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -1 +1 @@", "-LIMIT = 1", "+LIMIT = 2")},
+    )
+
+    assert not await _changes_named_target(runner, "`LIMIT` is too low")
 
 
 # --- fail-closed -------------------------------------------------------------------

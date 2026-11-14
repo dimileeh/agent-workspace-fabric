@@ -14,8 +14,6 @@ index-aligned with the raw file.
 
 from __future__ import annotations
 
-import re
-
 # ``str.splitlines()`` separators beyond ``\r``/``\n``. Masking must preserve
 # these so masked scan lines stay index-aligned with raw ``splitlines()``.
 _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
@@ -24,48 +22,6 @@ _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 def _mask_char_preserving_splitlines_separators(ch: str) -> str:
     """Blank ``ch`` unless it is a ``str.splitlines()`` separator."""
     return ch if ch in _SPLITLINES_SEPARATOR_CHARS else " "
-
-
-# What precedes a JSX element opened as an expression (``= <A />``,
-# ``return (<div>``, ``cond && <A />``, ``() => <A />`` (PRRT_kwDOSJAM6s63Y_3L),
-# a unary operand ``!<A />``/``void <A />`` (PRRT_kwDOSJAM6s63Z51H), or a binary
-# right operand ``"a" + <A />`` (PRRT_kwDOSJAM6s63aSxn), but not a TypeScript
-# non-null ``a! <b`` or a postfix ``a++ <b``): its completion ends the JSX.
-_JSX_ROOT_PREFIX_RE = re.compile(
-    r"(?:=>|[=(,?:\[{&|~*%^]|(?<!\+)\+|(?<!-)-|(?<![\w$)\]])!"
-    r"|(?<![\w$])(?:return|yield|default|void|await|typeof|delete|throw))\s*$"
-)
-# TypeScript type operators that code may put after a completed element
-# (``<Widget /> as Props``) (PRRT_kwDOSJAM6s63XLQg).
-_JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
-# An object literal body: a spread, or a ``key:``/shorthand ``key,`` first
-# member (quoted keys are already blank) (PRRT_kwDOSJAM6s63ZGB0).
-_JS_OBJECT_LITERAL_BODY_RE = re.compile(r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\])?\s*(?::(?!:)|,))")
-# An object member that can hold a JSX element: a spread or a ``key:`` value
-# (PRRT_kwDOSJAM6s63ZPLD).
-_JS_OBJECT_VALUE_MEMBER_RE = re.compile(
-    r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\]|'[^']*'|\"[^\"]*\")?\s*:(?!:))"
-)
-# A ``{`` opening a JS block: an arrow body, a keyword block, or after the
-# ``)`` closing a control/function/method-shorthand header (PRRT_kwDOSJAM6s63ZMkA).
-_JS_BLOCK_PREFIX_RE = re.compile(r"(?:=>|(?<![\w$.])(?:else|try|finally|do))\s*$")
-_JS_BLOCK_HEADER_RE = re.compile(
-    r"(?:(?<![\w$.])(?:if|for|while|switch|catch|with|function\s*\*?\s*[\w$]*)"
-    r"|\{\s*(?:(?:get|set|static|async)\s+)?\*?\s*[\w$]+)\s*$"
-)
-# An object literal or class body whose first member is a method shorthand
-# (``{ render() {``); a JSX container cannot hold a call followed by ``{``.
-_JS_METHOD_BODY_RE = re.compile(
-    r"\s*(?:(?:get|set|static|async)\s+)?\*?\s*[\w$]+\s*\([^()]*\)\s*(?::[^{}]*)?\{"
-)
-# A TypeScript return type annotation between a header's ``)`` and its ``{``
-# (``function f(): JSX.Element {``).
-_JS_RETURN_TYPE_RE = re.compile(r"\)\s*:\s*[\w$.]+(?:<[^(){}]*>)?(?:\[\])*$")
-# A column-0 declaration: JSX cannot span it, so the JSX-text check for a
-# ``//`` or ``/*`` reads only from the declaration holding it.
-_JS_TOP_LEVEL_DECLARATION_RE = re.compile(
-    r"^(?:export|import|const|let|var|function|class)(?![\w$])", re.MULTILINE
-)
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -103,13 +59,6 @@ def _path_allows_js_private_fields(path: str | None) -> bool:
     if name.endswith((".d.ts", ".d.mts", ".d.cts")):
         return True
     return any(name.endswith(suffix) for suffix in _JS_TS_PRIVATE_FIELD_SUFFIXES)
-
-
-def _path_is_python(path: str | None) -> bool:
-    """Return True when ``path`` is a Python source file, where ``//`` is floor division."""
-    if not path:
-        return False
-    return path.lower().replace("\\", "/").rsplit("/", 1)[-1].endswith((".py", ".pyi"))
 
 
 def _path_is_jsx(path: str | None) -> bool:
@@ -283,13 +232,8 @@ def _append_retained_brace_expr(
     *,
     n: int,
     allow_js_private_fields: bool,
-    slash_comments: bool = True,
 ) -> int:
-    """Retain ``{...}`` with nested strings/comments masked; return index after.
-
-    ``slash_comments=False`` keeps ``//`` as code: inside a Python f-string
-    expression it is floor division, not a comment.
-    """
+    """Retain ``{...}`` with nested strings/comments masked; return index after."""
     depth = 0
     i = start
     while i < n:
@@ -320,7 +264,7 @@ def _append_retained_brace_expr(
             out.append(" ")
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
-        if slash_comments and cur == "/" and i + 1 < n and line[i + 1] == "/":
+        if cur == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
@@ -355,7 +299,7 @@ def _mask_quoted_region_for_callee_scan(
             out.extend((" ", " ", " "))
             return i + 3
         if not triple and cur == "\\" and i + 1 < n:
-            out.extend((" ", _mask_char_preserving_splitlines_separators(line[i + 1])))
+            out.extend((" ", " "))
             i += 2
             continue
         if not triple and cur == quote:
@@ -367,12 +311,7 @@ def _mask_quoted_region_for_callee_scan(
                 i += 2
                 continue
             i = _append_retained_brace_expr(
-                line,
-                i,
-                out,
-                n=n,
-                allow_js_private_fields=allow_js_private_fields,
-                slash_comments=False,
+                line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
             )
             continue
         if retain_template and cur == "$" and i + 1 < n and line[i + 1] == "{":
@@ -399,26 +338,18 @@ def _mask_comments_and_string_literals_for_callee_scan(
     such as ``f'{"helper()"}'`` or ``${/helper()/}`` do not become false callees.
     ``#ident`` is kept as code only for JS/TS paths (private fields). For Python
     and unknown paths, every ``#`` begins a comment (fail closed on ambiguity).
-    ``//`` begins a comment except on Python paths, where it is floor division
-    (PRRT_kwDOSJAM6s63OADy).
     JS/TS regex masking uses the same path gate. Block comments are blanked for
     every path so a quote inside ``/* ... */`` cannot poison later prefix lines.
     """
     if not line:
         return line
     allow_js_private_fields = _path_allows_js_private_fields(path)
-    slash_comments = not _path_is_python(path)
-    jsx = _path_is_jsx(path)
     out: list[str] = []
     i = 0
     n = len(line)
     while i < n:
         ch = line[i]
         if ch in "'\"`":
-            if jsx and _jsx_text_quote_at(line, i, out):
-                out.append(ch)
-                i += 1
-                continue
             i = _append_masked_quote_at_for_callee_scan(
                 line, i, out, n=n, allow_js_private_fields=allow_js_private_fields
             )
@@ -429,26 +360,14 @@ def _mask_comments_and_string_literals_for_callee_scan(
                 out.append(ch)
                 i += 1
                 continue
-            if jsx and _jsx_text_slashes_at(out, line_start=_line_comment_spans_tag(line, i)):
-                out.append(ch)
-                i += 1
-                continue
             out.append(" ")
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
-        if slash_comments and ch == "/" and i + 1 < n and line[i + 1] == "/":
-            if jsx and _jsx_text_slashes_at(out):
-                out.extend("//")
-                i += 2
-                continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
         if ch == "/" and i + 1 < n and line[i + 1] == "*":
-            if jsx and _jsx_text_slashes_at(out, line_start=_block_comment_spans_tag(line, i)):
-                out.extend("/*")
-                i += 2
-                continue
             i = _append_masked_block_comment_at_for_callee_scan(line, i, out, n=n)
             continue
         if allow_js_private_fields and ch == "/" and _js_slash_can_start_regex(line, i):
@@ -457,97 +376,9 @@ def _mask_comments_and_string_literals_for_callee_scan(
         out.append(ch)
         i += 1
     masked = "".join(out)
-    if jsx:
+    if _path_is_jsx(path):
         return _mask_jsx_text_nodes_for_callee_scan(masked)
     return masked
-
-
-def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
-    """Whether a ``'``/``"`` at ``quote_index`` is JSX text rather than a string opener.
-
-    A JS/TS ``'``/``"`` string cannot run past its line without a ``\\``
-    continuation, so a quote left open there is JSX text such as ``Don't``,
-    and opening a string at it would blank the rest of the file
-    (PRRT_kwDOSJAM6s63Zfgo). Nor can a string literal follow a word with no gap
-    unless that word is an expression-prefix keyword (``return'x'``), so the
-    apostrophe of ``Don't <a href='x'>`` is JSX text even though a later quote
-    could close it — but only where the JSX text pass would blank it, so
-    ``export default'helper()'`` stays a string (PRRT_kwDOSJAM6s63akNF). A JSX
-    attribute string may span lines, so a quote right after ``=`` still opens one.
-    A template literal may span lines too, so a backtick is JSX text only where
-    the JSX text pass would blank it (PRRT_kwDOSJAM6s63arR0).
-    """
-    quote = line[quote_index]
-    if quote == "`":
-        return _jsx_text_slashes_at(out, line_start=_template_spans_tag(line, quote_index))
-    if quote not in "'\"":
-        return False
-    k = len(out) - 1
-    while k >= 0 and (out[k].isalnum() or out[k] in "_$"):
-        k -= 1
-    if (
-        k < len(out) - 1
-        and "".join(out[k + 1 :]) not in _JS_REGEX_PREFIX_KEYWORDS
-        and _jsx_text_slashes_at(out)
-    ):
-        return True
-    j = len(out) - 1
-    while j >= 0 and out[j] in " \t\r\n":
-        j -= 1
-    if j >= 0 and out[j] == "=":
-        return False
-    i = quote_index + 1
-    n = len(line)
-    while i < n:
-        if line[i] == "\\":
-            i += 3 if line.startswith("\r\n", i + 1) else 2
-        elif line[i] == quote:
-            return False
-        elif line[i] in "\r\n":
-            return True
-        else:
-            i += 1
-    return True
-
-
-def _block_comment_spans_tag(line: str, start: int) -> bool:
-    """Whether the ``/*`` at ``start`` would blank a ``<`` before its ``*/`` (or EOF)."""
-    end = line.find("*/", start + 2)
-    return "<" in line[start + 2 : end if end >= 0 else len(line)]
-
-
-def _template_spans_tag(line: str, start: int) -> bool:
-    """Whether the backtick at ``start`` would blank a ``<`` before its closing backtick (or EOF)."""
-    end = line.find("`", start + 1)
-    return "<" in line[start + 1 : end if end >= 0 else len(line)]
-
-
-def _line_comment_spans_tag(line: str, start: int) -> bool:
-    """Whether a line comment at ``start`` would blank a ``<`` before its line ends."""
-    return "<" in re.split(r"[\r\n]", line[start:], maxsplit=1)[0]
-
-
-def _jsx_text_slashes_at(out: list[str], *, line_start: bool = False) -> bool:
-    """Whether a ``//``, ``/*`` or ``#`` after masked ``out`` is JSX text rather than a comment.
-
-    JSX text such as ``<a>https://x.dev</a>`` holds no comments; masking its
-    ``//`` as one would blank the closing tag, and the JSX text pass would then
-    blank every later line (PRRT_kwDOSJAM6s63Zv5r); a text ``/*`` with no
-    ``*/`` would blank the rest of the file (PRRT_kwDOSJAM6s63Z51N), as would a
-    text ``#`` (``<div># 1</div>``) its closing tag (PRRT_kwDOSJAM6s63acD7). The
-    opener is text when the JSX text pass would blank it. One starting its line
-    stays a comment unless ``line_start`` (a ``/*`` or ``#`` that would blank a
-    closing tag, PRRT_kwDOSJAM6s63aHzN), and the check reads only from the
-    column-0 declaration holding it, so ordinary comments stay cheap.
-    """
-    prefix = "".join(out)
-    line_begin = max(prefix.rfind("\n"), prefix.rfind("\r")) + 1
-    if (not line_start and not prefix[line_begin:].strip()) or "<" not in prefix:
-        return False
-    start = 0
-    for declaration in _JS_TOP_LEVEL_DECLARATION_RE.finditer(prefix):
-        start = declaration.start()
-    return not _mask_jsx_text_nodes_for_callee_scan(prefix[start:] + "//").endswith("//")
 
 
 def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
@@ -557,191 +388,36 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     not become FIXED call-site evidence. Attribute strings are already blanked
     by the prior quote pass. Comparisons without a ``<`` tag opener are left
     unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
-
-    Text is blanked only inside an element: once a *rooted* element — one
-    opened right after an expression start (``= <Widget />``, ``return (<div>``)
-    — completes, the code after it is scanned again (PRRT_kwDOSJAM6s63VJ_g).
-    Any other tag (a children line read without its parent, a closing tag
-    with nothing open) leaves the rest blanked until each next tag, as before.
-    A rooted element followed by text (``{cond && <Icon />} helper()``) keeps
-    blanking too (PRRT_kwDOSJAM6s63Vay1).
     """
     if not line or "<" not in line:
         return line
     chars = list(line)
     n = len(line)
     i = 0
-    # Open rooted elements; ``None`` once the nesting cannot be followed.
-    depth: int | None = 0
-    root_start = 0
     while i < n:
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
-            start = i
-            # Advance through the tag to its closing ``>`` (strings already blank),
-            # past any ``>`` in a ``{...}`` attribute expression (PRRT_kwDOSJAM6s63YQ8-)
-            # or closing a ``<Widget<Props>`` type argument (PRRT_kwDOSJAM6s63Yzs5),
-            # but not the ``>`` of an ``=>`` function type in it (PRRT_kwDOSJAM6s63Y7R6).
+            # Advance through the tag to its closing ``>`` (strings already blank).
             i += 1
-            type_angles = 0
-            while i < n and (type_angles or line[i] != ">"):
-                if line[i] == "{":
-                    i = _mask_jsx_expression_container_for_callee_scan(line, i, chars)
-                    continue
-                if line[i] == "<":
-                    type_angles += 1
-                elif line[i] == ">" and line[i - 1] != "=":
-                    type_angles -= 1
+            while i < n and line[i] != ">":
                 i += 1
             if i >= n:
                 break
             i += 1  # past ``>``
-            if depth == 0:
-                root_start = start
-            depth = _jsx_depth_after_tag(line, start, i, depth)
-            if depth == 0:
-                text_start = _jsx_text_start_after_rooted_element(line, root_start, i)
-                if text_start is None:
-                    continue
-                depth, i = None, text_start
             # Text node until the next tag opener; retain ``{...}`` expressions.
             while i < n and line[i] != "<":
                 if line[i] == "{":
-                    i = _mask_jsx_expression_container_for_callee_scan(line, i, chars)
+                    depth = 1
+                    i += 1
+                    while i < n and depth > 0:
+                        if line[i] == "{":
+                            depth += 1
+                        elif line[i] == "}":
+                            depth -= 1
+                        i += 1
                     continue
                 chars[i] = _mask_char_preserving_splitlines_separators(line[i])
                 i += 1
             continue
         i += 1
     return "".join(chars)
-
-
-def _mask_jsx_expression_container_for_callee_scan(line: str, start: int, chars: list[str]) -> int:
-    """Mask JSX text nested in the ``{...}`` container at ``start``; return its end.
-
-    The container's expression stays scannable, but an element inside it
-    (``child={<div>helper()</div>}``, ``{ok && <b>helper()</b>}``) has its
-    text blanked too (PRRT_kwDOSJAM6s63ZUMH).
-    """
-    n = len(line)
-    end = start + 1
-    brace_depth = 1
-    while end < n and brace_depth > 0:
-        if line[end] == "{":
-            brace_depth += 1
-        elif line[end] == "}":
-            brace_depth -= 1
-        end += 1
-    chars[start:end] = _mask_jsx_text_nodes_for_callee_scan(line[start:end])
-    return end
-
-
-def _jsx_depth_after_tag(line: str, start: int, end: int, depth: int | None) -> int | None:
-    """Rooted-element nesting after the JSX tag ``line[start:end]``; ``None`` when lost."""
-    if depth is None or line[start + 1] == "!":
-        return None
-    if line[start + 1] == "/":
-        return depth - 1 if depth else None
-    if not depth and _JSX_ROOT_PREFIX_RE.search(line, 0, start) is None:
-        return None
-    return depth if line[end - 2] == "/" else depth + 1
-
-
-def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int | None:
-    """Where JSX text resumes after rooted element ``line[start:end]``; ``None`` if code.
-
-    Code cannot put an identifier right after a completed element
-    (``a = <Icon /> helper()``) other than a type operator
-    (``<Icon /> as Props``), and a ``}`` closing a brace opened before it
-    ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
-    so text follows. A container holds one expression, so a ``}`` after a
-    ``;`` closes a JS block (``() => { return <A />; };``) and stays code
-    (PRRT_kwDOSJAM6s63ZCcb). Likewise a ``}`` whose ``{`` opened an object
-    literal earlier on the line (``{ a: { b: c ? <A /> : <B /> } };``) stays
-    code (PRRT_kwDOSJAM6s63ZGB0), as does one closing a JS block opened earlier
-    on the line, even without a ``;`` (``() => { return <A /> }``)
-    (PRRT_kwDOSJAM6s63ZMkA). Line-local: the look-ahead stops at a line
-    separator.
-    """
-    n = len(line)
-    j = end
-    while j < n and line[j] in " \t)]":
-        j += 1
-    if (
-        j < n
-        and (line[j].isalnum() or line[j] in "_$")
-        and _JSX_TYPE_OPERATOR_RE.match(line, j) is None
-    ):
-        return end
-    braces = 0
-    statement_ended = False
-    # Whether each ``{`` still open before the element opened an object literal
-    # or a JS block rather than a JSX expression container.
-    openers: list[bool] = []
-    for k in range(start):
-        if line[k] == "{":
-            openers.append(
-                (
-                    _JS_OBJECT_LITERAL_BODY_RE.match(line, k + 1) is not None
-                    and _js_object_member_holds(line, k, start)
-                )
-                or _JS_METHOD_BODY_RE.match(line, k + 1) is not None
-                or _js_brace_opens_block(line, k)
-            )
-        elif line[k] == "}" and openers:
-            openers.pop()
-    while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:
-        if line[j] == "<" and j + 1 < n and (line[j + 1].isalpha() or line[j + 1] in "/!>"):
-            return None
-        if line[j] == "{":
-            braces += 1
-        elif line[j] == ";" and not braces:
-            statement_ended = True
-        elif line[j] == "}":
-            closes_code = not braces and bool(openers) and openers.pop()
-            if not braces and not statement_ended and not closes_code:
-                return j + 1
-            if not braces:
-                statement_ended = False
-            braces = max(braces - 1, 0)
-        j += 1
-    return None
-
-
-def _js_object_member_holds(line: str, k: int, start: int) -> bool:
-    """Whether the element at ``line[start]`` can sit in an object opened at ``line[k]``.
-
-    An object member holding an element is a spread or a ``key:`` value; a bare
-    member after a shorthand ``a,`` (``{count, <Badge />}``) is a JSX
-    container's comma operator instead (PRRT_kwDOSJAM6s63ZPLD).
-    """
-    member = k + 1
-    depth = 0
-    for p in range(k + 1, start):
-        if line[p] in "([{":
-            depth += 1
-        elif line[p] in ")]}":
-            depth -= 1
-        elif line[p] == "," and not depth:
-            member = p + 1
-    return _JS_OBJECT_VALUE_MEMBER_RE.match(line, member) is not None
-
-
-def _js_brace_opens_block(line: str, k: int) -> bool:
-    """Whether the ``{`` at ``line[k]`` opens a JS block, not a JSX container."""
-    prefix = line[:k].rstrip()
-    if _JS_BLOCK_PREFIX_RE.search(prefix) is not None:
-        return True
-    if (annotation := _JS_RETURN_TYPE_RE.search(prefix)) is not None:
-        prefix = prefix[: annotation.start() + 1]
-    if not prefix.endswith(")"):
-        return False
-    depth = 0
-    for p in range(len(prefix) - 1, -1, -1):
-        if prefix[p] == ")":
-            depth += 1
-        elif prefix[p] == "(":
-            depth -= 1
-            if not depth:
-                return _JS_BLOCK_HEADER_RE.search(prefix, 0, p) is not None
-    return False

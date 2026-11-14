@@ -1,8 +1,8 @@
 """Shared probe builders for the comment-named target evidence tests (issue #1232).
 
 Extracted from ``test_pre_push_validation_fix_pass_ancestry_comment_named.py`` so
-that module and its statement-boundary sibling stay under the first-party file
-line limit enforced by ``tests/unit/test_core_decomposition_maintainability.py``.
+that module stays under the first-party file line limit enforced by
+``tests/unit/test_core_decomposition_maintainability.py``.
 """
 
 from __future__ import annotations

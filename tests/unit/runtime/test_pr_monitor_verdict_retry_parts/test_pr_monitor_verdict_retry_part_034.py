@@ -206,12 +206,13 @@ def _runner(
     outputs: list[str],
     changed_paths: list[str],
     diffs: dict[str, str] | None = None,
+    texts: dict[str, str] | None = None,
     dirty_after_attempt: list[bool] | None = None,
 ) -> _CommentNamedRunner:
     (tmp_path / "ws_protocol").mkdir(exist_ok=True)
     return _CommentNamedRunner(
         changed_paths=changed_paths,
-        texts={_INBOUND: _INBOUND_TEXT, _USAGE: _USAGE_TEXT},
+        texts={_INBOUND: _INBOUND_TEXT, _USAGE: _USAGE_TEXT, **(texts or {})},
         diffs={
             _RUNBOOK: _RUNBOOK_AT_823,
             _ROUTES: _ROUTES_DIFF,
@@ -360,6 +361,35 @@ async def test_self_citing_false_positive_without_comment_named_evidence_escalat
     self_citation = _self_citation_logs(captured)
     assert len(self_citation) == 1
     assert self_citation[0]["has_path_evidence"] is False
+
+
+@pytest.mark.parametrize("definition", ["src/lib/workload/team.tsx", "src/lib/workload/team.ts"])
+@pytest.mark.unit
+async def test_js_ts_identifier_named_fix_escalates(tmp_path: Path, definition: str) -> None:
+    """A JS/TS identifier-named target yields no evidence: the pre-#1232 escalation stands."""
+    runner = _runner(
+        tmp_path,
+        changed_paths=[definition],
+        texts={definition: "export function memberWorkload(team) {\n  return team.load;\n}\n"},
+        diffs={
+            definition: f"--- a/{definition}\n+++ b/{definition}\n@@ -2 +2 @@\n"
+            "-  return team.load;\n+  return team.activeLoad();\n"
+        },
+        outputs=[_NO_VERDICT_LINE, _SELF_CITING_FALSE_POSITIVE],
+    )
+    thread = _thread(
+        "thread_js_named",
+        path="apps/console/panel.tsx",
+        line=40,
+        body="`memberWorkload()` counts paused members.",
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        verdict = await _address(runner, thread)
+
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
+    assert _self_citation_logs(captured)[0]["has_path_evidence"] is False
 
 
 @pytest.mark.unit

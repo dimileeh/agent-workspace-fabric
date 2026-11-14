@@ -150,7 +150,6 @@ def _assignment_rebound_scope_names(
     *,
     names: frozenset[str],
     definition_head_starts: frozenset[int],
-    statement_heads: frozenset[tuple[int, int]] = frozenset(),
 ) -> set[tuple[int, str]]:
     """``(scope_start, name)`` pairs a binding statement rebinds, read from the AST.
 
@@ -212,9 +211,7 @@ def _assignment_rebound_scope_names(
     not the one holding it. The head of a line already read as a definition is
     skipped exactly as the lexical reader skips it — ``record = lambda ...``
     *is* the head the last-head fold orders — while any other statement on
-    that line is read. So is a statement opening at a ``(line, column)`` of
-    ``statement_heads``: a plain binding the caller already read after a ``;``
-    (PRRT_kwDOSJAM6s63Sh3G). The AST counts columns in UTF-8 bytes.
+    that line is read.
     Each binding is attributed through ``_binding_scope_start``, from the
     indent of the line it starts on, so the keys match the heads' own and a
     function-local assignment shadows nothing at module scope — including one
@@ -263,14 +260,7 @@ def _assignment_rebound_scope_names(
         if not bound:
             continue
         indent = _leading_indent(raw_lines[node.lineno - 1])
-        if (node.lineno in definition_head_starts and node.col_offset == indent) or (
-            statement_heads
-            and (
-                node.lineno,
-                len(raw_lines[node.lineno - 1].encode()[: node.col_offset].decode()),
-            )
-            in statement_heads
-        ):
+        if node.lineno in definition_head_starts and node.col_offset == indent:
             continue
         scope_start = _binding_scope_start(
             file_text,
@@ -357,7 +347,6 @@ def _rebound_scope_names(
     *,
     path: str | None,
     collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]],
-    statement_heads: frozenset[tuple[int, int]] = frozenset(),
 ) -> set[tuple[int, str]]:
     """``(scope_start, name)`` pairs no ``collected`` definition head can own.
 
@@ -371,8 +360,7 @@ def _rebound_scope_names(
     Assignments are read twice over: lexically, which is the only reading
     JS/TS text has, and from the Python AST, which finds the ones a physical
     line does not start with (PRRT_kwDOSJAM6s6rBbdn) and the loop and ``with``
-    targets the lexical reader has no shape for at all. Both skip the
-    ``statement_heads`` the caller collected past a ``;`` itself.
+    targets the lexical reader has no shape for at all.
     """
     names = frozenset(name for name, *_rest in collected)
     head_starts = frozenset(start for _name, start, *_rest in collected)
@@ -383,14 +371,9 @@ def _rebound_scope_names(
             path=path,
             names=names,
             definition_head_starts=head_starts,
-            statement_heads=statement_heads,
         )
         | _assignment_rebound_scope_names(
-            file_text,
-            all_spans,
-            names=names,
-            definition_head_starts=head_starts,
-            statement_heads=statement_heads,
+            file_text, all_spans, names=names, definition_head_starts=head_starts
         )
         | _import_rebound_scope_names(file_text, all_spans, names=names)
     )
