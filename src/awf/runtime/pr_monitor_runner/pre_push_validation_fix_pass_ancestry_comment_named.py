@@ -142,9 +142,11 @@ _JS_TS_TYPE_PARAMETER_LIST_FOLLOWER_RE = re.compile(
 # So does a trailing unary ``!``; a TS non-null assertion (``value!``) follows its
 # operand and does not (PRRT_kwDOSJAM6s63Sh3A). So does a trailing TS type
 # operator (``satisfies``/``as``), which still needs its type (PRRT_kwDOSJAM6s63SzHv).
+# A trailing reserved ``extends`` awaits its operand, such as the extends type
+# of a conditional type after ``as`` (PRRT_kwDOSJAM6s63X1Cv).
 _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
     r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-|(?:^|[^\w$)\]\s!])[ \t]*!+"
-    r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as))$"
+    r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as|extends))$"
 )
 # A trailing TS type operator that still needs its type operand (``keyof``,
 # ``readonly``) right after an ``as``/``satisfies`` type operator

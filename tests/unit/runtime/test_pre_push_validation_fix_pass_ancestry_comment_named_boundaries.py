@@ -816,6 +816,30 @@ async def test_js_ts_label_binds_nothing(
             id="wrapped-keyof-after-as-named-identifier",
         ),
         pytest.param(
+            "export const LIMIT = value as T extends\n  U ? Expected1 : Other;\n",
+            2,
+            True,
+            id="trailing-extends-conditional-type-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value as T extends /* why */\n  U ? Expected1 : Other;\n",
+            2,
+            True,
+            id="commented-trailing-extends-conditional-type-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = config.extends\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="extends-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = config.\n  extends\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-extends-named-property-after-asi",
+        ),
+        pytest.param(
             "const keyof = 0;\nexport const LIMIT = keyof\nexport const OTHER = 1;\n",
             3,
             False,
