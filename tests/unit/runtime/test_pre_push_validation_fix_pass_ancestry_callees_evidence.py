@@ -934,6 +934,28 @@ def test_callee_refs_jsx_text_quote_opens_no_string(
             frozenset({(None, "helper")}),
             id="comment-without-tags",
         ),
+        # PRRT_kwDOSJAM6s63Z51N: a JSX text ``/*`` opens no block comment either.
+        pytest.param(
+            "const v = <div>/* x</div>;\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="text-block-comment-opener",
+        ),
+        pytest.param(
+            "const v = <p>a /* helper() */ b</p>;\n", 1, frozenset(), id="text-block-stays-text"
+        ),
+        pytest.param(
+            "const v = <A />; /* `x */\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="block-comment-after-element",
+        ),
+        pytest.param(
+            "const v = (\n  <p>\n  /* `x */\n  </p>\n);\nhelper();\n",
+            6,
+            frozenset({(None, "helper")}),
+            id="line-start-block-comment",
+        ),
     ],
 )
 @pytest.mark.unit
