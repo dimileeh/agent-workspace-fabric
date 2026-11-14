@@ -1681,6 +1681,22 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             id="as-asserted-postfix",
         ),
         pytest.param(
+            "export let LIMIT = 10;\n(LIMIT as (number)) = 20;\n",
+            False,
+            id="as-asserted-parenthesized-type-assignment",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\n((LIMIT satisfies ((() => number) | (string)))) += 20;\n",
+            False,
+            id="satisfies-asserted-nested-function-type-compound-assignment",
+        ),
+        pytest.param(
+            "export const LIMIT = {value: 10};\n++(LIMIT as (Box)).value;\n"
+            "--(LIMIT satisfies (() => Box))[0];\n",
+            True,
+            id="prefix-member-updates-through-parenthesized-type-only",
+        ),
+        pytest.param(
             "export let LIMIT = 10;\nif (LIMIT as boolean) x = 1;\nuse(LIMIT as number);\n",
             True,
             id="as-asserted-reads-only",
@@ -1771,6 +1787,11 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
             "export let LIMIT = 10;\nfor ((LIMIT satisfies number)in { a: 1 }) {}\n",
             False,
             id="for-in-satisfies-asserted",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ((LIMIT as (number)) of [20]) {}\n",
+            False,
+            id="for-of-as-asserted-parenthesized-type",
         ),
         pytest.param(
             "export let LIMIT = 10;\nif (on) for (LIMIT of [20]) work();\n",

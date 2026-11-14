@@ -198,6 +198,15 @@ _JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+aw
 _JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
 # The ``=`` assigning a JS/TS destructuring pattern (PRRT_kwDOSJAM6s63W936).
 _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
+# The type of an ``as``/``satisfies`` asserted target, up to the target's
+# closing ``)``. It may nest parenthesized types, a function type's ``=>``
+# included (``(LIMIT as (() => number)) = f``), three levels deep
+# (PRRT_kwDOSJAM6s63Y9xg).
+_JS_TS_TYPE_CHAR = r"(?:[^()=;!]|=>)"
+_JS_TS_NESTED_TYPE = rf"\((?:{_JS_TS_TYPE_CHAR})*\)"
+for _ in range(2):
+    _JS_TS_NESTED_TYPE = rf"\((?:{_JS_TS_TYPE_CHAR}|{_JS_TS_NESTED_TYPE})*\)"
+_JS_TS_ASSERTED_TYPE = rf"(?:{_JS_TS_TYPE_CHAR}|{_JS_TS_NESTED_TYPE})*?"
 # A JS/TS identifier any assignment or update operator writes, wherever it sits
 # in its statement — an inline ``if (on) LIMIT = 20`` body included
 # (PRRT_kwDOSJAM6s63XLQk). A parenthesized ``(LIMIT) = 20`` / ``++(LIMIT)``
@@ -208,10 +217,11 @@ _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
 # ``--(LIMIT)[0]``) writes the property, not the name (PRRT_kwDOSJAM6s63Y4_p).
 _JS_TS_ASSIGNED_TARGET_RE = re.compile(
     rf"(?<![\w$.])({_JS_IDENT})"
-    r"(?:[ \t]*(?:\)|!(?!=))|[ \t]+(?:as|satisfies)[ \t]+[^()=;!]*?(?=[ \t]*\)))*[ \t]*"
+    rf"(?:[ \t]*(?:\)|!(?!=))|[ \t]+(?:as|satisfies)[ \t]+{_JS_TS_ASSERTED_TYPE}(?=[ \t]*\)))*"
+    r"[ \t]*"
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
     rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})"
-    r"(?!(?:\s*(?:\)|!(?!=))|\s+(?:as|satisfies)\s+[^()=;!]*?(?=\s*\)))*\s*[.\[])"
+    rf"(?!(?:\s*(?:\)|!(?!=))|\s+(?:as|satisfies)\s+{_JS_TS_ASSERTED_TYPE}(?=\s*\)))*\s*[.\[])"
 )
 # A ``for`` head up to the target its ``of``/``in`` writes each iteration, which
 # a block-scoped ``let``/``const`` declares afresh but a ``var`` does not
@@ -223,7 +233,7 @@ _JS_TS_LOOP_HEAD_RE = re.compile(r"(?<![\w$.])for(?:[ \t]+await)?[ \t]*\([ \t]*(
 # ``satisfies`` target writes the name too (PRRT_kwDOSJAM6s63YTT3).
 _JS_TS_LOOP_TARGET_RE = re.compile(
     rf"(?:\([ \t]*)*({_JS_IDENT})"
-    r"(?:[ \t]*[)!]|[ \t]+(?:as|satisfies)[ \t]+[^()=;!]*?(?=[ \t]*\)))*"
+    rf"(?:[ \t]*[)!]|[ \t]+(?:as|satisfies)[ \t]+{_JS_TS_ASSERTED_TYPE}(?=[ \t]*\)))*"
     r"(?=(?<=[)!])[ \t]*(?:of|in)(?![\w$])|[ \t]+(?:of|in)(?![\w$]))"
 )
 _JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]*(?:of|in)(?![\w$])")
