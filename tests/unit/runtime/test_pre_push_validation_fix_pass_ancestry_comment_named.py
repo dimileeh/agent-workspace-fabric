@@ -1519,6 +1519,20 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
             True,
             id="js-ts-binding-after-completed-nested-loop-body",
         ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nouter: while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-labelled-loop-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) outer: for (const x of xs)\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-labelled-loop-head",
+        ),
     ],
 )
 @pytest.mark.unit

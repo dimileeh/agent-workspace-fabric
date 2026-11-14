@@ -157,6 +157,7 @@ _JS_TS_LEADING_CONTINUATION_RE = re.compile(
 # (``if (on) while (x)``) (PRRT_kwDOSJAM6s63V2yC).
 _JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?<![\w$])(?:else|do)$")
 _JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$")
+_JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -267,9 +268,13 @@ def _js_ts_head_opens_statement(prefix: str) -> bool:
     """Whether a JS/TS head after the masked ``prefix`` starts a statement.
 
     It does at the statement start, after a ``;`` or ``}``, or as the brace-less
-    body of the head ``prefix`` ends with (PRRT_kwDOSJAM6s63V2yC).
+    body of the head ``prefix`` ends with (PRRT_kwDOSJAM6s63V2yC), including
+    after a statement label (``outer: while (x)``).
     """
     prefix = prefix.rstrip(" \t")
+    label = _JS_TS_LABEL_RE.search(prefix)
+    if label is not None:
+        return _js_ts_head_opens_statement(prefix[: label.start()])
     return not prefix or prefix.endswith((";", "}")) or _js_ts_ends_with_body_head(prefix)
 
 
