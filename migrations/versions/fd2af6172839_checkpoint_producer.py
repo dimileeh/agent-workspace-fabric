@@ -14,6 +14,7 @@ revision = "fd2af6172839"
 down_revision = "ec19f5061728"
 branch_labels = None
 depends_on = None
+destructive = False
 
 
 def upgrade() -> None:

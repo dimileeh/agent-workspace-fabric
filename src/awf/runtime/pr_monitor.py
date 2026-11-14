@@ -54,6 +54,28 @@ from awf.runtime.feedback_policy import (
     thread_needs_attention,
 )
 from awf.runtime.monitor_state_keys import (
+    _AWAITING_WORKFLOW_SCOPE_STATE_KEY as _AWAITING_WORKFLOW_SCOPE_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION as _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION,
+)
+from awf.runtime.monitor_state_keys import (
+    _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY as _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    _MERGE_BLOCK_ATTENTION_STATE_KEY as _MERGE_BLOCK_ATTENTION_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    _PARKED_UNPUBLISHED_REPAIR_STATE_KEY as _PARKED_UNPUBLISHED_REPAIR_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    _PRE_PUSH_INFRA_FAILURE_STATE_KEY as _PRE_PUSH_INFRA_FAILURE_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY as _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
+)
+from awf.runtime.monitor_state_keys import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
     _merge_method_blocked_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
@@ -178,72 +200,6 @@ __all__ = [
 # ── State — small, serialisable, lives on the workspace row ────────────────
 
 
-_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
-(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
-restart reconstructs it and the idempotent-push ancestry check avoids a
-duplicate push (WS-2 §5). Defined here (the pure core) so ``decide`` can spot a
-still-preserved protected commit; the runner re-exports it from
-``remote_repair``."""
-
-
-_AWAITING_WORKFLOW_SCOPE_STATE_KEY = "__awf_awaiting_workflow_scope__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the previous
-poll's comment repair left the workspace waiting on an operator to grant the
-GitHub ``workflow`` token scope. That arm requeues ``AddressComments`` and keeps
-the row in ``monitoring_pr`` (it does NOT terminally fail like the sync-base /
-CI-repair workflow-scope arms), so the human wait spans polls. ``decide`` never
-reads it (it only ever looks up real thread/comment IDs), so — like the preserved
-protected-block key — it is inert to the decision core; it exists only to let the
-runner keep the awaiting-human attention flag set across those requeued polls
-instead of nulling it at the top-of-poll resume clear."""
-
-
-_PARKED_UNPUBLISHED_REPAIR_STATE_KEY = "__awf_parked_unpublished_repair__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that recovery
-parked unattributable unpushed commits for a human (#935). Its value is the park
-signature (disposition + local/remote heads) so a re-park of the SAME situation
-on a later poll is recognised as the ongoing episode instead of a new one.
-
-Like the workflow-scope key this is inert to ``decide`` (which only looks up real
-thread/comment IDs). It exists so the parked wait survives across polls: the
-runner keeps the awaiting-human attention flag set at the top-of-poll resume
-clear, and the recovery path appends its operator-facing park event once per
-distinct situation rather than once per poll."""
-
-
-_PRE_PUSH_INFRA_FAILURE_STATE_KEY = "__awf_pre_push_infra_failure__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON budget
-record for repeated infrastructure-signature pre-push validation fix failures
-(#1182): signature, attempt count, the PR head it was counted on, and the
-preserved evidence. Owned by ``pr_monitor_runner.pre_push_infrastructure_budget``.
-Like the park key above it is inert to ``decide``; it lets the comment-repair
-arm park for a human, without running agents, once the attempt cap is reached."""
-
-
-_MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
-loop's branch-protection fallback set the awaiting-human attention flag for an
-active deterministic merge rejection. That arm records NO sticky blocker (branch
-protection can clear externally without a code change), so ``decide`` keeps
-returning ``Merge`` every poll. ``decide`` never reads this key (it only looks up
-real thread/comment IDs) — like the workflow-scope key, it is inert to the
-decision core; it exists only so ``handle_merge_action``'s non-human gate waits
-(merge queue, reviewer settle, initial review grace) preserve that still-active
-human signal across polls instead of clearing it as a resolved ``NotifyHuman``
-episode (PRRT_kwDOSJAM6s6LXscz)."""
-
-_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY = "__awf_merge_block_attention_origin__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key carrying structured origin
-metadata for ``_MERGE_BLOCK_ATTENTION_STATE_KEY``.
-
-The merge-block marker itself stores the TTL timestamp. This companion key keeps
-machine decisions independent from the user-facing ``awaiting_human_reason``
-text while staying in the same persisted state map and row transaction."""
-
-_MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION = "merge_rejection"
-
-
 @dataclass
 class MonitorState:
     """Mutable state the runner keeps across iterations.
@@ -280,6 +236,16 @@ class MonitorState:
     current_pr_head_ref_checked: bool = field(
         default=False,
         init=False,
+        repr=False,
+        compare=False,
+    )
+    # Whether a protected-scope baseline-outage park's kept commit is still
+    # unpublished (#1221). Derived each poll from the workspace's block columns
+    # (``_protected_scope_baseline_park_resume_pending``), never persisted: a park
+    # of an already-committed repair leaves the worktree clean and sets no marker
+    # in ``threads_addressed_ids`` (PRRT_kwDOSJAM6s63UyV5).
+    protected_scope_baseline_park_pending: bool = field(
+        default=False,
         repr=False,
         compare=False,
     )
@@ -322,6 +288,15 @@ class MonitorState:
         the offending protected commit is still sitting on the workspace HEAD.
         """
         return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
+
+    @property
+    def has_stranded_park_edits(self) -> bool:
+        """Whether a park left uncommitted repair edits for its resume to commit.
+
+        Keyed on presence, not value: a park that could not read its HEAD records
+        the marker as the empty string.
+        """
+        return PROVIDER_PARK_STRANDED_EDITS_STATE_KEY in self.threads_addressed_ids
 
     @property
     def awaiting_workflow_scope(self) -> bool:
@@ -1122,7 +1097,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     9.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
         protected states can represent missing approval or branch-protection
         hooks even when there is no unresolved review thread to address.
-    10. All green → Merge (or NotifyHuman if auto_merge=False).
+    10. Head Actions run unsettled → WaitForCI (#1230); else Merge (NotifyHuman w/o auto_merge).
 
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
@@ -1221,7 +1196,21 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # (PRRT_kwDOSJAM6s6KHtX0). So an unfinalized preserved block outranks SyncBase
     # regardless of hint status: surface NotifyHuman instead, and a later resume
     # pushes the resolved block before SyncBase integrates the base with no grant.
-    if state.pending_operator_hint is not None and state.has_preserved_protected_block:
+    #
+    # A park that stranded uncommitted repair edits (a baseline-outage or managed-key
+    # park) outranks SyncBase the same way without the preserved-block marker, which
+    # would trip the directive-resume leak guard: merging the advanced base over the
+    # dirty repair paths fails as the terminal ``SYNC_BASE_MERGE_FAILED`` before the
+    # hint cycle can commit those edits (PRRT_kwDOSJAM6s63QUyw). A baseline-outage
+    # park of an already-committed repair strands no edits, yet SyncBase's push would
+    # still allow the non-fast-forward resync, whose ``reset --hard`` drops the kept
+    # commit if the PR branch advanced while parked; the hint resume suppresses that
+    # resync, so it outranks SyncBase too (PRRT_kwDOSJAM6s63UyV5).
+    if state.pending_operator_hint is not None and (
+        state.has_preserved_protected_block
+        or state.has_stranded_park_edits
+        or state.protected_scope_baseline_park_pending
+    ):
         hint = state.pending_operator_hint
         if hint.status == "pending":
             return AddressOperatorHint(hint=hint)
@@ -1477,10 +1466,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="awaiting_required_checks")
 
-    # 9. GitHub may report BLOCKED / HAS_HOOKS because required approval,
-    # protected hooks, or maintainer-controlled review state has not cleared.
-    # A rejected merge would only confirm the same protected-state blocker,
-    # so hand off instead of probing GitHub every poll.
+    # 9. BLOCKED / HAS_HOOKS can mean required approval, protected hooks, or
+    # maintainer-controlled review state has not cleared; a merge would only be
+    # rejected on that same blocker, so hand off instead of probing every poll.
     if status.merge_state_status in (
         MergeStateStatus.BLOCKED,
         MergeStateStatus.HAS_HOOKS,
@@ -1493,7 +1481,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if merge_method_blocker:
         return NotifyHuman(message=merge_method_blocker)
 
-    # 10. All green — terminal success action.
+    # 10. Green only once no GitHub Actions run for the head is unsettled (#1230).
+    if status.actions_runs_wait_reason is not None:
+        return WaitForCI(reason=status.actions_runs_wait_reason)
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

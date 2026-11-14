@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
     record_item_disposition,
@@ -255,6 +256,7 @@ async def test_cert_shows_the_legacy_baseline_count_separately(
             unresolved_review_comments=(),
             base_behind_count=0,
             merge_state_status=MergeStateStatus.CLEAN,
+            actions_runs=ActionsRunsState.SETTLED,
         ),
         state=MonitorState(),
         base_branch="development",

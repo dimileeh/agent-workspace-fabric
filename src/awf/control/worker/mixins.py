@@ -65,6 +65,7 @@ class WorkerDelegatesMixin:
 
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases
     _expire_due_secret_leases = _cleanup._expire_due_secret_leases
+    _maybe_reap_terminal_owned_rows = _cleanup._maybe_reap_terminal_owned_rows
     _maybe_release_terminal_runtime = _cleanup._maybe_release_terminal_runtime
     _load_terminal_runtime_candidate = _cleanup._load_terminal_runtime_candidate
     _release_terminal_runtime_promptly = _cleanup._release_terminal_runtime_promptly

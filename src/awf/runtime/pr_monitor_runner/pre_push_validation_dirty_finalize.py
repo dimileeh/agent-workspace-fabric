@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from awf.common.logging import get_logger
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
 )
@@ -36,6 +37,7 @@ from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     mark_provider_park_stranded_edits,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
@@ -435,12 +437,15 @@ async def _committed_delta_paths(
     ``PRRT_kwDOSJAM6s6Ka0aO``).
 
     Returns ``None`` when the committed delta cannot be resolved so the caller
-    can keep the fail-closed dirty path instead of trusting the commit.
+    can keep the fail-closed dirty path instead of trusting the commit. Like the
+    provider-park resume's re-parent reset this gate guards, the diff ignores
+    process object-lookup overrides (PRRT_kwDOSJAM6s63O2c-).
     """
     committed_result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
-        )
+        ),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not committed_result.ok:
         _log.warning(
@@ -782,7 +787,26 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # ``PROTECTED_SCOPE_DIFF_UNAVAILABLE`` reason code end-to-end instead of
         # letting it collapse into the generic pre-existing-dirty failure.
         # Returning a non-clean check carrying the reason code flows through
-        # ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``.
+        # ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``. A
+        # transient baseline outage that outlived its bounded retries is marked so
+        # ``_validated_git_push_result`` parks the workspace in ``blocked`` with the
+        # worktree kept instead of failing it terminally (#1221); the sink failed
+        # before ``git commit``, so mark the repair output it was committing for
+        # the guide resume's hint cycle (``provider_park_stranded_edits``), bounded
+        # by this finalize's owned delta so the resume commits nothing the
+        # ownership gate above would have refused (PRRT_kwDOSJAM6s63M6rp). The
+        # delta's anchor goes with it: the protected-scope repair agent can
+        # self-commit before the outage raises, past the preserved HEAD
+        # (PRRT_kwDOSJAM6s63OKfe).
+        transient = isinstance(exc, ProtectedScopeBaselineUnavailableError)
+        if transient:
+            preserved_head = await self._rev_parse_head(worktree_path)
+            mark_provider_park_stranded_edits(
+                cast("MonitorState", state),
+                preserved_head,
+                owned_paths=owned_delta_paths,
+                delta_anchor=operation_start_head,
+            )
         _log.warning(
             "monitor.pre_push_dirty_finalize_protected_scope_diff_unavailable",
             workspace_id=workspace_id,
@@ -794,6 +818,7 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=check.paths,
             reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
             message=str(exc) or "protected-scope diff unavailable before pre-push dirty finalize",
+            extra_details={"transient_baseline_unavailable": True} if transient else None,
         )
     except ProviderRecoveryRetryError:
         # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``

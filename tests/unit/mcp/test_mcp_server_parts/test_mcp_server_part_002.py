@@ -1243,10 +1243,10 @@ class TestCreateWorkspace:
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
                 "External task ID is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique external "
+                "repo/base/task-class/owned-path/title scope; use a unique external "
                 "task ID for this backlog slice or retry the original scope."
             ),
-            "detail": {"external_id": external_id},
+            "detail": {"external_id": external_id, "mismatched_fields": ["base"]},
         }
         assert_no_internal_error_fields(conflict.structuredContent)
 

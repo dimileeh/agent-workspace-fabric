@@ -223,6 +223,116 @@ class TestTaskAttemptRepository:
         assert "already belongs to a different task scope" in str(excinfo.value)
 
     @pytest.mark.unit
+    async def test_create_or_get_task_conflict_reports_only_title_mismatch(
+        self, session: AsyncSession
+    ) -> None:
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+
+        repo = TaskRepository(session)
+        scope: dict[str, Any] = {
+            "repo_url": "git@github.com:example/app.git",
+            "base_branch": "development",
+            "prompt": "Prompt",
+            "external_id": "WAVE-TITLE",
+            "idempotency_key": None,
+            "task_class": "docs_task",
+            "owned_paths": ["docs/**"],
+        }
+        await repo.create_or_get(title="Old title", **scope)
+
+        with pytest.raises(TaskExternalIdConflictError) as excinfo:
+            await repo.create_or_get(title="New title", **scope)
+
+        assert excinfo.value.mismatched_fields == ("title",)
+        assert "Old title" not in str(excinfo.value)
+        assert "New title" not in str(excinfo.value)
+
+    @pytest.mark.unit
+    async def test_create_or_get_task_conflict_reports_sorted_mismatched_fields(
+        self, session: AsyncSession
+    ) -> None:
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+
+        repo = TaskRepository(session)
+        await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Docs",
+            prompt="Prompt",
+            external_id="WAVE-SORT",
+            idempotency_key=None,
+            task_class="docs_task",
+            owned_paths=["docs/**"],
+        )
+
+        with pytest.raises(TaskExternalIdConflictError) as two:
+            await repo.create_or_get(
+                repo_url="git@github.com:example/app.git",
+                base_branch="release/next",
+                title="Docs",
+                prompt="Prompt",
+                external_id="WAVE-SORT",
+                idempotency_key=None,
+                task_class="docs_task",
+                owned_paths=["src/**"],
+            )
+        assert two.value.mismatched_fields == ("base", "owned_paths")
+
+        with pytest.raises(TaskExternalIdConflictError) as every:
+            await repo.create_or_get(
+                repo_url="git@github.com:example/other.git",
+                base_branch="release/next",
+                title="Other",
+                prompt="Prompt",
+                external_id="WAVE-SORT",
+                idempotency_key=None,
+                task_class="refactor_task",
+                owned_paths=["src/**"],
+            )
+        assert every.value.mismatched_fields == (
+            "base",
+            "owned_paths",
+            "repo",
+            "task_class",
+            "title",
+        )
+        for value in ("other.git", "release/next", "Other", "refactor_task", "src/**"):
+            assert value not in str(every.value)
+
+    @pytest.mark.unit
+    async def test_create_or_get_task_identical_scope_still_reuses_task(
+        self, session: AsyncSession
+    ) -> None:
+        from awf.db.repositories import TaskRepository
+
+        repo = TaskRepository(session)
+        scope: dict[str, Any] = {
+            "repo_url": "git@github.com:example/app.git",
+            "base_branch": "development",
+            "title": "Docs",
+            "prompt": "Prompt",
+            "external_id": "WAVE-SAME",
+            "idempotency_key": None,
+            "task_class": "docs_task",
+            "owned_paths": ["docs/**"],
+        }
+        first = await repo.create_or_get(**scope)
+        second = await repo.create_or_get(**scope)
+
+        assert second.id == first.id
+
+    @pytest.mark.unit
+    def test_task_external_id_conflict_error_normalizes_mismatched_fields(self) -> None:
+        from awf.db.repositories import TaskExternalIdConflictError
+
+        default = TaskExternalIdConflictError("WAVE-1")
+        assert default.mismatched_fields == ()
+
+        err = TaskExternalIdConflictError("WAVE-1", ["title", "base", "title"])
+        assert err.mismatched_fields == ("base", "title")
+        assert str(err) == str(default)
+
+    @pytest.mark.unit
     async def test_create_or_get_rejects_external_id_mismatch_via_idempotency_fallback(
         self, session: AsyncSession
     ) -> None:
@@ -273,6 +383,7 @@ class TestTaskAttemptRepository:
             )
 
         assert excinfo.value.external_id == "TICKET-NEW"
+        assert excinfo.value.mismatched_fields == ("external_id",)
         reloaded = await repo.get(first.id)
         assert reloaded is not None
         assert reloaded.external_id == "TICKET-OLD"

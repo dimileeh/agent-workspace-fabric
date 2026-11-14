@@ -26,6 +26,9 @@ from awf.runtime.ownership import (
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership as repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_baseline_park import (
+    keep_repair_for_baseline_park,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_compose_cleanup import (
     sink_and_raise_compose_cleanup_error as sink_and_raise_compose_cleanup_error,
 )
@@ -202,6 +205,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     preserve_timeout_work_and_raise_cleanup_error as preserve_timeout_work_and_raise_cleanup_error,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_rerun_sink import (
+    sink_timeout_rerun_dirty_changes as _sink_timeout_rerun_dirty_changes,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
@@ -388,33 +394,18 @@ async def _run_item_verdict_protocol(
     # handlers, so the cancellation branch below must read this as "the floor is
     # protected — do not rewind" (PRRT_kwDOSJAM6s6fylWD).
     timeout_preservation_protected: list[str] = []
+    # Non-empty once a baseline-outage park has claimed this attempt's repair; the
+    # cancellation branch below must not rewind it either (PRRT_kwDOSJAM6s63O77x).
+    baseline_park_preservation_claimed: list[bool] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
-        """Commit a reran-over timed-out run's uncommitted edits (#932).
-
-        A published rerun floor is only a SHA, so it cannot hold edits the
-        timed-out run never committed: with no commits of its own that floor
-        equals the attempt's own floor, and the rollback a provider or protocol
-        failure on the rerun performs resets straight through them. Running the
-        preserve handler's own dirty sink first turns them into a commit the
-        published floor does cover (PRRT_kwDOSJAM6s6fvw8r). Reads
-        ``item_start_head`` live: it is the sink anchor as of the run this
-        salvage belongs to.
-
-        Returns whether the recovery loop may rerun over this run. The sink's own
-        False is not that answer: it also means "nothing to commit" (clean
-        worktree, or the sink disabled), which is the ordinary case and must not
-        cost the rerun. Only stranded PR-worthy dirt does — the salvage failed,
-        the published SHA floor cannot cover those edits, and the rollback a
-        provider failure or non-FIXED verdict on the rerun performs would delete
-        work #932 promised to keep. Probe for it and fail closed on an unreadable
-        probe: preserving the timeout costs one rerun, guessing costs the edits
-        (PRRT_kwDOSJAM6s6fwTyO).
-        """
-        sink_outcome = await _sink_timeout_dirty_changes(
+        # Reads ``item_start_head`` live: it is the sink anchor as of the run
+        # this salvage belongs to.
+        return await _sink_timeout_rerun_dirty_changes(
             runner,
-            workspace_id=workspace_id,
             reason_code=reason_code,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
             item_start_head=item_start_head,
             commit_message=commit_message,
             compose_project=compose_project,
@@ -424,30 +415,6 @@ async def _run_item_verdict_protocol(
             command_evidence=command_evidence,
             commit_dirty_changes=commit_dirty_changes,
         )
-        if sink_outcome is TimeoutSinkOutcome.COMMITTED:
-            return True
-        try:
-            residue_fp = await _read_correction_pr_worthy_residue_fingerprint(
-                runner,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-            )
-        except Exception as probe_exc:
-            # Broad on purpose, like every other residue probe here: it spawns
-            # Git and can raise outside the git-spawn error set. Fail closed —
-            # an unreadable worktree cannot prove the edits were salvaged.
-            # ``asyncio.CancelledError`` is a ``BaseException`` and still
-            # propagates.
-            _log.warning(
-                "monitor.agent_verdict_timeout_rerun_residue_probe_failed",
-                workspace_id=workspace_id,
-                reason_code=reason_code,
-                exc_type=type(probe_exc).__name__,
-            )
-            return False
-        if residue_fp is None:
-            return False
-        return not _fingerprint_has_pr_worthy_path_residue(residue_fp)
 
     for protocol_attempt in range(2):
         dirty_changes_committed = False
@@ -1007,7 +974,19 @@ async def _run_item_verdict_protocol(
                 # nested protected-scope repair, supply-chain policy blocks the commit
                 # before ``git commit``, or the protected-scope diff cannot be verified.
                 # Roll back before propagating so unaccepted residue does not wedge
-                # remonitor or get pushed later.
+                # remonitor or get pushed later — except a transient baseline
+                # outage, whose park keeps the repair for the resume
+                # (PRRT_kwDOSJAM6s63N-C1).
+                if await keep_repair_for_baseline_park(
+                    runner,
+                    exc=exc,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    state=state,
+                    rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+                    preservation_claimed=baseline_park_preservation_claimed,
+                ):
+                    raise
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -1425,6 +1404,16 @@ async def _run_item_verdict_protocol(
             # *before* raising its ``AgentRunError``, so the timeout was
             # classified but no handler here ever saw it
             # (PRRT_kwDOSJAM6s6f0n6B).
+            if baseline_park_preservation_claimed:
+                # A baseline-outage park kept this repair and finished its marker
+                # under a shield before handing the cancellation on.
+                _log.warning(
+                    "monitor.agent_verdict_cancellation_preserved_baseline_park_repair",
+                    workspace_id=workspace_id,
+                    item_start_head=item_start_head,
+                    protocol_attempt=protocol_attempt,
+                )
+                raise
             cancelled_timeout_reason_code = cancellation_agent_timeout_reason_code(cancel_exc)
             if timeout_preservation_protected or cancelled_timeout_reason_code is not None:
                 if cancelled_timeout_reason_code is not None and not timeout_preservation_protected:

@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -102,6 +103,7 @@ def _outdated_settle_status(thread: ReviewThread) -> PRStatus:
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         outdated_unresolved_inline_threads=(thread,),
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

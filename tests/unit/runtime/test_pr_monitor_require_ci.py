@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     WaitForCI,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 
 def _status(
@@ -48,6 +49,7 @@ def _status(
         ci_failures=ci_failures,
         no_checks_observed=no_checks_observed,
         awaiting_required_checks_grace_active=awaiting_required_checks_grace_active,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

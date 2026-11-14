@@ -31,6 +31,10 @@ from awf.runtime.pr_monitor import (
     _mark_review_thread_addressed,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
+from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
+    PROVIDER_PARK_STRANDED_EDITS_STATE_KEY,
+)
 
 
 def _thread(
@@ -82,6 +86,7 @@ def _status(
     ci_failures: tuple[CheckFailure, ...] = (),
     closed: bool = False,
     merged: bool = False,
+    actions_runs: ActionsRunsState = ActionsRunsState.SETTLED,
 ) -> PRStatus:
     return PRStatus(
         number=42,
@@ -100,6 +105,7 @@ def _status(
         ci_failures=ci_failures,
         closed=closed,
         merged=merged,
+        actions_runs=actions_runs,
     )
 
 
@@ -418,6 +424,103 @@ class TestOperatorHints:
         assert isinstance(action, NotifyHuman)
         assert action.message is not None
         assert "agent could not revert" in action.message
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("parked_head", ("deadbeefcafef00d", ""))
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_resume_with_stranded_park_edits_runs_before_sync_base(
+        self, status: PRStatus, parked_head: str
+    ) -> None:
+        """A park that stranded uncommitted repair edits (a baseline-outage or
+        managed-key park) records no preserved-protected-block marker, yet its
+        resume must still beat SyncBase: merging the advanced base over the dirty
+        repair paths fails as the terminal ``SYNC_BASE_MERGE_FAILED`` before the
+        hint cycle can commit the stranded edits. An unreadable parked HEAD is
+        recorded as the empty string, which still marks the park
+        (PRRT_kwDOSJAM6s63QUyw)."""
+        hint = OperatorHint(reason="baseline reachable again", reason_code="OPERATOR_GUIDE")
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: parked_head},
+        )
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+        assert not state.has_preserved_protected_block
+
+    @pytest.mark.unit
+    def test_terminal_resume_with_stranded_park_edits_notifies_before_sync_base(self) -> None:
+        """A resume that ended needs_human with the stranded edits still dirty must
+        not fall through to SyncBase, which would merge over them
+        (PRRT_kwDOSJAM6s63QUyw)."""
+        hint = OperatorHint(
+            reason="baseline reachable again",
+            reason_code="OPERATOR_GUIDE",
+            status="needs_human",
+            status_reason="unexpected worktree changes",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={PROVIDER_PARK_STRANDED_EDITS_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "unexpected worktree changes" in action.message
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_resume_of_clean_baseline_park_runs_before_sync_base(
+        self, status: PRStatus
+    ) -> None:
+        """A baseline-outage park of an already-committed repair leaves the
+        worktree clean, so it sets neither state marker. SyncBase would still push
+        with the non-fast-forward resync, whose ``reset --hard`` drops the kept
+        commit if the PR branch advanced while parked; the hint resume suppresses
+        that resync, so it must run first (PRRT_kwDOSJAM6s63UyV5)."""
+        hint = OperatorHint(reason="baseline reachable again", reason_code="OPERATOR_GUIDE")
+        state = MonitorState(pending_operator_hint=hint, protected_scope_baseline_park_pending=True)
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+        assert not state.has_preserved_protected_block
+        assert not state.has_stranded_park_edits
+
+    @pytest.mark.unit
+    def test_terminal_resume_of_clean_baseline_park_notifies_before_sync_base(self) -> None:
+        """A failed resume leaves the kept commit unpublished, so it must not fall
+        through to SyncBase's resetting push either (PRRT_kwDOSJAM6s63UyV5)."""
+        hint = OperatorHint(
+            reason="baseline reachable again",
+            reason_code="OPERATOR_GUIDE",
+            status="needs_human",
+            status_reason="push rejected",
+        )
+        state = MonitorState(pending_operator_hint=hint, protected_scope_baseline_park_pending=True)
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "push rejected" in action.message
 
     @pytest.mark.unit
     def test_pending_directive_without_preserved_block_keeps_sync_base_first(self) -> None:

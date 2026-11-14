@@ -107,3 +107,53 @@ async def test_busy_host_transition_never_ignores_changed_physical_facts(
     host.linux.sample = Mock(side_effect=[before, after])
     monkeypatch.setattr("awf.hosted_node.host_runtime.validate_database", AsyncMock())
     assert await host.observe(runtime.receiver.identity) is None
+
+
+@pytest.mark.parametrize(
+    ("docker_idle", "before_idle", "after_idle", "expected"),
+    [
+        (True, True, True, ()),
+        (False, True, True, ("DOCKER_UNEXPECTED_CONTAINER",)),
+        (True, False, True, ("CGROUP_POPULATED",)),
+        (True, True, False, ("CGROUP_POPULATED",)),
+        (False, False, False, ("DOCKER_UNEXPECTED_CONTAINER", "CGROUP_POPULATED")),
+    ],
+)
+async def test_host_observation_names_why_execution_is_not_quiescent(
+    authority, monkeypatch, docker_idle, before_idle, after_idle, expected
+):
+    runtime, _, factory = authority
+    docker = Mock(
+        quiescent=AsyncMock(return_value=docker_idle),
+        healthy=AsyncMock(return_value=True),
+        unexpected_container=AsyncMock(return_value=not docker_idle),
+    )
+    host = HostRuntime(runtime.receiver.config, factory, runtime.receiver.identity, docker)
+    before = LinuxSnapshot("boot", 1, 2, 3, True, before_idle)
+    host.linux.sample = Mock(side_effect=[before, replace(before, execution_quiescent=after_idle)])
+    monkeypatch.setattr("awf.hosted_node.host_runtime.validate_database", AsyncMock())
+    observation = await host.observe(runtime.receiver.identity)
+    assert observation is not None and observation.retained_state_verified
+    assert observation.blockers == expected
+    assert observation.quiescent is (expected == ())
+
+
+async def test_failed_docker_quiescence_read_is_not_named_an_unexpected_container(
+    authority, monkeypatch
+):
+    # The first Docker read fails but the health read recovers: the host stays
+    # non-quiescent, yet no unexpected container was ever found to name.
+    runtime, _, factory = authority
+    docker = Mock(
+        quiescent=AsyncMock(return_value=False),
+        healthy=AsyncMock(return_value=True),
+        unexpected_container=AsyncMock(return_value=False),
+    )
+    host = HostRuntime(runtime.receiver.config, factory, runtime.receiver.identity, docker)
+    before = LinuxSnapshot("boot", 1, 2, 3, True, True)
+    host.linux.sample = Mock(side_effect=[before, before])
+    monkeypatch.setattr("awf.hosted_node.host_runtime.validate_database", AsyncMock())
+    observation = await host.observe(runtime.receiver.identity)
+    assert observation is not None and observation.retained_state_verified
+    assert not observation.quiescent
+    assert observation.blockers == ()

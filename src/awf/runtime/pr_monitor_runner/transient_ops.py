@@ -13,7 +13,7 @@ import re as re
 import time as time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import Any
 
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
@@ -25,6 +25,7 @@ from awf.common.github_retry import github_retry_context
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
+    CheckState,
     MonitorState,
     PRStatus,
 )
@@ -70,8 +71,8 @@ async def _fetch_status_for_decision(
 ) -> PRStatus:
     """Fetch the full PR snapshot used by the decision core.
 
-    Includes the local base-behind calculation and, for failing CI,
-    per-check logs. The same path is used for the main loop and the
+    Includes the local base-behind calculation, the head's GitHub Actions run
+    settlement (#1230) and, for failing CI, per-check logs. The same path is used for the main loop and the
     pre-merge recheck so the final merge gate cannot accidentally use
     weaker data than ordinary polling.
 
@@ -131,6 +132,9 @@ async def _fetch_status_for_decision(
     # the pre-merge recheck inside the merge critical section) gets it.
     if status.base_ref is not None and status.base_ref != base_branch:
         status = replace(status, base_ref_drifted=True)
+    status = await _with_actions_runs_state(
+        self, repo=repo, pr_number=pr_number, workspace_id=workspace_id, status=status, retry=retry
+    )
     if status.check_state.value == "FAILURE" and retry:
         pytest_fallback_commands = await self._workspace_test_commands(workspace_id)
         failures = await self._deps.gh.fetch_failing_check_logs(
@@ -141,7 +145,45 @@ async def _fetch_status_for_decision(
             rollup_checks=status.checks,
         )
         status = _with_ci_failures(status, failures)
-    return cast(PRStatus, status)
+    return status
+
+
+async def _with_actions_runs_state(
+    self: Any,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    workspace_id: str,
+    status: PRStatus,
+    retry: bool,
+) -> PRStatus:
+    """Stamp head Actions-run settlement for ``decide``'s merge-ready gate (#1230).
+
+    The rollup omits a workflow run still queued with zero jobs, so a green
+    rollup alone must not certify. Skipped for FAILURE / merged / closed
+    snapshots: ``decide`` returns before the gate, so the default ``UNKNOWN`` is
+    harmless there and the failure path keeps its single ``gh run list``. A read
+    failure leaves ``UNKNOWN`` (``decide`` waits, never certifies) and is logged
+    with a reason code; the next poll re-reads instead of failing the monitor.
+    """
+    if status.merged or status.closed or status.check_state == CheckState.FAILURE:
+        return status
+    try:
+        actions_runs = await self._deps.gh.fetch_actions_runs_state(
+            repo=repo, head_sha=status.head_sha, retry=retry
+        )
+    except ForgeClientError as exc:
+        _log.warning(
+            "monitor.actions_runs_unavailable",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            operation=exc.operation,
+            error=exc.redacted_detail(),
+            reason_code="ACTIONS_RUNS_UNAVAILABLE",
+        )
+        return status
+    return replace(status, actions_runs=actions_runs)
 
 
 @dataclass(frozen=True)

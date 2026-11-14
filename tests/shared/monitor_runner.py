@@ -18,6 +18,7 @@ from awf.common.github_client_threads import _audited_thread
 from awf.common.github_retry import RetryPolicy
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewThread
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import comments as _comments
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     MonitorVerdictResult,
@@ -32,8 +33,9 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
 class DefaultMergeMethodGitHubClient(GitHubClient):
     """GitHub client test double that keeps legacy merge queues stable.
 
-    It also records disposition replies and serves a clean review-thread audit
-    (#1018) so runner tests keep stable ``FakeCommandRunner`` queues.
+    It also records disposition replies, serves a clean review-thread audit
+    (#1018), and reports the head's Actions runs settled (#1230) so runner tests
+    keep stable ``FakeCommandRunner`` queues.
     """
 
     def __init__(self, runner: AsyncCommandRunner, **kwargs: Any) -> None:
@@ -132,6 +134,13 @@ class DefaultMergeMethodGitHubClient(GitHubClient):
         return ReviewThreadAudit(
             supported=True, viewer_login="awf-test-bot", threads=tuple(threads)
         )
+
+    async def fetch_actions_runs_state(
+        self, *, repo: RepoRef, head_sha: str, retry: bool = True
+    ) -> ActionsRunsState:
+        """Report every Actions run for the head completed without shelling ``gh``."""
+        del repo, head_sha, retry
+        return ActionsRunsState.SETTLED
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return all legacy repository merge methods for older runner tests."""

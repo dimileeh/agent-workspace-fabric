@@ -109,6 +109,7 @@ from awf.runtime.pr_monitor_runner.remote_repair import (
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeBaselineUnavailableError,
     ProtectedScopeDiffError,
     ProviderManagedKeyParkedError,
     ProviderRecoveryAuthError,
@@ -1032,7 +1033,7 @@ async def _run_pre_push_validation_fix_pass_impl(
         _MonitorAgentRuntimeOwnershipRepairFailedError,
         _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
-    ):
+    ) as exc:
         # ``_commit_dirty_worktree`` (and the protected-scope paths it invokes)
         # raises these deterministic reason-coded exceptions so the monitor loop's
         # dedicated handlers surface the right reason code. The broad
@@ -1046,8 +1047,24 @@ async def _run_pre_push_validation_fix_pass_impl(
         # / ``AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED``), so the monitor loop
         # terminates instead of retrying — no residue rollback is needed (the
         # stranded dirt surfaces only on a later operator resume, matching every
-        # other commit-sink caller's treatment of these two).
+        # other commit-sink caller's treatment of these two). The exception is a
+        # transient baseline outage that outlived its bounded retries
+        # (``ProtectedScopeBaselineUnavailableError``, #1221): the push seam parks
+        # the workspace in ``blocked`` with the worktree kept instead. The sink
+        # failed before ``git commit``, so mark the fix pass's uncommitted edits:
+        # the guide resume's hint cycle commits them before its pre-existing-dirty
+        # guard runs (``provider_park_stranded_edits``). The park skips the
+        # ancestry check below, so it records ``fix_pass_baseline_head`` for the
+        # resume to apply it before publishing a rewritten HEAD
+        # (PRRT_kwDOSJAM6s63M6rz).
         _raise_unproven_timeout_cleanup()
+        if isinstance(exc, ProtectedScopeBaselineUnavailableError):
+            preserved_head = await self._rev_parse_head(worktree_path)
+            mark_provider_park_stranded_edits(
+                cast("MonitorState | None", state),
+                preserved_head,
+                baseline_head=fix_pass_baseline_head,
+            )
         raise
     except Exception as exc:
         _log.warning(

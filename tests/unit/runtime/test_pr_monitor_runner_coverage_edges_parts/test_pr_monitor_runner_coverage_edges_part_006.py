@@ -607,7 +607,10 @@ async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_rea
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     # #910: post-action PR re-check before the protected-scope evaluation.
     cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
+    # Deterministic (non-transient) fetch failure: transient ones retry, then park (#1221).
+    cmd.queue_result(
+        returncode=128, stderr="fatal: couldn't find remote ref refs/heads/x"
+    )  # committed-diff baseline fetch
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
     runner = make_runner(

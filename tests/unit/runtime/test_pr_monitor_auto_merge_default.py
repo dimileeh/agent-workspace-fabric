@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 
 
 def _green_status() -> PRStatus:
@@ -43,6 +44,7 @@ def _green_status() -> PRStatus:
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         ci_failures=(),
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

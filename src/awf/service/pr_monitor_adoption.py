@@ -671,7 +671,7 @@ class PullRequestMonitorAdoptionService:
                 )
             ):
                 if explicit_external_id:
-                    raise TaskExternalIdConflictError(effective_external_id)
+                    raise TaskExternalIdConflictError(effective_external_id, ("external_id",))
                 task = await _create_generated_task()
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,

@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import merge_loop as runner_merge_loop
 from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_decision,
@@ -89,6 +90,7 @@ def _ready_status(
         latest_external_review_activity_source=latest_external_review_activity_source,
         quiet_period_anchor_at=quiet_period_anchor_at,
         quiet_period_anchor_source=quiet_period_anchor_source,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

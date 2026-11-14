@@ -16,6 +16,7 @@ revision: str = "8c9d0e1f2a3b"
 down_revision: str | Sequence[str] | None = "7b8c9d0e1f2a"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+destructive: bool = False
 
 
 def upgrade() -> None:

@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.release_pr_monitor import build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult
@@ -98,6 +99,7 @@ def _green_status(
         unresolved_review_comments=(),
         base_behind_count=0,
         merge_state_status=merge_state_status,
+        actions_runs=ActionsRunsState.SETTLED,
     )
 
 

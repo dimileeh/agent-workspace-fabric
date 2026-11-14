@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
+from awf.common import github_client_actions as _actions_runs
 from awf.common import github_client_threads as _review_threads
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
@@ -867,6 +868,7 @@ class GitHubClient:
     reply_to_thread = _review_threads.reply_to_thread
     unresolve_thread = _review_threads.unresolve_thread
     fetch_review_thread_audit = _review_threads.fetch_review_thread_audit
+    fetch_actions_runs_state = _actions_runs.fetch_actions_runs_state  # #1230 (line cap)
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment (not a reply to a thread)."""

@@ -46,11 +46,23 @@ __all__ = [
     "MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE",
     "enter_blocked_for_protected_violation_in_session",
     "is_monitor_origin_block_resume_phase",
+    "monitor_protected_scope_resume_origin",
 ]
 
 # Monitor-origin resume phases (POST-PR protected-scope pause sites).
 MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE = "monitor_protected_scope_push"
 MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE = "monitor_protected_scope_sync_base"
+
+
+def monitor_protected_scope_resume_origin(block_resume_phase: str | None) -> str:
+    """Return the monitor protected-scope resume phase a re-park must keep.
+
+    A sync-base origin stays sync-base so the next resume still selects the
+    sync-base-aware validator; every other origin re-parks as a push resume.
+    """
+    if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE:
+        return MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+    return MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
 
 
 def is_monitor_origin_block_resume_phase(block_resume_phase: str | None) -> bool:

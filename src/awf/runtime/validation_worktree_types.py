@@ -6,6 +6,7 @@ module under the first-party line budget.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -21,6 +22,7 @@ class ValidationWorktreeCheck:
     reason_code: str | None = None
     message: str = ""
     command_stderr: str = ""
+    extra_details: Mapping[str, object] | None = None
 
     @property
     def tracked_paths(self) -> tuple[str, ...]:
@@ -39,6 +41,8 @@ class ValidationWorktreeCheck:
             details["reason_code"] = self.reason_code
         if self.command_stderr:
             details["command_stderr"] = self.command_stderr
+        if self.extra_details is not None:
+            details.update(self.extra_details)
         return details
 
 

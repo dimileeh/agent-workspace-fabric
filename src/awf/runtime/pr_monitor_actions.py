@@ -99,6 +99,8 @@ class WaitForCI:
         "awaiting_required_checks",
         "ci_run_in_progress",
         "pr_head_not_synchronized",
+        "actions_runs_pending",
+        "actions_runs_unknown",
     ] = "pending_checks"
 
 

@@ -137,7 +137,10 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
+    # Deterministic (non-transient) fetch failure: transient ones retry, then park (#1221).
+    cmd.queue_result(
+        returncode=128, stderr="fatal: couldn't find remote ref refs/heads/x"
+    )  # committed-diff baseline fetch
     runner = make_runner(
         factory=factory,
         cmd=cmd,
