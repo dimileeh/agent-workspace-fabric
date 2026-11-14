@@ -203,12 +203,15 @@ _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
 # (PRRT_kwDOSJAM6s63XLQk). A parenthesized ``(LIMIT) = 20`` / ``++(LIMIT)``
 # target writes it too (PRRT_kwDOSJAM6s63X1Cq), as does a TS non-null asserted
 # ``LIMIT! = 20`` one — a ``!=`` is an inequality — or a parenthesized
-# ``(LIMIT as number) = 20`` / ``satisfies`` one (PRRT_kwDOSJAM6s63X_At).
+# ``(LIMIT as number) = 20`` / ``satisfies`` one (PRRT_kwDOSJAM6s63X_At). A
+# prefix update whose operand goes on to a member (``++LIMIT.value``,
+# ``--(LIMIT)[0]``) writes the property, not the name (PRRT_kwDOSJAM6s63Y4_p).
 _JS_TS_ASSIGNED_TARGET_RE = re.compile(
     rf"(?<![\w$.])({_JS_IDENT})"
     r"(?:[ \t]*(?:\)|!(?!=))|[ \t]+(?:as|satisfies)[ \t]+[^()=;!]*?(?=[ \t]*\)))*[ \t]*"
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
     rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})"
+    r"(?!(?:\s*(?:\)|!(?!=))|\s+(?:as|satisfies)\s+[^()=;!]*?(?=\s*\)))*\s*[.\[])"
 )
 # A ``for`` head up to the target its ``of``/``in`` writes each iteration, which
 # a block-scoped ``let``/``const`` declares afresh but a ``var`` does not

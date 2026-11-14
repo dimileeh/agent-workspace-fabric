@@ -1700,6 +1700,12 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             True,
             id="spaced-member-assignments-only",
         ),
+        pytest.param(
+            "export const LIMIT = {value: 10};\n++LIMIT.value;\n--LIMIT[0];\n"
+            "++(LIMIT).value;\n--LIMIT!.value;\n++(LIMIT as Box)\n  [0];\n",
+            True,
+            id="prefix-member-updates-only",
+        ),
     ],
 )
 @pytest.mark.unit
