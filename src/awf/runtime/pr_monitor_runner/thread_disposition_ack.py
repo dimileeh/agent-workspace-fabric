@@ -74,7 +74,8 @@ _DISSENT_RE = re.compile(
     r"disagree|incorrect|wrong|also|additionally|another|not|never|"
     r"would|might|needs|need to|requires|lacks|worth|nit|"
     # A conditional concurrence ("LGTM once it is fixed") awaits a fix that may not have landed.
-    r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending)\b|n't\b|"
+    r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending|upon|"
+    r"as soon as|as long as|so long as|in case|subject to|contingent|conditional)\b|n't\b|"
     r"\b(?:could|can) you\b|"
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,
@@ -86,8 +87,9 @@ _CONCURRENCE_RE = re.compile(
     # An agreement word concurs only alone.
     r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
     r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
-    # A predicate concurs only as the end of its clause, whatever its subject.
-    r".*?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
+    # A predicate concurs only as the end of its clause, whatever its subject, unless
+    # that subject holds an agreement word: "LGTM the moment it is fixed" qualifies it.
+    r"(?:(?!\b(?:agreed?|lgtm|looks good|you're|that's)\b).)*?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
     r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
     r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"

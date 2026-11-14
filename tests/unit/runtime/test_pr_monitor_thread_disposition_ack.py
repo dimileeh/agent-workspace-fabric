@@ -478,6 +478,11 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Withdrawn after the test is addressed.",
         "LGTM provided it is resolved.",
         "LGTM until it is resolved.",
+        "LGTM as soon as the null dereference is fixed.",
+        "LGTM the moment it is fixed.",
+        "Looks good to me in case it is fixed.",
+        "As long as the null dereference is fixed.",
+        "Agreed, subject to the bug is fixed.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",
