@@ -171,11 +171,11 @@ _JSX_OPENING_TAG_RE = re.compile(r"<[A-Za-z_$>]")
 _JSX_OPENING_TAG_OPENER_RE = re.compile(
     r"(?:^|[=(,:?\[{&|>]|(?<![\w$.])(?:return|yield|await))[ \t]*$"
 )
-# A JS/TS ``function``/``class`` expression whose head has no body yet: its
-# required ``{...}`` may open on a later line (PRRT_kwDOSJAM6s63YhJR).
-_JS_TS_BODILESS_EXPRESSION_HEAD_RE = re.compile(
+# A JS/TS ``function``/``class`` expression head, whose required ``{...}`` body
+# may open on a later line (PRRT_kwDOSJAM6s63YhJR).
+_JS_TS_EXPRESSION_HEAD_RE = re.compile(
     r"(?:[=(,:?\[&|>]|(?<![\w$.])(?:return|yield|await))[ \t]*(?:async[ \t]+)?"
-    r"(?:function|class)(?![\w$])[^{};]*$"
+    r"(?:function|class)(?![\w$])"
 )
 # A block comment closing a JS/TS operand, skipped to reach the operand that a
 # following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
@@ -274,6 +274,27 @@ def _comment_named_identifiers(text: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _js_ts_expression_head_awaits_body(code: str) -> bool:
+    """Whether ``code`` ends in a ``function``/``class`` expression head with no body yet.
+
+    A ``{`` or ``}`` nested in the head's parentheses or brackets — a destructured
+    parameter, an object default or a heritage call's argument — does not open
+    the body (PRRT_kwDOSJAM6s63Yl_Z).
+    """
+    for head in _JS_TS_EXPRESSION_HEAD_RE.finditer(code):
+        depth = 0
+        for char in code[head.end() :]:
+            if char in "([":
+                depth += 1
+            elif char in ")]":
+                depth = max(depth - 1, 0)
+            elif char == ";" or (char in "{}" and depth == 0):
+                break
+        else:
+            return True
+    return False
+
+
 def _js_ts_line_ends_statement(
     raw: str, scan: str, *, typescript: bool, statement: Sequence[str] = (), jsx: bool = False
 ) -> bool:
@@ -292,7 +313,7 @@ def _js_ts_line_ends_statement(
     body does not end its statement (PRRT_kwDOSJAM6s63YhJR).
     """
     code = scan.rstrip()
-    if _JS_TS_BODILESS_EXPRESSION_HEAD_RE.search(" ".join([*statement, code])) is not None:
+    if _js_ts_expression_head_awaits_body(" ".join([*statement, code])):
         return False
     # A line-leading ``/>`` closing the tag is masked as a regex literal.
     if (

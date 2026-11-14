@@ -1890,3 +1890,35 @@ async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
 
     assert await _changes_named_target(runner, "`handler` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "changed"),
+    [
+        pytest.param(
+            "export const handler = function ({ value })\n{\n  return 10;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10;", "+  return 11;"),
+            id="destructured-parameter",
+        ),
+        pytest.param(
+            "export const handler = function (options = { value: 1 })\n{\n  return 10;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10;", "+  return 11;"),
+            id="object-default-parameter",
+        ),
+        pytest.param(
+            "export const handler = class extends mixin({ base: Base })\n"
+            "{\n  run() { return 10; }\n};\n",
+            ("@@ -3 +3 @@", "-  run() { return 10; }", "+  run() { return 11; }"),
+            id="object-argument-heritage",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_split_function_initializer_body_survives_nested_braces(
+    text: str, changed: tuple[str, str, str]
+) -> None:
+    """Braces nested in a head's parentheses do not open its body (PRRT_kwDOSJAM6s63Yl_Z)."""
+    diff = _diff(_WEB, *changed)
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`handler` is too low") is True
