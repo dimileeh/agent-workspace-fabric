@@ -745,6 +745,16 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             id="asi-arrow-block-body-brace-stays-code",
         ),
         pytest.param(
+            "    function f(): JSX.Element { return <Icon /> } helper();",
+            frozenset({(None, "helper")}),
+            id="asi-return-type-block-body-brace-stays-code",
+        ),
+        pytest.param(
+            "    const o = { async render() { return <Icon /> } }; helper();",
+            frozenset({(None, "render"), (None, "helper")}),
+            id="asi-method-shorthand-block-body-brace-stays-code",
+        ),
+        pytest.param(
             "    (note) {cond && <Icon />} helper()", frozenset(), id="paren-text-container-text"
         ),
         pytest.param(

@@ -37,11 +37,20 @@ _JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
 # member (quoted keys are already blank) (PRRT_kwDOSJAM6s63ZGB0).
 _JS_OBJECT_LITERAL_BODY_RE = re.compile(r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\])?\s*(?::(?!:)|,))")
 # A ``{`` opening a JS block: an arrow body, a keyword block, or after the
-# ``)`` closing a control/function header (PRRT_kwDOSJAM6s63ZMkA).
+# ``)`` closing a control/function/method-shorthand header (PRRT_kwDOSJAM6s63ZMkA).
 _JS_BLOCK_PREFIX_RE = re.compile(r"(?:=>|(?<![\w$.])(?:else|try|finally|do))\s*$")
 _JS_BLOCK_HEADER_RE = re.compile(
-    r"(?<![\w$.])(?:if|for|while|switch|catch|with|function\s*\*?\s*[\w$]*)\s*$"
+    r"(?:(?<![\w$.])(?:if|for|while|switch|catch|with|function\s*\*?\s*[\w$]*)"
+    r"|\{\s*(?:(?:get|set|static|async)\s+)?\*?\s*[\w$]+)\s*$"
 )
+# An object literal or class body whose first member is a method shorthand
+# (``{ render() {``); a JSX container cannot hold a call followed by ``{``.
+_JS_METHOD_BODY_RE = re.compile(
+    r"\s*(?:(?:get|set|static|async)\s+)?\*?\s*[\w$]+\s*\([^()]*\)\s*(?::[^{}]*)?\{"
+)
+# A TypeScript return type annotation between a header's ``)`` and its ``{``
+# (``function f(): JSX.Element {``).
+_JS_RETURN_TYPE_RE = re.compile(r"\)\s*:\s*[\w$.]+(?:<[^(){}]*>)?(?:\[\])*$")
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -541,6 +550,7 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
         if line[k] == "{":
             openers.append(
                 _JS_OBJECT_LITERAL_BODY_RE.match(line, k + 1) is not None
+                or _JS_METHOD_BODY_RE.match(line, k + 1) is not None
                 or _js_brace_opens_block(line, k)
             )
         elif line[k] == "}" and openers:
@@ -568,6 +578,8 @@ def _js_brace_opens_block(line: str, k: int) -> bool:
     prefix = line[:k].rstrip()
     if _JS_BLOCK_PREFIX_RE.search(prefix) is not None:
         return True
+    if (annotation := _JS_RETURN_TYPE_RE.search(prefix)) is not None:
+        prefix = prefix[: annotation.start() + 1]
     if not prefix.endswith(")"):
         return False
     depth = 0
