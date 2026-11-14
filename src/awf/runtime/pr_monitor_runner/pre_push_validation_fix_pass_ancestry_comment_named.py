@@ -281,14 +281,15 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
     parameter, an object default or a heritage call's argument — does not open
     the body (PRRT_kwDOSJAM6s63Yl_Z). Nor does a type literal's ``{`` in a TS
     return-type annotation, where it follows the annotation's ``:``, a ``|``,
-    ``&``, ``<``, ``,`` or a function type's ``=>`` (PRRT_kwDOSJAM6s63Yomw).
+    ``&``, ``<``, ``,`` or a function type's ``=>`` (PRRT_kwDOSJAM6s63Yomw), or
+    a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP).
     """
     for head in _JS_TS_EXPRESSION_HEAD_RE.finditer(code):
         depth = 0
         annotated = False
         previous = ""
         for char in code[head.end() :]:
-            type_literal = annotated and previous in {":", "|", "&", "<", ",", "=>"}
+            type_literal = annotated and previous in {":", "|", "&", "<", ",", "=>", "?"}
             if char in "([" or (char == "{" and (depth or type_literal)):
                 depth += 1
             elif char in ")]" or (char == "}" and depth):
