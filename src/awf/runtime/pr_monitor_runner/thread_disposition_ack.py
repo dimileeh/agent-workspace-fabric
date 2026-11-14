@@ -73,7 +73,9 @@ _DISSENT_RE = re.compile(
 )
 _CONCURRENCE_RE = re.compile(
     r"\b(?:agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
-    r"withdrawn|withdraw(?:ing)?|retract(?:ed|ing)?|confirmed|verified|"
+    r"withdrawn|withdraw(?:ing)?|retract(?:ed|ing)?|"
+    # A verification concurs only when it is of the fix: a bare one may confirm the finding.
+    r"(?:confirmed|verified) (?:the )?fix|fix (?:is |was |has been )?(?:confirmed|verified)|"
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
     r"leav(?:e|ing) (?:the )?resolution to|"
     r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",

@@ -418,7 +418,14 @@ NEW_CONCERNS = (
 
 @pytest.mark.parametrize(
     "body",
-    [*CONCURRENCES, CONCURRENCE_WITH_ANALYSIS, "LGTM, the fix is confirmed.", "Retracted."],
+    [
+        *CONCURRENCES,
+        CONCURRENCE_WITH_ANALYSIS,
+        "LGTM, the fix is confirmed.",
+        "Retracted.",
+        "Verified the fix on the current head.",
+        "The fix has been verified.",
+    ],
 )
 def test_an_explicit_concurrence_is_recognised(body: str) -> None:
     assert is_bot_concurrence(body) is True
@@ -444,6 +451,9 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",
         "Agreed. <!-- the rest is hidden",
+        # A verification that confirms the finding, not the fix, is no concurrence.
+        "Verified: the null dereference reproduces on the current head.",
+        "Confirmed: the race reproduces.",
         # A concurrence only in quoted text is not the bot's own.
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.
