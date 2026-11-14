@@ -66,6 +66,12 @@ from tests.unit.runtime._thread_disposition_fixtures import (
     settled_baseline_state,
     thread_comment,
 )
+from tests.unit.runtime.test_pr_monitor_thread_disposition_ack import (
+    CONCURRENCE_WITH_ANALYSIS,
+    CONCURRENCES,
+    FALSE_POSITIVE_CONCURRENCE,
+    NEW_CONCERNS,
+)
 from tests.unit.runtime.test_pr_monitor_thread_disposition_gate import (
     _AUDIT,
     _REPO,
@@ -612,3 +618,100 @@ async def test_a_reply_too_long_to_quote_whole_fails_the_check_without_running_t
     assert persisted.threads_addressed_ids[key] == UNJUDGED
     [event] = await _ack_events(factory, workspace_id)
     assert (event["outcome"], event["evidence"]["detail"]) == ("check_failed", "reply_truncated")
+
+
+# --- #1238: a bot that concurs with AWF's disposition never re-blocks the gate ---
+
+
+@pytest.mark.parametrize(
+    ("body", "hosted"),
+    [
+        *((body, False) for body in CONCURRENCES),
+        # Both were UNJUDGED before the agent was ever asked: too long, or hosted.
+        pytest.param(CONCURRENCE_WITH_ANALYSIS, False, id="analysis-chain-over-the-cap"),
+        pytest.param(CONCURRENCES[0], True, id="hosted-adapter"),
+        pytest.param(FALSE_POSITIVE_CONCURRENCE, True, id="hosted-adapter-false-positive"),
+    ],
+)
+async def test_a_bot_concurrence_passes_the_gate_without_the_agent_or_a_reopen(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    body: str,
+    hosted: bool,
+) -> None:
+    reply = thread_comment(body, comment_id="3")
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(reply,))
+    if hosted:
+        runner._deps.adapter._runtime_executor = object()
+        assert runner._deps.adapter.is_hosted
+
+    await _judge(runner, workspace_id, state)
+    certified = await _gate(runner, workspace_id, state)
+
+    assert certified.blocker is None and certified.count_rows is not None
+    assert dict(certified.count_rows)["false positive"] == 1
+    assert runner._deps.adapter.calls == []  # judged without the agent
+    assert gh.unresolved == [] and gh.thread_replies == []
+    key = _disposition_ack_key(_SILENT, comment_identity(reply))
+    assert (await _persisted(factory, workspace_id)).threads_addressed_ids[key] == ACKNOWLEDGES
+    [event] = await _ack_events(factory, workspace_id)
+    assert (event["outcome"], event["reason_code"]) == ("acknowledged", _ACKNOWLEDGED)
+    assert event["evidence"]["detail"] == "concurrence"
+    assert _disposition_auto_reopen_key(_SILENT) not in state.threads_addressed_ids
+
+
+async def test_repeated_concurrences_across_re_triages_keep_passing_without_a_reopen(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Each new reply (an edit, or the bot's answer to a fresh marker after a
+    # re-triage) is a new identity, judged again: never a one-shot per thread.
+    first = thread_comment(CONCURRENCES[0], comment_id="3")
+    edited = thread_comment(f"{CONCURRENCES[0]} Thanks!", comment_id="3")
+    after_fresh_marker = thread_comment(CONCURRENCES[2], comment_id="5")
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(first,))
+    rounds = (
+        acked_thread(_SILENT, _MARKER, trailing=(first,)),
+        acked_thread(_SILENT, _MARKER, trailing=(edited,)),
+        acked_thread(
+            _SILENT, _MARKER, trailing=(after_fresh_marker,), viewer_bodies=(_MARKER, _MARKER)
+        ),
+    )
+
+    for index, thread in enumerate(rounds):
+        gh.audit = audit_of(thread)
+        if index:
+            assert (await _gate(runner, workspace_id, state)).retry is True  # a new identity
+        await _judge(runner, workspace_id, state)
+        certified = await _gate(runner, workspace_id, state)
+        assert certified.blocker is None and certified.count_rows is not None
+
+    assert runner._deps.adapter.calls == []
+    assert gh.unresolved == [] and gh.thread_replies == []
+    assert _disposition_auto_reopen_key(_SILENT) not in state.threads_addressed_ids
+    for comment in (first, edited, after_fresh_marker):
+        key = _disposition_ack_key(_SILENT, comment_identity(comment))
+        assert state.threads_addressed_ids[key] == ACKNOWLEDGES
+    details = [e["evidence"]["detail"] for e in await _ack_events(factory, workspace_id)]
+    assert details == ["concurrence"] * 3
+
+
+@pytest.mark.parametrize("body", NEW_CONCERNS)
+async def test_a_bot_reply_with_a_new_concern_goes_to_the_agent_and_still_re_triages(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    body: str,
+) -> None:
+    reply = thread_comment(body, comment_id="3")
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(reply,))
+    runner._deps.adapter.queue(stdout="AWF-DISPOSITION-ACK: NEW_POINT")
+
+    await _judge(runner, workspace_id, state)
+
+    [prompt] = runner._deps.adapter.calls  # the fallback: the agent's judgment
+    assert body.splitlines()[0] in prompt  # the evidence quoting escapes fences
+    key = _disposition_ack_key(_SILENT, comment_identity(reply))
+    assert state.threads_addressed_ids[key] == NEW_POINT
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    assert gh.unresolved == [_SILENT]
+    assert state.threads_addressed_ids[_disposition_auto_reopen_key(_SILENT)] == "1"

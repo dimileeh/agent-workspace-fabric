@@ -1,5 +1,9 @@
 """Operator ruling that closes an ``AGENT_NON_FIXED_WITH_MUTATION`` park (issue #1213).
 
+It also settles a resolved thread the READY_TO_MERGE disposition gate flagged
+``REVIEW_THREAD_DISPOSITION_UNVERIFIED`` (#1238), e.g. one whose opening bot
+kept replying after AWF's marker until the auto-reopen budget ran out.
+
 A correction attempt that mutated the worktree and then reported a non-FIXED
 verdict is rolled back and its review thread parked ``needs_human``. When the
 operator answers with a guide such as "PRRT_x FIXED by <sha>; make no code
@@ -16,8 +20,9 @@ a strict, machine-readable grammar (#1215), never English prose:
 
 The whole guide is checked before anything changes. Every ruled thread must be
 a live mutation park, open on the PR, with the conversation the park answered
-unchanged. A FIXED claim needs evidence: the cited commit must resolve and be
-an ancestor of the PR head. A thread the same ruling already resolved is
+unchanged; or a gate-flagged thread that is not listed open and that a
+single-thread audit shows resolved by AWF's own identity. A FIXED claim needs
+evidence: the cited commit must resolve and be an ancestor of the PR head. A thread the same ruling already resolved is
 satisfied, so a repeated guide retries only the threads still parked. Each
 thread then records the operator-sourced
 disposition, gets AWF's disposition reply, and is resolved. Each step is
@@ -25,8 +30,8 @@ audited under its reason code.
 
 Anything short of that fails closed: no thread changes, and the hint parks
 ``needs_human`` with ``OPERATOR_PARK_DISPOSITION_UNAPPLIED`` and a detail. A
-guide that carries no ruling line, or rules on no mutation park, never reaches
-any of this, so the agent cycle (and the #938 clear-and-retriage path) runs as
+guide that carries no ruling line, or rules on no mutation park or gate-flagged
+thread, never reaches any of this, so the agent cycle (and the #938 clear-and-retriage path) runs as
 before.
 """
 
@@ -47,7 +52,7 @@ from awf.runtime.feedback_policy import (
     review_thread_body_state_key,
 )
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _mutation_park_key
+from awf.runtime.monitor_state_keys import _disposition_unverified_key, _mutation_park_key
 from awf.runtime.operator_hints import mark_operator_hint_needs_human
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -68,6 +73,7 @@ from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
 from awf.runtime.pr_monitor_runner.operator_preserved_attempt import PreservedAttemptOutcome
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_AUDIT_UNAVAILABLE,
+    REVIEW_THREAD_DISPOSITION_UNVERIFIED,
     THREAD_DISPOSITION_REPLY_FAILED,
     ThreadDisposition,
     read_item_disposition,
@@ -135,6 +141,13 @@ _UNAPPLIED_EXPLANATION: dict[str, str] = {
     "ancestry_unverified": (
         "AWF could not verify that the cited commit is an ancestor of the PR head."
     ),
+    "flagged_thread_open": (
+        "a named gate-flagged thread is open on the PR again, so AWF re-triages it instead."
+    ),
+    "flagged_thread_not_resolved_by_awf": (
+        "a named gate-flagged thread is no longer resolved by AWF's own identity."
+    ),
+    "flagged_thread_unreadable": "AWF could not re-read a named gate-flagged thread.",
 }
 
 
@@ -148,9 +161,13 @@ class ParkRuling:
 
 @dataclass(frozen=True)
 class _Staged:
-    thread: ReviewThread
+    thread_id: str
+    thread: ReviewThread | None  # None: a gate-flagged thread, already resolved
     ruling: ParkRuling
     commit: str | None
+    # A gate-flagged thread's outside comments as its audit read them; the
+    # post-reply re-read refuses the ruling when they changed before the reply.
+    audited_comments: tuple[str, ...] = ()
 
 
 def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
@@ -201,6 +218,52 @@ def _is_ruleable_park(state: MonitorState, thread_id: str) -> bool:
     )
 
 
+def _is_gate_flagged(state: MonitorState, thread_id: str) -> bool:
+    """The READY_TO_MERGE disposition gate flagged this AWF-resolved thread (#1238)."""
+    return (
+        state.threads_addressed_ids.get(_disposition_unverified_key(thread_id))
+        == REVIEW_THREAD_DISPOSITION_UNVERIFIED
+    )
+
+
+def _listed_open(status: PRStatus, thread_id: str) -> bool:
+    return any(
+        thread.thread_id == thread_id
+        for thread in (
+            *status.unresolved_inline_threads,
+            *status.outdated_unresolved_inline_threads,
+        )
+    )
+
+
+async def _flagged_thread_problem(
+    self: Any, *, repo: RepoRef, pr_number: int, thread_id: str
+) -> tuple[tuple[str, ...], str | None]:
+    """``(outside comments, None)`` for a gate-flagged thread resolved by AWF, else ``((), why)``.
+
+    The outside comments are the conversation the ruling covers, as this audit
+    read it: the post-reply re-read compares them (PRRT_kwDOSJAM6s63XfSQ).
+    """
+    try:
+        audit = await self._deps.gh.fetch_review_thread_audit(
+            repo=repo, pr_number=pr_number, thread_id=thread_id
+        )
+    except ForgeClientError as exc:
+        _log.warning(
+            "monitor.operator_park_disposition_flagged_thread_unreadable",
+            thread_id=thread_id,
+            forge_reason_code=exc.reason_code,
+        )
+        return (), "flagged_thread_unreadable"
+    viewer = (audit.viewer_login or "").strip().casefold()
+    live = next((t for t in audit.threads if t.thread_id == thread_id), None)
+    if not audit.supported or not viewer or live is None:
+        return (), "flagged_thread_unreadable"
+    if not live.is_resolved or (live.resolved_by or "").strip().casefold() != viewer:
+        return (), "flagged_thread_not_resolved_by_awf"
+    return live.external_comment_bodies, None
+
+
 def _ruling_already_applied(
     state: MonitorState, status: PRStatus, thread_id: str, ruling: ParkRuling
 ) -> bool:
@@ -208,17 +271,17 @@ def _ruling_already_applied(
 
     A guide whose other thread failed to resolve is retried by sending it again
     (PRRT_kwDOSJAM6s62f9ot): the thread it did close is satisfied, not refused as
-    ``not_mutation_park``. A different ruling, or a reopened thread, is not.
+    ``not_mutation_park``. A different ruling, or a reopened thread, is not; nor is
+    one the gate flagged again, whose feedback came after the ruling's reply and
+    before any audit bound it (PRRT_kwDOSJAM6s63YWAU).
     """
     disposition = read_item_disposition(state, thread_id)
     if disposition is None or disposition.source != _DISPOSITION_SOURCE:
         return False
-    if not disposition.resolved or any(
-        thread.thread_id == thread_id
-        for thread in (
-            *status.unresolved_inline_threads,
-            *status.outdated_unresolved_inline_threads,
-        )
+    if (
+        not disposition.resolved
+        or _listed_open(status, thread_id)
+        or _is_gate_flagged(state, thread_id)
     ):
         return False
     if ruling.sha is None:
@@ -338,6 +401,8 @@ async def _stage(
     self: Any,
     *,
     workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
     status: PRStatus,
     state: MonitorState,
     rulings: dict[str, ParkRuling | None],
@@ -351,11 +416,23 @@ async def _stage(
             return [], "thread_without_disposition"
         if _ruling_already_applied(state, status, thread_id, ruling):
             continue
-        if not _is_ruleable_park(state, thread_id):
-            return [], "not_mutation_park"
-        thread, detail = _live_thread(state, status, thread_id)
-        if thread is None:
-            return [], detail
+        flagged = _is_gate_flagged(state, thread_id)
+        thread: ReviewThread | None = None
+        audited: tuple[str, ...] = ()
+        if flagged and not _listed_open(status, thread_id):
+            # #1238: resolved by AWF and flagged by the gate; the ruling is its disposition.
+            audited, detail = await _flagged_thread_problem(
+                self, repo=repo, pr_number=pr_number, thread_id=thread_id
+            )
+            if detail is not None:
+                return [], detail
+        elif _is_ruleable_park(state, thread_id):
+            thread, detail = _live_thread(state, status, thread_id)
+            if thread is None:
+                return [], detail
+        else:
+            # An open flagged thread is ``decide()``'s to re-triage.
+            return [], "flagged_thread_open" if flagged else "not_mutation_park"
         commit: str | None = None
         if ruling.sha is not None:
             commit, detail = await _ancestor_commit(
@@ -368,14 +445,21 @@ async def _stage(
             )
             if commit is None:
                 return [], detail
-        staged.append(_Staged(thread, ruling, commit))
+        staged.append(_Staged(thread_id, thread, ruling, commit, audited))
     return staged, None
 
 
 def _record_disposition(state: MonitorState, item: _Staged) -> str | None:
     """Record the operator's disposition on the thread; return the park's rollback head."""
-    thread_id = item.thread.thread_id
+    thread_id = item.thread_id
     record = mutation_park_record(state.threads_addressed_ids, thread_id)
+    # A gate-flagged thread is resolved, so the forge lists no body to hash: it
+    # keeps the one its last triage recorded, which a later reopen compares.
+    body_hash = (
+        review_thread_body_hash(item.thread)
+        if item.thread is not None
+        else state.threads_addressed_ids.get(review_thread_body_state_key(thread_id))
+    )
     for key in (
         _needs_human_reason_state_key(thread_id),
         _mutation_park_key(thread_id),
@@ -384,8 +468,12 @@ def _record_disposition(state: MonitorState, item: _Staged) -> str | None:
         state.threads_addressed_ids.pop(key, None)
     # The reply cites the commit, never the operator's free text: guide notes are
     # private to the operator and the thread is public.
+    verdict = "fix_committed" if item.commit is not None else "false_positive"
+    if item.thread is not None:
+        _mark_review_thread_addressed(state, item.thread, verdict)
+    else:
+        state.mark_addressed(thread_id, verdict)
     if item.commit is not None:
-        _mark_review_thread_addressed(state, item.thread, "fix_committed")
         disposition = ThreadDisposition(
             item_id=thread_id,
             disposition_class="fixed",
@@ -393,17 +481,16 @@ def _record_disposition(state: MonitorState, item: _Staged) -> str | None:
             reason=f"Fixed by {item.commit[:12]} per operator ruling.",
             commits=(item.commit,),
             source=_DISPOSITION_SOURCE,
-            thread_body_hash=review_thread_body_hash(item.thread),
+            thread_body_hash=body_hash,
         )
     else:
-        _mark_review_thread_addressed(state, item.thread, "false_positive")
         disposition = ThreadDisposition(
             item_id=thread_id,
             disposition_class="false_positive",
             verdict="false_positive",
             reason="False positive per operator ruling.",
             source=_DISPOSITION_SOURCE,
-            thread_body_hash=review_thread_body_hash(item.thread),
+            thread_body_hash=body_hash,
         )
     rollback_head = (record[0] or None) if record else None
     previous = read_item_disposition(state, thread_id)
@@ -443,9 +530,9 @@ async def apply_park_disposition(
     """Apply an operator ruling on mutation-parked threads before the hint's agent cycle.
 
     Returns ``None`` (the agent cycle runs as before) when the directive carries
-    no ruling, when none of its rulings names a mutation park (an ordinary
-    thread's ruling is the agent's to act on), or when a protected-scope block
-    is pending: that resume is owned by the grant/directive protocol. Otherwise the hint is finalized (each
+    no ruling, when none of its rulings names a mutation park or a gate-flagged
+    thread (an ordinary thread's ruling is the agent's to act on), or when a
+    protected-scope block is pending: that resume is owned by the grant/directive protocol. Otherwise the hint is finalized (each
     thread replied to and resolved, or re-parked under its own reason code) or
     parked ``needs_human`` with the UNAPPLIED reason code, and the caller
     persists state and skips the agent.
@@ -453,13 +540,22 @@ async def apply_park_disposition(
     rulings = park_dispositions(hint.directive)
     if rulings is None or state.has_preserved_protected_block:
         return None
-    # A ruling line is deliberate, so one naming a mutation park takes over the
-    # guide even when it conflicts: that fails closed below, never to the agent.
-    if not any(_is_ruleable_park(state, thread_id) for thread_id in rulings):
+    # A ruling line is deliberate, so one naming a mutation park or a gate-flagged
+    # thread takes over the guide even when it conflicts: that fails closed below,
+    # never to the agent. So does one this same ruling already settled, whose
+    # flag the gate has since cleared: a repeated guide is a no-op.
+    if not any(
+        _is_ruleable_park(state, thread_id)
+        or _is_gate_flagged(state, thread_id)
+        or (ruling is not None and _ruling_already_applied(state, status, thread_id, ruling))
+        for thread_id, ruling in rulings.items()
+    ):
         return None
     staged, detail = await _stage(
         self,
         workspace_id=workspace_id,
+        repo=repo,
+        pr_number=pr_number,
         status=status,
         state=state,
         rulings=rulings,
@@ -491,9 +587,9 @@ async def apply_park_disposition(
         )
         mark_operator_hint_needs_human(
             state,
-            f"{OPERATOR_PARK_DISPOSITION_UNAPPLIED}: the operator ruling on a parked review "
-            f"thread was not applied ({detail}): {_UNAPPLIED_EXPLANATION[detail]} Send a guide "
-            "with one line per parked thread: 'AWF-RULING <thread_id> FIXED <sha>' or "
+            f"{OPERATOR_PARK_DISPOSITION_UNAPPLIED}: the operator ruling on a parked or "
+            f"gate-flagged review thread was not applied ({detail}): "
+            f"{_UNAPPLIED_EXPLANATION[detail]} Send a guide with one line per such thread: 'AWF-RULING <thread_id> FIXED <sha>' or "
             "'AWF-RULING <thread_id> FALSE_POSITIVE[: <reason>]'.",
         )
         return PreservedAttemptOutcome(
@@ -509,7 +605,7 @@ async def apply_park_disposition(
             outcome="applied",
             reason_code=OPERATOR_PARK_DISPOSITION_APPLIED,
             evidence={
-                "thread_id": item.thread.thread_id,
+                "thread_id": item.thread_id,
                 "disposition": item.ruling.kind,
                 "sha": item.commit,
                 "head_sha": status.head_sha,
@@ -555,9 +651,11 @@ async def _reply_and_resolve(
     it (#305/#1018). A refused reply has already parked the thread under its own
     ``THREAD_DISPOSITION_*`` code. A failed resolve re-parks it ``needs_human``
     under ``OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED`` with the forge's reason
-    code; the posted reply is kept, so a repeated guide reuses it.
+    code; the posted reply is kept, so a repeated guide reuses it. A gate-flagged
+    thread is already resolved: the resolve is a no-op that records it landed,
+    and only then clears the gate's flag; any fault keeps it.
     """
-    thread_id = item.thread.thread_id
+    thread_id = item.thread_id
     posted = await reply_before_resolve(
         self,
         workspace_id=workspace_id,
@@ -568,6 +666,7 @@ async def _reply_and_resolve(
         base_branch=base_branch,
         remote_branch=remote_branch,
         thread=item.thread,
+        audited_comments=item.audited_comments,
         operation_id=operation_id,
         operation_type=OperationType.comment_repair.value,
         monitor_log=monitor_log,
@@ -607,6 +706,11 @@ async def _reply_and_resolve(
             },
         )
         return False
+    if _is_gate_flagged(state, thread_id):
+        # The ruling's reply and resolve landed, so it is the flagged thread's
+        # disposition: a repeat before the next gate audit is a no-op, and that
+        # audit flags it again on newer feedback (PRRT_kwDOSJAM6s63YizI).
+        state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
     await record_resolve_landed(self, workspace_id=workspace_id, state=state, disposition=posted)
     return True
 
