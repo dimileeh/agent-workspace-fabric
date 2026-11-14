@@ -3,7 +3,7 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-Five policies live here, all scoped to the correction retry — the attempt that
+Six policies live here, all scoped to the correction retry — the attempt that
 runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 
 * **Path-level evidence on the correction** — attempt 0 keeps the strict
@@ -44,6 +44,16 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
   scope, and ``self`` / ``cls`` / ``this`` receivers fail closed. Attempt 0
   stays strict, commits with no callee relationship keep escalating with the
   commit preserved, and the unmappable-anchor sentinel stays fail-closed.
+* **Comment-named target evidence on the correction** (#1232) — after all four
+  anchor-derived checks have failed, the same item-own range is accepted when
+  it changes a target the *reviewer's* comment text names: a repo-relative path
+  (near the named line when ``:line`` is given), or the Python definition of a
+  backticked identifier (a JS/TS one yields no evidence). Reviewers anchor at a
+  usage site and name the fix target in the body; three genuine fixes of that
+  shape escalated on 2026-11-13. AWF-authored replies and the agent's reason
+  are never evidence, attempt 0 stays strict, commits that change no named
+  target keep escalating with the commit preserved, and the unmappable-anchor
+  sentinel stays fail-closed.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
@@ -458,6 +468,89 @@ async def callee_definition_item_fix_evidence(
     return False
 
 
+async def comment_named_target_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    comment_text: str | None,
+    state: MonitorState | None,
+    anchor_head: str | None = None,
+) -> bool:
+    """Accept a fix to a target the reviewer's comment names (#1232).
+
+    The fifth and last correction-attempt evidence check: same
+    ``item_start_head``..HEAD range and the same contentful-descendant
+    requirement as the four anchor-derived gates, with the scope taken from the
+    reviewer's own comment text instead of the anchor. The range is accepted
+    when it changes a repo-relative path the comment names (near the named line
+    when ``:line`` is given) or the Python definition of an identifier the
+    comment backticks (``_commit_range_changes_comment_named_target``).
+
+    Why this is safe, and why it is needed (issue #1232): reviewers anchor at a
+    usage site and name the fix target in the body — a runbook line, the route
+    helper's file, the tuple a filter reads — and three genuine fixes of exactly
+    those shapes escalated to ``needs_human`` on 2026-11-13. The targets are the
+    reviewer's choice, never the agent's: ``comment_text`` is
+    ``reviewer_comment_text`` (AWF-authored replies excluded) and the agent's
+    verdict reason is never passed here. Attempt 0 stays strict, a commit that
+    changes no named target keeps escalating with the commit preserved, and the
+    ``item_line <= 0`` unmappable-anchor sentinel stays fail-closed; a
+    file-level thread (``item_line is None``) is not that sentinel.
+    ``anchor_head`` is the PR head the review was written against; named
+    ``path:line`` targets are relocated from it into ``item_start_head``.
+    """
+    if item_start_head is None or item_path is None or not (comment_text or "").strip():
+        return False
+    if item_line is not None and item_line < 1:
+        return False
+    if not worktree_path.exists():
+        return False
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    changes_named = getattr(runner, "_commit_range_changes_comment_named_target", None)
+    if not (callable(descends) and callable(trees_differ) and callable(changes_named)):
+        return False
+
+    candidate_heads: list[str] = []
+    end_head = await runner._rev_parse_head(worktree_path)
+    if end_head:
+        candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
+        ):
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if not await changes_named(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+            comment_text=comment_text,
+            anchor_head=anchor_head,
+        ):
+            continue
+        return True
+    return False
+
+
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -474,7 +567,9 @@ def correction_self_citation_outcome(
     (``path_level_item_fix_evidence``), **or** the package-level re-check of
     that same range (``package_level_item_fix_evidence``, #952), **or** the
     cross-file call-site→definition re-check of it
-    (``callee_definition_item_fix_evidence``, #1019). The guard reads
+    (``callee_definition_item_fix_evidence``, #1019), **or** the re-check
+    against targets the reviewer's comment names
+    (``comment_named_target_item_fix_evidence``, #1232). The guard reads
     whatever the correction accepted as evidence, so a sibling-module fix the
     agent then points at as "already addressed" resolves the thread instead of
     escalating. An explicit corrected ``needs_human``
@@ -585,8 +680,10 @@ def correction_unscoped_fix_outcome(
     the reviewed file's package (#952), and
     ``callee_definition_item_fix_evidence`` accepts one that changes the
     definition of a callee referenced at the anchored line in another file
-    (#1019). What is left is a commit in another package with no call-site
-    relationship to the reviewed line (or, with an unmappable anchor, one AWF
+    (#1019), and ``comment_named_target_item_fix_evidence`` accepts one that
+    changes a path or definition the reviewer's comment names (#1232). What is
+    left is a commit in another package with no call-site relationship to the
+    reviewed line and no named target (or, with an unmappable anchor, one AWF
     cannot place at all — that stays fail-closed). The protocol
     used to roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
