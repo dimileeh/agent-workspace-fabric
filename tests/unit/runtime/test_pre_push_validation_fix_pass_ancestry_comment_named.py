@@ -904,6 +904,22 @@ async def test_chained_assignment_target_excludes_an_arrow(
             id="semicolon-free-multiline-template-ends-declaration",
         ),
         pytest.param(
+            'const OTHER =\n  "hello"\nconst LIMIT = [\n  10\n];\n',
+            4,
+            "  20",
+            "LIMIT",
+            True,
+            id="declaration-after-standalone-string-operand",
+        ),
+        pytest.param(
+            'const OTHER =\n  "hello"\nconst LIMIT = [\n  10\n];\n',
+            4,
+            "  20",
+            "OTHER",
+            False,
+            id="standalone-string-operand-ends-declaration",
+        ),
+        pytest.param(
             "const LIMIT = `a\n// cleanup`\nconst OTHER = 1;\n",
             2,
             "// teardown`",

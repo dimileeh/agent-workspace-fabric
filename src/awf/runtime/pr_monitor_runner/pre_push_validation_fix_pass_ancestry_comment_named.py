@@ -567,8 +567,12 @@ def _module_level_assignment_spans(
                     (
                         scan.strip()
                         or (
-                            not starts_in_code[index]
-                            and _js_ts_line_ends_in_literal(raw_lines, index - 1, path=path)
+                            # A code line masked blank yet not a comment
+                            # is a whole literal operand (PRRT_kwDOSJAM6s63VnCo).
+                            bool(raw_lines[index].strip())
+                            and not raw_lines[index].lstrip().startswith(("//", "/*"))
+                            if starts_in_code[index]
+                            else _js_ts_line_ends_in_literal(raw_lines, index - 1, path=path)
                         )
                     )
                     and _js_ts_line_ends_statement(
