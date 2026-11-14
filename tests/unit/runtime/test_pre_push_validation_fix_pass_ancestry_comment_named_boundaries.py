@@ -870,6 +870,24 @@ async def test_js_ts_label_binds_nothing(
             id="closing-type-arguments-after-asi",
         ),
         pytest.param(
+            "export const LIMIT = value as Array <number>\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="spaced-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = value satisfies ns.List /* n */ <number>\nrun1();\n",
+            2,
+            False,
+            id="commented-closing-type-arguments-after-asi",
+        ),
+        pytest.param(
+            "const as = 0;\nexport const LIMIT = as < b >\n  c1;\n",
+            3,
+            True,
+            id="as-named-identifier-comparison-continuation",
+        ),
+        pytest.param(
             "export const LIMIT = value as Map<string, Array<(a: number) => void>>\nrun1();\n",
             2,
             False,

@@ -151,6 +151,13 @@ _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
 # (PRRT_kwDOSJAM6s63XaW6). Elsewhere it may be a contextual identifier.
 _JS_TS_TRAILING_TYPE_PREFIX_RE = re.compile(r"(?<![\w$.])(?:keyof|readonly)$")
 _JS_TS_TRAILING_TYPE_OPERATOR_RE = re.compile(r"(?<![\w$.])(?:satisfies|as)$")
+# A type name right after an ``as``/``satisfies`` type operator, whose spaced or
+# commented ``<`` still opens type arguments (``value as Array <number>``)
+# (PRRT_kwDOSJAM6s63XmEA).
+_JS_TS_ASSERTED_TYPE_NAME_RE = re.compile(
+    r"(?<![\w$.])(?:satisfies|as)[ \t]+(?:(?:keyof|readonly)[ \t]+)*"
+    r"[\w$]+(?:[ \t]*\.[ \t]*[\w$]+)*[ \t]*$"
+)
 # The ``>`` ending a completed JSX element (``<Widget />``, ``</div>``, ``</>``)
 # closes an operand rather than opening a comparison (PRRT_kwDOSJAM6s63VJ_g).
 _JSX_COMPLETED_ELEMENT_RE = re.compile(r"(?:/|</[\w$.:-]*[ \t]*)>$")
@@ -497,7 +504,8 @@ def _js_ts_ends_type_arguments(code: str) -> bool:
 
     The list's ``<`` must directly follow the type or callee name; a spaced
     ``a < b >`` is a comparison, and a ``>`` of ``=>`` closes nothing
-    (PRRT_kwDOSJAM6s63TIld).
+    (PRRT_kwDOSJAM6s63TIld). After an ``as``/``satisfies`` the name is a type,
+    so its ``<`` may follow whitespace or a comment (PRRT_kwDOSJAM6s63XmEA).
     """
     if not code.endswith(">") or code.endswith("=>"):
         return False
@@ -516,7 +524,10 @@ def _js_ts_ends_type_arguments(code: str) -> bool:
         elif char == "<":
             angles -= 1
             if not angles:
-                return re.match(r"[\w$]", code[position - 1]) is not None
+                return (
+                    re.match(r"[\w$]", code[position - 1]) is not None
+                    or _JS_TS_ASSERTED_TYPE_NAME_RE.search(code, 0, position) is not None
+                )
     return False
 
 
