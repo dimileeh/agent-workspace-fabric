@@ -198,6 +198,12 @@ _JS_TS_ASSIGNED_TARGET_RE = re.compile(
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
     rf"|(?:\+\+|--)[ \t]*({_JS_IDENT})"
 )
+# A ``for`` head up to the target its ``of``/``in`` writes each iteration, which
+# a block-scoped ``let``/``const`` declares afresh but a ``var`` does not
+# (PRRT_kwDOSJAM6s63XrHa).
+_JS_TS_LOOP_HEAD_RE = re.compile(r"(?<![\w$.])for(?:[ \t]+await)?[ \t]*\([ \t]*(?:var[ \t]+)?")
+_JS_TS_LOOP_TARGET_RE = re.compile(rf"{_JS_IDENT}(?=[ \t]+(?:of|in)(?![\w$]))")
+_JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]+(?:of|in)(?![\w$])")
 # A word a destructuring pattern can follow, unlike the object of ``a[LIMIT]``.
 _JS_TS_PATTERN_KEYWORD_RE = re.compile(r"(?<![\w$])(?:const|let|var|else|do)$")
 
@@ -602,7 +608,9 @@ def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -
     looked effective while importers reach the destructured value
     (PRRT_kwDOSJAM6s63W936). So does an assignment that does not open its
     statement — ``if (on) LIMIT = 20``, a braced block's, a ``+=`` or ``++`` —
-    which those statement-opening readers never see (PRRT_kwDOSJAM6s63XLQk).
+    which those statement-opening readers never see (PRRT_kwDOSJAM6s63XLQk),
+    or a ``for (LIMIT of xs)`` / ``for (LIMIT in o)`` target, which writes with
+    no assignment operator at all (PRRT_kwDOSJAM6s63XrHa).
     Every identifier a pattern holds is returned — a property key or a
     default's operand included — and an assignment is not told apart from a
     parameter default or a shadowing local, so a name the statement may bind
@@ -638,6 +646,21 @@ def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -
                 found.update(re.findall(_JS_IDENT, segment[opener : position + 1]))
         if char not in " \t":
             previous = opener
+    for head in _JS_TS_LOOP_HEAD_RE.finditer(segment):
+        target = _JS_TS_LOOP_TARGET_RE.match(segment, head.end())
+        if target is not None:
+            found.add(target.group())
+        elif segment.startswith(("[", "{"), head.end()):
+            depth = 0
+            for position in range(head.end(), len(segment)):
+                if segment[position] in "([{":
+                    depth += 1
+                elif segment[position] in ")]}":
+                    depth -= 1
+                    if not depth:
+                        break
+            if _JS_TS_LOOP_KEYWORD_RE.match(segment, position + 1) is not None:
+                found.update(re.findall(_JS_IDENT, segment[head.end() : position + 1]))
     return found
 
 

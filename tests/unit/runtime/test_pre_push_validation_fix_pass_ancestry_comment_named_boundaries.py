@@ -1548,3 +1548,47 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("export let LIMIT = 10;\nfor (LIMIT of [20]) {}\n", False, id="for-of"),
+        pytest.param("export let LIMIT = 10;\nfor (LIMIT in { a: 1 }) {}\n", False, id="for-in"),
+        pytest.param(
+            "export let LIMIT = 10;\nasync function f() {}\nfor await (LIMIT of gen()) {}\n",
+            False,
+            id="for-await-of",
+        ),
+        pytest.param("export var LIMIT = 10;\nfor (var LIMIT of [20]) {}\n", False, id="for-var"),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ([LIMIT] of [[20]]) {}\n", False, id="for-of-array-pattern"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ({ a: [LIMIT] } of [{ a: [20] }]) {}\n",
+            False,
+            id="for-of-nested-pattern",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on) for (LIMIT of [20]) work();\n",
+            False,
+            id="inline-for-of-body",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor (const LIMIT of [20]) {}\n"
+            "for (const x of [LIMIT]) {}\nfor (const key in LIMIT) {}\n"
+            "for ([x] = [LIMIT]; x < 1; x++) {}\n",
+            True,
+            id="block-scoped-and-read-only",
+        ),
+        pytest.param("export let LIMIT = 10;\nfor ([LIMIT\n", True, id="unclosed-pattern"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_loop_target_withholds_the_binding(text: str, *, expected: bool) -> None:
+    """A ``for...of``/``for...in`` target rebinds the name (PRRT_kwDOSJAM6s63XrHa)."""
+    old = text.splitlines()[0]
+    diff = _diff(_WEB, "@@ -1 +1 @@", f"-{old}", f"+{old.replace('10', '11')}")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
