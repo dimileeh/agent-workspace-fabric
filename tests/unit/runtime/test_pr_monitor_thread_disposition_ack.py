@@ -465,6 +465,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed–the handler crashes for empty input.",
         "Agreed (the handler crashes for empty input).",
         "Agreed and the handler crashes for empty input.",
+        # The whole clause must concur: an agreement word does not cover its complement.
+        "Agreed that the handler crashes for empty input.",
+        "I agree the handler crashes for empty input.",
+        "You're right that the handler crashes for empty input.",
+        "LGTM except the handler crashes for empty input.",
+        "Verified the fix leaves the handler crashing for empty input.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",

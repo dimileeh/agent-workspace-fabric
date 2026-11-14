@@ -77,18 +77,25 @@ _DISSENT_RE = re.compile(
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,
 )
+# A clause concurs only as a whole (it is matched in full): "Agreed that the handler
+# crashes" or "has a guard that crashes" may report a defect, so the agent judges it.
 _CONCURRENCE_RE = re.compile(
-    r"\b(?:agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
-    r"withdrawn|withdraw(?:ing)?|retract(?:ed|ing)?|"
+    r"(?:@\S+\s+)?(?:"
+    # An agreement word concurs only alone.
+    r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
+    r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
+    # A predicate concurs only as the end of its clause, whatever its subject.
+    r".*?\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
-    r"(?:confirmed|verified) (?:the )?fix|fix (?:is |was |has been )?(?:confirmed|verified)|"
-    r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
-    # The fix is present: the code has it, or its commit is in the revision. Presence
-    # concurs only as the whole claim: "has a guard that crashes" may report a defect.
-    r"(?:has|have|contains|includes) the (?:guard|fix|check|test)$|"
-    r"commit [0-9a-f]{7,40} is (?:now )?in|"
-    r"leav(?:e|ing) (?:the )?resolution to|"
-    r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",
+    r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
+    r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"
+    r"is (?:now )?(?:fixed|addressed|resolved)|is a fix(?: rather than a false positive)?|"
+    r"covers this case|"
+    # The fix is present: the code has it, or its commit is in the revision.
+    r"(?:has|have|contains|includes) the (?:guard|fix|check|test)|"
+    r"commit [0-9a-f]{7,40} is (?:now )?in(?: the (?:current|latest) (?:head|revision))?|"
+    r"leav(?:e|ing) (?:the )?resolution to (?:the )?(?:awf(?: monitor)?|monitor|you|@\S+)|"
+    r"no further (?:action|changes?) (?:is |are )?(?:needed|required)))",
     re.I,
 )
 # Every clause must concur or only thank; anything else (an imperative such as "Add a
@@ -131,9 +138,9 @@ def is_bot_concurrence(body: str) -> bool:
         return False
     own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
     clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
-    if not all(_CONCURRENCE_RE.search(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
+    if not all(_CONCURRENCE_RE.fullmatch(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
         return False
-    return any(_CONCURRENCE_RE.search(c) for c in clauses)
+    return any(_CONCURRENCE_RE.fullmatch(c) for c in clauses)
 
 
 def acknowledgement_view(thread: AuditedReviewThread, *, viewer: str) -> AuditedReviewThread | None:
