@@ -274,7 +274,7 @@ def _js_ts_line_ends_statement(
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
-    if typescript and _js_ts_ends_unfinished_type_operand(raw, scan, code):
+    if typescript and _js_ts_ends_unfinished_type_operand(raw, scan, code, statement):
         return False
     trailing = _JS_TS_TRAILING_CONTINUATION_RE.search(code)
     return (
@@ -317,12 +317,15 @@ def _jsx_opening_tag_is_open(code: str) -> bool:
     return open_tag
 
 
-def _js_ts_ends_unfinished_type_operand(raw: str, scan: str, code: str) -> bool:
+def _js_ts_ends_unfinished_type_operand(
+    raw: str, scan: str, code: str, statement: Sequence[str] = ()
+) -> bool:
     """Whether masked ``code`` ends ``as keyof`` / ``satisfies readonly``, awaiting its type.
 
     Only after a type operator that follows an operand is the ``keyof`` or
     ``readonly`` a type operator rather than a contextual identifier
-    (PRRT_kwDOSJAM6s63XaW6).
+    (PRRT_kwDOSJAM6s63XaW6). That operator may end the last masked line of the
+    ``statement`` (``value as`` wrapping before ``keyof``).
     """
     prefix = _JS_TS_TRAILING_TYPE_PREFIX_RE.search(code)
     if prefix is None:
@@ -330,6 +333,12 @@ def _js_ts_ends_unfinished_type_operand(raw: str, scan: str, code: str) -> bool:
     before = raw[: prefix.start()].rstrip()
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
         before = before[: comment.start()].rstrip()
+    if not before:
+        previous = next((line.rstrip() for line in reversed(statement) if line.strip()), "")
+        operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(previous)
+        return operator is not None and _js_ts_type_operator_follows_operand(
+            previous, previous, operator.start()
+        )
     operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(before)
     return operator is not None and _js_ts_type_operator_follows_operand(
         raw, scan, operator.start()

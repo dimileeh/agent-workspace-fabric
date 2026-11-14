@@ -804,6 +804,18 @@ async def test_js_ts_label_binds_nothing(
             id="trailing-readonly-type-operand-continuation",
         ),
         pytest.param(
+            "export const LIMIT = value as\n  keyof\n  Expected1;\n",
+            3,
+            True,
+            id="wrapped-keyof-type-operand-continuation",
+        ),
+        pytest.param(
+            "const as = 0;\nexport const LIMIT = as\n  keyof\nexport const OTHER = 1;\n",
+            4,
+            False,
+            id="wrapped-keyof-after-as-named-identifier",
+        ),
+        pytest.param(
             "const keyof = 0;\nexport const LIMIT = keyof\nexport const OTHER = 1;\n",
             3,
             False,
