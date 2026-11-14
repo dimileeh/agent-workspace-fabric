@@ -72,7 +72,9 @@ _CODE_REFERENCE_RE = re.compile(r"```|~~~|\b[\w./-]+\.\w+:\d+|\blines?\s+\d+", r
 _DISSENT_RE = re.compile(
     r"\?|\b(?:however|but|still|should|please|consider|suggest|recommend|missing|"
     r"disagree|incorrect|wrong|also|additionally|another|not|never|"
-    r"would|might|needs|need to|requires|lacks|worth|nit)\b|n't\b|"
+    r"would|might|needs|need to|requires|lacks|worth|nit|"
+    # A conditional concurrence ("LGTM once it is fixed") awaits a fix that may not have landed.
+    r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending)\b|n't\b|"
     r"\b(?:could|can) you\b|"
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,

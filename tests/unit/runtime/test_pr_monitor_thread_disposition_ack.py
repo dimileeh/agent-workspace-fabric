@@ -471,6 +471,13 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "You're right that the handler crashes for empty input.",
         "LGTM except the handler crashes for empty input.",
         "Verified the fix leaves the handler crashing for empty input.",
+        # A concurrence conditional on a fix that has not landed is no concurrence.
+        "LGTM once the null dereference is fixed.",
+        "Agreed if the handler is fixed.",
+        "Withdrawn when the guard is fixed.",
+        "Withdrawn after the test is addressed.",
+        "LGTM provided it is resolved.",
+        "LGTM until it is resolved.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",
