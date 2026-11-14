@@ -407,14 +407,14 @@ async def test_correction_false_positive_citing_item_start_commit_still_rolls_ba
 
 
 @pytest.mark.unit
-async def test_correction_that_mutates_and_cites_own_commit_still_rejected(
+async def test_correction_that_mutates_and_cites_own_commit_keeps_the_cited_commit(
     tmp_path: Path,
 ) -> None:
-    """Guard: ``AGENT_NON_FIXED_WITH_MUTATION`` keeps precedence over self-citation.
+    """#1105: self-citation beats ``AGENT_NON_FIXED_WITH_MUTATION`` for the cited commit.
 
-    The mutation gate runs first, so the self-citation rule never gets to turn
-    this into ``fix_committed``: the commit is rolled back and the item parks
-    under the mutation reason code (#1020).
+    The correction edits again and cites attempt 0's commit. Only the
+    correction's own (uncited) sink commit is rolled back; the cited commit is
+    kept and, carrying path-level evidence, accepted as the fix.
     """
     (tmp_path / "ws_protocol").mkdir()
     correction_head = "c" * 40
@@ -433,12 +433,13 @@ async def test_correction_that_mutates_and_cites_own_commit_still_rejected(
     state = MonitorState()
     verdict = await _address(runner, _thread("thread_mutating_correction"), state=state)
 
-    assert verdict == "needs_human"
-    parked_reason = state.threads_addressed_ids[
-        _needs_human_reason_state_key("thread_mutating_correction")
-    ]
-    assert AGENT_NON_FIXED_WITH_MUTATION in parked_reason
-    assert runner.reset_targets == [_ITEM_START_HEAD]
+    assert verdict == "fix_committed"
+    parked_reason = state.threads_addressed_ids.get(
+        _needs_human_reason_state_key("thread_mutating_correction"), ""
+    )
+    assert AGENT_NON_FIXED_WITH_MUTATION not in parked_reason
+    assert runner.reset_targets == [_ATTEMPT0_HEAD]
+    assert runner.current_head == _ATTEMPT0_HEAD
 
 
 @pytest.mark.unit

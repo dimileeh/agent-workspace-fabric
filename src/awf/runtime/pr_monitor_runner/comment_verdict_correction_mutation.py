@@ -10,6 +10,12 @@ when the measurement says the attempt did mutate, the verdict is refused after a
 safe rollback (``resolve_correction_non_fixed_mutation``). Both fail closed: an
 unreadable HEAD is a refusal, never an assumed-clean acceptance.
 
+One mutating shape is not a non-fix at all (#1105): a verdict that cites a
+commit in this item's own range is a FIXED claim backed by that commit.
+``keep_self_cited_item_commit`` keeps it, rolls back only what came after it,
+and judges it by the ordinary evidence chain before the mutation park is
+considered.
+
 Refusing the verdict is not the same as failing the workspace. Once the rollback
 has succeeded, the offending *item* is parked as ``needs_human`` with its reason
 code preserved — the #925/#928 escalation shape — and the comment-repair batch
@@ -29,8 +35,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
@@ -138,6 +147,202 @@ async def read_correction_end_head(
             "Correction attempt end HEAD was unreadable; cannot accept a "
             "non-FIXED verdict without measuring whether the worktree advanced."
         ),
+    )
+
+
+async def keep_self_cited_item_commit(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    item_start_head: str | None,
+    rollback_floor_head: str | None,
+    item_start_last_push_sha: str | None,
+    state: MonitorState | None,
+    post_attempt_head: str | None,
+    known_item_heads: Sequence[str | None],
+    verdict: str,
+    reason: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    comment_text: str | None,
+    anchor_head: str | None,
+    kept_commit_floor: list[tuple[str, str | None]] | None = None,
+) -> VerdictResult | None:
+    """Keep the item commit a mutating non-FIXED correction cites (#1105).
+
+    "Already addressed by earlier commit X", where X lies in this item's own
+    ``item_start_head``..HEAD range — attempt 0's commit, or one the correction
+    itself made — is a FIXED claim backed by X, not a non-fix. Rolling the whole
+    item back discarded correct fixes. Instead, reset to the newest cited item
+    commit (never below the #934 floor), which drops only the uncited later
+    commits — AWF's sink of the correction's edits included — and uncommitted
+    residue, then judge what is kept by the unchanged evidence chain:
+    ``fix_committed`` with evidence, otherwise ``needs_human`` with the commit
+    preserved (#928).
+
+    Returns ``None`` — the caller's ordinary mutation park — when nothing in the
+    item's range is cited (a pre-existing or foreign commit, or no citation),
+    when the floor ancestry probe fails, or when the cited commit does not
+    descend from the item start (a merged side branch). A hosted remote that
+    already advanced is rewound to the kept commit, and push tracking follows
+    it. Cited commits on two merge sides keep only the newest one's ancestry. A
+    failed rollback raises the mutation reason code.
+
+    Before its first rollback await, the kept head and the push tracking that
+    matches it are appended to ``kept_commit_floor`` so the caller's
+    cancellation handler rolls back only work above the kept commit.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+    from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
+    from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+        AGENT_NON_FIX_CITES_OWN_COMMIT,
+        _bounded,
+        attempt_commit_shas,
+        cited_item_commit,
+        correction_item_fix_evidence,
+        correction_self_citation_outcome,
+    )
+
+    if item_start_head is None or not post_attempt_head or not reason:
+        return None
+    # Hosted agents publish before AWF reads the verdict, so the rollback below
+    # rewinds the remote to the kept commit too (PRRT_kwDOSJAM6s63brOm).
+    hosted_remote_advanced = (
+        state is not None
+        and bool(getattr(runner._deps.adapter, "is_hosted", False))
+        and (
+            state.hosted_terminal_head_advanced
+            or (state.last_push_sha or "").strip().lower()
+            != (item_start_last_push_sha or "").strip().lower()
+        )
+    )
+    item_commits = await attempt_commit_shas(
+        runner,
+        worktree_path=worktree_path,
+        item_start_head=item_start_head,
+        attempt_tip=post_attempt_head,
+    )
+    if not item_commits:
+        # Same fallback as the tip-only self-citation check: the heads this
+        # protocol itself read inside the item, newest first.
+        item_commits = [head for head in (post_attempt_head, *known_item_heads) if head]
+    cited = cited_item_commit(reason, candidates=item_commits, item_start_head=item_start_head)
+    if cited is None:
+        return None
+    kept_head = cited
+    # The full-DAG item range can list a merged side-branch commit that forked
+    # before the item start, so the ancestry probe runs even when the floor is
+    # the item start (PRRT_kwDOSJAM6s63brGg).
+    floor = rollback_floor_head or item_start_head
+    if floor.lower() != cited.lower():
+        try:
+            cited_above_floor = await runner._head_descends_from(
+                worktree_path=worktree_path,
+                ancestor=floor,
+                descendant=cited,
+            )
+        except (TimeoutError, OSError, RuntimeError) as exc:
+            _log.warning(
+                "monitor.agent_verdict_correction_self_cite_floor_unreadable",
+                workspace_id=workspace_id,
+                rollback_floor_head=floor,
+                cited_commit=cited,
+                exc_type=type(exc).__name__,
+            )
+            return None
+        if not cited_above_floor and floor.lower() == item_start_head.lower():
+            # Resetting onto a side-branch commit would discard the item start's
+            # history — earlier accepted items' fixes included.
+            _log.warning(
+                "monitor.agent_verdict_correction_self_cite_off_item_start",
+                workspace_id=workspace_id,
+                item_start_head=item_start_head,
+                cited_commit=cited,
+            )
+            return None
+        if not cited_above_floor:
+            # #934: the preserved floor already contains the cited commit.
+            kept_head = floor
+    _log.warning(
+        "monitor.agent_verdict_correction_self_cite_partial_rollback",
+        workspace_id=workspace_id,
+        reason_code=AGENT_NON_FIX_CITES_OWN_COMMIT,
+        verdict=verdict,
+        cited_commit=cited,
+        kept_head=kept_head,
+        rolled_back_from=post_attempt_head,
+    )
+    if kept_commit_floor is not None:
+        # The rollback and evidence awaits below are cancellable; a cancellation
+        # must not rewind past the commit kept here (issue:6874707425).
+        kept_commit_floor.append(
+            (kept_head, kept_head if hosted_remote_advanced else item_start_last_push_sha)
+        )
+    rollback_ok = await _comment_verdict._rollback_or_classify_failure(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        item_start_head=kept_head,
+        item_start_last_push_sha=item_start_last_push_sha,
+        state=state,
+    )
+    if not rollback_ok:
+        raise _comment_verdict.AgentVerdictProtocolError(
+            reason_code=_comment_verdict.AGENT_NON_FIXED_WITH_MUTATION,
+            message=(
+                "Could not roll back the correction attempt's uncited edits after "
+                "it cited this item's own commit."
+            ),
+        )
+    if state is not None and hosted_remote_advanced:
+        # The rollback restored the item-start push state, but the remote now
+        # sits at the kept commit; track that so the batch push and the
+        # evidence chain see the published fix.
+        state.last_push_sha = kept_head
+        state.hosted_terminal_head_advanced = True
+    try:
+        has_evidence = await correction_item_fix_evidence(
+            runner,
+            protocol_attempt=1,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            item_line=item_line,
+            state=state,
+            dirty_changes_committed=False,
+            comment_text=comment_text,
+            anchor_head=anchor_head,
+        )
+    except (TimeoutError, OSError, RuntimeError) as exc:
+        # The partial rollback already left the worktree at the kept commit, so
+        # an unreadable re-check parks this item with that commit preserved
+        # instead of escaping the batch (PRRT_kwDOSJAM6s63brOn).
+        error = " ".join(redact_secrets(str(exc)).split())[:240] or "<no message>"
+        _log.warning(
+            "monitor.agent_verdict_correction_self_cite_evidence_unreadable",
+            workspace_id=workspace_id,
+            reason_code=AGENT_NON_FIX_CITES_OWN_COMMIT,
+            kept_head=kept_head,
+            exc_type=type(exc).__name__,
+            error=error,
+        )
+        return VerdictResult(
+            verdict="needs_human",
+            reason=_bounded(
+                f"Correction verdict cited this item's own commit {kept_head[:12]}, "
+                f"but its fix evidence could not be read ({type(exc).__name__}: "
+                f"{error}); the commit is preserved for human review. "
+                f"Agent reason: {reason}"
+            ),
+            kept_commit=True,
+        )
+    return correction_self_citation_outcome(
+        workspace_id=workspace_id,
+        verdict=verdict,
+        reason=reason,
+        attempt_tip=kept_head,
+        has_path_evidence=has_evidence,
     )
 
 

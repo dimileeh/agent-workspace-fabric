@@ -42,6 +42,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     comment_named_target_item_fix_evidence as comment_named_target_item_fix_evidence,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    correction_item_fix_evidence as correction_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_reason_cites_own_item_commit as correction_reason_cites_own_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -49,6 +52,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome as correction_unscoped_fix_outcome,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    item_commits_correction_context as item_commits_correction_context,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     package_level_item_fix_evidence as package_level_item_fix_evidence,
@@ -61,6 +67,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     verdict_reason_cites_own_commit as verdict_reason_cites_own_commit,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
+    keep_self_cited_item_commit as keep_self_cited_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
     read_correction_end_head as read_correction_end_head,
@@ -323,8 +332,10 @@ async def _run_item_verdict_protocol(
     item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
     non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION``: after a safe rollback the item
     is parked as ``needs_human`` so the batch survives (#1020), and only a failed
-    rollback still terminates the protocol. First-attempt non-FIXED still rolls
-    back unaccepted edits and returns the verdict. Any
+    rollback still terminates the protocol — unless the verdict cites a commit in
+    the item's own range, which is kept and judged as above (#1105).
+    First-attempt non-FIXED still rolls back unaccepted edits and returns the
+    verdict. Any
     provider execution failure before an accepted verdict also rolls unaccepted
     edits back first. Rollback never rewinds past this attempt's own start: on a
     re-attempt after a preserved timeout the evidence anchor is restored to the
@@ -401,6 +412,9 @@ async def _run_item_verdict_protocol(
     # Non-empty once a baseline-outage park has claimed this attempt's repair; the
     # cancellation branch below must not rewind it either (PRRT_kwDOSJAM6s63O77x).
     baseline_park_preservation_claimed: list[bool] = []
+    # (kept head, matching last push sha) once a self-citing correction keeps
+    # its cited item commit (#1105); cancellation rolls back only above it.
+    self_cited_kept_floor: list[tuple[str, str | None]] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
         # Reads ``item_start_head`` live: it is the sink anchor as of the run
@@ -858,107 +872,22 @@ async def _run_item_verdict_protocol(
                         operation_start_head=item_start_head,
                     )
 
-                logical_fix_evidence = await _item_fix_evidence(
+                # Line-anchored on attempt 0; the correction widens to path,
+                # package, callee and comment-named evidence over the item's own
+                # range. Inside the commit-sink ``try`` so it shares the
+                # rollback / reason-code handlers.
+                logical_fix_evidence = await correction_item_fix_evidence(
                     runner,
+                    protocol_attempt=protocol_attempt,
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
                     item_path=item_path,
                     item_line=item_line,
                     state=state,
                     dirty_changes_committed=dirty_changes_committed,
+                    comment_text=evidence_comment_text,
+                    anchor_head=evidence_anchor_head,
                 )
-                if (
-                    not logical_fix_evidence
-                    and protocol_attempt == 1
-                    and item_path is not None
-                    and item_line is not None
-                    and item_line > 0
-                ):
-                    # Path-level evidence on the correction (#925 D1, restored on
-                    # top of #928). Attempt 0 already failed the strict
-                    # line-anchored gate and the agent was told so; a re-affirmed
-                    # FIXED whose contentful commit changes the anchored *path*
-                    # is an honest off-anchor fix (helper above the caller, guard
-                    # at the call site), not an unsupported claim, and escalating
-                    # it to a human is the unnecessary escalation. Safe because
-                    # this is never the first gate and the probe runs over the
-                    # item's own ``item_start_head``..HEAD range, so the commit
-                    # cannot be stale or foreign. ``item_line <= 0`` is the
-                    # unmappable-anchor sentinel from the path/line remap above:
-                    # those stay fail-closed on both attempts
-                    # (PRRT_kwDOSJAM6s6dFLGV); ``item_line is None`` means the
-                    # check above was already path-level. Inside the commit-sink
-                    # ``try`` so it shares the rollback / reason-code handlers.
-                    logical_fix_evidence = await path_level_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=item_path,
-                        state=state,
-                        dirty_changes_committed=dirty_changes_committed,
-                    )
-                if (
-                    not logical_fix_evidence
-                    and protocol_attempt == 1
-                    and item_path is not None
-                    and (item_line is None or item_line > 0)
-                ):
-                    # Package-level evidence on the correction (#952). Both
-                    # checks above have failed, so the item's own commit range
-                    # changes neither the anchored line nor the reviewed file.
-                    # Accept it when it changes any file in the reviewed file's
-                    # *package* (the bundle-scope rule: same parent directory,
-                    # or descendant paths). That is the normal shape of a
-                    # callee-anchored review — "honour the ownership result in
-                    # that caller" is anchored on the callee and fixed in the
-                    # caller — and of a line-limit split that moved the reviewed
-                    # code into a sibling module, which makes every correct fix
-                    # off-path by construction. Eight escalations on 2026-09-07
-                    # (PRs #922, #934, #939) were exactly those shapes. Same
-                    # guards as above: correction attempt only, the item's own
-                    # ``item_start_head``..HEAD range, contentful + descendant,
-                    # and the ``item_line <= 0`` unmappable-anchor sentinel
-                    # stays fail-closed. Cross-package commits keep escalating.
-                    # Inside the commit-sink ``try`` so it shares the rollback /
-                    # reason-code handlers.
-                    logical_fix_evidence = await package_level_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=item_path,
-                        state=state,
-                        dirty_changes_committed=dirty_changes_committed,
-                    )
-                if (
-                    not logical_fix_evidence
-                    and protocol_attempt == 1
-                    and item_path is not None
-                    and item_line is not None
-                    and item_line > 0
-                ):
-                    # Cross-file call-site→definition evidence (#1019); rationale,
-                    # limits and fail-closed cases live in the helper docstring.
-                    logical_fix_evidence = await callee_definition_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=item_path,
-                        item_line=item_line,
-                        state=state,
-                        dirty_changes_committed=dirty_changes_committed,
-                    )
-                if not logical_fix_evidence and protocol_attempt == 1:
-                    # Reviewer-named target evidence (#1232); guards in the helper.
-                    logical_fix_evidence = await comment_named_target_item_fix_evidence(
-                        runner,
-                        worktree_path=worktree_path,
-                        item_start_head=item_start_head,
-                        item_path=item_path,
-                        item_line=item_line,
-                        comment_text=evidence_comment_text,
-                        state=state,
-                        anchor_head=evidence_anchor_head,
-                    )
             except (
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
@@ -1220,6 +1149,30 @@ async def _run_item_verdict_protocol(
                                 # (or HEAD advance from that sink alone) is not
                                 # correction mutation (PRRT_kwDOSJAM6s6eKNQT).
                             attempt_mutated = correction_authored_mutation
+                            if attempt_mutated and not pre_sink_head_unreadable:
+                                # #1105: citing a commit in this item's own range
+                                # is a FIXED claim — keep that commit, roll back
+                                # only what came after it, judge it by evidence.
+                                self_cited = await keep_self_cited_item_commit(
+                                    runner,
+                                    workspace_id=workspace_id,
+                                    worktree_path=worktree_path,
+                                    item_start_head=item_start_head,
+                                    rollback_floor_head=rollback_floor_head,
+                                    item_start_last_push_sha=item_start_last_push_sha,
+                                    state=state,
+                                    post_attempt_head=post_attempt_head,
+                                    known_item_heads=(attempt_start_head, verified_attempt_tip),
+                                    verdict=parsed.verdict,
+                                    reason=parsed.reason,
+                                    item_path=item_path,
+                                    item_line=item_line,
+                                    comment_text=evidence_comment_text,
+                                    anchor_head=evidence_anchor_head,
+                                    kept_commit_floor=self_cited_kept_floor,
+                                )
+                                if self_cited is not None:
+                                    return self_cited
                             if attempt_mutated:
                                 # Rolls back to the floor, then refuses the
                                 # verdict as mutation or — when the pre-sink
@@ -1389,7 +1342,16 @@ async def _run_item_verdict_protocol(
                 if fixed_without_evidence_verdict is not None
                 else ""
             )
-            current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+            item_commits_context = await item_commits_correction_context(
+                runner,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                attempt_tip=verified_attempt_tip,
+            )
+            current_prompt = (
+                f"{prompt}{correction_context}{item_commits_context}"
+                f"{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
+            )
         except asyncio.CancelledError as cancel_exc:
             # ``CancelledError`` is a ``BaseException`` and bypasses ``except
             # Exception``. Roll back agent edits/self-commits before re-raising so
@@ -1455,12 +1417,17 @@ async def _run_item_verdict_protocol(
                     ),
                 )
                 raise
+            cancel_floor_head, cancel_last_push_sha = (
+                self_cited_kept_floor[-1]
+                if self_cited_kept_floor
+                else (rollback_floor_head, item_start_last_push_sha)
+            )
             rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                 runner,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                item_start_head=rollback_floor_head,
-                item_start_last_push_sha=item_start_last_push_sha,
+                item_start_head=cancel_floor_head,
+                item_start_last_push_sha=cancel_last_push_sha,
                 state=state,
             )
             if not rollback_ok:
