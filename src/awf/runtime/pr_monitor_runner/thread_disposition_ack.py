@@ -71,8 +71,9 @@ _PROPOSED_CHANGE_RE = re.compile(r"^\s*(?:```|~~~)\s*(?:suggestion|diff)\b", re.
 _CODE_REFERENCE_RE = re.compile(r"```|~~~|\b[\w./-]+\.\w+:\d+|\blines?\s+\d+", re.I)
 _DISSENT_RE = re.compile(
     r"\?|\b(?:however|but|still|should|please|consider|suggest|recommend|missing|"
-    r"disagree|incorrect|wrong|also|additionally|another|not|never)\b|n't\b|"
-    r"\b(?:could|would|can) you\b|"
+    r"disagree|incorrect|wrong|also|additionally|another|not|never|"
+    r"would|might|needs|need to|requires|lacks|worth|nit)\b|n't\b|"
+    r"\b(?:could|can) you\b|"
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,
 )
@@ -84,6 +85,14 @@ _CONCURRENCE_RE = re.compile(
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
     r"leav(?:e|ing) (?:the )?resolution to|"
     r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",
+    re.I,
+)
+# Every clause must concur, thank, or be a statement led by its subject; anything else
+# (an imperative such as "Add a test") could be a new request, so the agent judges it.
+_CLAUSE_SPLIT_RE = re.compile(r"[.!?;:,\n]+")
+_STATEMENT_CLAUSE_RE = re.compile(
+    r"(?:(?:and|so)\s+)?(?:@\S+\s+)?"
+    r"(?:the|this|that|it|its|it's|i|i'm|we|commit|thanks|thank you)\b",
     re.I,
 )
 
@@ -99,7 +108,8 @@ def is_bot_concurrence(body: str) -> bool:
 
     ``True`` means certainly a concurrence: it withdraws the finding, confirms the
     fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
-    no dissent or new request, no code fence and no code reference. HTML comments,
+    no dissent or new request, no code fence and no code reference, and every
+    clause of it either concurs, thanks, or is a statement led by its subject. HTML comments,
     and ``<details>`` blocks whose summary labels them as supporting material
     (analysis, learnings, scripts, output, logs), are set aside.
     ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
@@ -119,6 +129,9 @@ def is_bot_concurrence(body: str) -> bool:
     if _CODE_REFERENCE_RE.search(prose) or _DISSENT_RE.search(prose):
         return False
     own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
+    if not all(_CONCURRENCE_RE.search(c) or _STATEMENT_CLAUSE_RE.match(c) for c in clauses):
+        return False
     return _CONCURRENCE_RE.search(own) is not None
 
 

@@ -447,6 +447,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed; see line 42.",
         "Agreed. Please add a test.",
         "Agreed. Also, consider the empty case.",
+        # Every clause must concur or state a fact: a new request alongside is a new point.
+        "Agreed. Add a regression test for empty input.",
+        "Agreed, add a test.",
+        "Agreed; rename the helper.",
+        "Agreed. The empty case needs a test.",
+        "Agreed. It would be good to cover the empty case.",
         # Unbalanced or unterminated markup could hide a request: fail closed.
         "Agreed. <details><summary>More</summary>Add a test for the empty case.",
         "Agreed. </details> Add a test.",
