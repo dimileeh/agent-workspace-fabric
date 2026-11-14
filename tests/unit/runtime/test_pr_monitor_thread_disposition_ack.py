@@ -524,6 +524,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "It crashes though it is fixed.",
         "The app crashes yet is fixed.",
         "The handler crashes the fix is confirmed.",
+        # A qualifier in the subject limits the fix: a partial remediation is no fix.
+        "This only partially covers this case.",
+        "The test partly covers this case.",
+        "The patch almost covers this case.",
+        "The partial fix is fixed.",
+        "It mostly is fixed.",
         # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
         "LGTM, the moment it is fixed.",
         "Withdrawn, the minute it is fixed.",

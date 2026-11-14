@@ -94,7 +94,7 @@ _CONCURRENCE_RE = re.compile(
     # A predicate concurs only as the end of its clause, after no subject or an
     # affirmative one: "I" only as a verification ("I verified that", "I verified the
     # fix"), else a short noun phrase, a determiner and at most three words free of
-    # agreement, negation, hedge and joining words and of a second subject. "LGTM the moment it is fixed", "No test
+    # agreement, negation, hedge, qualifier and joining words and of a second subject. "LGTM the moment it is fixed", "No test
     # covers this case", "Ensure it is fixed", "I doubt it is fixed", "I cannot confirm
     # it is fixed" or "The handler crashes though the bug is fixed" may report missing
     # work, so the agent judges them.
@@ -107,6 +107,8 @@ _CONCURRENCE_RE = re.compile(
     r"uncertain|cannot|unable|fail(?:s|ed)?|hope|hopefully|think|believe|guess|suppose|"
     r"assume|expect|suspect|maybe|perhaps|probably|possibly|presumably|likely|apparently|"
     r"seem(?:s|ingly)?|appears?|supposedly|unconfirmed|unverified|"
+    # A qualifier ("only partially", "almost", "the partial fix") limits the claim.
+    r"[\w`'-]*ly|almost|somewhat|half|quite|just|rather|partial|incomplete|some|most|"
     r"though|although|even|despite|yet|while|whilst|whereas|except|so|because|since|or|"
     r"the|this|that|these|those|it|its|they|we|i|my|our)(?![\w`'-]))[\w`'-]+){0,3}\s+)?"
     r"\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
