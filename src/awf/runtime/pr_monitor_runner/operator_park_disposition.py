@@ -165,6 +165,9 @@ class _Staged:
     thread: ReviewThread | None  # None: a gate-flagged thread, already resolved
     ruling: ParkRuling
     commit: str | None
+    # A gate-flagged thread's outside comments as its audit read them; the
+    # post-reply re-read refuses the ruling when they changed before the reply.
+    audited_comments: tuple[str, ...] = ()
 
 
 def park_dispositions(text: str | None) -> dict[str, ParkRuling | None] | None:
@@ -235,8 +238,12 @@ def _listed_open(status: PRStatus, thread_id: str) -> bool:
 
 async def _flagged_thread_problem(
     self: Any, *, repo: RepoRef, pr_number: int, thread_id: str
-) -> str | None:
-    """Why a gate-flagged thread is not provably resolved by AWF's identity, or ``None``."""
+) -> tuple[tuple[str, ...], str | None]:
+    """``(outside comments, None)`` for a gate-flagged thread resolved by AWF, else ``((), why)``.
+
+    The outside comments are the conversation the ruling covers, as this audit
+    read it: the post-reply re-read compares them (PRRT_kwDOSJAM6s63XfSQ).
+    """
     try:
         audit = await self._deps.gh.fetch_review_thread_audit(
             repo=repo, pr_number=pr_number, thread_id=thread_id
@@ -247,14 +254,14 @@ async def _flagged_thread_problem(
             thread_id=thread_id,
             forge_reason_code=exc.reason_code,
         )
-        return "flagged_thread_unreadable"
+        return (), "flagged_thread_unreadable"
     viewer = (audit.viewer_login or "").strip().casefold()
     live = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if not audit.supported or not viewer or live is None:
-        return "flagged_thread_unreadable"
+        return (), "flagged_thread_unreadable"
     if not live.is_resolved or (live.resolved_by or "").strip().casefold() != viewer:
-        return "flagged_thread_not_resolved_by_awf"
-    return None
+        return (), "flagged_thread_not_resolved_by_awf"
+    return live.external_comment_bodies, None
 
 
 def _ruling_already_applied(
@@ -405,9 +412,10 @@ async def _stage(
             continue
         flagged = _is_gate_flagged(state, thread_id)
         thread: ReviewThread | None = None
+        audited: tuple[str, ...] = ()
         if flagged and not _listed_open(status, thread_id):
             # #1238: resolved by AWF and flagged by the gate; the ruling is its disposition.
-            detail = await _flagged_thread_problem(
+            audited, detail = await _flagged_thread_problem(
                 self, repo=repo, pr_number=pr_number, thread_id=thread_id
             )
             if detail is not None:
@@ -431,7 +439,7 @@ async def _stage(
             )
             if commit is None:
                 return [], detail
-        staged.append(_Staged(thread_id, thread, ruling, commit))
+        staged.append(_Staged(thread_id, thread, ruling, commit, audited))
     return staged, None
 
 
@@ -651,6 +659,7 @@ async def _reply_and_resolve(
         base_branch=base_branch,
         remote_branch=remote_branch,
         thread=item.thread,
+        audited_comments=item.audited_comments,
         operation_id=operation_id,
         operation_type=OperationType.comment_repair.value,
         monitor_log=monitor_log,

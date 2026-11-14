@@ -1260,3 +1260,42 @@ async def test_ruling_on_a_gate_flagged_thread_fails_closed_when_it_cannot_be_pr
     assert OPERATOR_PARK_DISPOSITION_UNAPPLIED in hint.status_reason
     events = await _disposition_events(factory, workspace_id)
     assert [event.payload["evidence"]["detail"] for event in events] == [detail]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("change", ["added", "edited"])
+async def test_ruling_on_a_gate_flagged_thread_is_refused_when_feedback_lands_before_its_reply(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, change: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    post = gh.reply_to_thread
+
+    async def _feedback_then_reply(*, thread_id: str, body: str) -> str:
+        # The reviewer writes after the ruling's audit but before AWF's reply.
+        nodes = gh.review_threads[thread_id]["comments"]["nodes"]
+        if change == "added":
+            nodes.append(
+                {**nodes[-1], "id": "c-4", "body": "Still wrong.", "bodyText": "Still wrong."}
+            )
+        else:
+            nodes[-1] = {
+                **nodes[-1],
+                "body": "Edited: still wrong.",
+                "bodyText": "Edited: still wrong.",
+            }
+        return await post(thread_id=thread_id, body=body)
+
+    gh.reply_to_thread = _feedback_then_reply  # type: ignore[method-assign]
+
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert [event[0] for event in gh.events] == ["reply"]  # never resolved on it
+    disposition = read_item_disposition(state, _THREAD)
+    assert disposition is not None  # the ruling's reply is retired, never its answer
+    assert disposition.reply_comment_id is None and disposition.resolved is False
+    blocked = await _audit_gate(runner, workspace_id, state)
+    assert blocked.unverified == (_THREAD,)
