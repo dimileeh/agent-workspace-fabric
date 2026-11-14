@@ -1491,6 +1491,34 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
             True,
             id="js-ts-binding-after-unbalanced-close",
         ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) while (check())\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-loop-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) for (const x of xs)\n  LIMIT = 1;\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-for-head",
+        ),
+        pytest.param(
+            _WEB,
+            "let LIMIT = 0;\nif (on) do\n  LIMIT = 1;\nwhile (check());\n",
+            3,
+            False,
+            id="js-ts-braceless-body-after-nested-do-head",
+        ),
+        pytest.param(
+            _WEB,
+            "if (on) while (check()) step()\nexport const LIMIT = 1;\n",
+            2,
+            True,
+            id="js-ts-binding-after-completed-nested-loop-body",
+        ),
     ],
 )
 @pytest.mark.unit
@@ -1502,7 +1530,8 @@ async def test_indented_binding_counts_only_at_js_ts_module_scope(
     A brace-less control or concise-arrow body is not a statement of its own, so
     a write there is no binding (PRRT_kwDOSJAM6s63QK8_). A head whose body
     already follows its condition leaves the next statement at module scope
-    (PRRT_kwDOSJAM6s63VYOX).
+    (PRRT_kwDOSJAM6s63VYOX); one nested in another brace-less head still
+    leaves it as a body (PRRT_kwDOSJAM6s63V2yC).
     """
     old = text.splitlines()[line - 1]
     diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('1', '2')}")

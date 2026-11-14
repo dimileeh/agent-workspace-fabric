@@ -153,10 +153,10 @@ _JS_TS_LEADING_CONTINUATION_RE = re.compile(
 # ``if``/``for``/``while``/``with`` head, ``else`` or ``do`` (PRRT_kwDOSJAM6s63QK8_).
 # The head's ``(`` must match the statement's final ``)``, so a body already
 # completed on the line (``if (on) init()``) leaves none (PRRT_kwDOSJAM6s63VYOX).
-_JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?:^|[;}])[ \t]*(?:else|do)$")
-_JS_TS_CONTROL_HEAD_RE = re.compile(
-    r"(?:^|[;}])[ \t]*(?:else[ \t]+)?(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$"
-)
+# A head opens a statement, possibly the body of another brace-less head
+# (``if (on) while (x)``) (PRRT_kwDOSJAM6s63V2yC).
+_JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?<![\w$])(?:else|do)$")
+_JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -246,8 +246,9 @@ def _js_ts_line_ends_statement(
 
 def _js_ts_ends_with_body_head(logical: str) -> bool:
     """Whether the masked JS/TS ``logical`` statement leaves the next one as its body."""
-    if _JS_TS_BARE_BODY_HEAD_RE.search(logical) is not None:
-        return True
+    bare = _JS_TS_BARE_BODY_HEAD_RE.search(logical)
+    if bare is not None:
+        return _js_ts_head_opens_statement(logical[: bare.start()])
     if not logical.endswith(")"):
         return False
     depth = 0
@@ -257,8 +258,19 @@ def _js_ts_ends_with_body_head(logical: str) -> bool:
         elif logical[position] in "([{":
             depth -= 1
             if not depth:
-                return _JS_TS_CONTROL_HEAD_RE.search(logical[:position]) is not None
+                head = _JS_TS_CONTROL_HEAD_RE.search(logical[:position])
+                return head is not None and _js_ts_head_opens_statement(logical[: head.start()])
     return False
+
+
+def _js_ts_head_opens_statement(prefix: str) -> bool:
+    """Whether a JS/TS head after the masked ``prefix`` starts a statement.
+
+    It does at the statement start, after a ``;`` or ``}``, or as the brace-less
+    body of the head ``prefix`` ends with (PRRT_kwDOSJAM6s63V2yC).
+    """
+    prefix = prefix.rstrip(" \t")
+    return not prefix or prefix.endswith((";", "}")) or _js_ts_ends_with_body_head(prefix)
 
 
 def _js_ts_next_line_continues(
