@@ -202,8 +202,13 @@ _JS_TS_ASSIGNED_TARGET_RE = re.compile(
 # a block-scoped ``let``/``const`` declares afresh but a ``var`` does not
 # (PRRT_kwDOSJAM6s63XrHa).
 _JS_TS_LOOP_HEAD_RE = re.compile(r"(?<![\w$.])for(?:[ \t]+await)?[ \t]*\([ \t]*(?:var[ \t]+)?")
-_JS_TS_LOOP_TARGET_RE = re.compile(rf"{_JS_IDENT}(?=[ \t]+(?:of|in)(?![\w$]))")
-_JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]+(?:of|in)(?![\w$])")
+# A parenthesized ``for ((LIMIT) of xs)`` target, or a pattern's closing
+# ``]``/``}``, may abut its ``of``/``in``.
+_JS_TS_LOOP_TARGET_RE = re.compile(
+    rf"(?:\([ \t]*)*({_JS_IDENT})(?:[ \t]*\))*"
+    r"(?=(?<=\))[ \t]*(?:of|in)(?![\w$])|[ \t]+(?:of|in)(?![\w$]))"
+)
+_JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]*(?:of|in)(?![\w$])")
 # A word a destructuring pattern can follow, unlike the object of ``a[LIMIT]``.
 _JS_TS_PATTERN_KEYWORD_RE = re.compile(r"(?<![\w$])(?:const|let|var|else|do)$")
 
@@ -649,7 +654,7 @@ def _js_ts_assigned_names(segment: str, claimed: frozenset[int] = frozenset()) -
     for head in _JS_TS_LOOP_HEAD_RE.finditer(segment):
         target = _JS_TS_LOOP_TARGET_RE.match(segment, head.end())
         if target is not None:
-            found.add(target.group())
+            found.add(target.group(1))
         elif segment.startswith(("[", "{"), head.end()):
             depth = 0
             for position in range(head.end(), len(segment)):

@@ -1570,6 +1570,19 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
             id="for-of-nested-pattern",
         ),
         pytest.param(
+            "export let LIMIT = 10;\nfor ((LIMIT) of [20]) {}\n", False, id="for-of-parenthesized"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ( ( LIMIT )of [20]) {}\n",
+            False,
+            id="for-of-parenthesized-abutting",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ([LIMIT]of [[20]]) {}\n",
+            False,
+            id="for-of-pattern-abutting",
+        ),
+        pytest.param(
             "export let LIMIT = 10;\nif (on) for (LIMIT of [20]) work();\n",
             False,
             id="inline-for-of-body",
