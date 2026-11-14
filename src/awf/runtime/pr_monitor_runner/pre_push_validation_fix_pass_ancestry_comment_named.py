@@ -173,6 +173,7 @@ _JS_TS_LEADING_CONTINUATION_RE = re.compile(
 # A head opens a statement, possibly the body of another brace-less head
 # (``if (on) while (x)``) (PRRT_kwDOSJAM6s63V2yC).
 _JS_TS_BARE_BODY_HEAD_RE = re.compile(r"(?<![\w$])(?:else|do)$")
+_JS_TS_DO_RE = re.compile(r"(?<![\w$])do(?![\w$])")
 _JS_TS_CONTROL_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for|while|with)(?:[ \t]+await)?[ \t]*$")
 _JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
 # A JS/TS destructuring pattern opening a statement — after any declaration
@@ -355,14 +356,15 @@ def _js_ts_ends_with_body_head(logical: str, *, previous: str = "") -> bool:
 
 
 def _js_ts_ends_with_do_block(prefix: str) -> bool:
-    """Whether the masked JS/TS ``prefix`` ends with a ``do`` statement's block body.
+    """Whether the masked JS/TS ``prefix`` ends with a ``do`` statement's body.
 
     A ``while (...)`` after it terminates that ``do`` rather than heading a loop
-    that takes the next statement as its body (PRRT_kwDOSJAM6s63Wpy7).
+    that takes the next statement as its body (PRRT_kwDOSJAM6s63Wpy7), whether
+    the body is a block or a single statement (PRRT_kwDOSJAM6s63W94A).
     """
     prefix = prefix.rstrip(" \t")
     if not prefix.endswith("}"):
-        return False
+        return _js_ts_ends_with_braceless_do_body(prefix)
     depth = 0
     for position in range(len(prefix) - 1, -1, -1):
         if prefix[position] in ")]}":
@@ -376,6 +378,29 @@ def _js_ts_ends_with_do_block(prefix: str) -> bool:
                     and head.group() == "do"
                     and _js_ts_head_opens_statement(prefix[: head.start()])
                 )
+    return False
+
+
+def _js_ts_ends_with_braceless_do_body(prefix: str) -> bool:
+    """Whether the masked JS/TS ``prefix`` ends with a ``do`` and its single-statement body.
+
+    The body after the last statement-opening ``do`` is one statement: no
+    top-level ``;`` other than its own terminator, and no block of its own.
+    """
+    prefix = prefix.removesuffix(";").rstrip(" \t")
+    for head in reversed(list(_JS_TS_DO_RE.finditer(prefix))):
+        if not _js_ts_head_opens_statement(prefix[: head.start()]):
+            continue
+        body = prefix[head.end() :].strip(" \t")
+        depth = 0
+        for char in body:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            if depth < 0 or (char == ";" and not depth):
+                return False
+        return bool(body) and not body.startswith("{") and not depth
     return False
 
 
