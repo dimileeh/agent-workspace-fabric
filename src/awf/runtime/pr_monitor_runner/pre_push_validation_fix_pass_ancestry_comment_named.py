@@ -146,6 +146,11 @@ _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
     r"(?:[=*/%&|^<>?:,.~]|(?<!\+)\+|(?<!-)-|(?:^|[^\w$)\]\s!])[ \t]*!+"
     r"|(?<![\w$.])(?:await|typeof|new|void|delete|instanceof|in|satisfies|as))$"
 )
+# A trailing TS type operator that still needs its type operand (``keyof``,
+# ``readonly``) right after an ``as``/``satisfies`` type operator
+# (PRRT_kwDOSJAM6s63XaW6). Elsewhere it may be a contextual identifier.
+_JS_TS_TRAILING_TYPE_PREFIX_RE = re.compile(r"(?<![\w$.])(?:keyof|readonly)$")
+_JS_TS_TRAILING_TYPE_OPERATOR_RE = re.compile(r"(?<![\w$.])(?:satisfies|as)$")
 # The ``>`` ending a completed JSX element (``<Widget />``, ``</div>``, ``</>``)
 # closes an operand rather than opening a comparison (PRRT_kwDOSJAM6s63VJ_g).
 _JSX_COMPLETED_ELEMENT_RE = re.compile(r"(?:/|</[\w$.:-]*[ \t]*)>$")
@@ -269,6 +274,8 @@ def _js_ts_line_ends_statement(
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
+    if typescript and _js_ts_ends_unfinished_type_operand(raw, scan, code):
+        return False
     trailing = _JS_TS_TRAILING_CONTINUATION_RE.search(code)
     return (
         trailing is None
@@ -308,6 +315,25 @@ def _jsx_opening_tag_is_open(code: str) -> bool:
         elif char == ">" and not depth:
             open_tag = False
     return open_tag
+
+
+def _js_ts_ends_unfinished_type_operand(raw: str, scan: str, code: str) -> bool:
+    """Whether masked ``code`` ends ``as keyof`` / ``satisfies readonly``, awaiting its type.
+
+    Only after a type operator that follows an operand is the ``keyof`` or
+    ``readonly`` a type operator rather than a contextual identifier
+    (PRRT_kwDOSJAM6s63XaW6).
+    """
+    prefix = _JS_TS_TRAILING_TYPE_PREFIX_RE.search(code)
+    if prefix is None:
+        return False
+    before = raw[: prefix.start()].rstrip()
+    while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
+        before = before[: comment.start()].rstrip()
+    operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(before)
+    return operator is not None and _js_ts_type_operator_follows_operand(
+        raw, scan, operator.start()
+    )
 
 
 def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> bool:

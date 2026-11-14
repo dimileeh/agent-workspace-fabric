@@ -792,6 +792,30 @@ async def test_js_ts_label_binds_nothing(
             id="trailing-satisfies-after-commented-non-null-assertion",
         ),
         pytest.param(
+            "export const LIMIT = value as keyof\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-keyof-type-operand-continuation",
+        ),
+        pytest.param(
+            "export const LIMIT = value satisfies /* why */ readonly\n  Expected1[];\n",
+            2,
+            True,
+            id="trailing-readonly-type-operand-continuation",
+        ),
+        pytest.param(
+            "const keyof = 0;\nexport const LIMIT = keyof\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="keyof-named-identifier-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = config.as readonly\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="readonly-after-as-named-property-after-asi",
+        ),
+        pytest.param(
             "const as = 0;\nexport const LIMIT = !as\nexport const OTHER = 1;\n",
             3,
             False,
