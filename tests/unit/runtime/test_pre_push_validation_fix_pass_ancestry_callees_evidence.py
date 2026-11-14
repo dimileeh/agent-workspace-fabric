@@ -722,6 +722,17 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             frozenset({(None, "run"), (None, "helper")}),
             id="balanced-braces-stay-code",
         ),
+        # PRRT_kwDOSJAM6s63ZCcb: a ``}`` after a ``;`` closes a JS block, not a container.
+        pytest.param(
+            "    if (ok) { return <Icon />; } helper();",
+            frozenset({(None, "helper")}),
+            id="block-body-brace-stays-code",
+        ),
+        pytest.param(
+            "    {xs.map((x) => { return <Icon />; })} helper()",
+            frozenset({("xs", "map")}),
+            id="block-body-inside-container-text",
+        ),
         pytest.param(
             "    const v = <Icon /> as Props; helper();",
             frozenset({(None, "helper")}),

@@ -501,7 +501,9 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     (``a = <Icon /> helper()``) other than a type operator
     (``<Icon /> as Props``), and a ``}`` closing a brace opened before it
     ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
-    so text follows. Line-local: the look-ahead stops at a line separator.
+    so text follows. A container holds one expression, so a ``}`` after a
+    ``;`` closes a JS block (``() => { return <A />; };``) and stays code
+    (PRRT_kwDOSJAM6s63ZCcb). Line-local: the look-ahead stops at a line separator.
     """
     n = len(line)
     j = end
@@ -514,14 +516,19 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     ):
         return end
     braces = 0
+    statement_ended = False
     while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:
         if line[j] == "<" and j + 1 < n and (line[j + 1].isalpha() or line[j + 1] in "/!>"):
             return None
         if line[j] == "{":
             braces += 1
+        elif line[j] == ";" and not braces:
+            statement_ended = True
         elif line[j] == "}":
-            if not braces:
+            if not braces and not statement_ended:
                 return j + 1
-            braces -= 1
+            if not braces:
+                statement_ended = False
+            braces = max(braces - 1, 0)
         j += 1
     return None

@@ -1151,6 +1151,13 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         # PRRT_kwDOSJAM6s63Y_3L: a concise arrow body roots its JSX element.
         pytest.param("src/app/web/team.tsx", "() => <Widget />;", id="tsx-arrow-body"),
         pytest.param("src/app/web/team.jsx", "() => <div>hi</div>;", id="jsx-arrow-body"),
+        # PRRT_kwDOSJAM6s63ZCcb: a block body's ``}`` is code, not a JSX container end.
+        pytest.param(
+            "src/app/web/team.tsx", "() => { return <Widget />; };", id="tsx-arrow-block-body"
+        ),
+        pytest.param(
+            "src/app/web/team.jsx", "() => { return <div>hi</div>; };", id="jsx-arrow-block-body"
+        ),
     ],
 )
 @pytest.mark.parametrize(
