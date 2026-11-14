@@ -1564,6 +1564,18 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
         ),
         pytest.param("export let LIMIT = 10;\n(LIMIT)++;\n", False, id="parenthesized-postfix"),
         pytest.param("export let LIMIT = 10;\n++(LIMIT);\n", False, id="parenthesized-prefix"),
+        pytest.param("export let LIMIT = 10;\nLIMIT! = 20;\n", False, id="non-null-assignment"),
+        pytest.param(
+            "export let LIMIT = 10;\n(LIMIT !)! += 20;\n",
+            False,
+            id="parenthesized-non-null-compound-assignment",
+        ),
+        pytest.param("export let LIMIT = 10;\nLIMIT!++;\n", False, id="non-null-postfix"),
+        pytest.param(
+            "export let LIMIT = 10;\nif (LIMIT!= 5 || LIMIT !== 6 || LIMIT!!= 7) work();\n",
+            True,
+            id="non-null-inequality-reads-only",
+        ),
         pytest.param(
             "export let LIMIT = 10;\nif (on) other = LIMIT;\n"
             "if (LIMIT >= 5) obj.LIMIT = cache[LIMIT] = 1;\n",
