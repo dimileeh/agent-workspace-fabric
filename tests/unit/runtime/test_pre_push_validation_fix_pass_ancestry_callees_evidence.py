@@ -822,6 +822,23 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             id="line-ending-as-after-element",
         ),
         pytest.param("    a = <Icon /> assist()", frozenset(), id="as-prefixed-identifier-text"),
+        # PRRT_kwDOSJAM6s63ZUMH: elements nested in ``{...}`` containers blank their text
+        # while the container's executable calls stay scannable.
+        pytest.param(
+            "    const v = <Widget child={<div>helper()</div>} />;",
+            frozenset(),
+            id="attribute-container-element-text",
+        ),
+        pytest.param(
+            "    const v = <Widget child={ok ? <b>helper()</b> : run()} on={() => go()} />;",
+            frozenset({(None, "run"), (None, "go")}),
+            id="attribute-container-keeps-calls",
+        ),
+        pytest.param(
+            "    const v = <div>{ok && <b>helper()</b>}{run()}</div>;",
+            frozenset({(None, "run")}),
+            id="child-container-element-text",
+        ),
     ],
 )
 @pytest.mark.unit

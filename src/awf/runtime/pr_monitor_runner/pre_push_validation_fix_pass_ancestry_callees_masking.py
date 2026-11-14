@@ -468,15 +468,14 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             # or closing a ``<Widget<Props>`` type argument (PRRT_kwDOSJAM6s63Yzs5),
             # but not the ``>`` of an ``=>`` function type in it (PRRT_kwDOSJAM6s63Y7R6).
             i += 1
-            attribute_braces = type_angles = 0
-            while i < n and (attribute_braces or type_angles or line[i] != ">"):
+            type_angles = 0
+            while i < n and (type_angles or line[i] != ">"):
                 if line[i] == "{":
-                    attribute_braces += 1
-                elif line[i] == "}" and attribute_braces:
-                    attribute_braces -= 1
-                elif not attribute_braces and line[i] == "<":
+                    i = _mask_jsx_expression_container_for_callee_scan(line, i, chars)
+                    continue
+                if line[i] == "<":
                     type_angles += 1
-                elif not attribute_braces and line[i] == ">" and line[i - 1] != "=":
+                elif line[i] == ">" and line[i - 1] != "=":
                     type_angles -= 1
                 i += 1
             if i >= n:
@@ -493,20 +492,33 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             # Text node until the next tag opener; retain ``{...}`` expressions.
             while i < n and line[i] != "<":
                 if line[i] == "{":
-                    brace_depth = 1
-                    i += 1
-                    while i < n and brace_depth > 0:
-                        if line[i] == "{":
-                            brace_depth += 1
-                        elif line[i] == "}":
-                            brace_depth -= 1
-                        i += 1
+                    i = _mask_jsx_expression_container_for_callee_scan(line, i, chars)
                     continue
                 chars[i] = _mask_char_preserving_splitlines_separators(line[i])
                 i += 1
             continue
         i += 1
     return "".join(chars)
+
+
+def _mask_jsx_expression_container_for_callee_scan(line: str, start: int, chars: list[str]) -> int:
+    """Mask JSX text nested in the ``{...}`` container at ``start``; return its end.
+
+    The container's expression stays scannable, but an element inside it
+    (``child={<div>helper()</div>}``, ``{ok && <b>helper()</b>}``) has its
+    text blanked too (PRRT_kwDOSJAM6s63ZUMH).
+    """
+    n = len(line)
+    end = start + 1
+    brace_depth = 1
+    while end < n and brace_depth > 0:
+        if line[end] == "{":
+            brace_depth += 1
+        elif line[end] == "}":
+            brace_depth -= 1
+        end += 1
+    chars[start:end] = _mask_jsx_text_nodes_for_callee_scan(line[start:end])
+    return end
 
 
 def _jsx_depth_after_tag(line: str, start: int, end: int, depth: int | None) -> int | None:
