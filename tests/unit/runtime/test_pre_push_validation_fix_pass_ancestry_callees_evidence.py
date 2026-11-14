@@ -733,6 +733,25 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             frozenset({("xs", "map")}),
             id="block-body-inside-container-text",
         ),
+        # PRRT_kwDOSJAM6s63ZMkA: a block's ``}`` stays code without an explicit ``;``.
+        pytest.param(
+            "    if ((ok)) { return <Icon /> } helper();",
+            frozenset({(None, "helper")}),
+            id="asi-block-body-brace-stays-code",
+        ),
+        pytest.param(
+            "    run(() => { return <Icon /> }); helper();",
+            frozenset({(None, "run"), (None, "helper")}),
+            id="asi-arrow-block-body-brace-stays-code",
+        ),
+        pytest.param(
+            "    (note) {cond && <Icon />} helper()", frozenset(), id="paren-text-container-text"
+        ),
+        pytest.param(
+            "    note) {cond && <Icon />} helper()",
+            frozenset(),
+            id="unbalanced-paren-container-text",
+        ),
         # PRRT_kwDOSJAM6s63ZGB0: an object literal's ``}`` is code, not a container end.
         pytest.param(
             "    const v = { node: <Icon /> }; helper();",

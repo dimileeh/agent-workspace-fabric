@@ -1158,6 +1158,15 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param(
             "src/app/web/team.jsx", "() => { return <div>hi</div>; };", id="jsx-arrow-block-body"
         ),
+        # PRRT_kwDOSJAM6s63ZMkA: an ASI-terminated block body's ``}`` is code too.
+        pytest.param(
+            "src/app/web/team.tsx", "() => { return <Widget /> };", id="tsx-arrow-asi-block-body"
+        ),
+        pytest.param(
+            "src/app/web/team.jsx",
+            "function () { return <div>hi</div> };",
+            id="jsx-function-asi-block-body",
+        ),
         # PRRT_kwDOSJAM6s63ZGB0: an object literal's ``}`` is code, not a JSX container end.
         pytest.param(
             "src/app/web/team.tsx", "{ node: <Widget /> };", id="tsx-object-property-value"
