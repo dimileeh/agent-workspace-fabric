@@ -424,10 +424,15 @@ async def test_unmeasurable_mutation_with_self_cite_keeps_the_violation_park(
 
 
 @pytest.mark.unit
-async def test_hosted_remote_advance_keeps_todays_mutation_park(
+async def test_hosted_remote_advance_keeps_the_cited_commit_on_the_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """PRRT_kwDOSJAM6s63brOm: a hosted agent already published E before the verdict.
+
+    The remote is rewound to the cited B — not to item start A — and push
+    tracking follows it, so the published fix survives.
+    """
     remote_rollbacks: list[dict[str, object]] = []
 
     async def _record_remote_rollback(*_args: object, **kwargs: object) -> bool:
@@ -446,13 +451,18 @@ async def test_hosted_remote_advance_keeps_todays_mutation_park(
     )
     runner._deps.adapter.is_hosted = True
 
-    with structlog.testing.capture_logs() as captured:
-        result = await _invoke(runner, state=MonitorState(last_push_sha=_A))
+    state = MonitorState(last_push_sha=_A)
 
-    assert result.verdict == "needs_human"
-    assert result.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert runner.reset_targets == [_A]
-    assert not _events(captured, _PARTIAL_EVENT)
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke(runner, state=state)
+
+    assert result.verdict == "fix_committed"
+    assert runner.reset_targets == [_B]
+    assert [call["rollback_target_sha"] for call in remote_rollbacks] == [_B]
+    assert [call["expected_remote_head_sha"] for call in remote_rollbacks] == [_E]
+    assert state.last_push_sha == _B
+    assert state.hosted_terminal_head_advanced is True
+    assert _events(captured, _PARTIAL_EVENT)
 
 
 @pytest.mark.unit
@@ -644,6 +654,26 @@ async def test_keep_self_cited_item_commit_hosted_without_remote_advance_keeps_i
     assert result.verdict == "fix_committed"
     assert runner.reset_targets == [_B]
     assert [call["rollback_target_sha"] for call in remote_rollbacks] == [_B]
+
+
+@pytest.mark.unit
+async def test_keep_self_cited_item_commit_hosted_published_tip_keeps_push_tracking(
+    tmp_path: Path,
+) -> None:
+    """The hosted remote already sits at the cited commit: no rewind, tracking stays."""
+    runner = _runner(tmp_path, correction="unused", correction_head=_E, parents={_B: _A, _E: _B})
+    runner._deps.adapter.is_hosted = True
+    runner.current_head = _B
+    state = MonitorState(last_push_sha=_B)
+    state.hosted_terminal_head_advanced = True
+
+    result = await _keep(runner, reason=f"already addressed by {_B}", state=state)
+
+    assert result is not None
+    assert result.verdict == "fix_committed"
+    assert runner.reset_targets == []
+    assert state.last_push_sha == _B
+    assert state.hosted_terminal_head_advanced is True
 
 
 @pytest.mark.unit

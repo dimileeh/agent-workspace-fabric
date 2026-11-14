@@ -181,11 +181,11 @@ async def keep_self_cited_item_commit(
 
     Returns ``None`` — the caller's ordinary mutation park — when nothing in the
     item's range is cited (a pre-existing or foreign commit, or no citation),
-    when the floor ancestry probe fails, when the cited commit does not descend
-    from the item start (a merged side branch), or when a hosted remote already
-    advanced: the rollback would restore the item-start push state while the
-    remote sits at the kept commit. Cited commits on two merge sides keep only
-    the newest one's ancestry. A failed rollback raises the mutation reason code.
+    when the floor ancestry probe fails, or when the cited commit does not
+    descend from the item start (a merged side branch). A hosted remote that
+    already advanced is rewound to the kept commit, and push tracking follows
+    it. Cited commits on two merge sides keep only the newest one's ancestry. A
+    failed rollback raises the mutation reason code.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -198,12 +198,17 @@ async def keep_self_cited_item_commit(
 
     if item_start_head is None or not post_attempt_head or not reason:
         return None
-    if state is not None and getattr(runner._deps.adapter, "is_hosted", False):
-        saved_push = (item_start_last_push_sha or "").strip().lower()
-        if state.hosted_terminal_head_advanced or (
-            (state.last_push_sha or "").strip().lower() != saved_push
-        ):
-            return None
+    # Hosted agents publish before AWF reads the verdict, so the rollback below
+    # rewinds the remote to the kept commit too (PRRT_kwDOSJAM6s63brOm).
+    hosted_remote_advanced = (
+        state is not None
+        and bool(getattr(runner._deps.adapter, "is_hosted", False))
+        and (
+            state.hosted_terminal_head_advanced
+            or (state.last_push_sha or "").strip().lower()
+            != (item_start_last_push_sha or "").strip().lower()
+        )
+    )
     item_commits = await attempt_commit_shas(
         runner,
         worktree_path=worktree_path,
@@ -276,6 +281,12 @@ async def keep_self_cited_item_commit(
                 "it cited this item's own commit."
             ),
         )
+    if state is not None and hosted_remote_advanced:
+        # The rollback restored the item-start push state, but the remote now
+        # sits at the kept commit; track that so the batch push and the
+        # evidence chain see the published fix.
+        state.last_push_sha = kept_head
+        state.hosted_terminal_head_advanced = True
     has_evidence = await correction_item_fix_evidence(
         runner,
         protocol_attempt=1,
