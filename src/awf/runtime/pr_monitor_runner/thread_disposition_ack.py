@@ -92,18 +92,22 @@ _CONCURRENCE_RE = re.compile(
     r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
     r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
     # A predicate concurs only as the end of its clause, after no subject or an
-    # affirmative one: "I" only as a verification ("I verified that"), else led by a
-    # determiner and free of agreement, negation and hedge words. "LGTM the moment it is
-    # fixed", "No test covers this case", "Ensure it is fixed", "I doubt it is fixed" or
-    # "I cannot confirm it is fixed" may report missing work, so the agent judges them.
+    # affirmative one: "I" only as a verification ("I verified that"), else a short noun
+    # phrase, a determiner and at most three words free of agreement, negation, hedge
+    # and joining words and of a second subject. "LGTM the moment it is fixed", "No test
+    # covers this case", "Ensure it is fixed", "I doubt it is fixed", "I cannot confirm
+    # it is fixed" or "The handler crashes though the bug is fixed" may report missing
+    # work, so the agent judges them.
     r"(?:i(?:'m| am) (?=leav)|i(?:'ve| have| can)? (?:verified|confirmed|checked|verify|confirm) "
     r"(?:that )?)?"
-    r"(?:(?=(?:the|this|that|it|its|my|our)\b)(?:(?!\b(?:agreed?|lgtm|looks good|withdrawn|"
+    r"(?:(?:the|this|that|it|its|my|our)(?:\s+(?!(?:agreed?|lgtm|looks|withdrawn|"
     r"retracted|you're|"
     r"that's|no|none|nothing|nobody|neither|nor|without|whether|doubt|unclear|unsure|"
     r"uncertain|cannot|unable|fail(?:s|ed)?|hope|hopefully|think|believe|guess|suppose|"
     r"assume|expect|suspect|maybe|perhaps|probably|possibly|presumably|likely|apparently|"
-    r"seem(?:s|ingly)?|appears?|supposedly|unconfirmed|unverified)\b).)*?)?"
+    r"seem(?:s|ingly)?|appears?|supposedly|unconfirmed|unverified|"
+    r"though|although|even|despite|yet|while|whilst|whereas|except|so|because|since|or|"
+    r"the|this|that|these|those|it|its|they|we|i|my|our)(?![\w`'-]))[\w`'-]+){0,3}\s+)?"
     r"\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
     r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "

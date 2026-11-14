@@ -428,6 +428,7 @@ NEW_CONCERNS = (
         "Thanks for the explanation, the finding is withdrawn.",
         "I verified the null dereference is fixed.",
         "I have confirmed that the bug is resolved.",
+        "The null pointer dereference is fixed.",
     ],
 )
 def test_an_explicit_concurrence_is_recognised(body: str) -> None:
@@ -516,6 +517,11 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "It hopefully is fixed.",
         "This probably is fixed.",
         "The guard seems to have the fix is resolved.",
+        # A predicate's subject is a short noun phrase: a defect report joined to it is no fix.
+        "The handler crashes even though the null dereference is fixed.",
+        "It crashes though it is fixed.",
+        "The app crashes yet is fixed.",
+        "The handler crashes the fix is confirmed.",
         # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
         "LGTM, the moment it is fixed.",
         "Withdrawn, the minute it is fixed.",
