@@ -1850,3 +1850,43 @@ async def test_js_ts_continued_reassignment_withholds_the_binding(
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "changed", "expected"),
+    [
+        pytest.param(
+            "export const handler = function ()\n{\n  return 10;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10;", "+  return 11;"),
+            True,
+            id="function-body",
+        ),
+        pytest.param(
+            "export const handler = async function* gen(): Gen\n{\n  yield 10;\n}\nwork();\n",
+            ("@@ -3 +3 @@", "-  yield 10;", "+  yield 11;"),
+            True,
+            id="annotated-generator-body",
+        ),
+        pytest.param(
+            "export const handler = class extends Base\n{\n  run() { return 10; }\n};\n",
+            ("@@ -3 +3 @@", "-  run() { return 10; }", "+  run() { return 11; }"),
+            True,
+            id="class-body",
+        ),
+        pytest.param(
+            "export const handler = function () {\n  return 10;\n};\n{\n  work();\n}\n",
+            ("@@ -5 +5 @@", "-  work();", "+  rework();"),
+            False,
+            id="later-block",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
+    text: str, changed: tuple[str, str, str], *, expected: bool
+) -> None:
+    """A function or class initializer's next-line body is its binding's (PRRT_kwDOSJAM6s63YhJR)."""
+    diff = _diff(_WEB, *changed)
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`handler` is too low") is expected

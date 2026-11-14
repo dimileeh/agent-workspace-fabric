@@ -171,6 +171,12 @@ _JSX_OPENING_TAG_RE = re.compile(r"<[A-Za-z_$>]")
 _JSX_OPENING_TAG_OPENER_RE = re.compile(
     r"(?:^|[=(,:?\[{&|>]|(?<![\w$.])(?:return|yield|await))[ \t]*$"
 )
+# A JS/TS ``function``/``class`` expression whose head has no body yet: its
+# required ``{...}`` may open on a later line (PRRT_kwDOSJAM6s63YhJR).
+_JS_TS_BODILESS_EXPRESSION_HEAD_RE = re.compile(
+    r"(?:[=(,:?\[&|>]|(?<![\w$.])(?:return|yield|await))[ \t]*(?:async[ \t]+)?"
+    r"(?:function|class)(?![\w$])[^{};]*$"
+)
 # A block comment closing a JS/TS operand, skipped to reach the operand that a
 # following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
 _JS_TS_TRAILING_BLOCK_COMMENT_RE = re.compile(r"/\*(?:(?!\*/).)*\*/$")
@@ -282,9 +288,12 @@ def _js_ts_line_ends_statement(
     open on an earlier masked line of the ``statement`` (PRRT_kwDOSJAM6s63Tr7Q).
     In ``jsx`` code a line ending a completed JSX element ends on that operand
     (PRRT_kwDOSJAM6s63VJ_g); one inside an opening tag does not
-    (PRRT_kwDOSJAM6s63Wpyz).
+    (PRRT_kwDOSJAM6s63Wpyz). A ``function`` or ``class`` expression awaiting its
+    body does not end its statement (PRRT_kwDOSJAM6s63YhJR).
     """
     code = scan.rstrip()
+    if _JS_TS_BODILESS_EXPRESSION_HEAD_RE.search(" ".join([*statement, code])) is not None:
+        return False
     # A line-leading ``/>`` closing the tag is masked as a regex literal.
     if (
         jsx
