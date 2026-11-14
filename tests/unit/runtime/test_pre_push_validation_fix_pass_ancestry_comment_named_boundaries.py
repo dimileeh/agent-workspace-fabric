@@ -792,6 +792,12 @@ async def test_js_ts_label_binds_nothing(
             id="trailing-satisfies-after-commented-non-null-assertion",
         ),
         pytest.param(
+            "export const LIMIT = a < b > as\n  Expected1;\n",
+            2,
+            False,
+            id="trailing-as-after-spaced-comparison",
+        ),
+        pytest.param(
             "export const LIMIT = value as keyof\n  Expected1;\n",
             2,
             True,
@@ -1087,6 +1093,25 @@ async def test_js_ts_compact_trailing_angle_is_type_arguments_only_in_typescript
     """JavaScript has no type arguments: ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy)."""
     text = "export const LIMIT = a<b >\n  c1;\n"
     diff = _diff(path, "@@ -2 +2 @@", "-  c1;", "+  c2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        pytest.param("src/app/web/team.js", False, id="javascript-comparison"),
+        pytest.param(_WEB, True, id="typescript-instantiation-expression"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_type_operator_after_instantiation_expression_continues_only_in_typescript(
+    path: str, *, expected: bool
+) -> None:
+    """``fn<number> as`` asserts a completed instantiation (PRRT_kwDOSJAM6s63YH3s)."""
+    text = "export const LIMIT = fn<number> as\n  Handler1;\n"
+    diff = _diff(path, "@@ -2 +2 @@", "-  Handler1;", "+  Handler2;")
     runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected

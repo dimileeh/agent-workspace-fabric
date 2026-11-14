@@ -311,7 +311,9 @@ def _js_ts_line_ends_statement(
         )
         or (
             trailing.group() in {"satisfies", "as"}
-            and not _js_ts_type_operator_follows_operand(raw, scan, trailing.start())
+            and not _js_ts_type_operator_follows_operand(
+                raw, scan, trailing.start(), typescript=typescript
+            )
         )
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
         or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
@@ -361,21 +363,25 @@ def _js_ts_ends_unfinished_type_operand(
         previous = next((line.rstrip() for line in reversed(statement) if line.strip()), "")
         operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(previous)
         return operator is not None and _js_ts_type_operator_follows_operand(
-            previous, previous, operator.start()
+            previous, previous, operator.start(), typescript=True
         )
     operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(before)
     return operator is not None and _js_ts_type_operator_follows_operand(
-        raw, scan, operator.start()
+        raw, scan, operator.start(), typescript=True
     )
 
 
-def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> bool:
+def _js_ts_type_operator_follows_operand(
+    raw: str, scan: str, start: int, *, typescript: bool
+) -> bool:
     """Whether the ``satisfies``/``as`` at ``start`` follows an operand on its line.
 
     Only then is it a type operator; after ``=``, a keyword operator or a line
     break it is a bare contextual identifier (PRRT_kwDOSJAM6s63WfSH). An operand
     masked as a string, template or regex literal counts, as does one completed
-    by a postfix non-null assertion (``value! as``) (PRRT_kwDOSJAM6s63XU4a).
+    by a postfix non-null assertion (``value! as``) (PRRT_kwDOSJAM6s63XU4a). In
+    ``typescript`` code so does an instantiation expression completed by its
+    type arguments (``fn<number> as``) (PRRT_kwDOSJAM6s63YH3s).
     """
     before = raw[:start].rstrip()
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
@@ -385,7 +391,11 @@ def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> boo
     if scan[len(before) - 1] != before[-1]:
         return True
     if before.endswith("!"):
-        return _js_ts_type_operator_follows_operand(raw, scan, len(before.rstrip("!")))
+        return _js_ts_type_operator_follows_operand(
+            raw, scan, len(before.rstrip("!")), typescript=typescript
+        )
+    if typescript and _js_ts_ends_type_arguments(scan[: len(before)]):
+        return True
     return (
         _JS_TS_OPERAND_END_RE.search(before) is not None
         and _JS_TS_TRAILING_CONTINUATION_RE.search(before) is None
