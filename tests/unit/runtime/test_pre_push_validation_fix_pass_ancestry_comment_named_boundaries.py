@@ -1199,6 +1199,11 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param(
             "src/app/web/team.jsx", '<p>Say "hi</p>;', id="jsx-text-unpaired-double-quote"
         ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "<div>Don't <a href='x'>y</a></div>;",
+            id="tsx-text-apostrophe-before-attribute-string",
+        ),
     ],
 )
 @pytest.mark.parametrize(

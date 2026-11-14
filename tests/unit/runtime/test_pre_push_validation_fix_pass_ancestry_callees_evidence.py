@@ -876,6 +876,15 @@ def test_callee_refs_scan_code_after_a_completed_rooted_jsx_element(
             "const v = <p>Don't</p>; helper();", 1, frozenset({(None, "helper")}), id="eof-text"
         ),
         pytest.param("run(`helper()`);\n", 1, frozenset({(None, "run")}), id="template-literal"),
+        pytest.param(
+            "const v = <p>Don't <a href='x'>y</a></p>; helper();",
+            1,
+            frozenset({(None, "helper")}),
+            id="word-glued-text-apostrophe",
+        ),
+        pytest.param(
+            "function f() { return'helper()'; }", 1, frozenset(), id="keyword-glued-string"
+        ),
     ],
 )
 @pytest.mark.unit

@@ -446,12 +446,20 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
     A JS/TS ``'``/``"`` string cannot run past its line without a ``\\``
     continuation, so a quote left open there is JSX text such as ``Don't``,
     and opening a string at it would blank the rest of the file
-    (PRRT_kwDOSJAM6s63Zfgo). A JSX attribute string may span lines, so a quote
-    right after ``=`` still opens one.
+    (PRRT_kwDOSJAM6s63Zfgo). Nor can a string literal follow a word with no gap
+    unless that word is an expression-prefix keyword (``return'x'``), so the
+    apostrophe of ``Don't <a href='x'>`` is JSX text even though a later quote
+    could close it. A JSX attribute string may span lines, so a quote right
+    after ``=`` still opens one.
     """
     quote = line[quote_index]
     if quote not in "'\"":
         return False
+    k = len(out) - 1
+    while k >= 0 and (out[k].isalnum() or out[k] in "_$"):
+        k -= 1
+    if k < len(out) - 1 and "".join(out[k + 1 :]) not in _JS_REGEX_PREFIX_KEYWORDS:
+        return True
     j = len(out) - 1
     while j >= 0 and out[j] in " \t\r\n":
         j -= 1
