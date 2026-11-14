@@ -652,7 +652,8 @@ async def _reply_and_resolve(
     ``THREAD_DISPOSITION_*`` code. A failed resolve re-parks it ``needs_human``
     under ``OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED`` with the forge's reason
     code; the posted reply is kept, so a repeated guide reuses it. A gate-flagged
-    thread is already resolved: the resolve is a no-op that records it landed.
+    thread is already resolved: the resolve is a no-op that records it landed,
+    and only then clears the gate's flag; any fault keeps it.
     """
     thread_id = item.thread_id
     posted = await reply_before_resolve(
@@ -705,6 +706,11 @@ async def _reply_and_resolve(
             },
         )
         return False
+    if _is_gate_flagged(state, thread_id):
+        # The ruling's reply and resolve landed, so it is the flagged thread's
+        # disposition: a repeat before the next gate audit is a no-op, and that
+        # audit flags it again on newer feedback (PRRT_kwDOSJAM6s63YizI).
+        state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
     await record_resolve_landed(self, workspace_id=workspace_id, state=state, disposition=posted)
     return True
 

@@ -1344,3 +1344,51 @@ async def test_repeat_ruling_on_a_thread_the_gate_flagged_again_replies_anew(
     assert renewed.reply_comment_id != applied.reply_comment_id
     certified = await _audit_gate(runner, workspace_id, state)
     assert certified.blocker is None and certified.unverified == ()
+
+
+@pytest.mark.unit
+async def test_repeat_ruling_before_any_gate_run_is_a_no_op(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+    applied = read_item_disposition(state, _THREAD)
+    assert applied is not None and applied.resolved and applied.reply_comment_id is not None
+    # The applied ruling is the thread's disposition: the gate's flag is settled.
+    assert _disposition_unverified_key(_THREAD) not in state.threads_addressed_ids
+
+    # The same guide again, before the gate re-audits, answers nothing new
+    # (PRRT_kwDOSJAM6s63YizI): no second reply, and the first one is kept.
+    gh.events.clear()
+    _arm(state, _false_positive(), operation_id="op_guide_1238_repeat_early")
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == [] and gh.events == []
+    assert state.pending_operator_hint is None
+    assert read_item_disposition(state, _THREAD) == applied
+    events = await _disposition_events(factory, workspace_id)
+    assert [event.reason_code for event in events] == [OPERATOR_PARK_DISPOSITION_APPLIED]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fault", ["reply", "resolve"])
+async def test_ruling_that_does_not_land_keeps_the_gate_flag(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, fault: str
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    error = GitHubClientError(operation=fault, returncode=1, stderr="HTTP 502: bad gateway")
+    if fault == "reply":
+        gh.reply_error = error
+    else:
+        gh.resolve_error = error
+    _arm(state, _false_positive())
+
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert state.threads_addressed_ids[_disposition_unverified_key(_THREAD)] == _UNVERIFIED
