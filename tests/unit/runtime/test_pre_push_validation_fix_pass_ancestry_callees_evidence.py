@@ -898,6 +898,55 @@ def test_callee_refs_jsx_text_quote_opens_no_string(
     assert callees._callee_refs_from_file_line(text, line_no, path="src/mod.tsx") == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "line_no", "expected"),
+    [
+        pytest.param(
+            "const v = <a>https://x.dev</a>;\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="same-line-text-url",
+        ),
+        pytest.param(
+            "const v = (\n  <p>\n    see https://x.dev</p>\n);\nhelper();\n",
+            5,
+            frozenset({(None, "helper")}),
+            id="multi-line-text-url",
+        ),
+        pytest.param(
+            "const v = <p>a // b helper()</p>;\n", 1, frozenset(), id="text-slashes-stay-text"
+        ),
+        pytest.param(
+            "const v = <A />; // `x\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="comment-after-element",
+        ),
+        pytest.param(
+            "const v = (\n  <p>\n  // `x\n  </p>\n);\nrun(); // `y\nhelper();\n",
+            7,
+            frozenset({(None, "helper")}),
+            id="line-start-comment",
+        ),
+        pytest.param(
+            "const v = 1; // `x\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="comment-without-tags",
+        ),
+    ],
+)
+@pytest.mark.unit
+def test_callee_refs_jsx_text_slashes_open_no_comment(
+    text: str, line_no: int, expected: frozenset[tuple[str | None, str]]
+) -> None:
+    """A JSX text ``//`` (``<a>https://x</a>``) is no comment (PRRT_kwDOSJAM6s63Zv5r).
+
+    A comment ``//`` after code or a completed element, or starting its line, stays one.
+    """
+    assert callees._callee_refs_from_file_line(text, line_no, path="src/mod.tsx") == expected
+
+
 @pytest.mark.unit
 def test_callee_refs_mask_js_block_comments_and_prefix_poison() -> None:
     """``/* */`` must blank decoys and must not leave quotes that poison later lines."""

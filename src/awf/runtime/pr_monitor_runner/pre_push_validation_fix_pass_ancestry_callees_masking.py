@@ -56,6 +56,11 @@ _JS_METHOD_BODY_RE = re.compile(
 # A TypeScript return type annotation between a header's ``)`` and its ``{``
 # (``function f(): JSX.Element {``).
 _JS_RETURN_TYPE_RE = re.compile(r"\)\s*:\s*[\w$.]+(?:<[^(){}]*>)?(?:\[\])*$")
+# A column-0 declaration: JSX cannot span it, so the JSX-text check for a
+# ``//`` reads only from the declaration holding it.
+_JS_TOP_LEVEL_DECLARATION_RE = re.compile(
+    r"^(?:export|import|const|let|var|function|class)(?![\w$])", re.MULTILINE
+)
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -423,6 +428,10 @@ def _mask_comments_and_string_literals_for_callee_scan(
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
         if slash_comments and ch == "/" and i + 1 < n and line[i + 1] == "/":
+            if jsx and _jsx_text_slashes_at(out):
+                out.extend("//")
+                i += 2
+                continue
             out.extend((" ", " "))
             i = _append_comment_run_for_callee_scan(line, i + 2, out, n=n)
             continue
@@ -477,6 +486,26 @@ def _jsx_text_quote_at(line: str, quote_index: int, out: list[str]) -> bool:
         else:
             i += 1
     return True
+
+
+def _jsx_text_slashes_at(out: list[str]) -> bool:
+    """Whether a ``//`` after masked ``out`` is JSX text rather than a line comment.
+
+    JSX text such as ``<a>https://x.dev</a>`` holds no comments; masking its
+    ``//`` as one would blank the closing tag, and the JSX text pass would then
+    blank every later line (PRRT_kwDOSJAM6s63Zv5r). The ``//`` is text when the
+    JSX text pass would blank it. A ``//`` starting its line stays a comment, and
+    the check reads only from the column-0 declaration holding it, so ordinary
+    comments stay cheap.
+    """
+    prefix = "".join(out)
+    line_start = max(prefix.rfind("\n"), prefix.rfind("\r")) + 1
+    if not prefix[line_start:].strip() or "<" not in prefix:
+        return False
+    start = 0
+    for declaration in _JS_TOP_LEVEL_DECLARATION_RE.finditer(prefix):
+        start = declaration.start()
+    return not _mask_jsx_text_nodes_for_callee_scan(prefix[start:] + "//").endswith("//")
 
 
 def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
