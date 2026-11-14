@@ -2007,6 +2007,24 @@ async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
             ),
             id="semicolon-delimited-type-literal-return-type",
         ),
+        pytest.param(
+            "export const handler = function (): keyof { value: number }\n"
+            "{\n  return 'value';\n};\n",
+            ("@@ -3 +3 @@", "-  return 'value';", "+  return 'value' as const;"),
+            id="keyof-type-literal-return-type",
+        ),
+        pytest.param(
+            "export const handler = function <T>(): T extends { value: number } ? T : never\n"
+            "{\n  return 10 as never;\n};\n",
+            ("@@ -3 +3 @@", "-  return 10 as never;", "+  return 11 as never;"),
+            id="extends-type-literal-return-type",
+        ),
+        pytest.param(
+            "export const handler = function (input: unknown): input is { value: number }\n"
+            "{\n  return input !== null;\n};\n",
+            ("@@ -3 +3 @@", "-  return input !== null;", "+  return input != null;"),
+            id="type-predicate-type-literal-return-type",
+        ),
     ],
 )
 @pytest.mark.unit

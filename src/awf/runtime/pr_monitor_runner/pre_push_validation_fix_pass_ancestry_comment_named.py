@@ -239,6 +239,10 @@ _JS_TS_LOOP_TARGET_RE = re.compile(
 _JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]*(?:of|in)(?![\w$])")
 # A word a destructuring pattern can follow, unlike the object of ``a[LIMIT]``.
 _JS_TS_PATTERN_KEYWORD_RE = re.compile(r"(?<![\w$])(?:const|let|var|else|do)$")
+# Tokens after which a TS return annotation's ``{`` opens a type literal.
+_JS_TS_TYPE_LITERAL_PRECEDERS = frozenset(
+    {":", "|", "&", "<", ",", "=>", "?", "keyof", "extends", "is"}
+)
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -295,16 +299,17 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
     the body (PRRT_kwDOSJAM6s63Yl_Z). Nor does a type literal's ``{`` in a TS
     return-type annotation, where it follows the annotation's ``:``, a ``|``,
     ``&``, ``<``, ``,`` or a function type's ``=>`` (PRRT_kwDOSJAM6s63Yomw), or
-    a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP). Only a ``;`` outside
-    them ends the head; one delimits a type literal's members
+    a conditional type's ``?`` (PRRT_kwDOSJAM6s63YszP), or a ``keyof``,
+    ``extends`` or type-predicate ``is`` operator (PRRT_kwDOSJAM6s63ZGB2). Only
+    a ``;`` outside them ends the head; one delimits a type literal's members
     (PRRT_kwDOSJAM6s63Yt-L).
     """
     for head in _JS_TS_EXPRESSION_HEAD_RE.finditer(code):
         depth = 0
         annotated = False
-        previous = ""
+        previous = last = ""
         for char in code[head.end() :]:
-            type_literal = annotated and previous in {":", "|", "&", "<", ",", "=>", "?"}
+            type_literal = annotated and previous in _JS_TS_TYPE_LITERAL_PRECEDERS
             if char in "([" or (char == "{" and (depth or type_literal)):
                 depth += 1
             elif char in ")]" or (char == "}" and depth):
@@ -314,7 +319,14 @@ def _js_ts_expression_head_awaits_body(code: str) -> bool:
             elif char == ":" and depth == 0:
                 annotated = True
             if not char.isspace():
-                previous = "=>" if previous == "=" and char == ">" else char
+                if previous == "=" and char == ">":
+                    previous = "=>"
+                elif (char.isalnum() or char in "_$") and (last.isalnum() or last in "_$"):
+                    # Extend the word so ``previous`` holds a whole keyword.
+                    previous += char
+                else:
+                    previous = char
+            last = char
         else:
             return True
     return False
