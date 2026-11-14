@@ -771,6 +771,39 @@ async def test_js_ts_label_binds_nothing(
             "export const LIMIT = value as\n  Expected1;\n", 2, True, id="trailing-as-continuation"
         ),
         pytest.param(
+            'export const LIMIT = "a" as\n  Expected1;\n', 2, True, id="trailing-as-after-string"
+        ),
+        pytest.param(
+            "export const LIMIT = value /* why */ as\n  Expected1;\n",
+            2,
+            True,
+            id="trailing-as-after-commented-operand",
+        ),
+        pytest.param(
+            "const satisfies = 0;\nexport const LIMIT = satisfies\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="satisfies-named-identifier-after-asi",
+        ),
+        pytest.param(
+            "const as = 0;\nexport const LIMIT = as\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="as-named-identifier-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = typeof satisfies\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="satisfies-named-operand-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT =\n  satisfies\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-satisfies-named-identifier-after-asi",
+        ),
+        pytest.param(
             "export const LIMIT = config.as\nrun1();\n", 2, False, id="as-named-property-after-asi"
         ),
         pytest.param(

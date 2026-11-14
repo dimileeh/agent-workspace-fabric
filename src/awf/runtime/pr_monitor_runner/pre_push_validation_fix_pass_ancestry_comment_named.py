@@ -152,6 +152,9 @@ _JSX_COMPLETED_ELEMENT_RE = re.compile(r"(?:/|</[\w$.:-]*[ \t]*)>$")
 # A block comment closing a JS/TS operand, skipped to reach the operand that a
 # following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
 _JS_TS_TRAILING_BLOCK_COMMENT_RE = re.compile(r"/\*(?:(?!\*/).)*\*/$")
+# The last token of an operand that a contextual ``satisfies``/``as`` can follow
+# as a type operator (PRRT_kwDOSJAM6s63WfSH).
+_JS_TS_OPERAND_END_RE = re.compile(r"[\w$)\]}]$")
 _JS_TS_LEADING_CONTINUATION_RE = re.compile(
     r"^[ \t]*(?:(?!\+\+|--)[.?:,=*/%&|^<>+\-(\[`]|(?:instanceof|in)(?![\w$]))"
 )
@@ -246,8 +249,32 @@ def _js_ts_line_ends_statement(
             trailing.group()[0].isalpha()
             and " ".join([*statement, code[: trailing.start()]]).rstrip().endswith(".")
         )
+        or (
+            trailing.group() in {"satisfies", "as"}
+            and not _js_ts_type_operator_follows_operand(raw, scan, trailing.start())
+        )
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
         or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
+    )
+
+
+def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> bool:
+    """Whether the ``satisfies``/``as`` at ``start`` follows an operand on its line.
+
+    Only then is it a type operator; after ``=``, a keyword operator or a line
+    break it is a bare contextual identifier (PRRT_kwDOSJAM6s63WfSH). An operand
+    masked as a string, template or regex literal counts.
+    """
+    before = raw[:start].rstrip()
+    while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
+        before = before[: comment.start()].rstrip()
+    if not before:
+        return False
+    if scan[len(before) - 1] != before[-1]:
+        return True
+    return (
+        _JS_TS_OPERAND_END_RE.search(before) is not None
+        and _JS_TS_TRAILING_CONTINUATION_RE.search(before) is None
     )
 
 
