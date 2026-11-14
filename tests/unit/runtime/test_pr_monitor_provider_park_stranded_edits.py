@@ -636,6 +636,39 @@ async def test_an_owned_clean_resume_runs_the_committed_delta_gate_once(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("delta", "reason_code"),
+    [
+        ({"stdout": "A\0parked_commit.py\0"}, "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"),
+        (
+            {"returncode": 128, "stderr": "fatal: bad revision"},
+            "PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE",
+        ),
+    ],
+)
+async def test_an_already_clean_owned_resume_never_drops_the_marker_past_the_delta_gate(
+    tmp_path: Path, delta: dict[str, object], reason_code: str
+) -> None:
+    # A commit made while the workspace sat parked leaves the worktree clean, so the
+    # first resume never runs the sink; the committed-delta gate must still keep an
+    # unowned or uninspectable delta from the push (PRRT_kwDOSJAM6s63M6rp).
+    state = await _parked_state(tmp_path, owned_paths=("stranded_fix.py",))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(**delta)  # type: ignore[arg-type]
+    runner = _GatedRunner([None], cmd)
+
+    result = await _resume(runner, state, tmp_path)
+
+    assert result is not None
+    assert result.reason_code == reason_code
+    assert result.terminal_monitor_failure is True
+    assert runner.sink_calls == []
+    assert [call.args[-1] for call in cmd.calls] == [f"{_PRESERVED_HEAD}..HEAD"]
+    assert state.threads_addressed_ids[PROVIDER_PARK_STRANDED_EDITS_STATE_KEY] == _PRESERVED_HEAD
+    assert PROVIDER_PARK_STRANDED_EDITS_OWNED_STATE_KEY in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("preserved_head", [_PRESERVED_HEAD, ""])
 async def test_an_uninspectable_resume_commit_fails_closed(
     tmp_path: Path, preserved_head: str
