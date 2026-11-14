@@ -1158,6 +1158,13 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param(
             "src/app/web/team.jsx", "() => { return <div>hi</div>; };", id="jsx-arrow-block-body"
         ),
+        # PRRT_kwDOSJAM6s63ZGB0: an object literal's ``}`` is code, not a JSX container end.
+        pytest.param(
+            "src/app/web/team.tsx", "{ node: <Widget /> };", id="tsx-object-property-value"
+        ),
+        pytest.param(
+            "src/app/web/team.jsx", "{ a: 1, 'b': <div>hi</div> };", id="jsx-object-property-value"
+        ),
     ],
 )
 @pytest.mark.parametrize(

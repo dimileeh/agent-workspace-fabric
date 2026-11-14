@@ -733,6 +733,15 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             frozenset({("xs", "map")}),
             id="block-body-inside-container-text",
         ),
+        # PRRT_kwDOSJAM6s63ZGB0: an object literal's ``}`` is code, not a container end.
+        pytest.param(
+            "    const v = { node: <Icon /> }; helper();",
+            frozenset({(None, "helper")}),
+            id="object-property-value-stays-code",
+        ),
+        pytest.param(
+            "    {cond ? x : <Icon />} helper()", frozenset(), id="ternary-colon-container-text"
+        ),
         pytest.param(
             "    const v = <Icon /> as Props; helper();",
             frozenset({(None, "helper")}),

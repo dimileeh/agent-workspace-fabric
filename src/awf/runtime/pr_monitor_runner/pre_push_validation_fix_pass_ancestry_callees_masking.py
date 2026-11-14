@@ -33,6 +33,9 @@ _JSX_ROOT_PREFIX_RE = re.compile(r"(?:=>|[=(,?:\[{&|]|(?<![\w$])(?:return|yield|
 # TypeScript type operators that code may put after a completed element
 # (``<Widget /> as Props``) (PRRT_kwDOSJAM6s63XLQg).
 _JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
+# A ``key:`` right after an object literal's ``{`` or ``,`` (quoted keys are
+# already blank), so the element is a property value (PRRT_kwDOSJAM6s63ZGB0).
+_JSX_PROPERTY_VALUE_PREFIX_RE = re.compile(r"[{,]\s*(?:[\w$]+|\[[^\]]*\])?\s*:\s*$")
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -435,6 +438,7 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     i = 0
     # Open rooted elements; ``None`` once the nesting cannot be followed.
     depth: int | None = 0
+    root_start = 0
     while i < n:
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
@@ -458,9 +462,11 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             if i >= n:
                 break
             i += 1  # past ``>``
+            if depth == 0:
+                root_start = start
             depth = _jsx_depth_after_tag(line, start, i, depth)
             if depth == 0:
-                text_start = _jsx_text_start_after_rooted_element(line, i)
+                text_start = _jsx_text_start_after_rooted_element(line, root_start, i)
                 if text_start is None:
                     continue
                 depth, i = None, text_start
@@ -494,8 +500,8 @@ def _jsx_depth_after_tag(line: str, start: int, end: int, depth: int | None) -> 
     return depth if line[end - 2] == "/" else depth + 1
 
 
-def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
-    """Where JSX text resumes after a rooted element ending at ``end``; ``None`` if code.
+def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int | None:
+    """Where JSX text resumes after rooted element ``line[start:end]``; ``None`` if code.
 
     Code cannot put an identifier right after a completed element
     (``a = <Icon /> helper()``) other than a type operator
@@ -503,7 +509,9 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
     so text follows. A container holds one expression, so a ``}`` after a
     ``;`` closes a JS block (``() => { return <A />; };``) and stays code
-    (PRRT_kwDOSJAM6s63ZCcb). Line-local: the look-ahead stops at a line separator.
+    (PRRT_kwDOSJAM6s63ZCcb). Likewise the first ``}`` after an object property
+    value (``{ node: <A /> };``) closes the object literal (PRRT_kwDOSJAM6s63ZGB0).
+    Line-local: the look-ahead stops at a line separator.
     """
     n = len(line)
     j = end
@@ -516,7 +524,7 @@ def _jsx_text_start_after_rooted_element(line: str, end: int) -> int | None:
     ):
         return end
     braces = 0
-    statement_ended = False
+    statement_ended = _JSX_PROPERTY_VALUE_PREFIX_RE.search(line, 0, start) is not None
     while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:
         if line[j] == "<" and j + 1 < n and (line[j + 1].isalpha() or line[j + 1] in "/!>"):
             return None
