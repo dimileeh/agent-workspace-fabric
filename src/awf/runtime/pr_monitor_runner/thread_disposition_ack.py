@@ -76,7 +76,10 @@ _DISSENT_RE = re.compile(
     # A conditional concurrence ("LGTM once it is fixed") awaits a fix that may not have landed.
     r"once|if|unless|until|when|whenever|after|before|provided|assuming|pending|upon|"
     r"as soon as|as long as|so long as|in case|subject to|contingent|conditional|"
-    r"the (?:moment|minute|instant))\b|n't\b|"
+    r"the (?:moment|minute|instant)|"
+    # So is any time noun ahead of a subject: "LGTM, the day it is fixed".
+    r"the (?:second|hour|day|week|time)(?=\s+(?:that\s+)?(?:it|this|that|these|those|they|the|"
+    r"its|our|your|my)\b))\b|n't\b|"
     r"\b(?:could|can) you\b|"
     r"\b(?:issue|problem|bug|concern)s?\s+(?:remains?|persists?)\b(?!\s+withdrawn)",
     re.I,

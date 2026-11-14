@@ -510,6 +510,9 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "This is withdrawn the instant it is fixed.",
         "The finding is retracted the moment it is fixed.",
         "This is withdrawn the day it is fixed.",
+        "LGTM, the day it is fixed.",
+        "Withdrawn, the second it is fixed.",
+        "Agreed, the time that the bug is fixed.",
         # A concurrence only in quoted text is not the bot's own.
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.
