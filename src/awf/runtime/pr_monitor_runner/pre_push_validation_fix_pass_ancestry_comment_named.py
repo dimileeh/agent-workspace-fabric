@@ -312,7 +312,7 @@ def _js_ts_line_ends_statement(
         or (
             trailing.group() in {"satisfies", "as"}
             and not _js_ts_type_operator_follows_operand(
-                raw, scan, trailing.start(), typescript=typescript
+                raw, scan, trailing.start(), typescript=typescript, statement=statement
             )
         )
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
@@ -367,12 +367,12 @@ def _js_ts_ends_unfinished_type_operand(
         )
     operator = _JS_TS_TRAILING_TYPE_OPERATOR_RE.search(before)
     return operator is not None and _js_ts_type_operator_follows_operand(
-        raw, scan, operator.start(), typescript=True
+        raw, scan, operator.start(), typescript=True, statement=statement
     )
 
 
 def _js_ts_type_operator_follows_operand(
-    raw: str, scan: str, start: int, *, typescript: bool
+    raw: str, scan: str, start: int, *, typescript: bool, statement: Sequence[str] = ()
 ) -> bool:
     """Whether the ``satisfies``/``as`` at ``start`` follows an operand on its line.
 
@@ -381,7 +381,8 @@ def _js_ts_type_operator_follows_operand(
     masked as a string, template or regex literal counts, as does one completed
     by a postfix non-null assertion (``value! as``) (PRRT_kwDOSJAM6s63XU4a). In
     ``typescript`` code so does an instantiation expression completed by its
-    type arguments (``fn<number> as``) (PRRT_kwDOSJAM6s63YH3s).
+    type arguments (``fn<number> as``), which may wrap across the masked lines
+    of the ``statement`` (PRRT_kwDOSJAM6s63YH3s).
     """
     before = raw[:start].rstrip()
     while (comment := _JS_TS_TRAILING_BLOCK_COMMENT_RE.search(before)) is not None:
@@ -392,9 +393,9 @@ def _js_ts_type_operator_follows_operand(
         return True
     if before.endswith("!"):
         return _js_ts_type_operator_follows_operand(
-            raw, scan, len(before.rstrip("!")), typescript=typescript
+            raw, scan, len(before.rstrip("!")), typescript=typescript, statement=statement
         )
-    if typescript and _js_ts_ends_type_arguments(scan[: len(before)]):
+    if typescript and _js_ts_ends_type_arguments(" ".join([*statement, scan[: len(before)]])):
         return True
     return (
         _JS_TS_OPERAND_END_RE.search(before) is not None

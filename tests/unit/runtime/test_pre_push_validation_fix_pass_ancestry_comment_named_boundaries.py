@@ -1099,19 +1099,37 @@ async def test_js_ts_compact_trailing_angle_is_type_arguments_only_in_typescript
 
 
 @pytest.mark.parametrize(
-    ("path", "expected"),
+    ("path", "text", "line", "expected"),
     [
-        pytest.param("src/app/web/team.js", False, id="javascript-comparison"),
-        pytest.param(_WEB, True, id="typescript-instantiation-expression"),
+        pytest.param(
+            "src/app/web/team.js",
+            "export const LIMIT = fn<number> as\n  Handler1;\n",
+            2,
+            False,
+            id="javascript-comparison",
+        ),
+        pytest.param(
+            _WEB,
+            "export const LIMIT = fn<number> as\n  Handler1;\n",
+            2,
+            True,
+            id="typescript-instantiation-expression",
+        ),
+        pytest.param(
+            _WEB,
+            "export const LIMIT = fn<\n  number\n> as\n  Handler1;\n",
+            4,
+            True,
+            id="typescript-wrapped-instantiation-expression",
+        ),
     ],
 )
 @pytest.mark.unit
 async def test_js_ts_type_operator_after_instantiation_expression_continues_only_in_typescript(
-    path: str, *, expected: bool
+    path: str, text: str, line: int, *, expected: bool
 ) -> None:
     """``fn<number> as`` asserts a completed instantiation (PRRT_kwDOSJAM6s63YH3s)."""
-    text = "export const LIMIT = fn<number> as\n  Handler1;\n"
-    diff = _diff(path, "@@ -2 +2 @@", "-  Handler1;", "+  Handler2;")
+    diff = _diff(path, f"@@ -{line} +{line} @@", "-  Handler1;", "+  Handler2;")
     runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
 
     assert await _changes_named_target(runner, "`LIMIT` is too low") is expected
