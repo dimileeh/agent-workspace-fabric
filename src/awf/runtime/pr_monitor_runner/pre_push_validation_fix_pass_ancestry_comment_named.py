@@ -196,9 +196,11 @@ _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
 # in its statement — an inline ``if (on) LIMIT = 20`` body included
 # (PRRT_kwDOSJAM6s63XLQk). A parenthesized ``(LIMIT) = 20`` / ``++(LIMIT)``
 # target writes it too (PRRT_kwDOSJAM6s63X1Cq), as does a TS non-null asserted
-# ``LIMIT! = 20`` one; a ``!=`` is an inequality (PRRT_kwDOSJAM6s63X_At).
+# ``LIMIT! = 20`` one — a ``!=`` is an inequality — or a parenthesized
+# ``(LIMIT as number) = 20`` / ``satisfies`` one (PRRT_kwDOSJAM6s63X_At).
 _JS_TS_ASSIGNED_TARGET_RE = re.compile(
-    rf"(?<![\w$.])({_JS_IDENT})(?:[ \t]*(?:\)|!(?!=)))*[ \t]*"
+    rf"(?<![\w$.])({_JS_IDENT})"
+    r"(?:[ \t]*(?:\)|!(?!=))|[ \t]+(?:as|satisfies)[ \t]+[^()=;!]*?(?=[ \t]*\)))*[ \t]*"
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
     rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})"
 )

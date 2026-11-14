@@ -1572,6 +1572,24 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
         ),
         pytest.param("export let LIMIT = 10;\nLIMIT!++;\n", False, id="non-null-postfix"),
         pytest.param(
+            "export let LIMIT = 10;\n(LIMIT as number) = 20;\n", False, id="as-asserted-assignment"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\n((LIMIT satisfies number)) += 20;\n",
+            False,
+            id="satisfies-asserted-compound-assignment",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\n(LIMIT as Array<number>[0])++;\n",
+            False,
+            id="as-asserted-postfix",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (LIMIT as boolean) x = 1;\nuse(LIMIT as number);\n",
+            True,
+            id="as-asserted-reads-only",
+        ),
+        pytest.param(
             "export let LIMIT = 10;\nif (LIMIT!= 5 || LIMIT !== 6 || LIMIT!!= 7) work();\n",
             True,
             id="non-null-inequality-reads-only",
