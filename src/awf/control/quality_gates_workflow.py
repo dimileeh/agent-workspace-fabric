@@ -1049,7 +1049,7 @@ def _line_for_workflow_step_key_from_yaml_nodes(
 @lru_cache(maxsize=64)
 def _compose_workflow_yaml_document(text: str) -> Node | None:
     try:
-        return cast(Node | None, yaml.compose(text))
+        return yaml.compose(text)
     except yaml.YAMLError:
         return None
 
