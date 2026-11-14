@@ -60,8 +60,13 @@ _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
 # #1238: the deterministic concurrence check. Generic wording only, no reviewer names.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-# An innermost collapsed block: folded supporting material, not the reply's message.
-_DETAILS_RE = re.compile(r"<details\b[^>]*>(?:(?!<details\b).)*?</details\s*>", re.DOTALL | re.I)
+# An innermost collapsed block. It is set aside only when its summary labels it as
+# supporting material; any other fold could hold a request, so the agent judges it.
+_DETAILS_RE = re.compile(r"<details\b[^>]*>((?:(?!<details\b).)*?)</details\s*>", re.DOTALL | re.I)
+_SUPPORTING_FOLD_RE = re.compile(
+    r"\s*<summary\b[^>]*>[^<]*\b(?:analysis|learnings?|scripts?|outputs?|logs?)\b[^<]*</summary",
+    re.I,
+)
 _PROPOSED_CHANGE_RE = re.compile(r"^\s*(?:```|~~~)\s*(?:suggestion|diff)\b", re.M | re.I)
 _CODE_REFERENCE_RE = re.compile(r"```|~~~|\b[\w./-]+\.\w+:\d+|\blines?\s+\d+", re.I)
 _DISSENT_RE = re.compile(
@@ -94,16 +99,20 @@ def is_bot_concurrence(body: str) -> bool:
 
     ``True`` means certainly a concurrence: it withdraws the finding, confirms the
     fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
-    no dissent or new request, no code fence and no code reference. Collapsed
-    ``<details>`` blocks and HTML comments are set aside as supporting material.
+    no dissent or new request, no code fence and no code reference. HTML comments,
+    and ``<details>`` blocks whose summary labels them as supporting material
+    (analysis, learnings, scripts, output, logs), are set aside.
     ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
-    ambiguous (a proposed change anywhere, unbalanced markup) is ``False``.
+    ambiguous (a proposed change anywhere, unbalanced markup, any other fold) is
+    ``False``.
     """
     if _PROPOSED_CHANGE_RE.search(body):
         return False
     prose = _HTML_COMMENT_RE.sub(" ", body)
-    while (stripped := _DETAILS_RE.sub(" ", prose)) != prose:
-        prose = stripped
+    while fold := _DETAILS_RE.search(prose):
+        if not _SUPPORTING_FOLD_RE.match(fold.group(1)):
+            return False  # a fold not labelled as supporting material could hold a request
+        prose = f"{prose[: fold.start()]} {prose[fold.end() :]}"
     prose = prose.replace("\u2019", "'")
     if re.search(r"<!--|</?details\b", prose, re.I):
         return False  # unbalanced or unterminated: it could hide a request

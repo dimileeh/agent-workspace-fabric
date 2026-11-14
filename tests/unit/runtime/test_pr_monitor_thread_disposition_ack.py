@@ -458,6 +458,12 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.
         "Confirmed.\n<details><summary>Diff</summary>\n\n```diff\n-a\n+b\n```\n</details>",
+        # A fold not labelled as supporting material could hold a request: the agent judges.
+        "Agreed. <details><summary>New concern</summary>Please handle the empty input.</details>",
+        "Agreed. <details><summary>Nit</summary>Rename the helper.</details>",
+        "Agreed. <details>Rename the helper.</details>",
+        "Agreed.\n<details><summary>🧩 Analysis chain</summary>\n"
+        "<details><summary>Nit</summary>Rename the helper.</details>\n</details>",
     ],
 )
 def test_anything_short_of_an_explicit_concurrence_is_not_recognised(body: str) -> None:
