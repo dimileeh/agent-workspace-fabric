@@ -92,13 +92,14 @@ _CONCURRENCE_RE = re.compile(
     r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
     r"lgtm|looks good(?: to me)?|withdrawn|retracted|"
     # A predicate concurs only as the end of its clause, after no subject or an
-    # affirmative one: "I" only as a verification ("I verified that"), else a short noun
-    # phrase, a determiner and at most three words free of agreement, negation, hedge
-    # and joining words and of a second subject. "LGTM the moment it is fixed", "No test
+    # affirmative one: "I" only as a verification ("I verified that", "I verified the
+    # fix"), else a short noun phrase, a determiner and at most three words free of
+    # agreement, negation, hedge and joining words and of a second subject. "LGTM the moment it is fixed", "No test
     # covers this case", "Ensure it is fixed", "I doubt it is fixed", "I cannot confirm
     # it is fixed" or "The handler crashes though the bug is fixed" may report missing
     # work, so the agent judges them.
-    r"(?:i(?:'m| am) (?=leav)|i(?:'ve| have| can)? (?:verified|confirmed|checked|verify|confirm) "
+    r"(?:i(?:'m| am) (?=leav)|i(?:'ve| have)? (?=(?:confirmed|verified) (?:the )?fix\b)|"
+    r"i(?:'ve| have| can)? (?:verified|confirmed|checked|verify|confirm) "
     r"(?:that )?)?"
     r"(?:(?:the|this|that|it|its|my|our)(?:\s+(?!(?:agreed?|lgtm|looks|withdrawn|"
     r"retracted|you're|"

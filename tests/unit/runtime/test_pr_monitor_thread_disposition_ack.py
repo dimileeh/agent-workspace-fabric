@@ -428,6 +428,8 @@ NEW_CONCERNS = (
         "Thanks for the explanation, the finding is withdrawn.",
         "I verified the null dereference is fixed.",
         "I have confirmed that the bug is resolved.",
+        "I verified the fix.",
+        "I've confirmed the fix on the latest head.",
         "The null pointer dereference is fixed.",
     ],
 )
