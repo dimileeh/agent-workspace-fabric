@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -188,8 +189,10 @@ async def keep_self_cited_item_commit(
     failed rollback raises the mutation reason code.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+    from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
     from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
         AGENT_NON_FIX_CITES_OWN_COMMIT,
+        _bounded,
         attempt_commit_shas,
         cited_item_commit,
         correction_item_fix_evidence,
@@ -287,18 +290,42 @@ async def keep_self_cited_item_commit(
         # evidence chain see the published fix.
         state.last_push_sha = kept_head
         state.hosted_terminal_head_advanced = True
-    has_evidence = await correction_item_fix_evidence(
-        runner,
-        protocol_attempt=1,
-        worktree_path=worktree_path,
-        item_start_head=item_start_head,
-        item_path=item_path,
-        item_line=item_line,
-        state=state,
-        dirty_changes_committed=False,
-        comment_text=comment_text,
-        anchor_head=anchor_head,
-    )
+    try:
+        has_evidence = await correction_item_fix_evidence(
+            runner,
+            protocol_attempt=1,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            item_line=item_line,
+            state=state,
+            dirty_changes_committed=False,
+            comment_text=comment_text,
+            anchor_head=anchor_head,
+        )
+    except (TimeoutError, OSError, RuntimeError) as exc:
+        # The partial rollback already left the worktree at the kept commit, so
+        # an unreadable re-check parks this item with that commit preserved
+        # instead of escaping the batch (PRRT_kwDOSJAM6s63brOn).
+        error = " ".join(redact_secrets(str(exc)).split())[:240] or "<no message>"
+        _log.warning(
+            "monitor.agent_verdict_correction_self_cite_evidence_unreadable",
+            workspace_id=workspace_id,
+            reason_code=AGENT_NON_FIX_CITES_OWN_COMMIT,
+            kept_head=kept_head,
+            exc_type=type(exc).__name__,
+            error=error,
+        )
+        return VerdictResult(
+            verdict="needs_human",
+            reason=_bounded(
+                f"Correction verdict cited this item's own commit {kept_head[:12]}, "
+                f"but its fix evidence could not be read ({type(exc).__name__}: "
+                f"{error}); the commit is preserved for human review. "
+                f"Agent reason: {reason}"
+            ),
+            kept_commit=True,
+        )
     return correction_self_citation_outcome(
         workspace_id=workspace_id,
         verdict=verdict,

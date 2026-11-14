@@ -723,3 +723,29 @@ async def test_keep_self_cited_item_commit_refuses_a_side_branch_commit_off_the_
     assert result is None
     assert runner.reset_targets == []
     assert not _events(captured, _PARTIAL_EVENT)
+
+
+@pytest.mark.unit
+async def test_keep_self_cited_item_commit_parks_kept_commit_on_evidence_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s63brOn: an evidence re-check failure parks this item, not the batch."""
+    runner = _runner(tmp_path, correction="unused", correction_head=_E, parents={_B: _A, _E: _B})
+    runner.current_head = _E
+
+    async def _evidence_unreadable(*_args: object, **_kwargs: object) -> bool:
+        raise OSError("git diff spawn failed")
+
+    monkeypatch.setattr(comment_verdict, "_item_fix_evidence", _evidence_unreadable)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _keep(runner, reason=f"already addressed by {_B}")
+
+    assert result is not None
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is True
+    assert "OSError" in result.reason
+    assert "git diff spawn failed" in result.reason
+    assert runner.reset_targets == [_B]
+    assert _events(captured, "monitor.agent_verdict_correction_self_cite_evidence_unreadable")
