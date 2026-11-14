@@ -440,7 +440,8 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
             start = i
             # Advance through the tag to its closing ``>`` (strings already blank),
             # past any ``>`` in a ``{...}`` attribute expression (PRRT_kwDOSJAM6s63YQ8-)
-            # or closing a ``<Widget<Props>`` type argument (PRRT_kwDOSJAM6s63Yzs5).
+            # or closing a ``<Widget<Props>`` type argument (PRRT_kwDOSJAM6s63Yzs5),
+            # but not the ``>`` of an ``=>`` function type in it (PRRT_kwDOSJAM6s63Y7R6).
             i += 1
             attribute_braces = type_angles = 0
             while i < n and (attribute_braces or type_angles or line[i] != ">"):
@@ -450,7 +451,7 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
                     attribute_braces -= 1
                 elif not attribute_braces and line[i] == "<":
                     type_angles += 1
-                elif not attribute_braces and line[i] == ">":
+                elif not attribute_braces and line[i] == ">" and line[i - 1] != "=":
                     type_angles -= 1
                 i += 1
             if i >= n:

@@ -1231,6 +1231,8 @@ async def test_tsx_wrapped_type_operator_after_completed_jsx_element_continues(
         # PRRT_kwDOSJAM6s63Yzs5: a JSX type argument's ``>`` does not end the tag.
         pytest.param("<Widget<Props> value={10} />", id="type-argument"),
         pytest.param("<Widget<Map<K, V>> value={10} />", id="nested-type-arguments"),
+        # PRRT_kwDOSJAM6s63Y7R6: the ``>`` of an ``=>`` function type is not a closing angle.
+        pytest.param("<Widget<(x: number) => void> value={10} />", id="arrow-type-argument"),
     ],
 )
 @pytest.mark.unit
