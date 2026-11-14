@@ -1027,6 +1027,58 @@ async def test_js_ts_completed_jsx_initializer_ends_its_statement(
 @pytest.mark.parametrize(
     ("path", "text", "line", "expected"),
     [
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const VIEW = <Widget\n  value={10}\n/>;\n",
+            2,
+            True,
+            id="tsx-multi-line-opening-tag",
+        ),
+        pytest.param(
+            "src/app/web/team.jsx",
+            "export const VIEW = <Widget\n  title='x'\n  value={10}\n/>\nconst OTHER = 1;\n",
+            3,
+            True,
+            id="jsx-attribute-after-string-attribute",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const VIEW = <div>\n  <Widget\n    value={10}\n  />\n</div>;\n",
+            3,
+            True,
+            id="tsx-nested-multi-line-opening-tag",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const VIEW = <Widget\n  value={1}\n/>\nconst OTHER = 10;\n",
+            4,
+            False,
+            id="tsx-next-binding-after-line-leading-self-close",
+        ),
+        pytest.param(
+            "src/app/web/team.tsx",
+            "export const VIEW = a <b\n  value={10}\n",
+            2,
+            False,
+            id="tsx-comparison-after-operand",
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_multi_line_jsx_opening_tag_keeps_its_statement_open(
+    path: str, text: str, line: int, *, expected: bool
+) -> None:
+    """A JSX opening tag spanning lines keeps its initializer open (PRRT_kwDOSJAM6s63Wpyz)."""
+    old = text.splitlines()[line - 1]
+    diff = _diff(path, f"@@ -{line} +{line} @@", f"-{old}", f"+{old.replace('10', '11')}")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, "`VIEW` is wrong") is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "line", "expected"),
+    [
         pytest.param(_WEB, "  export const LIMIT = 1;\n", 1, True, id="js-ts-indented-module"),
         pytest.param(
             _WEB, "const a = 0;\n    LIMIT = 1;\n", 2, True, id="js-ts-indented-reassignment"

@@ -149,6 +149,14 @@ _JS_TS_TRAILING_CONTINUATION_RE = re.compile(
 # The ``>`` ending a completed JSX element (``<Widget />``, ``</div>``, ``</>``)
 # closes an operand rather than opening a comparison (PRRT_kwDOSJAM6s63VJ_g).
 _JSX_COMPLETED_ELEMENT_RE = re.compile(r"(?:/|</[\w$.:-]*[ \t]*)>$")
+# A JSX opening tag's ``<`` (``<Widget``, ``<>``) follows the start of an
+# expression, an operator or an enclosing tag's ``>``, never an operand: ``a <b``
+# is a comparison. Until the tag's own ``>``, its statement stays open
+# (PRRT_kwDOSJAM6s63Wpyz).
+_JSX_OPENING_TAG_RE = re.compile(r"<[A-Za-z_$>]")
+_JSX_OPENING_TAG_OPENER_RE = re.compile(
+    r"(?:^|[=(,:?\[{&|>]|(?<![\w$.])(?:return|yield|await))[ \t]*$"
+)
 # A block comment closing a JS/TS operand, skipped to reach the operand that a
 # following ``!`` asserts non-null (PRRT_kwDOSJAM6s63S15a).
 _JS_TS_TRAILING_BLOCK_COMMENT_RE = re.compile(r"/\*(?:(?!\*/).)*\*/$")
@@ -228,9 +236,17 @@ def _js_ts_line_ends_statement(
     ``a<b >`` is a comparison (PRRT_kwDOSJAM6s63TdLy). A type-argument list may
     open on an earlier masked line of the ``statement`` (PRRT_kwDOSJAM6s63Tr7Q).
     In ``jsx`` code a line ending a completed JSX element ends on that operand
-    (PRRT_kwDOSJAM6s63VJ_g).
+    (PRRT_kwDOSJAM6s63VJ_g); one inside an opening tag does not
+    (PRRT_kwDOSJAM6s63Wpyz).
     """
     code = scan.rstrip()
+    # A line-leading ``/>`` closing the tag is masked as a regex literal.
+    if (
+        jsx
+        and not raw.lstrip().startswith("/>")
+        and _jsx_opening_tag_is_open(" ".join([*statement, code]))
+    ):
+        return False
     tail = raw[len(code) :].lstrip()
     if tail and not tail.startswith(("//", "/*")):
         return True
@@ -256,6 +272,29 @@ def _js_ts_line_ends_statement(
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
         or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
     )
+
+
+def _jsx_opening_tag_is_open(code: str) -> bool:
+    """Whether the masked JSX ``code`` ends inside an opening tag, before its ``>``.
+
+    A ``>`` inside the tag's ``{...}`` attribute expressions closes nothing.
+    """
+    open_tag = False
+    depth = 0
+    for position, char in enumerate(code):
+        if not open_tag:
+            open_tag = (
+                _JSX_OPENING_TAG_RE.match(code, position) is not None
+                and _JSX_OPENING_TAG_OPENER_RE.search(code, 0, position) is not None
+            )
+            depth = 0
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif char == ">" and not depth:
+            open_tag = False
+    return open_tag
 
 
 def _js_ts_type_operator_follows_operand(raw: str, scan: str, start: int) -> bool:
