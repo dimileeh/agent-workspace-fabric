@@ -1143,6 +1143,33 @@ async def test_js_ts_label_binds_nothing(
             id="keyword-named-property-after-asi",
         ),
         pytest.param(
+            "export const LIMIT = cache. delete\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="spaced-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache. /* key */ delete\nexport const OTHER = 1;\n",
+            2,
+            False,
+            id="commented-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  delete\nexport const OTHER = 1;\n",
+            3,
+            False,
+            id="wrapped-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  // key\n  delete\nexport const OTHER = 1;\n",
+            4,
+            False,
+            id="comment-wrapped-keyword-named-property-after-asi",
+        ),
+        pytest.param(
+            "export const LIMIT = cache.\n  delete\n  (1);\n", 3, True, id="wrapped-property-call"
+        ),
+        pytest.param(
             "export const LIMIT = renew\nrun1();\n", 2, False, id="keyword-suffixed-identifier"
         ),
         pytest.param(

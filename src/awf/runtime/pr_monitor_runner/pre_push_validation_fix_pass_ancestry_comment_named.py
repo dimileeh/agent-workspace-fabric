@@ -229,8 +229,15 @@ def _js_ts_line_ends_statement(
             operand = operand[: comment.start()].rstrip()
         if operand and scan[len(operand) - 1] != operand[-1]:
             return True
+    trailing = _JS_TS_TRAILING_CONTINUATION_RE.search(code)
     return (
-        _JS_TS_TRAILING_CONTINUATION_RE.search(code) is None
+        trailing is None
+        or (
+            # A keyword-named property after a spaced or wrapped ``.`` is an
+            # operand, not an operator (PRRT_kwDOSJAM6s63VtWM).
+            trailing.group()[0].isalpha()
+            and " ".join([*statement, code[: trailing.start()]]).rstrip().endswith(".")
+        )
         or (jsx and _JSX_COMPLETED_ELEMENT_RE.search(code) is not None)
         or (typescript and _js_ts_ends_type_arguments(" ".join([*statement, code])))
     )
