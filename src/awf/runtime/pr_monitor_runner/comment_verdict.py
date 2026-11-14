@@ -412,6 +412,9 @@ async def _run_item_verdict_protocol(
     # Non-empty once a baseline-outage park has claimed this attempt's repair; the
     # cancellation branch below must not rewind it either (PRRT_kwDOSJAM6s63O77x).
     baseline_park_preservation_claimed: list[bool] = []
+    # (kept head, matching last push sha) once a self-citing correction keeps
+    # its cited item commit (#1105); cancellation rolls back only above it.
+    self_cited_kept_floor: list[tuple[str, str | None]] = []
 
     async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
         # Reads ``item_start_head`` live: it is the sink anchor as of the run
@@ -1166,6 +1169,7 @@ async def _run_item_verdict_protocol(
                                     item_line=item_line,
                                     comment_text=evidence_comment_text,
                                     anchor_head=evidence_anchor_head,
+                                    kept_commit_floor=self_cited_kept_floor,
                                 )
                                 if self_cited is not None:
                                     return self_cited
@@ -1413,12 +1417,17 @@ async def _run_item_verdict_protocol(
                     ),
                 )
                 raise
+            cancel_floor_head, cancel_last_push_sha = (
+                self_cited_kept_floor[-1]
+                if self_cited_kept_floor
+                else (rollback_floor_head, item_start_last_push_sha)
+            )
             rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                 runner,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                item_start_head=rollback_floor_head,
-                item_start_last_push_sha=item_start_last_push_sha,
+                item_start_head=cancel_floor_head,
+                item_start_last_push_sha=cancel_last_push_sha,
                 state=state,
             )
             if not rollback_ok:

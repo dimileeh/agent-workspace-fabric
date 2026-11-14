@@ -167,6 +167,7 @@ async def keep_self_cited_item_commit(
     item_line: int | None,
     comment_text: str | None,
     anchor_head: str | None,
+    kept_commit_floor: list[tuple[str, str | None]] | None = None,
 ) -> VerdictResult | None:
     """Keep the item commit a mutating non-FIXED correction cites (#1105).
 
@@ -187,6 +188,10 @@ async def keep_self_cited_item_commit(
     already advanced is rewound to the kept commit, and push tracking follows
     it. Cited commits on two merge sides keep only the newest one's ancestry. A
     failed rollback raises the mutation reason code.
+
+    Before its first rollback await, the kept head and the push tracking that
+    matches it are appended to ``kept_commit_floor`` so the caller's
+    cancellation handler rolls back only work above the kept commit.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
@@ -268,6 +273,12 @@ async def keep_self_cited_item_commit(
         kept_head=kept_head,
         rolled_back_from=post_attempt_head,
     )
+    if kept_commit_floor is not None:
+        # The rollback and evidence awaits below are cancellable; a cancellation
+        # must not rewind past the commit kept here (issue:6874707425).
+        kept_commit_floor.append(
+            (kept_head, kept_head if hosted_remote_advanced else item_start_last_push_sha)
+        )
     rollback_ok = await _comment_verdict._rollback_or_classify_failure(
         runner,
         workspace_id=workspace_id,

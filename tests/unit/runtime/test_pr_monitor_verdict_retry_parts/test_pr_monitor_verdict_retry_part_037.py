@@ -19,6 +19,7 @@ commit, ``E`` AWF's dirty-sink commit of the correction's uncommitted edits.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -749,3 +750,79 @@ async def test_keep_self_cited_item_commit_parks_kept_commit_on_evidence_error(
     assert "git diff spawn failed" in result.reason
     assert runner.reset_targets == [_B]
     assert _events(captured, "monitor.agent_verdict_correction_self_cite_evidence_unreadable")
+
+
+@pytest.mark.unit
+async def test_cancellation_during_kept_commit_evidence_check_keeps_the_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue 6874707425: a worker cancelled during the re-check must not delete B.
+
+    The cancellation handler rolls back only work above the kept commit, never to
+    the item-start floor.
+    """
+    runner = _runner(
+        tmp_path,
+        correction=f"FALSE POSITIVE: already addressed by earlier commit {_B}",
+        correction_head=_E,
+        parents={_B: _A, _E: _B},
+    )
+
+    item_fix_evidence = comment_verdict._item_fix_evidence
+
+    async def _cancelled(*args: object, **kwargs: object) -> bool:
+        if runner.reset_targets:
+            # Only the re-check after the partial rollback is cancelled.
+            raise asyncio.CancelledError
+        return await item_fix_evidence(*args, **kwargs)
+
+    monkeypatch.setattr(comment_verdict, "_item_fix_evidence", _cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner)
+
+    assert runner.reset_targets == [_B]
+    assert runner.current_head == _B
+
+
+@pytest.mark.unit
+async def test_hosted_cancellation_after_partial_rollback_keeps_remote_and_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted: the remote already rewound to B stays there, and tracking stays on B."""
+    remote_rollbacks: list[dict[str, object]] = []
+
+    async def _record_remote_rollback(*_args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    item_fix_evidence = comment_verdict._item_fix_evidence
+
+    async def _cancelled(*args: object, **kwargs: object) -> bool:
+        if runner.reset_targets:
+            # Only the re-check after the partial rollback is cancelled.
+            raise asyncio.CancelledError
+        return await item_fix_evidence(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+    monkeypatch.setattr(comment_verdict, "_item_fix_evidence", _cancelled)
+    runner = _runner(
+        tmp_path,
+        correction=f"FALSE POSITIVE: already addressed by earlier commit {_B}",
+        correction_head=_E,
+        parents={_B: _A, _E: _B},
+    )
+    runner._deps.adapter.is_hosted = True
+    state = MonitorState(last_push_sha=_A)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _invoke(runner, state=state)
+
+    assert runner.reset_targets == [_B]
+    assert [call["rollback_target_sha"] for call in remote_rollbacks] == [_B]
+    assert state.last_push_sha == _B
