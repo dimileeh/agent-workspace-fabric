@@ -1823,3 +1823,30 @@ async def test_js_ts_reassignment_withholds_the_definition_head(
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
 
     assert await _changes_named_target(runner, "`handler` is too low") is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("export let LIMIT = 10;\nLIMIT\n = 20;\n", False, id="target-then-operator"),
+        pytest.param(
+            "export let LIMIT = 10;\nLIMIT // comment\n\n  += 20;\n", False, id="compound-past-gap"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nif (on)\n  LIMIT\n  = 20;\n", False, id="brace-less-body"
+        ),
+        pytest.param("export let LIMIT = 10;\nother\n = LIMIT;\n", True, id="reads-only"),
+        pytest.param(
+            "export let LIMIT = 10;\nwork();\n[x] = [LIMIT];\n", True, id="ended-statement"
+        ),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_continued_reassignment_withholds_the_binding(
+    text: str, *, expected: bool
+) -> None:
+    """A reassignment whose operator leads the next line rebinds (PRRT_kwDOSJAM6s63Ycby)."""
+    diff = _diff(_WEB, "@@ -1 +1 @@", "-export let LIMIT = 10;", "+export let LIMIT = 11;")
+    runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})
+
+    assert await _changes_named_target(runner, "`LIMIT` is too low") is expected

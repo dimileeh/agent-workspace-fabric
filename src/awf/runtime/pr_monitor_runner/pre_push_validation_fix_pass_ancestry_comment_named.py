@@ -890,7 +890,8 @@ def _module_level_assignment_spans(
     (PRRT_kwDOSJAM6s63Sh3G). A JS/TS destructuring assignment of the name,
     which no ``name =`` reader matches, withholds it too (PRRT_kwDOSJAM6s63W936),
     as does any JS/TS assignment of it not opening its statement, such as an
-    inline ``if (on) LIMIT = 20`` body (PRRT_kwDOSJAM6s63XLQk).
+    inline ``if (on) LIMIT = 20`` body (PRRT_kwDOSJAM6s63XLQk), or one whose
+    operator leads the next line (PRRT_kwDOSJAM6s63Ycby).
     """
     js_ts = Path(path).suffix.lower() in _JS_TS_CALL_SITE_SUFFIXES
     typescript = Path(path).suffix.lower() in _TS_SUFFIXES
@@ -960,6 +961,16 @@ def _module_level_assignment_spans(
                         or not _js_ts_line_ends_in_literal(raw_lines, index, path=path)
                     )
                 )
+            ):
+                continued = True
+                continue
+            # Any other statement reads on into a next line leading with a
+            # continuation, so ``LIMIT\n= 20`` is one write (PRRT_kwDOSJAM6s63Ycby).
+            if (
+                not declaration
+                and index + 1 < len(scan_lines)
+                and not scan.rstrip().endswith((";", "}"))
+                and _js_ts_next_line_continues(raw_lines, scan_lines, starts_in_code, index)
             ):
                 continued = True
                 continue
