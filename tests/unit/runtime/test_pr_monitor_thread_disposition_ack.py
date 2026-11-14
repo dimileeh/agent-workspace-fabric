@@ -426,6 +426,8 @@ NEW_CONCERNS = (
         "Verified the fix on the current head.",
         "The fix has been verified.",
         "Thanks for the explanation, the finding is withdrawn.",
+        "I verified the null dereference is fixed.",
+        "I have confirmed that the bug is resolved.",
     ],
 )
 def test_an_explicit_concurrence_is_recognised(body: str) -> None:
@@ -504,6 +506,16 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "I doubt the null dereference is fixed.",
         "It is unclear whether the bug is fixed.",
         "That's right the moment it is fixed.",
+        # Only a verification leads an "I" claim: an unconfirmed or hoped-for fix is no fix.
+        "I cannot confirm the null dereference is fixed.",
+        "I can not confirm the null dereference is fixed.",
+        "I hope the null dereference is fixed.",
+        "I think it is fixed.",
+        "I'm unable to confirm the null dereference is fixed.",
+        "The bot cannot confirm it is fixed.",
+        "It hopefully is fixed.",
+        "This probably is fixed.",
+        "The guard seems to have the fix is resolved.",
         # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
         "LGTM, the moment it is fixed.",
         "Withdrawn, the minute it is fixed.",
