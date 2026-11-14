@@ -192,11 +192,12 @@ _JS_TS_LABEL_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*[ \t]*:$")
 _JS_TS_DESTRUCTURING_EQUALS_RE = re.compile(r"[ \t]*=(?![=>])")
 # A JS/TS identifier any assignment or update operator writes, wherever it sits
 # in its statement — an inline ``if (on) LIMIT = 20`` body included
-# (PRRT_kwDOSJAM6s63XLQk).
+# (PRRT_kwDOSJAM6s63XLQk). A parenthesized ``(LIMIT) = 20`` / ``++(LIMIT)``
+# target writes it too (PRRT_kwDOSJAM6s63X1Cq).
 _JS_TS_ASSIGNED_TARGET_RE = re.compile(
-    rf"(?<![\w$.])({_JS_IDENT})[ \t]*"
+    rf"(?<![\w$.])({_JS_IDENT})(?:[ \t]*\))*[ \t]*"
     r"(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)"
-    rf"|(?:\+\+|--)[ \t]*({_JS_IDENT})"
+    rf"|(?:\+\+|--)(?:[ \t]*\()*[ \t]*({_JS_IDENT})"
 )
 # A ``for`` head up to the target its ``of``/``in`` writes each iteration, which
 # a block-scoped ``let``/``const`` declares afresh but a ``var`` does not

@@ -1531,6 +1531,16 @@ async def test_js_ts_destructuring_reassignment_withholds_the_binding(
             id="nested-inline-body",
         ),
         pytest.param(
+            "export let LIMIT = 10;\n(LIMIT) = 20;\n", False, id="parenthesized-assignment"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\n(( LIMIT )) += 20;\n",
+            False,
+            id="nested-parenthesized-compound-assignment",
+        ),
+        pytest.param("export let LIMIT = 10;\n(LIMIT)++;\n", False, id="parenthesized-postfix"),
+        pytest.param("export let LIMIT = 10;\n++(LIMIT);\n", False, id="parenthesized-prefix"),
+        pytest.param(
             "export let LIMIT = 10;\nif (on) other = LIMIT;\n"
             "if (LIMIT >= 5) obj.LIMIT = cache[LIMIT] = 1;\n",
             True,
