@@ -1165,6 +1165,12 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param(
             "src/app/web/team.jsx", "{ a: 1, 'b': <div>hi</div> };", id="jsx-object-property-value"
         ),
+        pytest.param(
+            "src/app/web/team.tsx", "{ a: { b: () => <Widget /> } };", id="tsx-nested-object-value"
+        ),
+        pytest.param(
+            "src/app/web/team.tsx", "{ node: c ? <A /> : (<B />) };", id="tsx-object-ternary-value"
+        ),
     ],
 )
 @pytest.mark.parametrize(

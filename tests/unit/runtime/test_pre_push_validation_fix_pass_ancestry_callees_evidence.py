@@ -740,6 +740,11 @@ def test_callee_refs_from_file_line_preserves_multiline_receiver() -> None:
             id="object-property-value-stays-code",
         ),
         pytest.param(
+            "    const v = { a: { b: c ? <A /> : <B /> } }; helper();",
+            frozenset({(None, "helper")}),
+            id="nested-object-ternary-value-stays-code",
+        ),
+        pytest.param(
             "    {cond ? x : <Icon />} helper()", frozenset(), id="ternary-colon-container-text"
         ),
         pytest.param(

@@ -33,9 +33,9 @@ _JSX_ROOT_PREFIX_RE = re.compile(r"(?:=>|[=(,?:\[{&|]|(?<![\w$])(?:return|yield|
 # TypeScript type operators that code may put after a completed element
 # (``<Widget /> as Props``) (PRRT_kwDOSJAM6s63XLQg).
 _JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")
-# A ``key:`` right after an object literal's ``{`` or ``,`` (quoted keys are
-# already blank), so the element is a property value (PRRT_kwDOSJAM6s63ZGB0).
-_JSX_PROPERTY_VALUE_PREFIX_RE = re.compile(r"[{,]\s*(?:[\w$]+|\[[^\]]*\])?\s*:\s*$")
+# An object literal body: a spread, or a ``key:``/shorthand ``key,`` first
+# member (quoted keys are already blank) (PRRT_kwDOSJAM6s63ZGB0).
+_JS_OBJECT_LITERAL_BODY_RE = re.compile(r"\s*(?:\.\.\.|(?:[\w$]+|\[[^\]]*\])?\s*(?::(?!:)|,))")
 
 
 # JS/TS private fields (`#ident`) are code; elsewhere `#` begins a comment.
@@ -509,9 +509,10 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
     ends a ``{...}`` JSX expression container (``{cond && <Icon />} helper()``),
     so text follows. A container holds one expression, so a ``}`` after a
     ``;`` closes a JS block (``() => { return <A />; };``) and stays code
-    (PRRT_kwDOSJAM6s63ZCcb). Likewise the first ``}`` after an object property
-    value (``{ node: <A /> };``) closes the object literal (PRRT_kwDOSJAM6s63ZGB0).
-    Line-local: the look-ahead stops at a line separator.
+    (PRRT_kwDOSJAM6s63ZCcb). Likewise a ``}`` whose ``{`` opened an object
+    literal earlier on the line (``{ a: { b: c ? <A /> : <B /> } };``) stays
+    code (PRRT_kwDOSJAM6s63ZGB0). Line-local: the look-ahead stops at a line
+    separator.
     """
     n = len(line)
     j = end
@@ -524,7 +525,14 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
     ):
         return end
     braces = 0
-    statement_ended = _JSX_PROPERTY_VALUE_PREFIX_RE.search(line, 0, start) is not None
+    statement_ended = False
+    # Whether each ``{`` still open before the element opened an object literal.
+    openers: list[bool] = []
+    for k in range(start):
+        if line[k] == "{":
+            openers.append(_JS_OBJECT_LITERAL_BODY_RE.match(line, k + 1) is not None)
+        elif line[k] == "}" and openers:
+            openers.pop()
     while j < n and line[j] not in _SPLITLINES_SEPARATOR_CHARS:
         if line[j] == "<" and j + 1 < n and (line[j + 1].isalpha() or line[j + 1] in "/!>"):
             return None
@@ -533,7 +541,8 @@ def _jsx_text_start_after_rooted_element(line: str, start: int, end: int) -> int
         elif line[j] == ";" and not braces:
             statement_ended = True
         elif line[j] == "}":
-            if not braces and not statement_ended:
+            closes_object = not braces and bool(openers) and openers.pop()
+            if not braces and not statement_ended and not closes_object:
                 return j + 1
             if not braces:
                 statement_ended = False
