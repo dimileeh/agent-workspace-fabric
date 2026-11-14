@@ -83,8 +83,9 @@ _CONCURRENCE_RE = re.compile(
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
     r"(?:confirmed|verified) (?:the )?fix|fix (?:is |was |has been )?(?:confirmed|verified)|"
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix|covers this case|lgtm|looks good|"
-    # The fix is present: the code has it, or its commit is in the revision.
-    r"(?:has|have|contains|includes) (?:the|a) (?:guard|fix|check|test)|"
+    # The fix is present: the code has it, or its commit is in the revision. Presence
+    # concurs only as the whole claim: "has a guard that crashes" may report a defect.
+    r"(?:has|have|contains|includes) the (?:guard|fix|check|test)$|"
     r"commit [0-9a-f]{7,40} is (?:now )?in|"
     r"leav(?:e|ing) (?:the )?resolution to|"
     r"no further (?:action|changes?) (?:is |are )?(?:needed|required))\b",
@@ -132,7 +133,7 @@ def is_bot_concurrence(body: str) -> bool:
     clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
     if not all(_CONCURRENCE_RE.search(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
         return False
-    return _CONCURRENCE_RE.search(own) is not None
+    return any(_CONCURRENCE_RE.search(c) for c in clauses)
 
 
 def acknowledgement_view(thread: AuditedReviewThread, *, viewer: str) -> AuditedReviewThread | None:

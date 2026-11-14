@@ -472,6 +472,11 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         # A verification that confirms the finding, not the fix, is no concurrence.
         "Verified: the null dereference reproduces on the current head.",
         "Confirmed: the race reproduces.",
+        # Presence of a guard or test concurs only as the whole claim of its clause.
+        "The handler has a guard that crashes on empty input.",
+        "The code includes a test that reproduces the crash.",
+        "The code includes the test that reproduces the crash.",
+        "The code includes a test.",
         # A concurrence only in quoted text is not the bot's own.
         "> Verified: the guard exists.\n\nHmm.",
         # A proposed change, even folded into a details block or a diff, is a new point.
