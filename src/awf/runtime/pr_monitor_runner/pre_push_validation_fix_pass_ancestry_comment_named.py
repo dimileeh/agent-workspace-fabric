@@ -92,9 +92,10 @@ _NON_DEFINITION_NAMES = (
 # scan lines at column 0, so text in strings/docstrings and class or function
 # bodies never counts; ``==`` / ``+=`` are not bindings. A JS/TS statement may be
 # indented at module scope; its blocks are bracketed, so a binding inside one
-# never opens a statement (PRRT_kwDOSJAM6s63P5Zi).
+# never opens a statement (PRRT_kwDOSJAM6s63P5Zi). A standalone arrow's ``=>``
+# binds no parameter at module scope (PRRT_kwDOSJAM6s63V0Yl).
 _MODULE_LEVEL_ASSIGNMENT_RE = re.compile(
-    rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
+    rf"^(?:export[ \t]+)?(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*=(?![=>])"
 )
 # A further target of a chained binding (``A = B = 10``), matched right after
 # the previous target's ``=`` (PRRT_kwDOSJAM6s63PKQ9). An arrow's ``=>`` binds

@@ -120,11 +120,12 @@ _ASSIGNMENT_DEFINITION_HEAD = (
 # ``const validate = replacement``, ``validate: Recorder = replacement``. Its
 # right-hand side carries no definition head of its own — those heads are
 # ``_ASSIGNMENT_DEFINITION_HEAD``'s subject and are read as definitions — so
-# this is the rebinding form definition discovery cannot see.
+# this is the rebinding form definition discovery cannot see. A standalone
+# arrow's ``=>`` rebinds no name (PRRT_kwDOSJAM6s63V0Yl).
 _PLAIN_ASSIGNMENT_TARGETS_RE = re.compile(
     rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?"
     rf"({_JS_IDENT}(?:[ \t]*,[ \t]*{_JS_IDENT})*)"
-    rf"(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
+    rf"(?:[ \t]*:[^=\n]*)?[ \t]*=(?![=>])"
 )
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
