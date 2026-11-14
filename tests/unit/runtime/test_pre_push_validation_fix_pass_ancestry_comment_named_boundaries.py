@@ -1744,6 +1744,24 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
             id="for-of-pattern-abutting",
         ),
         pytest.param(
+            "export let LIMIT = 10;\nfor (LIMIT! of [20]) {}\n", False, id="for-of-non-null"
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ((LIMIT!)of [20]) {}\n",
+            False,
+            id="for-of-parenthesized-non-null",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ((LIMIT as number) of [20]) {}\n",
+            False,
+            id="for-of-as-asserted",
+        ),
+        pytest.param(
+            "export let LIMIT = 10;\nfor ((LIMIT satisfies number)in { a: 1 }) {}\n",
+            False,
+            id="for-in-satisfies-asserted",
+        ),
+        pytest.param(
             "export let LIMIT = 10;\nif (on) for (LIMIT of [20]) work();\n",
             False,
             id="inline-for-of-body",
@@ -1760,7 +1778,10 @@ async def test_js_ts_inline_reassignment_withholds_the_binding(
 )
 @pytest.mark.unit
 async def test_js_ts_loop_target_withholds_the_binding(text: str, *, expected: bool) -> None:
-    """A ``for...of``/``for...in`` target rebinds the name (PRRT_kwDOSJAM6s63XrHa)."""
+    """A ``for...of``/``for...in`` target rebinds the name (PRRT_kwDOSJAM6s63XrHa).
+
+    So does a TS non-null or ``as``/``satisfies`` asserted one (PRRT_kwDOSJAM6s63YTT3).
+    """
     old = text.splitlines()[0]
     diff = _diff(_WEB, "@@ -1 +1 @@", f"-{old}", f"+{old.replace('10', '11')}")
     runner = _probe(texts={_WEB: text}, changed_paths=(_WEB,), diffs={_WEB: diff})

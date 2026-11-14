@@ -209,10 +209,13 @@ _JS_TS_ASSIGNED_TARGET_RE = re.compile(
 # (PRRT_kwDOSJAM6s63XrHa).
 _JS_TS_LOOP_HEAD_RE = re.compile(r"(?<![\w$.])for(?:[ \t]+await)?[ \t]*\([ \t]*(?:var[ \t]+)?")
 # A parenthesized ``for ((LIMIT) of xs)`` target, or a pattern's closing
-# ``]``/``}``, may abut its ``of``/``in``.
+# ``]``/``}``, may abut its ``of``/``in``. A TS non-null asserted
+# ``for (LIMIT! of xs)`` or parenthesized ``for ((LIMIT as number) of xs)`` /
+# ``satisfies`` target writes the name too (PRRT_kwDOSJAM6s63YTT3).
 _JS_TS_LOOP_TARGET_RE = re.compile(
-    rf"(?:\([ \t]*)*({_JS_IDENT})(?:[ \t]*\))*"
-    r"(?=(?<=\))[ \t]*(?:of|in)(?![\w$])|[ \t]+(?:of|in)(?![\w$]))"
+    rf"(?:\([ \t]*)*({_JS_IDENT})"
+    r"(?:[ \t]*[)!]|[ \t]+(?:as|satisfies)[ \t]+[^()=;!]*?(?=[ \t]*\)))*"
+    r"(?=(?<=[)!])[ \t]*(?:of|in)(?![\w$])|[ \t]+(?:of|in)(?![\w$]))"
 )
 _JS_TS_LOOP_KEYWORD_RE = re.compile(r"[ \t]*(?:of|in)(?![\w$])")
 # A word a destructuring pattern can follow, unlike the object of ``a[LIMIT]``.
