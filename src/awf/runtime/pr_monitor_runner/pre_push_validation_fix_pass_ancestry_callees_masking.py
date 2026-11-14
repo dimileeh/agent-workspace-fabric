@@ -27,8 +27,9 @@ def _mask_char_preserving_splitlines_separators(ch: str) -> str:
 
 
 # What precedes a JSX element opened as an expression (``= <A />``,
-# ``return (<div>``, ``cond && <A />``): its completion ends the JSX.
-_JSX_ROOT_PREFIX_RE = re.compile(r"(?:[=(,?:\[{&|]|(?<![\w$])(?:return|yield|default))\s*$")
+# ``return (<div>``, ``cond && <A />``, ``() => <A />`` (PRRT_kwDOSJAM6s63Y_3L)):
+# its completion ends the JSX.
+_JSX_ROOT_PREFIX_RE = re.compile(r"(?:=>|[=(,?:\[{&|]|(?<![\w$])(?:return|yield|default))\s*$")
 # TypeScript type operators that code may put after a completed element
 # (``<Widget /> as Props``) (PRRT_kwDOSJAM6s63XLQg).
 _JSX_TYPE_OPERATOR_RE = re.compile(r"(?:as|satisfies)(?![\w$])")

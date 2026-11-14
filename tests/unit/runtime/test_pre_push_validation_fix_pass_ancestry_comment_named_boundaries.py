@@ -1148,6 +1148,9 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
         pytest.param("src/app/web/team.jsx", "<></>", id="jsx-fragment"),
         pytest.param("src/app/web/team.tsx", "<div>hi</div>", id="tsx-closing-tag"),
         pytest.param("src/app/web/team.jsx", "<ui.Panel open />", id="jsx-member-tag"),
+        # PRRT_kwDOSJAM6s63Y_3L: a concise arrow body roots its JSX element.
+        pytest.param("src/app/web/team.tsx", "() => <Widget />;", id="tsx-arrow-body"),
+        pytest.param("src/app/web/team.jsx", "() => <div>hi</div>;", id="jsx-arrow-body"),
     ],
 )
 @pytest.mark.parametrize(
