@@ -969,6 +969,23 @@ def test_callee_refs_jsx_text_quote_opens_no_string(
             frozenset({(None, "helper")}),
             id="line-start-block-comment-after-element",
         ),
+        # PRRT_kwDOSJAM6s63acD7: a JSX text ``#`` opens no comment either.
+        pytest.param(
+            "const v = <div># 1</div>;\nhelper();\n",
+            2,
+            frozenset({(None, "helper")}),
+            id="text-hash",
+        ),
+        pytest.param("const v = <p># helper()</p>;\n", 1, frozenset(), id="text-hash-stays-text"),
+        pytest.param(
+            "const v = <div>\n# 1</div>;\nhelper();\n",
+            3,
+            frozenset({(None, "helper")}),
+            id="line-start-text-hash",
+        ),
+        pytest.param(
+            "const v = <A />; # helper()\n", 1, frozenset(), id="hash-after-element-stays-comment"
+        ),
     ],
 )
 @pytest.mark.unit

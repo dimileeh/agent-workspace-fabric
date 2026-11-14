@@ -428,6 +428,10 @@ def _mask_comments_and_string_literals_for_callee_scan(
                 out.append(ch)
                 i += 1
                 continue
+            if jsx and _jsx_text_slashes_at(out, line_start=_line_comment_spans_tag(line, i)):
+                out.append(ch)
+                i += 1
+                continue
             out.append(" ")
             i = _append_comment_run_for_callee_scan(line, i + 1, out, n=n)
             continue
@@ -502,17 +506,23 @@ def _block_comment_spans_tag(line: str, start: int) -> bool:
     return "<" in line[start + 2 : end if end >= 0 else len(line)]
 
 
+def _line_comment_spans_tag(line: str, start: int) -> bool:
+    """Whether a line comment at ``start`` would blank a ``<`` before its line ends."""
+    return "<" in re.split(r"[\r\n]", line[start:], maxsplit=1)[0]
+
+
 def _jsx_text_slashes_at(out: list[str], *, line_start: bool = False) -> bool:
-    """Whether a ``//`` or ``/*`` after masked ``out`` is JSX text rather than a comment.
+    """Whether a ``//``, ``/*`` or ``#`` after masked ``out`` is JSX text rather than a comment.
 
     JSX text such as ``<a>https://x.dev</a>`` holds no comments; masking its
     ``//`` as one would blank the closing tag, and the JSX text pass would then
     blank every later line (PRRT_kwDOSJAM6s63Zv5r); a text ``/*`` with no
-    ``*/`` would blank the rest of the file (PRRT_kwDOSJAM6s63Z51N). The opener
-    is text when the JSX text pass would blank it. One starting its line stays a
-    comment unless ``line_start`` (a ``/*`` that would blank a closing tag,
-    PRRT_kwDOSJAM6s63aHzN), and the check reads only from the column-0
-    declaration holding it, so ordinary comments stay cheap.
+    ``*/`` would blank the rest of the file (PRRT_kwDOSJAM6s63Z51N), as would a
+    text ``#`` (``<div># 1</div>``) its closing tag (PRRT_kwDOSJAM6s63acD7). The
+    opener is text when the JSX text pass would blank it. One starting its line
+    stays a comment unless ``line_start`` (a ``/*`` or ``#`` that would blank a
+    closing tag, PRRT_kwDOSJAM6s63aHzN), and the check reads only from the
+    column-0 declaration holding it, so ordinary comments stay cheap.
     """
     prefix = "".join(out)
     line_begin = max(prefix.rfind("\n"), prefix.rfind("\r")) + 1

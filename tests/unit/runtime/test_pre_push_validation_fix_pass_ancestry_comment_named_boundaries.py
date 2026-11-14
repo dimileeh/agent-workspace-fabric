@@ -1212,6 +1212,9 @@ async def test_js_ts_type_operator_after_instantiation_expression_continues_only
             "src/app/web/team.tsx", "<div>/* helper()</div>;", id="tsx-text-block-comment-opener"
         ),
         pytest.param("src/app/web/team.jsx", "<p>a /* b</p>;", id="jsx-text-block-comment-opener"),
+        # PRRT_kwDOSJAM6s63acD7: a JSX text ``#`` opens no line comment.
+        pytest.param("src/app/web/team.tsx", "<div># 1</div>;", id="tsx-text-hash"),
+        pytest.param("src/app/web/team.jsx", "<p>Issue #{n}</p>;", id="jsx-text-hash-before-brace"),
         # PRRT_kwDOSJAM6s63Z51H: a unary operator roots its JSX operand.
         pytest.param("src/app/web/team.tsx", "!<Widget />;", id="tsx-unary-not"),
         pytest.param("src/app/web/team.jsx", "~<div>hi</div>;", id="jsx-unary-bitwise-not"),
@@ -1254,6 +1257,26 @@ async def test_js_ts_line_start_jsx_text_block_comment_opener_ends_no_statement(
     path = "src/app/web/team.tsx"
     text = "export const VIEW = <div>\n/* helper()\n</div>;\nexport const OTHER = 1;\n"
     diff = _diff(path, "@@ -4 +4 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
+    runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
+
+    assert await _changes_named_target(runner, comment) is expected
+
+
+@pytest.mark.parametrize(
+    ("comment", "expected"),
+    [
+        pytest.param("`VIEW` is wrong", False, id="unchanged-jsx-binding"),
+        pytest.param("`OTHER` is wrong", True, id="changed-next-binding"),
+    ],
+)
+@pytest.mark.unit
+async def test_js_ts_line_start_jsx_text_hash_ends_no_statement(
+    comment: str, *, expected: bool
+) -> None:
+    """A ``#`` starting a JSX text line before its tag opens no comment (PRRT_kwDOSJAM6s63acD7)."""
+    path = "src/app/web/team.tsx"
+    text = "export const VIEW = <div>\n# 1</div>;\nexport const OTHER = 1;\n"
+    diff = _diff(path, "@@ -3 +3 @@", "-export const OTHER = 1;", "+export const OTHER = 2;")
     runner = _probe(texts={path: text}, changed_paths=(path,), diffs={path: diff})
 
     assert await _changes_named_target(runner, comment) is expected
