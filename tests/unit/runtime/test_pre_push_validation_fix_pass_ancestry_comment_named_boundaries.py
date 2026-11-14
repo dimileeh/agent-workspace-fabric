@@ -1879,6 +1879,13 @@ async def test_js_ts_continued_reassignment_withholds_the_binding(
             False,
             id="later-block",
         ),
+        pytest.param(
+            "export const handler = function (): Promise<number> {\n  return 10;\n};\n"
+            "{\n  work();\n}\n",
+            ("@@ -5 +5 @@", "-  work();", "+  rework();"),
+            False,
+            id="generic-return-type-later-block",
+        ),
     ],
 )
 @pytest.mark.unit
@@ -1910,6 +1917,24 @@ async def test_js_ts_split_function_initializer_body_stays_in_the_binding(
             "{\n  run() { return 10; }\n};\n",
             ("@@ -3 +3 @@", "-  run() { return 10; }", "+  run() { return 11; }"),
             id="object-argument-heritage",
+        ),
+        pytest.param(
+            "export const handler = function (): { value: number }\n"
+            "{\n  return { value: 10 };\n};\n",
+            ("@@ -3 +3 @@", "-  return { value: 10 };", "+  return { value: 11 };"),
+            id="object-return-type",
+        ),
+        pytest.param(
+            "export const handler = function (): Promise<{ value: number }> | { value: 1 }\n"
+            "{\n  return { value: 1 };\n};\n",
+            ("@@ -3 +3 @@", "-  return { value: 1 };", "+  return { value: 1 as const };"),
+            id="union-generic-return-type",
+        ),
+        pytest.param(
+            "export const handler = function (): () => { value: number }\n"
+            "{\n  return () => ({ value: 10 });\n};\n",
+            ("@@ -3 +3 @@", "-  return () => ({ value: 10 });", "+  return () => ({ value: 11 });"),
+            id="function-type-return-type",
         ),
     ],
 )
