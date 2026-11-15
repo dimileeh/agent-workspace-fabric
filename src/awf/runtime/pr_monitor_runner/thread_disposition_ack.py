@@ -47,7 +47,10 @@ from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evide
 from awf.common.redaction import redact_secrets
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner.thread_disposition import disposition_marker_class
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    DispositionClass,
+    disposition_marker_class,
+)
 
 ACKNOWLEDGES: Final = "ACKNOWLEDGES"
 NEW_POINT: Final = "NEW_POINT"
@@ -88,7 +91,7 @@ _DISSENT_RE = re.compile(
 )
 # A clause concurs only as a whole (it is matched in full): "Agreed that the handler
 # crashes" or "has a guard that crashes" may report a defect, so the agent judges it.
-_CONCURRENCE_RE = re.compile(
+_CONCURRENCE_HEAD = (
     r"(?:@\S+\s+)?(?:"
     # An agreement word concurs only alone.
     r"agreed|i agree|you're (?:right|correct)|that's (?:right|correct)|"
@@ -114,20 +117,31 @@ _CONCURRENCE_RE = re.compile(
     r"though|although|even|despite|yet|while|whilst|whereas|except|so|because|since|or|"
     r"the|this|that|these|those|it|its|they|we|i|my|our)(?![\w`'-]))[\w`'-]+){0,3}\s+)?"
     r"\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"
+    r"leav(?:e|ing) (?:the )?resolution to (?:the )?(?:awf(?: monitor)?|monitor|you|@\S+)|"
+    r"no further (?:action|changes?) (?:is |are )?(?:needed|required)"
+)
+# A claim about the finding concurs only with the disposition it matches: "this is a
+# fix rather than a false positive" rejects a false-positive ruling, and "this is a
+# false positive" is no confirmation of a fix, so the agent judges either elsewhere.
+_FIX_CLAIMS = (
     # A verification concurs only when it is of the fix: a bare one may confirm the finding.
-    r"(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
+    r"|(?:confirmed|verified) (?:the )?fix(?: (?:on|in|at) the (?:current|latest) "
     r"(?:head|revision|commit))?|fix (?:is |was |has been )?(?:confirmed|verified)|"
     r"is (?:now )?(?:fixed|addressed|resolved)|is a fix(?: rather than a false positive)?|"
-    # Agreeing with a false-positive disposition: "Agreed, this is a false positive."
-    r"(?:is|was) a false positive|"
     r"covers this case|"
     # The fix is present: the code has it, or its commit is in the revision.
     r"(?:has|have|contains|includes) the (?:guard|fix|check|test)|"
-    r"commit [0-9a-f]{7,40} is (?:now )?in(?: the (?:current|latest) (?:head|revision))?|"
-    r"leav(?:e|ing) (?:the )?resolution to (?:the )?(?:awf(?: monitor)?|monitor|you|@\S+)|"
-    r"no further (?:action|changes?) (?:is |are )?(?:needed|required)))",
-    re.I,
+    r"commit [0-9a-f]{7,40} is (?:now )?in(?: the (?:current|latest) (?:head|revision))?"
 )
+# Agreeing with a false-positive disposition: "Agreed, this is a false positive."
+_FALSE_POSITIVE_CLAIMS = r"|(?:is|was) a false positive"
+_FIX_CONCURRENCE_RE = re.compile(f"{_CONCURRENCE_HEAD}{_FIX_CLAIMS}))", re.I)
+_CONCURRENCE_RES: dict[DispositionClass, re.Pattern[str]] = {
+    "fixed": _FIX_CONCURRENCE_RE,
+    "fixed_branch_evidence": _FIX_CONCURRENCE_RE,
+    "false_positive": re.compile(f"{_CONCURRENCE_HEAD}{_FALSE_POSITIVE_CLAIMS}))", re.I),
+    "deferred": re.compile(f"{_CONCURRENCE_HEAD}))", re.I),
+}
 # Every clause must concur or only thank; anything else (an imperative such as "Add a
 # test", or a statement such as "The handler crashes") could be a new point, so the
 # agent judges it. A spaced hyphen, a dash, a bracket or "and" also joins clauses.
@@ -141,11 +155,13 @@ def comment_identity(comment: AuditedThreadComment) -> str:
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
-def is_bot_concurrence(body: str) -> bool:
-    """Whether ``body`` only concurs with AWF's disposition, decided without the agent.
+def is_bot_concurrence(body: str, *, disposition_class: DispositionClass) -> bool:
+    """Whether ``body`` only concurs with AWF's ``disposition_class``, decided without the agent.
 
-    ``True`` means certainly a concurrence: it withdraws the finding, confirms the
-    fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
+    ``True`` means certainly a concurrence: it withdraws the finding, leaves
+    resolution to AWF, or makes the claim that class rests on (a fix confirmed for
+    a fixed one, a false positive for a false-positive one; none for a deferral),
+    in the bot's own words outside quotes, with
     no dissent or new request, no code fence and no code reference, and every
     clause of it either concurs or only thanks. HTML comments,
     and ``<details>`` blocks whose whole summary is a supporting-material label
@@ -168,9 +184,10 @@ def is_bot_concurrence(body: str) -> bool:
         return False
     own = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith(">"))
     clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(own) if c.strip()]
-    if not all(_CONCURRENCE_RE.fullmatch(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
+    concurrence = _CONCURRENCE_RES[disposition_class]
+    if not all(concurrence.fullmatch(c) or _THANKS_CLAUSE_RE.fullmatch(c) for c in clauses):
         return False
-    return any(_CONCURRENCE_RE.fullmatch(c) for c in clauses)
+    return any(concurrence.fullmatch(c) for c in clauses)
 
 
 def acknowledgement_view(thread: AuditedReviewThread, *, viewer: str) -> AuditedReviewThread | None:

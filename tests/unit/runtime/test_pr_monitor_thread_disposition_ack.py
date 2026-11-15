@@ -30,7 +30,11 @@ from awf.runtime.monitor_state_keys import (
     _disposition_auto_reopen_key,
 )
 from awf.runtime.pr_monitor import NotifyHuman
-from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    DISPOSITION_CLASSES,
+    DispositionClass,
+    read_item_disposition,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ACKNOWLEDGES,
     MAX_ACK_REFETCH_FAILURES,
@@ -433,12 +437,50 @@ NEW_CONCERNS = (
         "I verified the fix.",
         "I've confirmed the fix on the latest head.",
         "The null pointer dereference is fixed.",
-        FALSE_POSITIVE_CONCURRENCE,
-        "This was a false positive.",
     ],
 )
-def test_an_explicit_concurrence_is_recognised(body: str) -> None:
-    assert is_bot_concurrence(body) is True
+@pytest.mark.parametrize("disposition_class", ["fixed", "fixed_branch_evidence"])
+def test_an_explicit_concurrence_with_a_fix_is_recognised(
+    body: str, disposition_class: DispositionClass
+) -> None:
+    assert is_bot_concurrence(body, disposition_class=disposition_class) is True
+
+
+@pytest.mark.parametrize("body", [FALSE_POSITIVE_CONCURRENCE, "This was a false positive."])
+def test_an_explicit_concurrence_with_a_false_positive_is_recognised(body: str) -> None:
+    assert is_bot_concurrence(body, disposition_class="false_positive") is True
+
+
+@pytest.mark.parametrize("disposition_class", DISPOSITION_CLASSES)
+@pytest.mark.parametrize(
+    "body", [CONCURRENCES[0], "Retracted.", "LGTM.", "I'm leaving resolution to the AWF monitor."]
+)
+def test_a_class_neutral_concurrence_is_recognised_for_every_disposition(
+    body: str, disposition_class: DispositionClass
+) -> None:
+    assert is_bot_concurrence(body, disposition_class=disposition_class) is True
+
+
+@pytest.mark.parametrize(
+    ("body", "disposition_class"),
+    [
+        # A bot rejecting AWF's false-positive ruling: the finding is real.
+        (CONCURRENCES[1], "false_positive"),
+        ("This is a fix rather than a false positive.", "false_positive"),
+        ("This is a fix.", "false_positive"),
+        ("The null pointer dereference is fixed.", "false_positive"),
+        (CONCURRENCES[2], "false_positive"),
+        # A false-positive claim confirms no fix, and a deferral rests on neither claim.
+        (FALSE_POSITIVE_CONCURRENCE, "fixed"),
+        ("This was a false positive.", "fixed_branch_evidence"),
+        ("I verified the fix.", "deferred"),
+        (FALSE_POSITIVE_CONCURRENCE, "deferred"),
+    ],
+)
+def test_a_claim_that_contradicts_the_disposition_class_is_not_recognised(
+    body: str, disposition_class: DispositionClass
+) -> None:
+    assert is_bot_concurrence(body, disposition_class=disposition_class) is False
 
 
 @pytest.mark.parametrize(
@@ -561,5 +603,8 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed. <details><summary>Logs of the new crash</summary>x</details>",
     ],
 )
-def test_anything_short_of_an_explicit_concurrence_is_not_recognised(body: str) -> None:
-    assert is_bot_concurrence(body) is False
+@pytest.mark.parametrize("disposition_class", DISPOSITION_CLASSES)
+def test_anything_short_of_an_explicit_concurrence_is_not_recognised(
+    body: str, disposition_class: DispositionClass
+) -> None:
+    assert is_bot_concurrence(body, disposition_class=disposition_class) is False

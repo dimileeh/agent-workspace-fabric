@@ -78,6 +78,8 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
     REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT,
     REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED,
+    DispositionClass,
+    disposition_marker_class,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ACKNOWLEDGES,
@@ -191,6 +193,10 @@ async def judge_pending_disposition_acks(
         thread = next((t for t in audit.threads if t.thread_id == thread_id), None)
         view = acknowledgement_view(thread, viewer=viewer) if thread and viewer else None
         if thread is not None and view is not None:
+            # The marker the view certified: a concurrence must agree with its class.
+            disposition_class = disposition_marker_class(
+                view.current_viewer_comment_bodies[-1:], thread_id=thread_id
+            )
             for comment in thread.trailing_comments:
                 if read_ack_judgment(state, thread_id, comment) is not None:
                     continue
@@ -205,6 +211,7 @@ async def judge_pending_disposition_acks(
                         compose_file=compose_file,
                         state=state,
                         reply=comment.body,
+                        disposition_class=disposition_class,
                         prompt=ack_check_prompt(
                             thread.opener.body if thread.opener else "",
                             view.viewer_comment_bodies[-1],
@@ -245,13 +252,16 @@ async def _judge(
     compose_file: Path,
     state: MonitorState,
     reply: str,
+    disposition_class: DispositionClass | None,
     prompt: str,
 ) -> tuple[AckJudgment, str]:
     """Judge the reply, deterministically when it plainly concurs, else by the agent.
 
     Returns the judgment and why.
     """
-    if is_bot_concurrence(reply):
+    if disposition_class is not None and is_bot_concurrence(
+        reply, disposition_class=disposition_class
+    ):
         # #1238: no agent run, so no hosted, length or worktree limit applies.
         return ACKNOWLEDGES, "concurrence"
     if self._deps.adapter.is_hosted:

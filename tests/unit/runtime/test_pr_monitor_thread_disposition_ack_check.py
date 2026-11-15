@@ -626,7 +626,9 @@ async def test_a_reply_too_long_to_quote_whole_fails_the_check_without_running_t
 @pytest.mark.parametrize(
     ("body", "hosted"),
     [
-        *((body, False) for body in CONCURRENCES),
+        # Each agrees with the thread's false-positive marker.
+        (CONCURRENCES[0], False),
+        (FALSE_POSITIVE_CONCURRENCE, False),
         # Both were UNJUDGED before the agent was ever asked: too long, or hosted.
         pytest.param(CONCURRENCE_WITH_ANALYSIS, False, id="analysis-chain-over-the-cap"),
         pytest.param(CONCURRENCES[0], True, id="hosted-adapter"),
@@ -668,7 +670,7 @@ async def test_repeated_concurrences_across_re_triages_keep_passing_without_a_re
     # re-triage) is a new identity, judged again: never a one-shot per thread.
     first = thread_comment(CONCURRENCES[0], comment_id="3")
     edited = thread_comment(f"{CONCURRENCES[0]} Thanks!", comment_id="3")
-    after_fresh_marker = thread_comment(CONCURRENCES[2], comment_id="5")
+    after_fresh_marker = thread_comment(FALSE_POSITIVE_CONCURRENCE, comment_id="5")
     state, gh, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(first,))
     rounds = (
         acked_thread(_SILENT, _MARKER, trailing=(first,)),
@@ -694,6 +696,32 @@ async def test_repeated_concurrences_across_re_triages_keep_passing_without_a_re
         assert state.threads_addressed_ids[key] == ACKNOWLEDGES
     details = [e["evidence"]["detail"] for e in await _ack_events(factory, workspace_id)]
     assert details == ["concurrence"] * 3
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_a_fix_claim_against_a_false_positive_marker_is_no_concurrence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    hosted: bool,
+) -> None:
+    # "A fix rather than a false positive" rejects AWF's false-positive ruling: it
+    # never certifies that ruling without the agent, and a hosted run re-triages.
+    reply = thread_comment(CONCURRENCES[1], comment_id="3")
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(reply,))
+    if hosted:
+        runner._deps.adapter._runtime_executor = object()
+    else:
+        runner._deps.adapter.queue(stdout="AWF-DISPOSITION-ACK: NEW_POINT")
+
+    await _judge(runner, workspace_id, state)
+
+    key = _disposition_ack_key(_SILENT, comment_identity(reply))
+    assert state.threads_addressed_ids[key] == (UNJUDGED if hosted else NEW_POINT)
+    assert len(runner._deps.adapter.calls) == (0 if hosted else 1)
+    [event] = await _ack_events(factory, workspace_id)
+    assert event["evidence"]["detail"] != "concurrence"
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    assert gh.unresolved == [_SILENT]
 
 
 @pytest.mark.parametrize("body", NEW_CONCERNS)
