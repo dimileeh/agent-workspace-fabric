@@ -678,6 +678,26 @@ async def test_keep_self_cited_item_commit_hosted_published_tip_keeps_push_track
 
 
 @pytest.mark.unit
+async def test_keep_self_cited_item_commit_keeps_a_known_head_past_a_capped_listing(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s63mToC: a capped ``rev-list`` still leaves the known heads citable.
+
+    The listing stops at its newest commits (E, D), so the correction-start head
+    B is not in it; citing B must keep it rather than roll the item back.
+    """
+    runner = _runner(tmp_path, correction="unused", correction_head=_E)
+    runner._range = lambda _spec: [_E, _D]  # type: ignore[method-assign]
+    runner.current_head = _E
+
+    result = await _keep(runner, reason=f"already addressed by {_B}")
+
+    assert result is not None
+    assert result.verdict == "fix_committed"
+    assert runner.reset_targets == [_B]
+
+
+@pytest.mark.unit
 async def test_keep_self_cited_item_commit_fails_closed_on_floor_probe_error(
     tmp_path: Path,
 ) -> None:

@@ -223,10 +223,16 @@ async def keep_self_cited_item_commit(
         item_start_head=item_start_head,
         attempt_tip=post_attempt_head,
     )
-    if not item_commits:
-        # Same fallback as the tip-only self-citation check: the heads this
-        # protocol itself read inside the item, newest first.
-        item_commits = [head for head in (post_attempt_head, *known_item_heads) if head]
+    # Same fallback as the tip-only self-citation check: the heads this protocol
+    # itself read inside the item, newest first. They follow even a non-empty
+    # listing, which ``_MAX_ATTEMPT_COMMITS`` caps at the newest commits, so an
+    # older known head stays citable (PRRT_kwDOSJAM6s63mToC).
+    listed = {commit.lower() for commit in item_commits}
+    item_commits += [
+        head
+        for head in (post_attempt_head, *known_item_heads)
+        if head and head.lower() not in listed
+    ]
     cited = cited_item_commit(reason, candidates=item_commits, item_start_head=item_start_head)
     if cited is None:
         return None
