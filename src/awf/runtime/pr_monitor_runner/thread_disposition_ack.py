@@ -114,6 +114,8 @@ _CONCURRENCE_HEAD = (
     r"seem(?:s|ingly)?|appears?|supposedly|unconfirmed|unverified|"
     # A qualifier ("only partially", "almost", "the partial fix") limits the claim.
     r"[\w`'-]*ly|almost|somewhat|half|quite|just|rather|partial|incomplete|some|most|"
+    # A modal ("may be", "will be", "is to be") makes it a possible or future withdrawal or fix.
+    r"may|might|will|shall|would|could|can|should|must|ought|going|gonna|to|[\w`'-]*'(?:ll|d)|"
     r"though|although|even|despite|yet|while|whilst|whereas|except|so|because|since|or|"
     r"the|this|that|these|those|it|its|they|we|i|my|our)(?![\w`'-]))[\w`'-]+){0,3}\s+)?"
     r"\b(?:withdrawn|retracted|withdraw(?:ing)? (?:the|this|my) (?:finding|comment|point)|"

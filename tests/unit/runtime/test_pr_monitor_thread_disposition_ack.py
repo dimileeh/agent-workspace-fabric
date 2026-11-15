@@ -577,6 +577,16 @@ def test_a_claim_that_contradicts_the_disposition_class_is_not_recognised(
         "The partial fix is fixed.",
         "It mostly is fixed.",
         "It is probably a false positive.",
+        # Only a current withdrawal or fix concurs: a possible or future one may never land.
+        "The finding may be withdrawn.",
+        "The finding will be withdrawn.",
+        "The finding shall be withdrawn.",
+        "The finding can be withdrawn.",
+        "The finding must be withdrawn.",
+        "This is to be withdrawn.",
+        "The finding'll be withdrawn.",
+        "It will have the fix.",
+        "It may have the fix.",
         # A comma does not shed the hedge, nor does a withdrawal word ahead of it.
         "LGTM, the moment it is fixed.",
         "Withdrawn, the minute it is fixed.",
