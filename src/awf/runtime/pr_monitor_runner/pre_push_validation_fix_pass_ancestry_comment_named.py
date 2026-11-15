@@ -68,7 +68,15 @@ _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
 _PATH_TOKEN_SPLIT_RE = re.compile(r"[\s`'\"()<>]+")
 _PATH_TRAILING_PUNCTUATION = ".,;:!?"
 _NAMED_PATH_RE = re.compile(r"((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]+)(?::(\d+)(?:-\d+)?)?")
-_FENCED_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+# A fenced block, ``` or ~~~, closes only on a run of its own character at least
+# as long as its opener; a backtick opener's info string has no backtick, so a
+# one-line ```span``` is not a fence. A block-quote prefix is allowed, and an
+# unclosed fence runs to the end of the text (PRRT_kwDOSJAM6s63mi4S).
+_FENCED_BLOCK_RE = re.compile(
+    r"^[ \t>]*(?:(?P<b>`{3,})[^`\n]*|(?P<t>~{3,})[^\n]*)\n"
+    r"(?:.*?^[ \t>]*(?:(?P=b)`*|(?P=t)~*)[ \t\r]*$|.*\Z)",
+    re.DOTALL | re.MULTILINE,
+)
 _INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 # A Python identifier; a JS-only spelling such as ``$helper`` names nothing here.
 _NAMED_IDENTIFIER_RE = re.compile(r"((?!\d)\w+)(?:\(\))?")

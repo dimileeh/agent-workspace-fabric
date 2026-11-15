@@ -107,6 +107,37 @@ def test_comment_named_paths_ignores_paths_only_inside_fenced_blocks() -> None:
 
 
 @pytest.mark.unit
+def test_comment_named_paths_ignores_tilde_longer_quoted_and_unclosed_fences() -> None:
+    # A fence closes only on a same-character run at least as long as its opener,
+    # so a ``~~~`` block and a four-backtick block quoting a three-backtick line
+    # are blanked whole; so is a fence in a block quote, and an unclosed fence
+    # runs to the end of the comment. A one-line triple-backtick span is no fence.
+    text = (
+        "Fix src/app/real.py\r\n"
+        "~~~text\r\nsrc/app/sample.py\r\n~~~\r\n"
+        "````markdown\n```\nsrc/app/inner.py\n```\nsrc/app/after_inner.py\n````\n"
+        "> ```\n> src/app/quoted.py\n> ```\n"
+        "and ```src/app/span.py``` too.\n"
+        "```\nsrc/app/unclosed.py"
+    )
+
+    assert comment_named._comment_named_paths(text) == (
+        ("src/app/real.py", None),
+        ("src/app/span.py", None),
+    )
+
+
+@pytest.mark.unit
+async def test_named_path_only_inside_a_tilde_fence_is_not_evidence() -> None:
+    runner = _probe(
+        changed_paths=(_DOC,),
+        diffs={_DOC: _diff(_DOC, "@@ -40 +40 @@", "-old", "+new")},
+    )
+
+    assert not await _changes_named_target(runner, f"For example:\n~~~text\n{_DOC}\n~~~\n")
+
+
+@pytest.mark.unit
 def test_comment_named_identifiers_accepts_single_backtick_names_and_calls() -> None:
     text = (
         "Add it to `_TASK_INBOUND_TYPES` and honour it in "
@@ -125,10 +156,21 @@ def test_comment_named_identifiers_rejects_dotted_argumented_fenced_and_keyword_
         "``double``, nor `None`, `True`, `self`, `cls`, `this`, `null`, "
         "`undefined`, `return`, `def`, `function`, nor the JS-only `$helper`.\n"
         "```python\nfenced_name\n```\n"
-        "```\n`fenced_inline`\n```"
+        "```\n`fenced_inline`\n```\n"
+        "~~~\n`tilde_inline`\n~~~\n"
+        "````\n```\n`after_inner_fence`\n```\n````"
     )
 
     assert comment_named._comment_named_identifiers(text) == frozenset()
+
+
+@pytest.mark.unit
+def test_comment_named_identifiers_keeps_prose_names_around_tilde_and_long_fences() -> None:
+    text = "Fix `before`.\n~~~\n`tilde_inline`\n~~~\nthen `between`.\n````\n```\n````\n`after`"
+
+    assert comment_named._comment_named_identifiers(text) == frozenset(
+        {"before", "between", "after"}
+    )
 
 
 @pytest.mark.unit
