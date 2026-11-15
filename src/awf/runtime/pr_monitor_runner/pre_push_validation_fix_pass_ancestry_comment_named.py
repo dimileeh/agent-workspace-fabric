@@ -196,8 +196,12 @@ def _bound_names(node: ast.AST) -> tuple[str, ...]:
         return () if isinstance(node.ctx, ast.Load) else (node.id,)
     if isinstance(node, _PYTHON_FUNCTION_OR_CLASS):
         return (node.name,)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
     if isinstance(node, ast.alias):
         return ((node.asname or node.name).split(".")[0],)
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return tuple(node.names)
     if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
         return (node.name,) if node.name else ()
     if isinstance(node, ast.MatchMapping):
@@ -317,23 +321,30 @@ def _deleted_paths_from_name_status_z(name_status_z: str) -> frozenset[str]:
     return frozenset(deleted)
 
 
-def _unaliased_import_modules(
+def _name_bindings(
     file_text: str, *, path: str, names: frozenset[str]
 ) -> dict[str, list[str | None]] | None:
-    """Module paths each of ``names`` is imported from without an alias in ``file_text``.
+    """How ``file_text`` binds each of ``names`` anywhere in it, or None when unparsable.
 
-    ``from M import name`` yields ``M`` as a ``/``-joined path prefix (a relative
-    ``M`` resolved against ``path``'s directory); ``import name`` / ``import
-    name.sub`` binds a module object, and an unresolvable relative import binds
-    something this reader cannot follow, so both yield None, as does a ``case``
-    pattern capturing the name (PRRT_kwDOSJAM6s63nFMJ). Imports and captures at
-    any depth count, as the definition scan's lines do. Unparsable text returns None.
+    Every binding form the stdlib ``ast`` records counts, at any depth and in
+    any scope (``_bound_names``): an assignment, augmented, annotated,
+    unpacking, ``for``/``with``/``except``/walrus or ``del`` target, a
+    ``def``/``class`` name, a parameter, an aliased or plain ``import``, a
+    ``case`` capture, and a ``global``/``nonlocal`` declaration. Each yields
+    None, a binding of the file's own. An unaliased ``from M import name`` —
+    or a ``from M import *`` in a file that uses the name — yields ``M`` as a
+    ``/``-joined path prefix instead (a relative ``M`` resolved against
+    ``path``'s directory, None when it cannot be), so a re-import of another
+    binding file's object can be told apart from a second definition.
     """
     try:
         tree = ast.parse(file_text)
     except (SyntaxError, ValueError, RecursionError):
         return None
-    modules: dict[str, list[str | None]] = {}
+    used = names & {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    from_modules: dict[ast.alias, str | None] = {}
+    bindings: dict[str, list[str | None]] = {}
+    # ``ast.walk`` is breadth-first, so an ``ImportFrom`` precedes its aliases.
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = (
@@ -342,18 +353,15 @@ def _unaliased_import_modules(
                 else (node.module or "").replace(".", "/")
             )
             for alias in node.names:
-                if alias.asname is None and alias.name in names:
-                    modules.setdefault(alias.name, []).append(module)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                bound = alias.name.split(".")[0]
-                if alias.asname is None and bound in names:
-                    modules.setdefault(bound, []).append(None)
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
-            for bound in _bound_names(node):
-                if bound in names:
-                    modules.setdefault(bound, []).append(None)
-    return modules
+                if alias.asname is None:
+                    from_modules[alias] = module
+        elif isinstance(node, ast.alias) and node in from_modules:
+            for name in used if node.name == "*" else names & {node.name}:
+                bindings.setdefault(name, []).append(from_modules[node])
+        else:
+            for name in names.intersection(_bound_names(node)):
+                bindings.setdefault(name, []).append(None)
+    return bindings
 
 
 async def _names_defined_in_several_files(
@@ -363,62 +371,35 @@ async def _names_defined_in_several_files(
 
     A backticked name carries no module, so when two files define it the
     comment does not say which one the reviewed code reaches, and a change to an
-    unrelated same-named definition must not count (PRRT_kwDOSJAM6s63mN54). One
-    ``git grep`` over every Python source finds the lines that may bind the name:
-    a ``def``/``class`` at any depth, a leading annotation, an assignment or
-    walrus target anywhere on the line (chained, tuple, indented —
-    PRRT_kwDOSJAM6s63mfY9), an ``as``/``for`` target, or any element of a
-    leading assignment or ``for`` target list (PRRT_kwDOSJAM6s63misj). A docstring line, a
-    method, or a keyword argument only over-counts, so the scan can only
-    withhold a name.
+    unrelated same-named definition must not count (PRRT_kwDOSJAM6s63mN54).
 
-    An unaliased import binds the name too (PRRT_kwDOSJAM6s63m-rh): a file whose
-    line may import it — an ``import`` line, or a bare name-list line a wrapped
-    import continues on — is read and parsed, and each import that does not come
+    One whole-word ``git grep -l`` lists the Python sources that spell a name at
+    all; each is read at ``ref`` and parsed, and ``_name_bindings`` collects how
+    it binds the name. Per-line patterns kept missing binding forms —
+    non-leading and unpacking targets, imports, ``case`` captures — so the
+    parser, not the grep, decides what binds. An unaliased import of the name
     from another binding file's own module (``from a import LIMIT`` re-exporting
-    ``a.py``'s) counts as one more definition. The module's own file must sit
-    under a root the importer's directory starts with, so ``src/app/json.py``
-    is not the ``json`` that ``from json import loads`` reaches
-    (PRRT_kwDOSJAM6s63nFsa). A ``case`` pattern capturing the name counts too,
-    in a file a second grep finds holding both a ``case`` clause and the name
-    (PRRT_kwDOSJAM6s63nFMJ). More than
-    ``_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS`` such files, or an unreadable or
-    unparsable one, fails closed.
+    ``a.py``'s) is not a second definition; the module's file must sit under a
+    root the importer's directory starts with, so ``src/app/json.py`` is not the
+    ``json`` that ``from json import loads`` reaches (PRRT_kwDOSJAM6s63nFsa).
+    More than ``_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS`` candidate files, or an
+    unreadable or unparsable one, fails closed.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _git_env_for_merge_safety_object_lookup,
         _path_text_at_ref,
     )
 
-    alternation = "|".join(sorted(names))
     result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,
             "grep",
-            "--no-line-number",
-            "--no-column",
+            "-l",
             "-z",
             "-I",
-            "-E",
-            "-e",
-            rf"^[[:space:]]*((async[[:space:]]+)?def|class)[[:space:]]+({alternation})"
-            r"([^[:alnum:]_]|$)",
-            "-e",
-            rf"^[[:space:]]*({alternation})[[:space:]]*:",
-            "-e",
-            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*:?=",
-            "-e",
-            rf"(^|[^[:alnum:]_])(as|for)[[:space:]]+({alternation})([^[:alnum:]_]|$)",
-            "-e",
-            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*[]),]",
-            "-e",
-            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]+in([^[:alnum:]_]|$)",
-            "-e",
-            rf"(^|[^[:alnum:]_.])import[[:space:](](.*[^[:alnum:]_.])?({alternation})"
-            r"([^[:alnum:]_]|$)",
-            "-e",
-            rf"^([[:alnum:]_[:space:],()]*[[:space:],(])?({alternation})"
-            r"([[:space:],()][[:alnum:]_[:space:],()]*)?([[:space:]]*#.*)?$",
+            "-w",
+            "-F",
+            *(argument for name in sorted(names) for argument in ("-e", name)),
             ref,
             "--",
             *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
@@ -428,107 +409,40 @@ async def _names_defined_in_several_files(
     if not result.ok:
         # ``git grep`` exits 1 when nothing matches; anything else is unreadable.
         return frozenset() if result.returncode == 1 and not result.stdout else None
-    # The grep prefilters whole lines; this keeps only a binding of a name — a
-    # comparison such as ``LIMIT == 1`` or an attribute ``x.LIMIT = 1`` is a read.
-    binding = re.compile(
-        rf"^\s*(?:(?:async\s+)?def|class)\s+({alternation})(?!\w)"
-        rf"|^\s*({alternation})\s*:"
-        rf"|(?<![\w.])({alternation})\s*:?=(?!=)"
-        rf"|(?<!\w)(?:as|for)\s+({alternation})(?!\w)"
-    )
-    # An unpacking target list leading the line — ``LIMIT, rest =``, ``(a, LIMIT) =``,
-    # ``for x, LIMIT in`` — binds every element; a ``(`` right after a word is a
-    # call, so ``f(LIMIT, key=1)`` stays a read.
-    target = r"(?:[\w.*,\[\]\s)]|(?<![\w\])])\()+?"
-    target_list = re.compile(
-        rf"^\s*(?:async\s+)?for\s+({target})\s+in(?!\w)|^\s*((?:{target}=(?!=))+)"
-    )
-    target_name = re.compile(rf"(?<![\w.])({alternation})(?!\w)")
-    # A line an import of a name may sit on: an ``import`` line, or a bare
-    # name list — the continuation of a wrapped ``from M import (...)``. A
-    # ``def``/``class`` head is a definition, never an import.
-    definition_head = re.compile(r"^\s*(?:(?:async\s+)?def|class)\s")
-    import_line = re.compile(
-        rf"(?<![\w.])import[\s(](?:.*[^\w.])?({alternation})(?!\w)"
-        rf"|^(?:[\w\s,()]*[\s,(])?({alternation})(?:[\s,()][\w\s,()]*)?(?:\s*#.*)?$"
-    )
-    files: dict[str, set[str]] = {}
-    import_paths: set[str] = set()
-    for record in str(result.stdout).splitlines():
-        head, terminated, line = record.partition("\0")
-        prefix, colon, path = head.partition(":")
-        if not (terminated and colon and prefix == ref):
-            return None
-        for match in binding.finditer(line):
-            name = next(group for group in match.groups() if group)
-            files.setdefault(name, set()).add(path)
-        targets = target_list.match(line)
-        for name in target_name.findall(targets.group(1) or targets.group(2)) if targets else ():
-            files.setdefault(name, set()).add(path)
-        if import_line.search(line) and not definition_head.match(line):
-            import_paths.add(path)
-    # A ``case`` pattern captures names too, possibly on a continuation line
-    # (PRRT_kwDOSJAM6s63nFMJ), so every file with a ``case`` clause that mentions
-    # a name is read and parsed alongside the importers.
-    pattern_files = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "grep",
-            "-l",
-            "-z",
-            "-I",
-            "-E",
-            "--all-match",
-            "-e",
-            r"^[[:space:]]*case([^[:alnum:]_]|$)",
-            "-e",
-            rf"(^|[^[:alnum:]_.])({alternation})([^[:alnum:]_]|$)",
-            ref,
-            "--",
-            *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
-        ),
-        env=_git_env_for_merge_safety_object_lookup(),
-    )
-    if not pattern_files.ok and (pattern_files.returncode != 1 or pattern_files.stdout):
+    *records, unterminated = str(result.stdout).split("\0")
+    if unterminated:
         return None
-    for record in filter(None, str(pattern_files.stdout).split("\0")):
+    candidates: set[str] = set()
+    for record in records:
         prefix, colon, path = record.partition(":")
-        if not (colon and prefix == ref):
+        if not (colon and path and prefix == ref):
             return None
-        import_paths.add(path)
-    if len(import_paths) > _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS:
+        candidates.add(path)
+    if len(candidates) > _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS:
         return None
-    importers: dict[str, dict[str, list[str | None]]] = {}
-    for path in sorted(import_paths):
+    binders: dict[str, dict[str, list[str | None]]] = {}
+    for path in sorted(candidates):
         file_text = await _path_text_at_ref(self, worktree_path=worktree_path, ref=ref, path=path)
-        modules = (
-            None
-            if file_text is None
-            else _unaliased_import_modules(file_text, path=path, names=names)
-        )
-        if modules is None:
+        bindings = None if file_text is None else _name_bindings(file_text, path=path, names=names)
+        if bindings is None:
             return None
-        for name, imported in modules.items():
-            importers.setdefault(name, {})[path] = imported
+        for name, modules in bindings.items():
+            binders.setdefault(name, {})[path] = modules
     ambiguous: set[str] = set()
-    for name in names:
-        defined = files.get(name, set())
-        imported_by = importers.get(name, {})
-        bound = defined | imported_by.keys()
-        foreign = [
+    for name, by_path in binders.items():
+        definitions = [
             path
-            for path, modules in imported_by.items()
-            if path not in defined
-            and any(
+            for path, modules in by_path.items()
+            if any(
                 module is None
                 or not any(
                     _candidate_is_under_module_path(other, module, call_site=path, exact=True)
-                    for other in bound - {path}
+                    for other in by_path.keys() - {path}
                 )
                 for module in modules
             )
         ]
-        if len(defined) + len(foreign) > 1:
+        if len(definitions) > 1:
             ambiguous.add(name)
     return frozenset(ambiguous)
 

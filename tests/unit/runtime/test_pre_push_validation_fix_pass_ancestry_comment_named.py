@@ -1034,15 +1034,13 @@ async def test_named_identifier_defined_in_another_file_is_not_evidence(ref: str
     # The comment names no module, so with a second definition anywhere in the
     # repo the changed one may be unrelated to the reviewed code's.
     runner = _probe(
-        texts={_INBOUND: _INBOUND_TEXT},
+        texts={
+            _INBOUND: _INBOUND_TEXT,
+            _OTHER: "class Sweeper:\n    def _TASK_INBOUND_TYPES(self):\n        return ()\n",
+        },
         changed_paths=(_INBOUND,),
         diffs={_INBOUND: _INBOUND_INSERT},
-        definitions={
-            ref: (
-                (_INBOUND, "_TASK_INBOUND_TYPES ="),
-                (_OTHER, "    def _TASK_INBOUND_TYPES("),
-            )
-        },
+        candidates={ref: (_INBOUND, _OTHER)},
     )
 
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
@@ -1052,17 +1050,11 @@ async def test_named_identifier_defined_in_another_file_is_not_evidence(ref: str
 @pytest.mark.unit
 async def test_only_the_ambiguous_named_identifier_is_withheld() -> None:
     other = "def other():\n    return 0\n"
-    definitions = (
-        (_INBOUND, "def other("),
-        (_OTHER, "other ="),
-        (_INBOUND, "_TASK_INBOUND_TYPES ="),
-        (_INBOUND, "_TASK_INBOUND_TYPES: tuple[str, ...] ="),
-    )
     runner = _probe(
         texts={_INBOUND: _INBOUND_TEXT, _OTHER: other},
         changed_paths=(_INBOUND, _OTHER),
         diffs={_INBOUND: _INBOUND_INSERT, _OTHER: _diff(_OTHER, "@@ -2 +2 @@", "-a", "+b")},
-        definitions={_LEFT: definitions, _RIGHT: definitions},
+        candidates={_LEFT: (_INBOUND, _OTHER), _RIGHT: (_INBOUND, _OTHER)},
     )
 
     assert await _changes_named_target(runner, "`other` and `_TASK_INBOUND_TYPES`")
@@ -1076,69 +1068,108 @@ async def test_only_the_ambiguous_named_identifier_is_withheld() -> None:
     [
         pytest.param(None, id="grep-failed"),
         # A record with no NUL path terminator, or another ref's, cannot be attributed.
-        pytest.param(f"{_LEFT}:{_INBOUND}:_TASK_INBOUND_TYPES =\n", id="no-terminator"),
-        pytest.param(f"{_RIGHT}:{_INBOUND}\0_TASK_INBOUND_TYPES =\n", id="foreign-ref"),
+        pytest.param(f"{_LEFT}:{_INBOUND}", id="no-terminator"),
+        pytest.param(f"{_RIGHT}:{_INBOUND}\0", id="foreign-ref"),
+        # PRRT_kwDOSJAM6s63nFMJ: a candidate that cannot be read or parsed may bind the name.
+        pytest.param((_INBOUND, "src/app/unreadable.py"), id="unreadable-candidate"),
+        pytest.param((_INBOUND, _OTHER), id="unparsable-candidate"),
     ],
 )
 @pytest.mark.unit
-async def test_unreadable_definition_grep_fails_closed(output: str | None) -> None:
+async def test_unreadable_definition_grep_fails_closed(
+    output: tuple[str, ...] | str | None,
+) -> None:
     runner = _probe(
-        texts={_INBOUND: _INBOUND_TEXT},
+        texts={_INBOUND: _INBOUND_TEXT, _OTHER: "_TASK_INBOUND_TYPES = (\n"},
         changed_paths=(_INBOUND,),
         diffs={_INBOUND: _INBOUND_INSERT},
-        definitions={_LEFT: output},
+        candidates={_LEFT: output},
     )
 
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
     assert runner.diff_paths == []
 
 
-@pytest.mark.parametrize("importers", [1, comment_named._MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS + 1])
+@pytest.mark.parametrize("importers", [1, comment_named._MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS])
 @pytest.mark.unit
-async def test_unreadable_or_too_many_import_lines_fail_closed(importers: int) -> None:
-    # PRRT_kwDOSJAM6s63m-rh: a file that may import the name is read; one that
+async def test_unreadable_or_too_many_candidate_files_fail_closed(importers: int) -> None:
+    # PRRT_kwDOSJAM6s63m-rh: every file spelling the name is read; one that
     # cannot be, or more files than the read cap, leaves uniqueness unproven.
     paths = [f"src/app/user_{index}.py" for index in range(importers)]
-    definitions = (
-        (_INBOUND, "_TASK_INBOUND_TYPES ="),
-        *((path, "from app.messaging.inbound_types import _TASK_INBOUND_TYPES") for path in paths),
-    )
     runner = _probe(
         texts={_INBOUND: _INBOUND_TEXT},
         changed_paths=(_INBOUND,),
         diffs={_INBOUND: _INBOUND_INSERT},
-        definitions={_LEFT: definitions},
+        candidates={_LEFT: (_INBOUND, *paths)},
     )
 
     assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
-    assert runner.shows == ([] if importers > 1 else paths)
+    assert runner.shows == ([] if importers > 1 else [_INBOUND, *paths])
     assert runner.diff_paths == []
+
+
+_EXTERNAL = "src/app/settings.py"
 
 
 @pytest.mark.parametrize(
-    "listed",
+    ("source", "modules"),
     [
-        pytest.param(None, id="grep-failed"),
-        pytest.param(f"{_RIGHT}:{_OTHER}\0", id="foreign-ref"),
-        pytest.param(("src/app/unreadable.py",), id="unreadable"),
+        pytest.param("LIMIT = 1\n", [None], id="assign"),
+        pytest.param("OTHER = LIMIT = 2\n", [None], id="chained"),
+        pytest.param("A, LIMIT = 1, 2\n", [None], id="tuple"),
+        pytest.param("(A, LIMIT) = 1, 2\n", [None], id="unpack-parenthesized"),
+        pytest.param("[*LIMIT, B] = 1, 2\n", [None], id="unpack-starred"),
+        pytest.param("A = B, LIMIT = 1, 2\n", [None], id="unpack-chained"),
+        pytest.param("if True:\n    LIMIT = 2\n", [None], id="indented"),
+        pytest.param("LIMIT: int\n", [None], id="annotation-only"),
+        pytest.param("LIMIT += 1\n", [None], id="augmented"),
+        pytest.param("del LIMIT\n", [None], id="del"),
+        pytest.param("print(LIMIT := 2)\n", [None], id="walrus"),
+        pytest.param("type LIMIT = int\n", [None], id="type-alias"),
+        pytest.param("for X, LIMIT in ():\n    pass\n", [None], id="for-unpack"),
+        pytest.param("X = [1 for LIMIT in ()]\n", [None], id="comprehension"),
+        pytest.param("with open() as (A, LIMIT):\n    pass\n", [None], id="with"),
+        pytest.param("try:\n    pass\nexcept E as LIMIT:\n    pass\n", [None], id="except"),
+        pytest.param("class C:\n    def LIMIT(self):\n        pass\n", [None], id="method"),
+        pytest.param("class LIMIT:\n    pass\n", [None], id="class"),
+        pytest.param("def f(*, LIMIT=1):\n    pass\n", [None], id="parameter"),
+        pytest.param("f = lambda LIMIT: 0\n", [None], id="lambda-parameter"),
+        pytest.param("def f():\n    global LIMIT\n", [None], id="global"),
+        pytest.param("def f():\n    def g():\n        nonlocal LIMIT\n", [None], id="nonlocal"),
+        pytest.param("import os as LIMIT\n", [None], id="import-as"),
+        pytest.param("import LIMIT.sub\n", [None], id="plain-import"),
+        pytest.param("from m import X as LIMIT\n", [None], id="from-import-as"),
+        pytest.param("from a.b import (\n    X,\n    LIMIT\n)\n", ["a/b"], id="from-import"),
+        pytest.param("from .settings import LIMIT\n", ["src/app/settings"], id="relative"),
+        pytest.param("from .......x import LIMIT\n", [None], id="relative-above-root"),
+        pytest.param("from a import *\nprint(LIMIT)\n", ["a"], id="star-used"),
+        pytest.param("def f():\n    from a import LIMIT\n", ["a"], id="local-import"),
+        pytest.param("match 2:\n    case LIMIT:\n        pass\n", [None], id="case-capture"),
+        pytest.param("match []:\n    case [*LIMIT]:\n        pass\n", [None], id="case-star"),
+        pytest.param("match {}:\n    case {**LIMIT}:\n        pass\n", [None], id="case-rest"),
+        pytest.param(
+            "match 2:\n    case {\n        'k': int() as LIMIT,\n    }:\n        pass\n",
+            [None],
+            id="case-wrapped-as",
+        ),
+        # Reading, aliasing away or comparing against the name binds nothing.
+        pytest.param("CHECK = LIMIT == 1\nX = f(LIMIT, key=1)\n", [], id="reads"),
+        pytest.param("x.LIMIT = 1\n", [], id="attribute"),
+        pytest.param("from m import LIMIT as OTHER\n", [], id="aliased-away"),
+        pytest.param("from a import *\n", [], id="star-unused"),
+        pytest.param("match 1:\n    case a.LIMIT:\n        pass\n", [], id="case-value"),
+        pytest.param("for X in (LIMIT, 2):\n    pass\n", [], id="for-iterable"),
     ],
 )
 @pytest.mark.unit
-async def test_unreadable_case_clause_files_fail_closed(
-    listed: tuple[str, ...] | str | None,
-) -> None:
-    # PRRT_kwDOSJAM6s63nFMJ: a file whose ``case`` pattern may capture the name
-    # must be read, so an unreadable listing or file leaves uniqueness unproven.
-    runner = _probe(
-        texts={_INBOUND: _INBOUND_TEXT},
-        changed_paths=(_INBOUND,),
-        diffs={_INBOUND: _INBOUND_INSERT},
-        definitions={_LEFT: ((_INBOUND, "_TASK_INBOUND_TYPES ="),)},
-        pattern_files={_LEFT: listed},
+def test_name_bindings_reads_every_binding_form(source: str, modules: list[str | None]) -> None:
+    # Each form a review round of this PR raised, read by the parser instead of a regex.
+    bindings = comment_named._name_bindings(
+        source, path=_EXTERNAL, names=frozenset({"LIMIT", "UNUSED"})
     )
 
-    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
-    assert runner.diff_paths == []
+    assert bindings == ({"LIMIT": modules} if modules else {})
+    assert comment_named._name_bindings("X = (\n", path=_EXTERNAL, names=frozenset()) is None
 
 
 def _git(repo: Path, *args: str) -> str:
