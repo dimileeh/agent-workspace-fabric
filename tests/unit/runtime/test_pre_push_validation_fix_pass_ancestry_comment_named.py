@@ -1092,8 +1092,18 @@ async def test_real_git_grep_withholds_a_name_two_packages_define(
         pytest.param("print(LIMIT := 2)\n", False, id="walrus"),
         pytest.param("import os as LIMIT\n", False, id="import-as"),
         pytest.param("for LIMIT in ():\n    pass\n", False, id="for-target"),
+        # PRRT_kwDOSJAM6s63misj: a non-final unpacking target binds the name too.
+        pytest.param("LIMIT, REST = 1, 2\n", False, id="unpack-leading"),
+        pytest.param("(A, LIMIT) = 1, 2\n", False, id="unpack-parenthesized"),
+        pytest.param("[*LIMIT, B] = 1, 2\n", False, id="unpack-starred"),
+        pytest.param("A = B, LIMIT = 1, 2\n", False, id="unpack-chained"),
+        pytest.param("for X, LIMIT in ():\n    pass\n", False, id="for-unpack"),
+        pytest.param("for (LIMIT, X) in ():\n    pass\n", False, id="for-unpack-paren"),
         # Reading the name is not a second definition.
         pytest.param("CHECK = LIMIT == 1 or LIMIT <= 2\n", True, id="reference-only"),
+        pytest.param("print(LIMIT, 1)\nX = max(LIMIT, 2)\n", True, id="call-argument"),
+        pytest.param("X = f(LIMIT, key=1)\n", True, id="call-keyword"),
+        pytest.param("for X in (LIMIT, 2):\n    pass\n", True, id="for-iterable"),
     ],
 )
 @pytest.mark.unit

@@ -300,7 +300,8 @@ async def _names_defined_in_several_files(
     ``git grep`` over every Python source finds the lines that may bind the name:
     a ``def``/``class`` at any depth, a leading annotation, an assignment or
     walrus target anywhere on the line (chained, tuple, indented —
-    PRRT_kwDOSJAM6s63mfY9), or an ``as``/``for`` target. A docstring line, a
+    PRRT_kwDOSJAM6s63mfY9), an ``as``/``for`` target, or any element of a
+    leading assignment or ``for`` target list (PRRT_kwDOSJAM6s63misj). A docstring line, a
     method, or a keyword argument only over-counts, so the scan can only
     withhold a name.
     """
@@ -327,6 +328,10 @@ async def _names_defined_in_several_files(
             rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*:?=",
             "-e",
             rf"(^|[^[:alnum:]_])(as|for)[[:space:]]+({alternation})([^[:alnum:]_]|$)",
+            "-e",
+            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*[]),]",
+            "-e",
+            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]+in([^[:alnum:]_]|$)",
             ref,
             "--",
             *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
@@ -344,6 +349,14 @@ async def _names_defined_in_several_files(
         rf"|(?<![\w.])({alternation})\s*:?=(?!=)"
         rf"|(?<!\w)(?:as|for)\s+({alternation})(?!\w)"
     )
+    # An unpacking target list leading the line — ``LIMIT, rest =``, ``(a, LIMIT) =``,
+    # ``for x, LIMIT in`` — binds every element; a ``(`` right after a word is a
+    # call, so ``f(LIMIT, key=1)`` stays a read.
+    target = r"(?:[\w.*,\[\]\s)]|(?<![\w\])])\()+?"
+    target_list = re.compile(
+        rf"^\s*(?:async\s+)?for\s+({target})\s+in(?!\w)|^\s*((?:{target}=(?!=))+)"
+    )
+    target_name = re.compile(rf"(?<![\w.])({alternation})(?!\w)")
     files: dict[str, set[str]] = {}
     for record in str(result.stdout).splitlines():
         head, terminated, line = record.partition("\0")
@@ -352,6 +365,9 @@ async def _names_defined_in_several_files(
             return None
         for match in binding.finditer(line):
             name = next(group for group in match.groups() if group)
+            files.setdefault(name, set()).add(path)
+        targets = target_list.match(line)
+        for name in target_name.findall(targets.group(1) or targets.group(2)) if targets else ():
             files.setdefault(name, set()).add(path)
     return frozenset(name for name, paths in files.items() if len(paths) > 1)
 
