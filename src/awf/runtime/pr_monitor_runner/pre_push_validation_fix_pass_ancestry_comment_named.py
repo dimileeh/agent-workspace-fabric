@@ -17,7 +17,9 @@ This module adds the fifth gate. Over the item's own commit range it accepts:
   names in single backticks (``name`` / ``name()``) in a **Python** source, read
   with the stdlib ``ast``: the effective module-level ``def``/``class`` or plain
   assignment of that name. A definition the range *adds* — in an existing file
-  or a new one — counts too. JS/TS sources (``.js``/``.jsx``/``.ts``/``.tsx``/
+  or a new one — counts too. A name more than one Python file defines does
+  not say which definition the reviewed code reaches, so it yields no
+  evidence. JS/TS sources (``.js``/``.jsx``/``.ts``/``.tsx``/
   ``.mjs``/``.cjs``, ...) have no parser here, so an identifier-named target in
   them yields no evidence and the item fails closed, as before #1232.
 
@@ -37,6 +39,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _CALLEE_KEYWORD_BLOCKLIST,
 )
@@ -75,6 +78,9 @@ _NON_DEFINITION_NAMES = (
     | frozenset({"self", "cls", "this", "null", "undefined"})
 )
 _PYTHON_FUNCTION_OR_CLASS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+# The name a ``git grep -o`` definition match spells: a ``def``/``class`` at any
+# depth, or a column-0 binding.
+_GREPPED_DEFINITION_NAME_RE = re.compile(r"\s*(?:(?:async\s+)?def|class)\s+(\w+)|(\w+)")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -272,6 +278,59 @@ def _diff_new_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> b
     return False
 
 
+async def _names_defined_in_several_files(
+    self: Any, *, worktree_path: Path, ref: str, names: frozenset[str]
+) -> frozenset[str] | None:
+    """The ``names`` more than one Python file at ``ref`` defines, or None when unreadable.
+
+    A backticked name carries no module, so when two files define it the
+    comment does not say which one the reviewed code reaches, and a change to an
+    unrelated same-named definition must not count (PRRT_kwDOSJAM6s63mN54). One
+    ``git grep`` over every Python source finds any ``def``/``class`` of the
+    name at any depth and any column-0 binding of it; a docstring line or a
+    method only over-counts, so the scan can only withhold a name.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    alternation = "|".join(sorted(names))
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "grep",
+            "--no-line-number",
+            "--no-column",
+            "-o",
+            "-z",
+            "-I",
+            "-E",
+            "-e",
+            rf"^[[:space:]]*((async[[:space:]]+)?def|class)[[:space:]]+({alternation})"
+            r"([^[:alnum:]_]|$)",
+            "-e",
+            rf"^({alternation})[[:space:]]*[:=]",
+            ref,
+            "--",
+            *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
+        ),
+        env=_git_env_for_merge_safety_object_lookup(),
+    )
+    if not result.ok:
+        # ``git grep`` exits 1 when nothing matches; anything else is unreadable.
+        return frozenset() if result.returncode == 1 and not result.stdout else None
+    files: dict[str, set[str]] = {}
+    for record in str(result.stdout).splitlines():
+        head, terminated, matched = record.partition("\0")
+        prefix, colon, path = head.partition(":")
+        if not (terminated and colon and prefix == ref):
+            return None
+        named = _GREPPED_DEFINITION_NAME_RE.match(matched)
+        if named is not None and (name := named.group(1) or named.group(2)) in names:
+            files.setdefault(name, set()).add(path)
+    return frozenset(name for name, paths in files.items() if len(paths) > 1)
+
+
 async def _commit_range_changes_comment_named_target(
     self: Any,
     *,
@@ -294,9 +353,10 @@ async def _commit_range_changes_comment_named_target(
     or a module-level plain binding — overlaps an old-side hunk of the range in
     a changed file, or whose span at ``right`` overlaps a new-side hunk, so a
     definition the range adds counts in an existing or a new file
-    (PRRT_kwDOSJAM6s63LTK6). Each file is diffed paired with its rename source or
-    target so a pure move stays hunkless. Fails closed on any unreadable Git
-    output.
+    (PRRT_kwDOSJAM6s63LTK6). A name more than one Python file defines at
+    ``left`` or ``right`` is ambiguous and withheld (PRRT_kwDOSJAM6s63mN54).
+    Each file is diffed paired with its rename source or target so a pure move
+    stays hunkless. Fails closed on any unreadable Git output.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _changed_paths_in_commit_range,
@@ -361,6 +421,15 @@ async def _commit_range_changes_comment_named_target(
             self, worktree_path=worktree_path, left=left, right=right, path=path, line=line
         ):
             return True
+    for ref in (left, right):
+        if not names:
+            return False
+        ambiguous = await _names_defined_in_several_files(
+            self, worktree_path=worktree_path, ref=ref, names=names
+        )
+        if ambiguous is None:
+            return False
+        names -= ambiguous
     if not names:
         return False
     rename_map, _name_status_z = await _rename_map_in_commit_range(

@@ -21,9 +21,44 @@ _CHANNEL = "src/app/agents_management/channel_service.py"
 _WEB = "src/app/web/team.ts"
 _OTHER = "src/app/control/queue_sweeper.py"
 
+_GrepOutput = tuple[tuple[str, str], ...] | str | None
+
 
 def _diff(path: str, header: str, *body: str) -> str:
     return f"--- a/{path}\n+++ b/{path}\n{header}\n" + "".join(f"{line}\n" for line in body)
+
+
+class _GrepProbe(_Probe):
+    """A ``_Probe`` that also answers the repo-wide definition ``git grep``.
+
+    ``definitions`` maps a ref to the ``(path, matched line)`` records Git would
+    print for it, or to raw output; a ref absent from it greps nothing (exit 1),
+    and a ``None`` value is an unreadable grep.
+    """
+
+    def __init__(self, *, definitions: dict[str, _GrepOutput], **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.definitions = definitions
+        self.greps: list[str] = []
+
+    async def _run(self, cmd: list[str], **kwargs: object):
+        from awf.common.commands import CommandResult
+
+        if "grep" not in cmd:
+            return await super()._run(cmd, **kwargs)
+        ref = cmd[cmd.index("--") - 1]
+        self.greps.append(ref)
+        if ref not in self.definitions:
+            return CommandResult(returncode=1, stdout="", stderr="")
+        records = self.definitions[ref]
+        if records is None:
+            return CommandResult(returncode=128, stdout="", stderr="grep failed")
+        stdout = (
+            records
+            if isinstance(records, str)
+            else "".join(f"{ref}:{path}\0{line}\n" for path, line in records)
+        )
+        return CommandResult(returncode=0, stdout=stdout, stderr="")
 
 
 def _probe(
@@ -31,11 +66,13 @@ def _probe(
     texts: dict[str, str | None] | None = None,
     changed_paths: tuple[str, ...] | None,
     diffs: dict[str, str | None] | None = None,
-) -> _Probe:
-    return _Probe(
+    definitions: dict[str, _GrepOutput] | None = None,
+) -> _GrepProbe:
+    return _GrepProbe(
         texts={(_LEFT, path): text for path, text in (texts or {}).items()},
         changed_paths=changed_paths,
         diffs=dict(diffs or {}),
+        definitions=dict(definitions or {}),
     )
 
 

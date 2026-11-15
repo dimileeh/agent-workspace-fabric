@@ -10,6 +10,7 @@ Git reads the gate issues, so "named path changed", "named path untouched",
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -877,6 +878,118 @@ async def test_unparsable_python_source_fails_closed() -> None:
     )
 
     assert not await _changes_named_target(runner, "`LIMIT` is too low")
+
+
+# --- ambiguous names (PRRT_kwDOSJAM6s63mN54) ------------------------------------------
+
+
+@pytest.mark.parametrize("ref", [_LEFT, _RIGHT])
+@pytest.mark.unit
+async def test_named_identifier_defined_in_another_file_is_not_evidence(ref: str) -> None:
+    # The comment names no module, so with a second definition anywhere in the
+    # repo the changed one may be unrelated to the reviewed code's.
+    runner = _probe(
+        texts={_INBOUND: _INBOUND_TEXT},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _INBOUND_INSERT},
+        definitions={
+            ref: (
+                (_INBOUND, "_TASK_INBOUND_TYPES ="),
+                (_OTHER, "    def _TASK_INBOUND_TYPES("),
+            )
+        },
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
+    assert runner.diff_paths == []
+
+
+@pytest.mark.unit
+async def test_only_the_ambiguous_named_identifier_is_withheld() -> None:
+    other = "def other():\n    return 0\n"
+    definitions = (
+        (_INBOUND, "def other("),
+        (_OTHER, "other ="),
+        (_INBOUND, "_TASK_INBOUND_TYPES ="),
+        (_INBOUND, "_TASK_INBOUND_TYPES: tuple[str, ...] ="),
+    )
+    runner = _probe(
+        texts={_INBOUND: _INBOUND_TEXT, _OTHER: other},
+        changed_paths=(_INBOUND, _OTHER),
+        diffs={_INBOUND: _INBOUND_INSERT, _OTHER: _diff(_OTHER, "@@ -2 +2 @@", "-a", "+b")},
+        definitions={_LEFT: definitions, _RIGHT: definitions},
+    )
+
+    assert await _changes_named_target(runner, "`other` and `_TASK_INBOUND_TYPES`")
+    assert not await _changes_named_target(runner, "`other` needs a guard")
+    # Once every name is withheld at `left`, `right` is not grepped.
+    assert runner.greps == [_LEFT, _RIGHT, _LEFT]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        pytest.param(None, id="grep-failed"),
+        # A record with no NUL path terminator, or another ref's, cannot be attributed.
+        pytest.param(f"{_LEFT}:{_INBOUND}:_TASK_INBOUND_TYPES =\n", id="no-terminator"),
+        pytest.param(f"{_RIGHT}:{_INBOUND}\0_TASK_INBOUND_TYPES =\n", id="foreign-ref"),
+    ],
+)
+@pytest.mark.unit
+async def test_unreadable_definition_grep_fails_closed(output: str | None) -> None:
+    runner = _probe(
+        texts={_INBOUND: _INBOUND_TEXT},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _INBOUND_INSERT},
+        definitions={_LEFT: output},
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
+    assert runner.diff_paths == []
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize(("second_package", "evidence"), [(True, False), (False, True)])
+@pytest.mark.unit
+async def test_real_git_grep_withholds_a_name_two_packages_define(
+    tmp_path: Path, second_package: bool, evidence: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from awf.common.commands import AsyncioSubprocessRunner
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "agent@example.com")
+    _git(tmp_path, "config", "user.name", "AWF Agent")
+    for package in ("pkg_a", "pkg_b") if second_package else ("pkg_b",):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / "auth.py").write_text(
+            "def validate_token(token):\n    return bool(token)\n", encoding="utf-8"
+        )
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    left = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "pkg_b" / "auth.py").write_text(
+        "def validate_token(token):\n    return token is not None\n", encoding="utf-8"
+    )
+    _git(tmp_path, "commit", "-q", "-am", "fix")
+    right = _git(tmp_path, "rev-parse", "HEAD")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+
+    changed = await comment_named._commit_range_changes_comment_named_target(
+        runner,
+        worktree_path=tmp_path,
+        left=left,
+        right=right,
+        comment_text="`validate_token` accepts an empty token",
+    )
+
+    assert changed is evidence
 
 
 # --- fail-closed -------------------------------------------------------------------
