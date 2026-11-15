@@ -297,6 +297,24 @@ def _diff_new_hunk_overlaps_line_span(diff_text: str, start: int, end: int) -> b
     return False
 
 
+def _deleted_paths_from_name_status_z(name_status_z: str) -> frozenset[str]:
+    """Paths a ``--name-status -z`` listing records as deleted (``D``)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _normalize_evidence_item_path,
+    )
+
+    fields = name_status_z.split("\0")
+    deleted: set[str] = set()
+    index = 0
+    while index + 1 < len(fields):
+        status = fields[index]
+        if status.startswith("D"):
+            deleted.add(_normalize_evidence_item_path(fields[index + 1]))
+        # Rename and copy records carry a source and a target path.
+        index += 3 if status[:1] in {"R", "C"} else 2
+    return frozenset(deleted)
+
+
 async def _names_defined_in_several_files(
     self: Any, *, worktree_path: Path, ref: str, names: frozenset[str]
 ) -> frozenset[str] | None:
@@ -490,6 +508,7 @@ async def _commit_range_changes_comment_named_target(
         # definition (PRRT_kwDOSJAM6s63mToQ).
         return False
     renamed_from = {target: source for source, target in rename_map.items()}
+    deleted = _deleted_paths_from_name_status_z(name_status_z)
     # Definition discovery reads Python sources only: a JS/TS identifier-named
     # target has no parser here and fails closed, and a docs or text snippet
     # spelling the name is not its definition (PRRT_kwDOSJAM6s63O-t2).
@@ -507,10 +526,11 @@ async def _commit_range_changes_comment_named_target(
                 self, worktree_path=worktree_path, ref=right, path=right_path
             )
         right_text = right_texts[right_path]
-        if right_text is not None and not _parses_as_python(right_text):
+        if candidate not in deleted if right_text is None else not _parses_as_python(right_text):
             # Unparsable right-side source fails closed even when the left side's
-            # spans overlap the diff; only a deleted file has no right side
-            # (PRRT_kwDOSJAM6s63mToU).
+            # spans overlap the diff (PRRT_kwDOSJAM6s63mToU), and so does an
+            # unreadable one: only a ``D`` record says a file has no right side
+            # (PRRT_kwDOSJAM6s63mi4W).
             continue
         right_heads, right_bindings = _named_definition_spans(
             None if candidate in rename_map else right_text, names

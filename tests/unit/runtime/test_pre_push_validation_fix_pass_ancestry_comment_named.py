@@ -1003,13 +1003,26 @@ async def test_unparsable_rename_target_fails_closed() -> None:
 @pytest.mark.unit
 async def test_named_definition_deleted_with_its_file_is_evidence() -> None:
     """An intentional file deletion has no right side to parse and stays evidence."""
-    runner = _Probe(
+    runner = _RenameProbe(
+        name_status=f"D\0{_INBOUND}\0",
         texts={(_LEFT, _INBOUND): "def other():\n    return 0\n", (_RIGHT, _INBOUND): None},
-        changed_paths=(_INBOUND,),
+        changed_paths=(),
         diffs={_INBOUND: _diff(_INBOUND, "@@ -1,2 +0,0 @@", "-def other():", "-    return 0")},
     )
 
     assert await _changes_named_target(runner, "Remove the dead `other()` helper")
+
+
+@pytest.mark.unit
+async def test_unreadable_right_side_of_a_modified_file_fails_closed() -> None:
+    """A failed right-side read of a modified file is not a deletion (PRRT_kwDOSJAM6s63mi4W)."""
+    runner = _Probe(
+        texts={(_LEFT, _INBOUND): "def other():\n    return 0\n", (_RIGHT, _INBOUND): None},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -2 +2 @@", "-    return 0", "+    return 1")},
+    )
+
+    assert not await _changes_named_target(runner, "`other()` returns the wrong value")
 
 
 # --- ambiguous names (PRRT_kwDOSJAM6s63mN54) ------------------------------------------
