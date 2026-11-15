@@ -66,12 +66,14 @@ class _ItemRangeRunner(_VerdictRunner):
         self,
         *,
         parents: dict[str, str],
+        merge_parents: dict[str, str] | None = None,
         subjects: dict[str, str] | None = None,
         rev_list_fails: bool = False,
         self_commits: dict[int, str] | None = None,
         **kwargs: object,
     ) -> None:
         self._parents = parents
+        self._merge_parents = merge_parents or {}
         self._subjects = subjects or {}
         self._rev_list_fails = rev_list_fails
         self._self_commits = self_commits or {}
@@ -82,10 +84,13 @@ class _ItemRangeRunner(_VerdictRunner):
     def _range(self, spec: str) -> list[str]:
         start, tip = spec.split("..")
         commits: list[str] = []
-        node: str | None = tip
-        while node and node != start:
+        pending = [tip]
+        while pending:
+            node = pending.pop(0)
+            if node == start or node in commits:
+                continue
             commits.append(node)
-            node = self._parents.get(node)
+            pending += [p for p in (self._parents.get(node), self._merge_parents.get(node)) if p]
         return commits
 
     async def _run_git(self, cmd: list[str], **kwargs: object) -> CommandResult:
@@ -120,11 +125,14 @@ class _ItemRangeRunner(_VerdictRunner):
         del worktree_path
         if ancestor == descendant:
             return False
-        node = self._parents.get(descendant)
-        while node is not None:
-            if node == ancestor:
-                return True
-            node = self._parents.get(node)
+        pending = [descendant]
+        while pending:
+            node = pending.pop()
+            for parent in (self._parents.get(node), self._merge_parents.get(node)):
+                if parent == ancestor:
+                    return True
+                if parent is not None:
+                    pending.append(parent)
         return False
 
 
@@ -347,6 +355,45 @@ async def test_self_cite_never_rewinds_past_the_preserved_timeout_floor(
     assert result.verdict == "fix_committed"
     assert runner.reset_targets == [expected_target]
     assert runner.current_head == expected_target
+
+
+@pytest.mark.unit
+async def test_self_cite_diverged_from_the_floor_keeps_the_merge_joining_both(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s63mToL: a diverged citation is not discarded by the floor reset.
+
+    The timed-out run left floor D; attempt 0 commits B on it, and the correction
+    commits C off item start A, merges it into B as M, then E is sunk on top.
+    Resetting onto floor D would drop C, and resetting onto C would drop D, so
+    the merge M holding both is kept and parked for human review.
+    """
+    cited = "c" * 40
+    merge = "7" * 40
+    runner = _runner(
+        tmp_path,
+        correction=f"FALSE POSITIVE: already addressed by earlier commit {cited}",
+        correction_head=_E,
+        parents={cited: _A, _D: _A, _B: _D, merge: _B, _E: merge},
+        merge_parents={merge: cited},
+    )
+    runner.current_head = _D
+    state = MonitorState()
+    remember_item_start_head(state, _ITEM_ID, _A)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke(
+            runner, state=state, operation_start_head=_D, evidence_item_id=_ITEM_ID
+        )
+
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is True
+    assert result.reason is not None and merge[:12] in result.reason
+    assert runner.reset_targets == [merge]
+    assert runner.current_head == merge
+    diverged = _events(captured, "monitor.agent_verdict_correction_self_cite_diverges_from_floor")
+    assert [event["joining_head"] for event in diverged] == [merge]
+    assert not _events(captured, "monitor.agent_verdict_correction_mutation_item_parked")
 
 
 @pytest.mark.unit
@@ -752,9 +799,9 @@ async def test_keep_self_cited_item_commit_refuses_a_floor_that_diverged_from_th
 ) -> None:
     """PRRT_kwDOSJAM6s63mToL: the preserved floor is kept only when it holds the citation.
 
-    Floor D and cited C both descend from item start A on separate branches; E
-    merges them through B. C is not above D, but D does not contain C either, so
-    resetting onto D would discard the cited fix: the ordinary mutation park wins.
+    Floor D and cited C both descend from item start A on separate branches and
+    no item commit joins them. C is not above D, and D does not contain C, so
+    resetting onto C would discard the floor: the ordinary mutation park wins.
     """
     cited = "c" * 40
     runner = _runner(

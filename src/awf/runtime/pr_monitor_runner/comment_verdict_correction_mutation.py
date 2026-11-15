@@ -185,7 +185,9 @@ async def keep_self_cited_item_commit(
     item's range is cited (a pre-existing or foreign commit, or no citation),
     when the floor ancestry probe fails, when the cited commit does not
     descend from the item start (a merged side branch), or when it diverged
-    from a preserved floor that does not contain it. A hosted remote that
+    from a preserved floor and no item commit joins the two. When one does, the
+    oldest such commit is kept and parked ``needs_human`` for review, since it
+    is the correction's own uncited work. A hosted remote that
     already advanced is rewound to the kept commit, and push tracking follows
     it. Cited commits on two merge sides keep only the newest one's ancestry. A
     failed rollback raises the mutation reason code.
@@ -242,6 +244,7 @@ async def keep_self_cited_item_commit(
     # before the item start, so the ancestry probe runs even when the floor is
     # the item start (PRRT_kwDOSJAM6s63brGg).
     floor = rollback_floor_head or item_start_head
+    joining_head: str | None = None
     if floor.lower() != cited.lower():
         try:
             cited_above_floor = await runner._head_descends_from(
@@ -261,6 +264,20 @@ async def keep_self_cited_item_commit(
                     ancestor=cited,
                     descendant=floor,
                 )
+            )
+            # Diverged: the ordinary mutation park would reset onto the floor and
+            # discard the cited fix, so keep the item commit that joins both.
+            joining_head = (
+                await _head_holding_both(
+                    runner,
+                    worktree_path=worktree_path,
+                    heads=item_commits,
+                    floor=floor,
+                    cited=cited,
+                )
+                if not (cited_above_floor or floor_holds_cited)
+                and floor.lower() != item_start_head.lower()
+                else None
             )
         except (TimeoutError, OSError, RuntimeError) as exc:
             _log.warning(
@@ -287,8 +304,11 @@ async def keep_self_cited_item_commit(
                 workspace_id=workspace_id,
                 rollback_floor_head=floor,
                 cited_commit=cited,
+                joining_head=joining_head,
             )
-            return None
+            if joining_head is None:
+                return None
+            kept_head = joining_head
         if floor_holds_cited:
             # #934: the preserved floor already contains the cited commit.
             kept_head = floor
@@ -329,6 +349,19 @@ async def keep_self_cited_item_commit(
         # evidence chain see the published fix.
         state.last_push_sha = kept_head
         state.hosted_terminal_head_advanced = True
+    if joining_head is not None:
+        # The joining commit is the correction's own, uncited work: preserve it
+        # for human review instead of crediting it through the evidence chain.
+        return VerdictResult(
+            verdict="needs_human",
+            reason=_bounded(
+                f"Correction verdict cited this item's own commit {cited[:12]}, which "
+                f"diverged from the preserved floor {floor[:12]}; the commit "
+                f"{kept_head[:12]} joining both is preserved for human review. "
+                f"Agent reason: {reason}"
+            ),
+            kept_commit=True,
+        )
     try:
         has_evidence = await correction_item_fix_evidence(
             runner,
@@ -372,6 +405,25 @@ async def keep_self_cited_item_commit(
         attempt_tip=kept_head,
         has_path_evidence=has_evidence,
     )
+
+
+async def _head_holding_both(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    heads: Sequence[str],
+    floor: str,
+    cited: str,
+) -> str | None:
+    """The oldest listed item head that contains both ``floor`` and ``cited``."""
+    for head in reversed(heads):
+        if await runner._head_descends_from(
+            worktree_path=worktree_path, ancestor=floor, descendant=head
+        ) and await runner._head_descends_from(
+            worktree_path=worktree_path, ancestor=cited, descendant=head
+        ):
+            return head
+    return None
 
 
 async def resolve_correction_non_fixed_mutation(
