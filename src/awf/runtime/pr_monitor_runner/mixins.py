@@ -134,6 +134,9 @@ class RunnerDelegatesMixin:
     _commit_range_changes_callee_definition = (
         _pre_push_validation_fix_pass._commit_range_changes_callee_definition
     )
+    _commit_range_changes_comment_named_target = (
+        _pre_push_validation_fix_pass._commit_range_changes_comment_named_target
+    )
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log

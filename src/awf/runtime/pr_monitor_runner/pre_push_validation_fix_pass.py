@@ -97,6 +97,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _rename_diff_preserves_line_numbers as _rename_diff_preserves_line_numbers,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_comment_named import (
+    _commit_range_changes_comment_named_target as _commit_range_changes_comment_named_target,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _commit_range_changes_callee_definition as _commit_range_changes_callee_definition,
 )

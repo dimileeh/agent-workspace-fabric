@@ -47,6 +47,9 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TaskTagUnset,
 )
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_comment_named import (
+    reviewer_comment_text,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition import sync_item_disposition
 
 __all__ = (
@@ -223,6 +226,7 @@ async def _address_thread(
             evidence_item_path=thread.path,
             evidence_item_line=getattr(thread, "line", None),
             evidence_anchor_head=cycle_start_head,
+            evidence_comment_text=reviewer_comment_text(thread),
         )
     except AgentVerdictExecutionError as exc:
         # This seam can only return the bare verdict, so keep the reason code
@@ -468,6 +472,7 @@ async def _invoke_cli_for_verdict_result(
     evidence_item_path: str | None = None,
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
+    evidence_comment_text: str | None = None,
 ) -> VerdictResult | MonitorVerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -489,6 +494,7 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_path=evidence_item_path,
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
+            evidence_comment_text=evidence_comment_text,
         )
     except AgentVerdictExecutionError as exc:
         return _agent_failed_result(exc)

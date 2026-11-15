@@ -90,6 +90,7 @@ async def _check(runner: Any) -> tuple[str, str]:
         compose_file=Path("/tmp/compose.yml"),
         state=MonitorState(),
         reply="Thanks, that makes sense.",
+        disposition_class="false_positive",
         prompt="judge",
     )
 

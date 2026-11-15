@@ -68,6 +68,7 @@ from awf.db.models import (
     ResourceReservation,
     Workspace,
     WorkspaceEvent,
+    WorkspaceSecretLease,
 )
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -89,6 +90,7 @@ from awf.service.failure_causality import (
     load_primary_failure_snapshot,
 )
 from awf.service.secret_leases import (
+    TERMINAL_RUNTIME_RELEASE_REVOKE_REASON,
     SecretLeaseService,
 )
 
@@ -1130,6 +1132,10 @@ async def _record_terminal_runtime_released(
         from awf.service.provider_diagnostics import settle_quiescent_diagnostic
 
         await settle_quiescent_diagnostic(session, ws)
+        # The runtime is down, so no process still holds the mounted material. Revoke in
+        # the release transaction (and under the status guard above, so a resumed workspace
+        # keeps its leases) instead of leaving them for the terminal-owned-row reaper.
+        await _revoke_terminal_release_secret_leases(session, ws)
         if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
             # The release event already exists — e.g. a ``cancel --stop-stack`` pre-emits
             # ``terminal_runtime_released`` in the service after only a ``docker stop``
@@ -1211,6 +1217,17 @@ async def _record_terminal_runtime_released(
             compose_project_name=candidate.compose_project_name,
             exc=exc,
         )
+
+
+async def _revoke_terminal_release_secret_leases(
+    session: AsyncSession, ws: Workspace
+) -> list[WorkspaceSecretLease]:
+    """Revoke a released terminal workspace's revocable leases with a release-specific reason."""
+    return await SecretLeaseService(session).revoke_workspace_secret_leases(
+        ws,
+        now=datetime.now(UTC),
+        reason_code=TERMINAL_RUNTIME_RELEASE_REVOKE_REASON,
+    )
 
 
 async def _handle_planning_scope_auto_retry_resume_failure(

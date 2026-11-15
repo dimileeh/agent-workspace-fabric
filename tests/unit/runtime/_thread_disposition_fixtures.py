@@ -30,7 +30,9 @@ _DEFAULT_ISSUE = "https://github.com/acme/widgets/issues/7"
 _DEFAULT_REASON = "the reviewed code already handles this case"
 BOT_LOGIN = "review-bot"
 BOT_FEEDBACK = "P2: guard the None payload"
-BOT_ACK = "Agreed, this is a false positive."
+# An acknowledgement the deterministic concurrence check does not recognise
+# (#1238), so the tests built on it exercise the agent's judgment.
+BOT_ACK = "Thanks for the explanation."
 # The conversation AWF's bound reply followed, as ``acked_thread`` reads it.
 BOUND_DIGEST = "c" * 64
 

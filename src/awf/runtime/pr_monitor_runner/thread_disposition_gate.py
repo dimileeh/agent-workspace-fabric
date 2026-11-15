@@ -20,8 +20,9 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   that reopen itself, at most twice per thread, after the gate returns
   (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_reopen`, #1138).
   Two refinements run in front of that fallback (#1138): a reply by the
-  thread's own opening bot after AWF's marker is judged once by the agent, and
-  an ACKNOWLEDGES judgment keeps the marker as the disposition
+  thread's own opening bot after AWF's marker is judged once per comment, by a
+  deterministic concurrence check, else by the agent (#1238), and an
+  ACKNOWLEDGES judgment keeps the marker as the disposition
   (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_ack`); and a ``fixed``
   disposition that crossed a moved-head re-adoption live certifies nothing until
   its commits are confirmed in the adopted head

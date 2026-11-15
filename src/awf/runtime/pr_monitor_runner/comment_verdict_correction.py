@@ -3,7 +3,7 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-Five policies live here, all scoped to the correction retry — the attempt that
+Six policies live here, all scoped to the correction retry — the attempt that
 runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 
 * **Path-level evidence on the correction** — attempt 0 keeps the strict
@@ -44,6 +44,16 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
   scope, and ``self`` / ``cls`` / ``this`` receivers fail closed. Attempt 0
   stays strict, commits with no callee relationship keep escalating with the
   commit preserved, and the unmappable-anchor sentinel stays fail-closed.
+* **Comment-named target evidence on the correction** (#1232) — after all four
+  anchor-derived checks have failed, the same item-own range is accepted when
+  it changes a target the *reviewer's* comment text names: a repo-relative path
+  (near the named line when ``:line`` is given), or the Python definition of a
+  backticked identifier (a JS/TS one yields no evidence). Reviewers anchor at a
+  usage site and name the fix target in the body; three genuine fixes of that
+  shape escalated on 2026-11-13. AWF-authored replies and the agent's reason
+  are never evidence, attempt 0 stays strict, commits that change no named
+  target keep escalating with the commit preserved, and the unmappable-anchor
+  sentinel stays fail-closed.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
@@ -53,7 +63,12 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
   evidence exists (related-line, or correction-time path-level), otherwise
   escalate to ``needs_human``. An explicit corrected ``needs_human`` always
   stays ``needs_human`` (commit still preserved) so evidence cannot override a
-  requested human gate (issue:5558086911).
+  requested human gate (issue:5558086911). This also holds when the correction
+  mutated (#1105): a cited commit in ``item_start_head``..HEAD — attempt 0's,
+  or one the correction itself made — is kept with everything under it, only
+  the uncited later commits and edits roll back, and the kept commit faces the
+  same evidence chain (``correction_item_fix_evidence``). The correction prompt
+  names the item's own commits (``item_commits_correction_context``).
 * **No monitor failure on an unsubstantiated correction fix** — a correction
   FIXED whose contentful commit carries no item-scoped evidence used to roll
   back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``, failing the whole
@@ -100,6 +115,37 @@ _MAX_CORRECTION_REASON_LENGTH = 500
 # pathological range from producing unbounded output.
 _MAX_ATTEMPT_COMMITS = 50
 
+# Bound on each agent-authored commit subject quoted back in the correction
+# prompt (#1105).
+_MAX_COMMIT_SUBJECT_LENGTH = 120
+
+
+def cited_item_commit(
+    reason: str | None,
+    *,
+    candidates: Sequence[str],
+    item_start_head: str | None,
+) -> str | None:
+    """The first of ``candidates`` that ``reason`` names, or ``None``.
+
+    ``candidates`` are this item's commits, newest first (``rev-list
+    --topo-order``), so the answer is the newest cited item commit (#1105).
+    ``item_start_head`` — a genuinely earlier commit — is never a candidate, and
+    a reference needs Git's own seven-hex minimum abbreviation.
+    """
+    if not reason:
+        return None
+    tokens = [match.group(0).lower() for match in _COMMIT_REFERENCE.finditer(reason)]
+    start = item_start_head.lower() if item_start_head is not None else None
+    for commit in candidates:
+        candidate = commit.strip()
+        lowered = candidate.lower()
+        if not lowered or lowered == start:
+            continue
+        if any(lowered.startswith(token) or token.startswith(lowered) for token in tokens):
+            return candidate
+    return None
+
 
 def verdict_reason_cites_own_commit(
     reason: str | None,
@@ -122,22 +168,13 @@ def verdict_reason_cites_own_commit(
     """
     if not reason or not attempt_tip:
         return False
-    tip = attempt_tip.lower()
-    if item_start_head is not None and tip == item_start_head.lower():
+    if item_start_head is not None and attempt_tip.lower() == item_start_head.lower():
         return False
-    start = item_start_head.lower() if item_start_head is not None else None
-    candidates = [tip]
-    for commit in attempt_commits or ():
-        candidate = commit.strip().lower()
-        if candidate and candidate != start and candidate not in candidates:
-            candidates.append(candidate)
-    for match in _COMMIT_REFERENCE.finditer(reason):
-        token = match.group(0).lower()
-        if any(
-            candidate.startswith(token) or token.startswith(candidate) for candidate in candidates
-        ):
-            return True
-    return False
+    candidates = [attempt_tip, *(attempt_commits or ())]
+    return (
+        cited_item_commit(reason, candidates=candidates, item_start_head=item_start_head)
+        is not None
+    )
 
 
 async def attempt_commit_shas(
@@ -171,10 +208,13 @@ async def attempt_commit_shas(
         # Full DAG range (not --first-parent): a merge tip can retain a fix only
         # via its second parent (PRRT_kwDOSJAM6s6fqb23). Restricting to the first
         # parent misses that SHA, self-citation fails, and rollback discards it.
+        # ``--topo-order`` lists children before parents, so the first cited
+        # commit is the newest one (#1105).
         result = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "rev-list",
+                "--topo-order",
                 f"--max-count={_MAX_ATTEMPT_COMMITS}",
                 f"{item_start_head}..{attempt_tip}",
             ),
@@ -192,6 +232,74 @@ async def attempt_commit_shas(
     if not result.ok:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+async def item_commits_correction_context(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    attempt_tip: str | None,
+) -> str:
+    """Correction-prompt block naming this item's own commits (#1105).
+
+    Without it the agent sees attempt 0's commit at HEAD and can call it an
+    "earlier commit" that already addressed the review — the self-citation the
+    mutation gate then rolled back. Subjects are agent-authored, so they are
+    redacted and bounded, and they are never evidence. Empty when the range is
+    empty, unknown, or Git cannot list it, which leaves the prompt unchanged.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+    )
+    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _git_env_for_merge_safety_object_lookup,
+    )
+
+    if not attempt_tip or not item_start_head:
+        return ""
+    if attempt_tip.lower() == item_start_head.lower() or not worktree_path.exists():
+        return ""
+    try:
+        result = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "log",
+                "--format=%H %s",
+                f"--max-count={_MAX_ATTEMPT_COMMITS}",
+                f"{item_start_head}..{attempt_tip}",
+            ),
+            env=_git_env_for_merge_safety_object_lookup(),
+            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, OSError, RuntimeError) as exc:
+        _log.warning(
+            "monitor.agent_verdict_item_commits_context_unreadable",
+            item_start_head=item_start_head,
+            attempt_tip=attempt_tip,
+            exc_type=type(exc).__name__,
+        )
+        return ""
+    if not result.ok:
+        return ""
+    lines: list[str] = []
+    for line in result.stdout.splitlines():
+        sha, _, subject = line.strip().partition(" ")
+        if sha:
+            bounded_subject = redact_secrets(subject)[:_MAX_COMMIT_SUBJECT_LENGTH]
+            lines.append(f"- {sha[:12]} {bounded_subject}".rstrip())
+    if not lines:
+        return ""
+    listing = "\n".join(lines)
+    return (
+        "\n\nThese commits were already made for THIS review item. They are this "
+        "item's own work, not pre-existing commits:\n"
+        f"{listing}\n"
+        "Any commit you make during this attempt is also this item's work. If one "
+        "of these commits fixes the review item, report FIXED, not FALSE POSITIVE "
+        "or DEFER."
+    )
 
 
 async def correction_reason_cites_own_item_commit(
@@ -458,6 +566,210 @@ async def callee_definition_item_fix_evidence(
     return False
 
 
+async def comment_named_target_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    comment_text: str | None,
+    state: MonitorState | None,
+    anchor_head: str | None = None,
+) -> bool:
+    """Accept a fix to a target the reviewer's comment names (#1232).
+
+    The fifth and last correction-attempt evidence check: same
+    ``item_start_head``..HEAD range and the same contentful-descendant
+    requirement as the four anchor-derived gates, with the scope taken from the
+    reviewer's own comment text instead of the anchor. The range is accepted
+    when it changes a repo-relative path the comment names (near the named line
+    when ``:line`` is given) or the Python definition of an identifier the
+    comment backticks (``_commit_range_changes_comment_named_target``).
+
+    Why this is safe, and why it is needed (issue #1232): reviewers anchor at a
+    usage site and name the fix target in the body — a runbook line, the route
+    helper's file, the tuple a filter reads — and three genuine fixes of exactly
+    those shapes escalated to ``needs_human`` on 2026-11-13. The targets are the
+    reviewer's choice, never the agent's: ``comment_text`` is
+    ``reviewer_comment_text`` (AWF-authored replies excluded) and the agent's
+    verdict reason is never passed here. Attempt 0 stays strict, a commit that
+    changes no named target keeps escalating with the commit preserved, and the
+    ``item_line <= 0`` unmappable-anchor sentinel stays fail-closed; a
+    file-level thread (``item_line is None``) is not that sentinel.
+    ``anchor_head`` is the PR head the review was written against; named
+    ``path:line`` targets are relocated from it into ``item_start_head``.
+    """
+    if item_start_head is None or item_path is None or not (comment_text or "").strip():
+        return False
+    if item_line is not None and item_line < 1:
+        return False
+    if not worktree_path.exists():
+        return False
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    changes_named = getattr(runner, "_commit_range_changes_comment_named_target", None)
+    if not (callable(descends) and callable(trees_differ) and callable(changes_named)):
+        return False
+
+    candidate_heads: list[str] = []
+    end_head = await runner._rev_parse_head(worktree_path)
+    if end_head:
+        candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
+        ):
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if not await changes_named(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+            comment_text=comment_text,
+            anchor_head=anchor_head,
+        ):
+            continue
+        return True
+    return False
+
+
+async def correction_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    protocol_attempt: int,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+    comment_text: str | None,
+    anchor_head: str | None,
+) -> bool:
+    """The item-scoped FIXED evidence chain over ``item_start_head``..HEAD.
+
+    Attempt 0 is strictly line-anchored; the correction attempt widens, in
+    order, to path, package, callee-definition and comment-named evidence. One
+    chain serves both the ordinary post-attempt check and the #1105 re-check
+    of a self-cited commit, so the two cannot drift. ``_item_fix_evidence`` is
+    resolved through ``comment_verdict`` at call time so monkeypatches there
+    still reach it.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    evidence = await comment_verdict._item_fix_evidence(
+        runner,
+        worktree_path=worktree_path,
+        item_start_head=item_start_head,
+        item_path=item_path,
+        item_line=item_line,
+        state=state,
+        dirty_changes_committed=dirty_changes_committed,
+    )
+    if (
+        not evidence
+        and protocol_attempt == 1
+        and item_path is not None
+        and item_line is not None
+        and item_line > 0
+    ):
+        # Path-level evidence on the correction (#925 D1, restored on top of
+        # #928). Attempt 0 already failed the strict line-anchored gate and the
+        # agent was told so; a re-affirmed FIXED whose contentful commit changes
+        # the anchored *path* is an honest off-anchor fix (helper above the
+        # caller, guard at the call site), not an unsupported claim, and
+        # escalating it to a human is the unnecessary escalation. Safe because
+        # this is never the first gate and the probe runs over the item's own
+        # ``item_start_head``..HEAD range, so the commit cannot be stale or
+        # foreign. ``item_line <= 0`` is the unmappable-anchor sentinel from the
+        # path/line remap: those stay fail-closed on both attempts
+        # (PRRT_kwDOSJAM6s6dFLGV); ``item_line is None`` means the check above
+        # was already path-level.
+        evidence = await path_level_item_fix_evidence(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            state=state,
+            dirty_changes_committed=dirty_changes_committed,
+        )
+    if (
+        not evidence
+        and protocol_attempt == 1
+        and item_path is not None
+        and (item_line is None or item_line > 0)
+    ):
+        # Package-level evidence on the correction (#952). Both checks above
+        # have failed, so the item's own commit range changes neither the
+        # anchored line nor the reviewed file. Accept it when it changes any
+        # file in the reviewed file's *package* (the bundle-scope rule: same
+        # parent directory, or descendant paths). That is the normal shape of a
+        # callee-anchored review — "honour the ownership result in that caller"
+        # is anchored on the callee and fixed in the caller — and of a
+        # line-limit split that moved the reviewed code into a sibling module,
+        # which makes every correct fix off-path by construction. Eight
+        # escalations on 2026-09-07 (PRs #922, #934, #939) were exactly those
+        # shapes. Same guards as above: correction attempt only, the item's own
+        # ``item_start_head``..HEAD range, contentful + descendant, and the
+        # ``item_line <= 0`` unmappable-anchor sentinel stays fail-closed.
+        # Cross-package commits keep escalating.
+        evidence = await package_level_item_fix_evidence(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            state=state,
+            dirty_changes_committed=dirty_changes_committed,
+        )
+    if (
+        not evidence
+        and protocol_attempt == 1
+        and item_path is not None
+        and item_line is not None
+        and item_line > 0
+    ):
+        # Cross-file call-site→definition evidence (#1019); rationale, limits
+        # and fail-closed cases live in the helper docstring.
+        evidence = await callee_definition_item_fix_evidence(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            item_line=item_line,
+            state=state,
+            dirty_changes_committed=dirty_changes_committed,
+        )
+    if not evidence and protocol_attempt == 1:
+        # Reviewer-named target evidence (#1232); guards in the helper.
+        evidence = await comment_named_target_item_fix_evidence(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            item_path=item_path,
+            item_line=item_line,
+            comment_text=comment_text,
+            state=state,
+            anchor_head=anchor_head,
+        )
+    return evidence
+
+
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -474,7 +786,9 @@ def correction_self_citation_outcome(
     (``path_level_item_fix_evidence``), **or** the package-level re-check of
     that same range (``package_level_item_fix_evidence``, #952), **or** the
     cross-file call-site→definition re-check of it
-    (``callee_definition_item_fix_evidence``, #1019). The guard reads
+    (``callee_definition_item_fix_evidence``, #1019), **or** the re-check
+    against targets the reviewer's comment names
+    (``comment_named_target_item_fix_evidence``, #1232). The guard reads
     whatever the correction accepted as evidence, so a sibling-module fix the
     agent then points at as "already addressed" resolves the thread instead of
     escalating. An explicit corrected ``needs_human``
@@ -585,8 +899,10 @@ def correction_unscoped_fix_outcome(
     the reviewed file's package (#952), and
     ``callee_definition_item_fix_evidence`` accepts one that changes the
     definition of a callee referenced at the anchored line in another file
-    (#1019). What is left is a commit in another package with no call-site
-    relationship to the reviewed line (or, with an unmappable anchor, one AWF
+    (#1019), and ``comment_named_target_item_fix_evidence`` accepts one that
+    changes a path or definition the reviewer's comment names (#1232). What is
+    left is a commit in another package with no call-site relationship to the
+    reviewed line and no named target (or, with an unmappable anchor, one AWF
     cannot place at all — that stays fail-closed). The protocol
     used to roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
