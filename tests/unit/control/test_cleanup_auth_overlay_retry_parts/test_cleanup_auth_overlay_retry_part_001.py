@@ -186,8 +186,12 @@ def _patch_record_released_deps(
     async def _resume(_self: object, *, workspace_id: str) -> None:
         del workspace_id
 
+    async def _revoke_leases(_session: object, _ws: object) -> list[object]:
+        return []
+
     monkeypatch.setattr(worker_cleanup, "WorkspaceRepository", _WorkspaceRepo)
     monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", _run_db_operation_with_retry)
+    monkeypatch.setattr(worker_cleanup, "_revoke_terminal_release_secret_leases", _revoke_leases)
     monkeypatch.setattr(
         worker_cleanup,
         "_resume_blocked_planning_scope_auto_retry_after_runtime_release",

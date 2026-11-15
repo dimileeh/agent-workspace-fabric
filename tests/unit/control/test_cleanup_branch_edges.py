@@ -785,7 +785,18 @@ async def test_record_released_returns_when_status_no_longer_terminal(
     assert added_events == []
 
 
+@pytest.fixture
+def _no_lease_revoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake sessions cannot run the lease revoke SQL; its real-DB coverage lives elsewhere."""
+
+    async def _revoke_leases(_session: object, _ws: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(worker_cleanup, "_revoke_terminal_release_secret_leases", _revoke_leases)
+
+
 @pytest.mark.unit
+@pytest.mark.usefixtures("_no_lease_revoke")
 async def test_record_released_returns_when_event_already_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -836,6 +847,7 @@ async def test_record_released_returns_when_event_already_exists(
 
 
 @pytest.mark.unit
+@pytest.mark.usefixtures("_no_lease_revoke")
 @pytest.mark.parametrize("marker_exists", [False, True])
 async def test_record_released_seeds_pending_overlay_marker_on_duplicate_release(
     monkeypatch: pytest.MonkeyPatch,
@@ -908,6 +920,7 @@ async def test_record_released_seeds_pending_overlay_marker_on_duplicate_release
 
 
 @pytest.mark.unit
+@pytest.mark.usefixtures("_no_lease_revoke")
 async def test_record_released_skips_pending_seed_when_overlay_unmounted_on_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
