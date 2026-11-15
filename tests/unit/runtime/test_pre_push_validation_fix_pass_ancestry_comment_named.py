@@ -719,6 +719,41 @@ async def test_named_identifier_in_a_pure_rename_is_not_evidence() -> None:
     assert runner.shows == [_INBOUND, moved, moved]
 
 
+class _RenameMapUnreadableProbe(_RenameProbe):
+    """A ``_RenameProbe`` whose name-status read succeeds once, then fails."""
+
+    async def _run(self, cmd: list[str], **kwargs: object):
+        from awf.common.commands import CommandResult
+
+        if "--name-status" in cmd and not self.name_status:
+            return CommandResult(returncode=128, stdout="", stderr="diff failed")
+        result = await super()._run(cmd, **kwargs)
+        if "--name-status" in cmd:
+            self.name_status = ""
+        return result
+
+
+@pytest.mark.unit
+async def test_unreadable_rename_map_fails_closed() -> None:
+    """A move read without its rename edge must not look like a deleted definition."""
+    moved = "src/app/messaging/inbound_kinds.py"
+    deleted = _INBOUND_TEXT.splitlines()
+    runner = _RenameMapUnreadableProbe(
+        name_status=f"R100\0{_INBOUND}\0{moved}\0",
+        texts={(_LEFT, _INBOUND): _INBOUND_TEXT, (_RIGHT, _INBOUND): None},
+        changed_paths=(),
+        # Diffed alone, the move's source reads as a whole-file deletion.
+        diffs={
+            _INBOUND: _diff(
+                _INBOUND, f"@@ -1,{len(deleted)} +0,0 @@", *(f"-{line}" for line in deleted)
+            )
+        },
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses the task type")
+    assert _INBOUND not in runner.diff_paths
+
+
 @pytest.mark.parametrize(
     "path", [_DOC, "docs/reference/inbound.rst", "notes/inbound.txt", "docs/inbound.py.orig"]
 )

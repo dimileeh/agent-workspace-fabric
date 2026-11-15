@@ -437,9 +437,14 @@ async def _commit_range_changes_comment_named_target(
         names -= ambiguous
     if not names:
         return False
-    rename_map, _name_status_z = await _rename_map_in_commit_range(
+    rename_map, name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
+    if not name_status_z:
+        # The range changed paths, so empty rename metadata is an unreadable read:
+        # without it a pure move's source reads as a whole-file deletion of the
+        # definition (PRRT_kwDOSJAM6s63mToQ).
+        return False
     renamed_from = {target: source for source, target in rename_map.items()}
     # Definition discovery reads Python sources only: a JS/TS identifier-named
     # target has no parser here and fails closed, and a docs or text snippet
