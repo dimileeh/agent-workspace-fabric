@@ -96,6 +96,17 @@ def test_comment_named_paths_deduplicates_in_order() -> None:
 
 
 @pytest.mark.unit
+def test_comment_named_paths_ignores_paths_only_inside_fenced_blocks() -> None:
+    text = (
+        "Fix src/app/real.py:7.\n"
+        "```\nTraceback:\n  File src/app/sample.py, line 3\n```\n"
+        "```python\n# tests/unit/test_dump.py\n```"
+    )
+
+    assert comment_named._comment_named_paths(text) == (("src/app/real.py", 7),)
+
+
+@pytest.mark.unit
 def test_comment_named_identifiers_accepts_single_backtick_names_and_calls() -> None:
     text = (
         "Add it to `_TASK_INBOUND_TYPES` and honour it in "

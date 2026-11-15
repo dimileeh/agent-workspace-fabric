@@ -99,13 +99,18 @@ def reviewer_comment_text(thread: ReviewThread) -> str:
 
 
 def _comment_named_paths(text: str) -> tuple[tuple[str, int | None], ...]:
-    """Repo-relative ``(path, line)`` pairs named in ``text``, de-duplicated in order."""
+    """Repo-relative ``(path, line)`` pairs named in ``text``, de-duplicated in order.
+
+    Fenced blocks are blanked first: a path in a pasted log, traceback or sample
+    is not the reviewer naming a fix target (PRRT_kwDOSJAM6s63mPOz).
+    """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _normalize_evidence_item_path,
     )
 
     named: dict[tuple[str, int | None], None] = {}
-    for token in _PATH_TOKEN_SPLIT_RE.split(_URL_RE.sub(" ", text)):
+    prose = _URL_RE.sub(" ", _FENCED_BLOCK_RE.sub(" ", text))
+    for token in _PATH_TOKEN_SPLIT_RE.split(prose):
         match = _NAMED_PATH_RE.fullmatch(token.rstrip(_PATH_TRAILING_PUNCTUATION))
         if match is None:
             continue
