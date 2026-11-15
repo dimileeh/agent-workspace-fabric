@@ -554,6 +554,11 @@ def test_an_explicit_concurrence_is_recognised(body: str) -> None:
         "Agreed. <details>Rename the helper.</details>",
         "Agreed.\n<details><summary>🧩 Analysis chain</summary>\n"
         "<details><summary>Nit</summary>Rename the helper.</details>\n</details>",
+        # A supporting label is the whole summary: more words there could title a request.
+        "Agreed. <details><summary>Analysis and new concern</summary>"
+        "The handler still crashes on empty input.</details>",
+        "Agreed. <details><summary>🧩 Analysis: the handler crashes</summary>x</details>",
+        "Agreed. <details><summary>Logs of the new crash</summary>x</details>",
     ],
 )
 def test_anything_short_of_an_explicit_concurrence_is_not_recognised(body: str) -> None:

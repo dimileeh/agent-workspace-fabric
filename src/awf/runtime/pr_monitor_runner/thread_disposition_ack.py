@@ -60,11 +60,13 @@ _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
 # #1238: the deterministic concurrence check. Generic wording only, no reviewer names.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-# An innermost collapsed block. It is set aside only when its summary labels it as
-# supporting material; any other fold could hold a request, so the agent judges it.
+# An innermost collapsed block. It is set aside only when its whole summary is a
+# supporting-material label ("🧩 Analysis chain"); any other fold, such as "Analysis
+# and new concern", could hold a request, so the agent judges it.
 _DETAILS_RE = re.compile(r"<details\b[^>]*>((?:(?!<details\b).)*?)</details\s*>", re.DOTALL | re.I)
 _SUPPORTING_FOLD_RE = re.compile(
-    r"\s*<summary\b[^>]*>[^<]*\b(?:analysis|learnings?|scripts?|outputs?|logs?)\b[^<]*</summary",
+    r"\s*<summary\b[^>]*>[^\w<]*(?:analysis(?: chain)?|learnings?(?: (?:added|used))?|"
+    r"scripts?(?: executed)?|outputs?|logs?)[^\w<]*</summary",
     re.I,
 )
 _PROPOSED_CHANGE_RE = re.compile(r"^\s*(?:```|~~~)\s*(?:suggestion|diff)\b", re.M | re.I)
@@ -146,7 +148,7 @@ def is_bot_concurrence(body: str) -> bool:
     fix, or leaves resolution to AWF, in the bot's own words outside quotes, with
     no dissent or new request, no code fence and no code reference, and every
     clause of it either concurs or only thanks. HTML comments,
-    and ``<details>`` blocks whose summary labels them as supporting material
+    and ``<details>`` blocks whose whole summary is a supporting-material label
     (analysis, learnings, scripts, output, logs), are set aside.
     ``False`` means not sure, never ``NEW_POINT``: the agent judges it. Anything
     ambiguous (a proposed change anywhere, unbalanced markup, any other fold) is
