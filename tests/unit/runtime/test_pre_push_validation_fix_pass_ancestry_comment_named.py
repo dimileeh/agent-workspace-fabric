@@ -1116,6 +1116,32 @@ async def test_unreadable_or_too_many_import_lines_fail_closed(importers: int) -
 
 
 @pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param(None, id="grep-failed"),
+        pytest.param(f"{_RIGHT}:{_OTHER}\0", id="foreign-ref"),
+        pytest.param(("src/app/unreadable.py",), id="unreadable"),
+    ],
+)
+@pytest.mark.unit
+async def test_unreadable_case_clause_files_fail_closed(
+    listed: tuple[str, ...] | str | None,
+) -> None:
+    # PRRT_kwDOSJAM6s63nFMJ: a file whose ``case`` pattern may capture the name
+    # must be read, so an unreadable listing or file leaves uniqueness unproven.
+    runner = _probe(
+        texts={_INBOUND: _INBOUND_TEXT},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _INBOUND_INSERT},
+        definitions={_LEFT: ((_INBOUND, "_TASK_INBOUND_TYPES ="),)},
+        pattern_files={_LEFT: listed},
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
+    assert runner.diff_paths == []
+
+
+@pytest.mark.parametrize(
     ("candidate", "module_path", "expected"),
     [
         ("pkg/__init__.py", "pkg", True),
@@ -1212,6 +1238,23 @@ async def test_real_git_grep_withholds_a_name_two_packages_define(
         ),
         pytest.param("from .a import LIMIT\n", True, id="relative-re-import"),
         pytest.param("from external_settings import LIMIT as OTHER\n", True, id="aliased-away"),
+        # PRRT_kwDOSJAM6s63nFMJ: a ``case`` pattern capture binds the name too.
+        pytest.param("match [2]:\n    case [LIMIT]:\n        pass\n", False, id="case-sequence"),
+        pytest.param("match 2:\n    case LIMIT:\n        pass\n", False, id="case-capture"),
+        pytest.param("match 2:\n    case int() as LIMIT:\n        pass\n", False, id="case-as"),
+        pytest.param("match []:\n    case [*LIMIT]:\n        pass\n", False, id="case-star"),
+        pytest.param("match {}:\n    case {**LIMIT}:\n        pass\n", False, id="case-rest"),
+        pytest.param(
+            "def f(x):\n    match x:\n        case {\n            'k': LIMIT,\n        }:\n"
+            "            pass\n",
+            False,
+            id="case-wrapped",
+        ),
+        # A ``case`` that only compares against the name binds nothing.
+        pytest.param(
+            "import a\nmatch 1:\n    case a.LIMIT:\n        pass\n", True, id="case-value"
+        ),
+        pytest.param("match 1:\n    case 1:\n        print(LIMIT)\n", True, id="case-body-read"),
         # Reading the name is not a second definition.
         pytest.param("CHECK = LIMIT == 1 or LIMIT <= 2\n", True, id="reference-only"),
         pytest.param("print(LIMIT, 1)\nX = max(LIMIT, 2)\n", True, id="call-argument"),

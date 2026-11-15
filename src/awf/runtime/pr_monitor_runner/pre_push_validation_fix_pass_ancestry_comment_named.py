@@ -325,8 +325,9 @@ def _unaliased_import_modules(
     ``from M import name`` yields ``M`` as a ``/``-joined path prefix (a relative
     ``M`` resolved against ``path``'s directory); ``import name`` / ``import
     name.sub`` binds a module object, and an unresolvable relative import binds
-    something this reader cannot follow, so both yield None. Imports at any depth
-    count, as the definition scan's lines do. Unparsable text returns None.
+    something this reader cannot follow, so both yield None, as does a ``case``
+    pattern capturing the name (PRRT_kwDOSJAM6s63nFMJ). Imports and captures at
+    any depth count, as the definition scan's lines do. Unparsable text returns None.
     """
     try:
         tree = ast.parse(file_text)
@@ -347,6 +348,10 @@ def _unaliased_import_modules(
             for alias in node.names:
                 bound = alias.name.split(".")[0]
                 if alias.asname is None and bound in names:
+                    modules.setdefault(bound, []).append(None)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+            for bound in _bound_names(node):
+                if bound in names:
                     modules.setdefault(bound, []).append(None)
     return modules
 
@@ -383,7 +388,9 @@ async def _names_defined_in_several_files(
     line may import it — an ``import`` line, or a bare name-list line a wrapped
     import continues on — is read and parsed, and each import that does not come
     from another binding file's own module (``from a import LIMIT`` re-exporting
-    ``a.py``'s) counts as one more definition. More than
+    ``a.py``'s) counts as one more definition. So does a ``case`` pattern
+    capturing the name in a file a second grep finds holding both a ``case``
+    clause and the name (PRRT_kwDOSJAM6s63nFMJ). More than
     ``_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS`` such files, or an unreadable or
     unparsable one, fails closed.
     """
@@ -469,6 +476,35 @@ async def _names_defined_in_several_files(
             files.setdefault(name, set()).add(path)
         if import_line.search(line) and not definition_head.match(line):
             import_paths.add(path)
+    # A ``case`` pattern captures names too, possibly on a continuation line
+    # (PRRT_kwDOSJAM6s63nFMJ), so every file with a ``case`` clause that mentions
+    # a name is read and parsed alongside the importers.
+    pattern_files = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "grep",
+            "-l",
+            "-z",
+            "-I",
+            "-E",
+            "--all-match",
+            "-e",
+            r"^[[:space:]]*case([^[:alnum:]_]|$)",
+            "-e",
+            rf"(^|[^[:alnum:]_.])({alternation})([^[:alnum:]_]|$)",
+            ref,
+            "--",
+            *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
+        ),
+        env=_git_env_for_merge_safety_object_lookup(),
+    )
+    if not pattern_files.ok and (pattern_files.returncode != 1 or pattern_files.stdout):
+        return None
+    for record in filter(None, str(pattern_files.stdout).split("\0")):
+        prefix, colon, path = record.partition(":")
+        if not (colon and prefix == ref):
+            return None
+        import_paths.add(path)
     if len(import_paths) > _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS:
         return None
     importers: dict[str, dict[str, list[str | None]]] = {}
