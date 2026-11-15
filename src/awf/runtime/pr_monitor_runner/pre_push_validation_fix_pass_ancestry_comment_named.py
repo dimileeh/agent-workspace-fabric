@@ -78,9 +78,6 @@ _NON_DEFINITION_NAMES = (
     | frozenset({"self", "cls", "this", "null", "undefined"})
 )
 _PYTHON_FUNCTION_OR_CLASS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-# The name a ``git grep -o`` definition match spells: a ``def``/``class`` at any
-# depth, or a column-0 binding.
-_GREPPED_DEFINITION_NAME_RE = re.compile(r"\s*(?:(?:async\s+)?def|class)\s+(\w+)|(\w+)")
 
 
 def reviewer_comment_text(thread: ReviewThread) -> str:
@@ -300,9 +297,12 @@ async def _names_defined_in_several_files(
     A backticked name carries no module, so when two files define it the
     comment does not say which one the reviewed code reaches, and a change to an
     unrelated same-named definition must not count (PRRT_kwDOSJAM6s63mN54). One
-    ``git grep`` over every Python source finds any ``def``/``class`` of the
-    name at any depth and any column-0 binding of it; a docstring line or a
-    method only over-counts, so the scan can only withhold a name.
+    ``git grep`` over every Python source finds the lines that may bind the name:
+    a ``def``/``class`` at any depth, a leading annotation, an assignment or
+    walrus target anywhere on the line (chained, tuple, indented —
+    PRRT_kwDOSJAM6s63mfY9), or an ``as``/``for`` target. A docstring line, a
+    method, or a keyword argument only over-counts, so the scan can only
+    withhold a name.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _git_env_for_merge_safety_object_lookup,
@@ -315,7 +315,6 @@ async def _names_defined_in_several_files(
             "grep",
             "--no-line-number",
             "--no-column",
-            "-o",
             "-z",
             "-I",
             "-E",
@@ -323,7 +322,11 @@ async def _names_defined_in_several_files(
             rf"^[[:space:]]*((async[[:space:]]+)?def|class)[[:space:]]+({alternation})"
             r"([^[:alnum:]_]|$)",
             "-e",
-            rf"^({alternation})[[:space:]]*[:=]",
+            rf"^[[:space:]]*({alternation})[[:space:]]*:",
+            "-e",
+            rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*:?=",
+            "-e",
+            rf"(^|[^[:alnum:]_])(as|for)[[:space:]]+({alternation})([^[:alnum:]_]|$)",
             ref,
             "--",
             *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
@@ -333,14 +336,22 @@ async def _names_defined_in_several_files(
     if not result.ok:
         # ``git grep`` exits 1 when nothing matches; anything else is unreadable.
         return frozenset() if result.returncode == 1 and not result.stdout else None
+    # The grep prefilters whole lines; this keeps only a binding of a name — a
+    # comparison such as ``LIMIT == 1`` or an attribute ``x.LIMIT = 1`` is a read.
+    binding = re.compile(
+        rf"^\s*(?:(?:async\s+)?def|class)\s+({alternation})(?!\w)"
+        rf"|^\s*({alternation})\s*:"
+        rf"|(?<![\w.])({alternation})\s*:?=(?!=)"
+        rf"|(?<!\w)(?:as|for)\s+({alternation})(?!\w)"
+    )
     files: dict[str, set[str]] = {}
     for record in str(result.stdout).splitlines():
-        head, terminated, matched = record.partition("\0")
+        head, terminated, line = record.partition("\0")
         prefix, colon, path = head.partition(":")
         if not (terminated and colon and prefix == ref):
             return None
-        named = _GREPPED_DEFINITION_NAME_RE.match(matched)
-        if named is not None and (name := named.group(1) or named.group(2)) in names:
+        for match in binding.finditer(line):
+            name = next(group for group in match.groups() if group)
             files.setdefault(name, set()).add(path)
     return frozenset(name for name, paths in files.items() if len(paths) > 1)
 

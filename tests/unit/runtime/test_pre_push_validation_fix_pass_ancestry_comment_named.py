@@ -1082,6 +1082,53 @@ async def test_real_git_grep_withholds_a_name_two_packages_define(
     assert changed is evidence
 
 
+@pytest.mark.parametrize(
+    ("other_source", "evidence"),
+    [
+        pytest.param("OTHER = LIMIT = 2\n", False, id="chained"),
+        pytest.param("A, LIMIT = 1, 2\n", False, id="tuple"),
+        pytest.param("if True:\n    LIMIT = 2\n", False, id="indented"),
+        pytest.param("LIMIT: int\nLIMIT = 2\n", False, id="annotated"),
+        pytest.param("print(LIMIT := 2)\n", False, id="walrus"),
+        pytest.param("import os as LIMIT\n", False, id="import-as"),
+        pytest.param("for LIMIT in ():\n    pass\n", False, id="for-target"),
+        # Reading the name is not a second definition.
+        pytest.param("CHECK = LIMIT == 1 or LIMIT <= 2\n", True, id="reference-only"),
+    ],
+)
+@pytest.mark.unit
+async def test_real_git_grep_withholds_a_name_another_module_binds_anywhere(
+    tmp_path: Path, other_source: str, evidence: bool
+) -> None:
+    # PRRT_kwDOSJAM6s63mfY9: a non-leading binding elsewhere still makes the name ambiguous.
+    from types import SimpleNamespace
+
+    from awf.common.commands import AsyncioSubprocessRunner
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "agent@example.com")
+    _git(tmp_path, "config", "user.name", "AWF Agent")
+    (tmp_path / "a.py").write_text("LIMIT = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(other_source, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    left = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "a.py").write_text("LIMIT = 3\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-q", "-am", "fix")
+    right = _git(tmp_path, "rev-parse", "HEAD")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+
+    changed = await comment_named._commit_range_changes_comment_named_target(
+        runner,
+        worktree_path=tmp_path,
+        left=left,
+        right=right,
+        comment_text="`LIMIT` is too low",
+    )
+
+    assert changed is evidence
+
+
 # --- fail-closed -------------------------------------------------------------------
 
 
