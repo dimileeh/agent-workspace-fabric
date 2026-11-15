@@ -332,16 +332,16 @@ def _name_bindings(
     ``def``/``class`` name, a parameter, an aliased or plain ``import``, a
     ``case`` capture, and a ``global``/``nonlocal`` declaration. Each yields
     None, a binding of the file's own. An unaliased ``from M import name`` —
-    or a ``from M import *`` in a file that uses the name — yields ``M`` as a
-    ``/``-joined path prefix instead (a relative ``M`` resolved against
-    ``path``'s directory, None when it cannot be), so a re-import of another
-    binding file's object can be told apart from a second definition.
+    or a ``from M import *``, which may bind every name whether or not the file
+    spells it (PRRT_kwDOSJAM6s63nK3y) — yields ``M`` as a ``/``-joined path
+    prefix instead (a relative ``M`` resolved against ``path``'s directory, None
+    when it cannot be), so a re-import of another binding file's object can be
+    told apart from a second definition.
     """
     try:
         tree = ast.parse(file_text)
     except (SyntaxError, ValueError, RecursionError):
         return None
-    used = names & {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     from_modules: dict[ast.alias, str | None] = {}
     bindings: dict[str, list[str | None]] = {}
     # ``ast.walk`` is breadth-first, so an ``ImportFrom`` precedes its aliases.
@@ -356,7 +356,7 @@ def _name_bindings(
                 if alias.asname is None:
                     from_modules[alias] = module
         elif isinstance(node, ast.alias) and node in from_modules:
-            for name in used if node.name == "*" else names & {node.name}:
+            for name in names if node.name == "*" else names & {node.name}:
                 bindings.setdefault(name, []).append(from_modules[node])
         else:
             for name in names.intersection(_bound_names(node)):
@@ -374,8 +374,10 @@ async def _names_defined_in_several_files(
     unrelated same-named definition must not count (PRRT_kwDOSJAM6s63mN54).
 
     One whole-word ``git grep -l`` lists the Python sources that spell a name at
-    all; each is read at ``ref`` and parsed, and ``_name_bindings`` collects how
-    it binds the name. Per-line patterns kept missing binding forms —
+    all or hold an ``import *``, which binds names it never spells
+    (PRRT_kwDOSJAM6s63nK3y); each is read at ``ref`` and parsed, and
+    ``_name_bindings`` collects how it binds the name. Per-line patterns kept
+    missing binding forms —
     non-leading and unpacking targets, imports, ``case`` captures — so the
     parser, not the grep, decides what binds. An unaliased import of the name
     from another binding file's own module (``from a import LIMIT`` re-exporting
@@ -398,8 +400,11 @@ async def _names_defined_in_several_files(
             "-z",
             "-I",
             "-w",
-            "-F",
+            "-E",
+            # Identifiers carry no ERE metacharacters, so each still matches literally.
             *(argument for name in sorted(names) for argument in ("-e", name)),
+            "-e",
+            r"import[[:space:]]*\*",
             ref,
             "--",
             *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),

@@ -1142,7 +1142,6 @@ _EXTERNAL = "src/app/settings.py"
         pytest.param("from a.b import (\n    X,\n    LIMIT\n)\n", ["a/b"], id="from-import"),
         pytest.param("from .settings import LIMIT\n", ["src/app/settings"], id="relative"),
         pytest.param("from .......x import LIMIT\n", [None], id="relative-above-root"),
-        pytest.param("from a import *\nprint(LIMIT)\n", ["a"], id="star-used"),
         pytest.param("def f():\n    from a import LIMIT\n", ["a"], id="local-import"),
         pytest.param("match 2:\n    case LIMIT:\n        pass\n", [None], id="case-capture"),
         pytest.param("match []:\n    case [*LIMIT]:\n        pass\n", [None], id="case-star"),
@@ -1156,7 +1155,6 @@ _EXTERNAL = "src/app/settings.py"
         pytest.param("CHECK = LIMIT == 1\nX = f(LIMIT, key=1)\n", [], id="reads"),
         pytest.param("x.LIMIT = 1\n", [], id="attribute"),
         pytest.param("from m import LIMIT as OTHER\n", [], id="aliased-away"),
-        pytest.param("from a import *\n", [], id="star-unused"),
         pytest.param("match 1:\n    case a.LIMIT:\n        pass\n", [], id="case-value"),
         pytest.param("for X in (LIMIT, 2):\n    pass\n", [], id="for-iterable"),
     ],
@@ -1170,6 +1168,18 @@ def test_name_bindings_reads_every_binding_form(source: str, modules: list[str |
 
     assert bindings == ({"LIMIT": modules} if modules else {})
     assert comment_named._name_bindings("X = (\n", path=_EXTERNAL, names=frozenset()) is None
+
+
+@pytest.mark.parametrize("source", ["from a import *\n", "from a import*\nprint(LIMIT)\n"])
+@pytest.mark.unit
+def test_name_bindings_counts_a_star_import_as_binding_every_name(source: str) -> None:
+    # PRRT_kwDOSJAM6s63nK3y: ``import *`` binds names the importer never spells,
+    # which other modules can still reach as attributes of it.
+    bindings = comment_named._name_bindings(
+        source, path=_EXTERNAL, names=frozenset({"LIMIT", "UNUSED"})
+    )
+
+    assert bindings == {"LIMIT": ["a"], "UNUSED": ["a"]}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -1251,6 +1261,9 @@ async def test_real_git_grep_withholds_a_name_two_packages_define(
             "from . import a\nfrom a import (\n    LIMIT,\n)\n", True, id="re-import-wrapped"
         ),
         pytest.param("from .a import LIMIT\n", True, id="relative-re-import"),
+        # PRRT_kwDOSJAM6s63nK3y: a star import binds the name without spelling it.
+        pytest.param("from external_settings import *\n", False, id="star-import"),
+        pytest.param("from a import *\n", True, id="star-re-export"),
         pytest.param("from external_settings import LIMIT as OTHER\n", True, id="aliased-away"),
         # PRRT_kwDOSJAM6s63nFMJ: a ``case`` pattern capture binds the name too.
         pytest.param("match [2]:\n    case [LIMIT]:\n        pass\n", False, id="case-sequence"),
