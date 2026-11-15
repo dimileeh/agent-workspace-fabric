@@ -747,6 +747,35 @@ async def test_keep_self_cited_item_commit_refuses_a_side_branch_commit_off_the_
 
 
 @pytest.mark.unit
+async def test_keep_self_cited_item_commit_refuses_a_floor_that_diverged_from_the_cited_commit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s63mToL: the preserved floor is kept only when it holds the citation.
+
+    Floor D and cited C both descend from item start A on separate branches; E
+    merges them through B. C is not above D, but D does not contain C either, so
+    resetting onto D would discard the cited fix: the ordinary mutation park wins.
+    """
+    cited = "c" * 40
+    runner = _runner(
+        tmp_path,
+        correction="unused",
+        correction_head=_E,
+        parents={cited: _A, _D: _A, _B: _D, _E: _B},
+    )
+    runner._range = lambda _spec: [_E, cited, _B, _D]  # type: ignore[method-assign]
+    runner.current_head = _E
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _keep(runner, reason=f"already addressed by {cited}", rollback_floor_head=_D)
+
+    assert result is None
+    assert runner.reset_targets == []
+    assert not _events(captured, _PARTIAL_EVENT)
+    assert _events(captured, "monitor.agent_verdict_correction_self_cite_diverges_from_floor")
+
+
+@pytest.mark.unit
 async def test_keep_self_cited_item_commit_parks_kept_commit_on_evidence_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

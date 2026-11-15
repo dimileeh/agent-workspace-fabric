@@ -183,8 +183,9 @@ async def keep_self_cited_item_commit(
 
     Returns ``None`` — the caller's ordinary mutation park — when nothing in the
     item's range is cited (a pre-existing or foreign commit, or no citation),
-    when the floor ancestry probe fails, or when the cited commit does not
-    descend from the item start (a merged side branch). A hosted remote that
+    when the floor ancestry probe fails, when the cited commit does not
+    descend from the item start (a merged side branch), or when it diverged
+    from a preserved floor that does not contain it. A hosted remote that
     already advanced is rewound to the kept commit, and push tracking follows
     it. Cited commits on two merge sides keep only the newest one's ancestry. A
     failed rollback raises the mutation reason code.
@@ -248,6 +249,19 @@ async def keep_self_cited_item_commit(
                 ancestor=floor,
                 descendant=cited,
             )
+            # #934 keeps the preserved floor only when it really holds the cited
+            # commit: a cited commit that diverged from the floor (both under the
+            # item start, joined by a later merge) would be discarded by resetting
+            # onto the floor (PRRT_kwDOSJAM6s63mToL).
+            floor_holds_cited = (
+                not cited_above_floor
+                and floor.lower() != item_start_head.lower()
+                and await runner._head_descends_from(
+                    worktree_path=worktree_path,
+                    ancestor=cited,
+                    descendant=floor,
+                )
+            )
         except (TimeoutError, OSError, RuntimeError) as exc:
             _log.warning(
                 "monitor.agent_verdict_correction_self_cite_floor_unreadable",
@@ -267,7 +281,15 @@ async def keep_self_cited_item_commit(
                 cited_commit=cited,
             )
             return None
-        if not cited_above_floor:
+        if not cited_above_floor and not floor_holds_cited:
+            _log.warning(
+                "monitor.agent_verdict_correction_self_cite_diverges_from_floor",
+                workspace_id=workspace_id,
+                rollback_floor_head=floor,
+                cited_commit=cited,
+            )
+            return None
+        if floor_holds_cited:
             # #934: the preserved floor already contains the cited commit.
             kept_head = floor
     _log.warning(
