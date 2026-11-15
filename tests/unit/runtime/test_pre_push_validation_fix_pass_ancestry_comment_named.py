@@ -1141,23 +1141,6 @@ async def test_unreadable_case_clause_files_fail_closed(
     assert runner.diff_paths == []
 
 
-@pytest.mark.parametrize(
-    ("candidate", "module_path", "expected"),
-    [
-        ("pkg/__init__.py", "pkg", True),
-        ("src/pkg/mod.py", "pkg/mod", True),
-        ("pkg/mod.pyi", "pkg/mod", True),
-        ("pkg/other.py", "pkg", False),
-        ("other/mod.py", "pkg/mod", False),
-    ],
-)
-@pytest.mark.unit
-def test_is_module_file_matches_only_the_modules_own_file(
-    candidate: str, module_path: str, expected: bool
-) -> None:
-    assert comment_named._is_module_file(candidate, module_path) is expected
-
-
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
@@ -1290,6 +1273,51 @@ async def test_real_git_grep_withholds_a_name_another_module_binds_anywhere(
         left=left,
         right=right,
         comment_text="`LIMIT` is too low",
+    )
+
+    assert changed is evidence
+
+
+@pytest.mark.parametrize(
+    ("importer", "source", "evidence"),
+    [
+        # PRRT_kwDOSJAM6s63nFsa: ``src/app/json.py`` is ``app.json``, not ``json``, so
+        # an unrelated file importing ``loads`` from ``json`` binds a second object.
+        pytest.param("src/other/use.py", "from json import loads\n", False, id="foreign-suffix"),
+        pytest.param("src/other/use.py", "from app.json import loads\n", True, id="re-import"),
+        pytest.param("src/app/use.py", "from .json import loads\n", True, id="relative"),
+    ],
+)
+@pytest.mark.unit
+async def test_real_git_grep_matches_an_import_only_under_the_importers_root(
+    tmp_path: Path, importer: str, source: str, evidence: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from awf.common.commands import AsyncioSubprocessRunner
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "agent@example.com")
+    _git(tmp_path, "config", "user.name", "AWF Agent")
+    definition = tmp_path / "src" / "app" / "json.py"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("def loads(text):\n    return text\n", encoding="utf-8")
+    (tmp_path / importer).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer).write_text(source, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    left = _git(tmp_path, "rev-parse", "HEAD")
+    definition.write_text("def loads(text):\n    return text.strip()\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-q", "-am", "fix")
+    right = _git(tmp_path, "rev-parse", "HEAD")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=AsyncioSubprocessRunner()))
+
+    changed = await comment_named._commit_range_changes_comment_named_target(
+        runner,
+        worktree_path=tmp_path,
+        left=left,
+        right=right,
+        comment_text="`loads` keeps whitespace",
     )
 
     assert changed is evidence

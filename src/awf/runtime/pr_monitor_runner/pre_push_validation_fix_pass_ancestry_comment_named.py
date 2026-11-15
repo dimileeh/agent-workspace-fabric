@@ -46,8 +46,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
     _PYTHON_CALL_SITE_SUFFIXES,
+    _candidate_is_under_module_path,
     _diff_adds_decorators_above_span,
-    _module_path_segments,
     _path_diff_text_in_commit_range,
     _relative_import_module_path,
 )
@@ -356,18 +356,6 @@ def _unaliased_import_modules(
     return modules
 
 
-def _is_module_file(candidate: str, module_path: str) -> bool:
-    """True when ``candidate`` is ``module_path``'s own file (``M.py`` or ``M/__init__.py``).
-
-    Matched as a path suffix so any source root (``src/``, ``tests/``) resolves.
-    """
-    segments = _module_path_segments(candidate)
-    if segments[-1:] == ["__init__"]:
-        segments = segments[:-1]
-    wanted = module_path.split("/")
-    return segments[-len(wanted) :] == wanted
-
-
 async def _names_defined_in_several_files(
     self: Any, *, worktree_path: Path, ref: str, names: frozenset[str]
 ) -> frozenset[str] | None:
@@ -388,9 +376,12 @@ async def _names_defined_in_several_files(
     line may import it — an ``import`` line, or a bare name-list line a wrapped
     import continues on — is read and parsed, and each import that does not come
     from another binding file's own module (``from a import LIMIT`` re-exporting
-    ``a.py``'s) counts as one more definition. So does a ``case`` pattern
-    capturing the name in a file a second grep finds holding both a ``case``
-    clause and the name (PRRT_kwDOSJAM6s63nFMJ). More than
+    ``a.py``'s) counts as one more definition. The module's own file must sit
+    under a root the importer's directory starts with, so ``src/app/json.py``
+    is not the ``json`` that ``from json import loads`` reaches
+    (PRRT_kwDOSJAM6s63nFsa). A ``case`` pattern capturing the name counts too,
+    in a file a second grep finds holding both a ``case`` clause and the name
+    (PRRT_kwDOSJAM6s63nFMJ). More than
     ``_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS`` such files, or an unreadable or
     unparsable one, fails closed.
     """
@@ -530,7 +521,10 @@ async def _names_defined_in_several_files(
             if path not in defined
             and any(
                 module is None
-                or not any(_is_module_file(other, module) for other in bound - {path})
+                or not any(
+                    _candidate_is_under_module_path(other, module, call_site=path, exact=True)
+                    for other in bound - {path}
+                )
                 for module in modules
             )
         ]
