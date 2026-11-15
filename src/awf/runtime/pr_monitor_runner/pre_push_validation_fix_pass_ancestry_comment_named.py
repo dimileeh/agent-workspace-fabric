@@ -47,7 +47,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_f
     _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
     _PYTHON_CALL_SITE_SUFFIXES,
     _diff_adds_decorators_above_span,
+    _module_path_segments,
     _path_diff_text_in_commit_range,
+    _relative_import_module_path,
 )
 
 if TYPE_CHECKING:
@@ -315,6 +317,52 @@ def _deleted_paths_from_name_status_z(name_status_z: str) -> frozenset[str]:
     return frozenset(deleted)
 
 
+def _unaliased_import_modules(
+    file_text: str, *, path: str, names: frozenset[str]
+) -> dict[str, list[str | None]] | None:
+    """Module paths each of ``names`` is imported from without an alias in ``file_text``.
+
+    ``from M import name`` yields ``M`` as a ``/``-joined path prefix (a relative
+    ``M`` resolved against ``path``'s directory); ``import name`` / ``import
+    name.sub`` binds a module object, and an unresolvable relative import binds
+    something this reader cannot follow, so both yield None. Imports at any depth
+    count, as the definition scan's lines do. Unparsable text returns None.
+    """
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    modules: dict[str, list[str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = (
+                _relative_import_module_path(path, "." * node.level, node.module)
+                if node.level
+                else (node.module or "").replace(".", "/")
+            )
+            for alias in node.names:
+                if alias.asname is None and alias.name in names:
+                    modules.setdefault(alias.name, []).append(module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.name.split(".")[0]
+                if alias.asname is None and bound in names:
+                    modules.setdefault(bound, []).append(None)
+    return modules
+
+
+def _is_module_file(candidate: str, module_path: str) -> bool:
+    """True when ``candidate`` is ``module_path``'s own file (``M.py`` or ``M/__init__.py``).
+
+    Matched as a path suffix so any source root (``src/``, ``tests/``) resolves.
+    """
+    segments = _module_path_segments(candidate)
+    if segments[-1:] == ["__init__"]:
+        segments = segments[:-1]
+    wanted = module_path.split("/")
+    return segments[-len(wanted) :] == wanted
+
+
 async def _names_defined_in_several_files(
     self: Any, *, worktree_path: Path, ref: str, names: frozenset[str]
 ) -> frozenset[str] | None:
@@ -330,9 +378,18 @@ async def _names_defined_in_several_files(
     leading assignment or ``for`` target list (PRRT_kwDOSJAM6s63misj). A docstring line, a
     method, or a keyword argument only over-counts, so the scan can only
     withhold a name.
+
+    An unaliased import binds the name too (PRRT_kwDOSJAM6s63m-rh): a file whose
+    line may import it — an ``import`` line, or a bare name-list line a wrapped
+    import continues on — is read and parsed, and each import that does not come
+    from another binding file's own module (``from a import LIMIT`` re-exporting
+    ``a.py``'s) counts as one more definition. More than
+    ``_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS`` such files, or an unreadable or
+    unparsable one, fails closed.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _git_env_for_merge_safety_object_lookup,
+        _path_text_at_ref,
     )
 
     alternation = "|".join(sorted(names))
@@ -358,6 +415,12 @@ async def _names_defined_in_several_files(
             rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]*[]),]",
             "-e",
             rf"(^|[^[:alnum:]_.])({alternation})[[:space:]]+in([^[:alnum:]_]|$)",
+            "-e",
+            rf"(^|[^[:alnum:]_.])import[[:space:](](.*[^[:alnum:]_.])?({alternation})"
+            r"([^[:alnum:]_]|$)",
+            "-e",
+            rf"^([[:alnum:]_[:space:],()]*[[:space:],(])?({alternation})"
+            r"([[:space:],()][[:alnum:]_[:space:],()]*)?([[:space:]]*#.*)?$",
             ref,
             "--",
             *(f"*{suffix}" for suffix in sorted(_PYTHON_CALL_SITE_SUFFIXES)),
@@ -383,7 +446,16 @@ async def _names_defined_in_several_files(
         rf"^\s*(?:async\s+)?for\s+({target})\s+in(?!\w)|^\s*((?:{target}=(?!=))+)"
     )
     target_name = re.compile(rf"(?<![\w.])({alternation})(?!\w)")
+    # A line an import of a name may sit on: an ``import`` line, or a bare
+    # name list — the continuation of a wrapped ``from M import (...)``. A
+    # ``def``/``class`` head is a definition, never an import.
+    definition_head = re.compile(r"^\s*(?:(?:async\s+)?def|class)\s")
+    import_line = re.compile(
+        rf"(?<![\w.])import[\s(](?:.*[^\w.])?({alternation})(?!\w)"
+        rf"|^(?:[\w\s,()]*[\s,(])?({alternation})(?:[\s,()][\w\s,()]*)?(?:\s*#.*)?$"
+    )
     files: dict[str, set[str]] = {}
+    import_paths: set[str] = set()
     for record in str(result.stdout).splitlines():
         head, terminated, line = record.partition("\0")
         prefix, colon, path = head.partition(":")
@@ -395,7 +467,40 @@ async def _names_defined_in_several_files(
         targets = target_list.match(line)
         for name in target_name.findall(targets.group(1) or targets.group(2)) if targets else ():
             files.setdefault(name, set()).add(path)
-    return frozenset(name for name, paths in files.items() if len(paths) > 1)
+        if import_line.search(line) and not definition_head.match(line):
+            import_paths.add(path)
+    if len(import_paths) > _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS:
+        return None
+    importers: dict[str, dict[str, list[str | None]]] = {}
+    for path in sorted(import_paths):
+        file_text = await _path_text_at_ref(self, worktree_path=worktree_path, ref=ref, path=path)
+        modules = (
+            None
+            if file_text is None
+            else _unaliased_import_modules(file_text, path=path, names=names)
+        )
+        if modules is None:
+            return None
+        for name, imported in modules.items():
+            importers.setdefault(name, {})[path] = imported
+    ambiguous: set[str] = set()
+    for name in names:
+        defined = files.get(name, set())
+        imported_by = importers.get(name, {})
+        bound = defined | imported_by.keys()
+        foreign = [
+            path
+            for path, modules in imported_by.items()
+            if path not in defined
+            and any(
+                module is None
+                or not any(_is_module_file(other, module) for other in bound - {path})
+                for module in modules
+            )
+        ]
+        if len(defined) + len(foreign) > 1:
+            ambiguous.add(name)
+    return frozenset(ambiguous)
 
 
 async def _commit_range_changes_comment_named_target(

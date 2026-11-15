@@ -1093,6 +1093,45 @@ async def test_unreadable_definition_grep_fails_closed(output: str | None) -> No
     assert runner.diff_paths == []
 
 
+@pytest.mark.parametrize("importers", [1, comment_named._MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS + 1])
+@pytest.mark.unit
+async def test_unreadable_or_too_many_import_lines_fail_closed(importers: int) -> None:
+    # PRRT_kwDOSJAM6s63m-rh: a file that may import the name is read; one that
+    # cannot be, or more files than the read cap, leaves uniqueness unproven.
+    paths = [f"src/app/user_{index}.py" for index in range(importers)]
+    definitions = (
+        (_INBOUND, "_TASK_INBOUND_TYPES ="),
+        *((path, "from app.messaging.inbound_types import _TASK_INBOUND_TYPES") for path in paths),
+    )
+    runner = _probe(
+        texts={_INBOUND: _INBOUND_TEXT},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _INBOUND_INSERT},
+        definitions={_LEFT: definitions},
+    )
+
+    assert not await _changes_named_target(runner, "`_TASK_INBOUND_TYPES` misses a kind")
+    assert runner.shows == ([] if importers > 1 else paths)
+    assert runner.diff_paths == []
+
+
+@pytest.mark.parametrize(
+    ("candidate", "module_path", "expected"),
+    [
+        ("pkg/__init__.py", "pkg", True),
+        ("src/pkg/mod.py", "pkg/mod", True),
+        ("pkg/mod.pyi", "pkg/mod", True),
+        ("pkg/other.py", "pkg", False),
+        ("other/mod.py", "pkg/mod", False),
+    ],
+)
+@pytest.mark.unit
+def test_is_module_file_matches_only_the_modules_own_file(
+    candidate: str, module_path: str, expected: bool
+) -> None:
+    assert comment_named._is_module_file(candidate, module_path) is expected
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
@@ -1154,6 +1193,25 @@ async def test_real_git_grep_withholds_a_name_two_packages_define(
         pytest.param("A = B, LIMIT = 1, 2\n", False, id="unpack-chained"),
         pytest.param("for X, LIMIT in ():\n    pass\n", False, id="for-unpack"),
         pytest.param("for (LIMIT, X) in ():\n    pass\n", False, id="for-unpack-paren"),
+        # PRRT_kwDOSJAM6s63m-rh: an unaliased import binds another module's object.
+        pytest.param("from external_settings import LIMIT\n", False, id="from-import"),
+        pytest.param("from external_settings import OTHER, LIMIT\n", False, id="from-import-list"),
+        pytest.param(
+            "from external_settings import (\n    OTHER,\n    LIMIT\n)\n",
+            False,
+            id="from-import-wrapped",
+        ),
+        pytest.param("from .settings import LIMIT\n", False, id="relative-import"),
+        pytest.param("import LIMIT.sub\n", False, id="plain-import"),
+        pytest.param("def f():\n    from external_settings import LIMIT\n", False, id="local"),
+        pytest.param("from external_settings import LIMIT\nX = (\n", False, id="unparsable"),
+        # Re-importing the one definition is not a second one.
+        pytest.param("from a import LIMIT\n", True, id="re-import"),
+        pytest.param(
+            "from . import a\nfrom a import (\n    LIMIT,\n)\n", True, id="re-import-wrapped"
+        ),
+        pytest.param("from .a import LIMIT\n", True, id="relative-re-import"),
+        pytest.param("from external_settings import LIMIT as OTHER\n", True, id="aliased-away"),
         # Reading the name is not a second definition.
         pytest.param("CHECK = LIMIT == 1 or LIMIT <= 2\n", True, id="reference-only"),
         pytest.param("print(LIMIT, 1)\nX = max(LIMIT, 2)\n", True, id="call-argument"),
