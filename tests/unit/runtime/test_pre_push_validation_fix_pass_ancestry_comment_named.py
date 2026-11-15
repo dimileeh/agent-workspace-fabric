@@ -926,6 +926,50 @@ async def test_unparsable_python_source_fails_closed() -> None:
     assert not await _changes_named_target(runner, "`LIMIT` is too low")
 
 
+@pytest.mark.unit
+async def test_unparsable_right_side_python_source_fails_closed() -> None:
+    """Valid left-side spans are no evidence when the fix leaves the file invalid."""
+    runner = _Probe(
+        texts={
+            (_LEFT, _INBOUND): "def other():\n    return 0\n",
+            (_RIGHT, _INBOUND): "def other():\n    return (\n",
+        },
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -2 +2 @@", "-    return 0", "+    return (")},
+    )
+
+    assert not await _changes_named_target(runner, "`other()` returns the wrong value")
+
+
+@pytest.mark.unit
+async def test_unparsable_rename_target_fails_closed() -> None:
+    """A rename source's left-side spans need a parsable right side under its target."""
+    moved = "src/app/messaging/inbound_kinds.py"
+    runner = _RenameProbe(
+        name_status=f"R090\0{_INBOUND}\0{moved}\0",
+        texts={
+            (_LEFT, _INBOUND): "def other():\n    return 0\n",
+            (_RIGHT, moved): "def other():\n    return (\n",
+        },
+        changed_paths=(),
+        diffs={moved: _diff(moved, "@@ -2 +2 @@", "-    return 0", "+    return (")},
+    )
+
+    assert not await _changes_named_target(runner, "`other()` returns the wrong value")
+
+
+@pytest.mark.unit
+async def test_named_definition_deleted_with_its_file_is_evidence() -> None:
+    """An intentional file deletion has no right side to parse and stays evidence."""
+    runner = _Probe(
+        texts={(_LEFT, _INBOUND): "def other():\n    return 0\n", (_RIGHT, _INBOUND): None},
+        changed_paths=(_INBOUND,),
+        diffs={_INBOUND: _diff(_INBOUND, "@@ -1,2 +0,0 @@", "-def other():", "-    return 0")},
+    )
+
+    assert await _changes_named_target(runner, "Remove the dead `other()` helper")
+
+
 # --- ambiguous names (PRRT_kwDOSJAM6s63mN54) ------------------------------------------
 
 

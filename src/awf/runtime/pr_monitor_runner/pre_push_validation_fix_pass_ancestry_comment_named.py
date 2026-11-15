@@ -198,6 +198,15 @@ def _bound_names(node: ast.AST) -> tuple[str, ...]:
     return ()
 
 
+def _parses_as_python(text: str) -> bool:
+    """True when ``text`` is valid Python source."""
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    return True
+
+
 def _named_definition_spans(
     file_text: str | None, names: frozenset[str]
 ) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
@@ -450,20 +459,27 @@ async def _commit_range_changes_comment_named_target(
     # target has no parser here and fails closed, and a docs or text snippet
     # spelling the name is not its definition (PRRT_kwDOSJAM6s63O-t2).
     sources = [path for path in changed if Path(path).suffix.lower() in _PYTHON_CALL_SITE_SUFFIXES]
+    right_texts: dict[str, str | None] = {}
     for candidate in sources[:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]:
         file_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
         spans, bindings = _named_definition_spans(file_text, names)
         # A rename source's right-side text is read under its target, itself a candidate.
-        right_text = (
-            None
-            if candidate in rename_map
-            else await _path_text_at_ref(
-                self, worktree_path=worktree_path, ref=right, path=candidate
+        right_path = rename_map.get(candidate, candidate)
+        if right_path not in right_texts:
+            right_texts[right_path] = await _path_text_at_ref(
+                self, worktree_path=worktree_path, ref=right, path=right_path
             )
+        right_text = right_texts[right_path]
+        if right_text is not None and not _parses_as_python(right_text):
+            # Unparsable right-side source fails closed even when the left side's
+            # spans overlap the diff; only a deleted file has no right side
+            # (PRRT_kwDOSJAM6s63mToU).
+            continue
+        right_heads, right_bindings = _named_definition_spans(
+            None if candidate in rename_map else right_text, names
         )
-        right_heads, right_bindings = _named_definition_spans(right_text, names)
         right_spans = right_heads + right_bindings
         if not (spans or bindings or right_spans):
             continue
