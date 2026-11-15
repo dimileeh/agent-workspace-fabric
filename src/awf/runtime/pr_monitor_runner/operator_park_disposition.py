@@ -653,7 +653,8 @@ async def _reply_and_resolve(
     under ``OPERATOR_PARK_DISPOSITION_RESOLVE_FAILED`` with the forge's reason
     code; the posted reply is kept, so a repeated guide reuses it. A gate-flagged
     thread is already resolved: the resolve is a no-op that records it landed,
-    and only then clears the gate's flag; any fault keeps it.
+    and only then clears the gate's flag; any fault keeps it, and so does a
+    post-reply re-read that shows it reopened, which is never resolved again.
     """
     thread_id = item.thread_id
     posted = await reply_before_resolve(
@@ -667,6 +668,7 @@ async def _reply_and_resolve(
         remote_branch=remote_branch,
         thread=item.thread,
         audited_comments=item.audited_comments,
+        expect_resolved=item.thread is None,
         operation_id=operation_id,
         operation_type=OperationType.comment_repair.value,
         monitor_log=monitor_log,

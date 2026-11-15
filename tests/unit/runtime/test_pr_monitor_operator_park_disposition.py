@@ -1302,6 +1302,35 @@ async def test_ruling_on_a_gate_flagged_thread_is_refused_when_feedback_lands_be
 
 
 @pytest.mark.unit
+async def test_ruling_on_a_gate_flagged_thread_never_resolves_a_reopen_before_its_reply(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner, workspace_id, gh, cycle, _cmd = await _runner(factory, tmp_path)
+    _resolved_with_bot_reply(gh)
+    state = await _gate_flagged(runner, workspace_id, gh)
+    _arm(state, _false_positive())
+    post = gh.reply_to_thread
+
+    async def _reopen_then_reply(*, thread_id: str, body: str) -> str:
+        # A reviewer reopens the thread after the ruling's audit, comments unchanged.
+        gh.review_threads[thread_id]["isResolved"] = False
+        gh.review_threads[thread_id]["resolvedBy"] = None
+        return await post(thread_id=thread_id, body=body)
+
+    gh.reply_to_thread = _reopen_then_reply  # type: ignore[method-assign]
+
+    await _guide_poll(runner, workspace_id, gh, state, _status())
+
+    assert cycle.calls == []
+    assert [event[0] for event in gh.events] == ["reply"]  # the reopen is never closed
+    assert gh.review_threads[_THREAD]["isResolved"] is False
+    assert state.threads_addressed_ids[_disposition_unverified_key(_THREAD)] == _UNVERIFIED
+    disposition = read_item_disposition(state, _THREAD)
+    assert disposition is not None  # the ruling's reply is retired, never its answer
+    assert disposition.reply_comment_id is None and disposition.resolved is False
+
+
+@pytest.mark.unit
 async def test_repeat_ruling_on_a_thread_the_gate_flagged_again_replies_anew(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

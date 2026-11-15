@@ -105,6 +105,7 @@ async def reply_before_resolve(
     repo: RepoRef | None = None,
     retry: bool = True,
     audited_comments: tuple[str, ...] = (),
+    expect_resolved: bool = False,
 ) -> ThreadDisposition | None:
     """Post the thread's disposition reply; ``None`` means do NOT resolve.
 
@@ -112,7 +113,9 @@ async def reply_before_resolve(
     returned (:func:`_reread_thread_after_reply`); ``thread`` is the thread as the
     monitor listed it, whose outside comments that check compares when given;
     without one, ``audited_comments`` are the outside comments an audit read
-    (a resolved thread the monitor does not list, #1238).
+    (a resolved thread the monitor does not list, #1238). ``expect_resolved``
+    marks such a thread: a re-read that shows it open again refuses the reply, so
+    the caller never resolves over a reviewer's reopen.
     ``retry=False`` (outdated hygiene under
     ``serialized_merge``) makes that re-read fail fast, and a fault requeues the
     thread for the next poll instead of parking it.
@@ -177,6 +180,7 @@ async def reply_before_resolve(
                 reply_comment_id=posted.reply_comment_id,
                 retry=retry,
                 audited_comments=audited_comments,
+                expect_resolved=expect_resolved,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -312,6 +316,7 @@ async def _reread_thread_after_reply(
     reply_comment_id: str | None,
     retry: bool,
     audited_comments: tuple[str, ...] = (),
+    expect_resolved: bool = False,
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -338,6 +343,10 @@ async def _reread_thread_after_reply(
     if live is None:
         raise _StaleRereadError(f"the re-read does not show thread {thread_id} yet")
     moved = _conversation_moved(thread, live, reply_comment_id, audited_comments)
+    if expect_resolved and not live.is_resolved:
+        # A reviewer reopened the resolved thread after the audit that cleared it:
+        # the reopen is feedback after the decision, so resolving would close it.
+        return moved or _FEEDBACK_AFTER_DECISION, None
     if moved is None and reply_comment_id not in live.viewer_comment_ids:
         raise _StaleRereadError(f"the re-read does not show reply {reply_comment_id} yet")
     if live.viewer_comment_ids[-1:] != (reply_comment_id,):
