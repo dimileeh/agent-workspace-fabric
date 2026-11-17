@@ -122,6 +122,58 @@ async def test_in_scope_stack_prepare_denial_stops_even_when_workspace_ok(tmp_pa
     assert "ws_exact" not in scope._authority_grace
 
 
+async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, monkeypatch):
+    """Failed in-scope authority stop must stay pending for the owned-row sweep.
+
+    When ``resource_limits()`` exhausts grace and Compose teardown fails, the
+    scope finalizer can still see healthy ``workspace()`` material and skip
+    another stop. Without queueing ``_pending_stops`` /
+    ``_retained_stop_failures`` before the attempt, the next sweep reconciles
+    the (possibly already retracted) publication as owned and returns success
+    with no further teardown — leaving the stack running
+    (PRRT_kwDOSJAM6s64iiNm).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def resource_limits(_workspace_id: str):
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.resource_limits = AsyncMock(side_effect=resource_limits)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    with pytest.raises(OSError, match="synthetic docker teardown failure"):
+        async with scope.scope("ws_exact"):
+            await scope.resource_limits("ws_exact")
+
+    assert scope.stop_workspace.await_count == 1
+    assert "ws_exact" in scope._retained_stop_failures
+    assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in (scope._pending_stops["ws_exact"][1] or "")
+
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in scope.stop_workspace.await_args.kwargs["message"]
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
+
+
 async def test_rule_success_clears_only_that_checker_window(tmp_path, monkeypatch):
     """Independent checkers: reconcile success does not clear resource_limits.
 

@@ -414,10 +414,10 @@ async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_af
 
     While admission is closed the sweep only retires previous-boot views. Those
     failures share ``_retained_stop_failures`` so the next open poll retries them,
-    but they must not enter ``_pending_stops`` (that set is only for raised sweep
-    ``_stop`` calls). A still-owned reconcile success must clear the pending
-    retract — never call ``_stop`` on healthy retained work that was never meant
-    to tear down.
+    but they must not enter ``_pending_stops`` (that set is only for classified
+    teardown retries whose ``_stop`` was queued or raised). A still-owned
+    reconcile success must clear the pending retract — never call ``_stop`` on
+    healthy retained work that was never meant to tear down.
     """
     from tests.unit.test_hosted_runtime_authority_grace_parts.helpers import (
         _mock_consumers,

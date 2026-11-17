@@ -84,9 +84,10 @@ class _RetainedStop:
 
     Closed-admission ``retract_retired`` misses and failed Compose stops share
     this set so they stay prioritized across polls. Owned teardown retries must
-    consult ``_pending_stops`` — only identities whose sweep ``_stop`` raised
-    carry a recorded reason/message there; a retract-only miss must not stop
-    healthy retained work once admission opens.
+    consult ``_pending_stops`` — only identities whose classified ``_stop`` was
+    queued (in-scope authority stop or sweep ``_stop`` raise) carry a recorded
+    reason/message there; a retract-only miss must not stop healthy retained
+    work once admission opens.
     """
 
 
@@ -131,8 +132,9 @@ class WorkspaceConsumers:
         self._history_cursor = ""
         self._retry_cursor = ""
         self._retained_stop_failures: dict[str, _RetainedStop] = {}
-        # Reason/message for owned teardown retries: recorded only when a sweep
-        # ``_stop`` raises, dropped when that ``_stop`` returns successfully.
+        # Reason/message for owned teardown retries: queued before an in-scope
+        # classified stop (and when a sweep ``_stop`` raises), dropped when that
+        # ``_stop`` returns successfully.
         self._pending_stops: dict[str, tuple[str | None, str | None]] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
@@ -324,20 +326,32 @@ class WorkspaceConsumers:
                     # the finalizer's later _stop a no-op (one stop per failure).
                     # Fence closing first: the watcher may still be polling, and
                     # association() does not treat failed as inactive.
+                    # Queue teardown before attempting stop: if Compose teardown
+                    # fails, the finalizer may skip retry (healthy workspace()),
+                    # so the owned-row sweep must keep the pending stop until it
+                    # succeeds.
+                    reason_code = _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                    message = (
+                        self._authority_unavailable_message()
+                        if action == "stop_exhausted"
+                        else None
+                    )
                     ownership = owned_publication(self.authority.views, workspace_id)
                     if ownership is not None:
                         ownership.closing = True
-                    await self._stop(
-                        workspace_id,
-                        reason_code=(
-                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                        ),
-                        message=(
-                            self._authority_unavailable_message()
-                            if action == "stop_exhausted"
-                            else None
-                        ),
-                    )
+                    self._pending_stops[workspace_id] = (reason_code, message)
+                    self._retained_stop_failures.setdefault(workspace_id, _RetainedStop())
+                    try:
+                        await self._stop(
+                            workspace_id,
+                            reason_code=reason_code,
+                            message=message,
+                        )
+                    except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                        raise
+                    else:
+                        self._pending_stops.pop(workspace_id, None)
+                        self._retained_stop_failures.pop(workspace_id, None)
                     raise
                 self._clear_authority_check_success(workspace_id, checker=checker)
                 holding_claim = False
