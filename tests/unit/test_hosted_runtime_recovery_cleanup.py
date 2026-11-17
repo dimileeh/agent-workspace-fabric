@@ -571,6 +571,113 @@ async def test_failed_mounted_refresh_resets_ownership_so_retry_can_repopulate(
         assert (path.parent / "publication").exists()
 
 
+async def test_retry_marker_fsync_failure_clears_ownership_and_tracks_partial_marker(
+    authority, tmp_path, monkeypatch
+):
+    """Retry-marker fsync failure must not leave ownership on a deleted token.
+
+    A grace-eligible storage fault can fail the mounted refresh and then fail
+    persisting publication.retry for the same reason. Ownership cleanup after
+    that marker write must still run, and a partially written marker must be
+    adopted so cancel can invalidate it once storage recovers.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    real_fsync = os.fsync
+
+    def failing_fsync(fd):
+        raise OSError("synthetic retry marker fsync failure")
+
+    consumers = WorkspaceConsumers(runtime, tmp_path)
+    consumers.stop_workspace = AsyncMock()
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        assert ownership.publication is not None
+
+        monkeypatch.setattr(os, "fsync", failing_fsync)
+        with pytest.raises(OSError, match="synthetic retry marker fsync failure"):
+            await runtime.workspace("ws_cloud_stable")
+        assert path.is_dir()
+        assert path.stat().st_ino == inode
+        assert not list(path.iterdir())
+        assert not (path.parent / "publication").exists()
+        assert ownership.publication is None
+        marker = path.parent / "publication.retry"
+        assert marker.exists()
+        generation = marker.read_text(encoding="ascii")
+        assert len(generation) == 32
+        assert ownership.retry == generation
+
+        monkeypatch.setattr(os, "fsync", real_fsync)
+        await consumers._stop("ws_cloud_stable", authority_lost=False)
+        assert ownership.retry is None
+        assert not marker.exists()
+
+        await runtime.workspace("ws_cloud_stable")
+        assert path.stat().st_ino == inode
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+        assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+        assert ownership.publication is not None
+        assert ownership.retry is None
+        assert (path.parent / "publication").exists()
+
+
+async def test_unreadable_partial_retry_marker_is_cleared_with_ownership(authority, monkeypatch):
+    """Invalid partial publication.retry must be cleared when persistence fails.
+
+    If marker creation leaves an unreadable fence, ownership still drops the dead
+    publication token and removes that fence so cancel/reconcile are not stuck on
+    MaterialDeniedError from a corrupt retry file.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_retry = runtime.views._retry_marker
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic mounted refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    def corrupt_retry(parent, *, present=None):
+        if present is True:
+            fd = os.open(
+                "publication.retry",
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent,
+            )
+            try:
+                os.write(fd, b"bad")
+            finally:
+                os.close(fd)
+            raise OSError("synthetic corrupt retry persist")
+        return real_retry(parent, present=present)
+
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        monkeypatch.setattr(runtime.views, "_retry_marker", corrupt_retry)
+        with pytest.raises(OSError, match="synthetic mounted refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        assert ownership.publication is None
+        assert ownership.retry is None
+        assert not (path.parent / "publication.retry").exists()
+
+        monkeypatch.setattr(os, "replace", replace_file)
+        monkeypatch.setattr(runtime.views, "_retry_marker", real_retry)
+        await runtime.workspace("ws_cloud_stable")
+        assert path.stat().st_ino == inode
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+        assert ownership.publication is not None
+
+
 async def test_retained_reconcile_republishes_after_failed_mounted_refresh(authority, monkeypatch):
     """Retained reconcile must restore a warm mount after a fenced refresh failure.
 

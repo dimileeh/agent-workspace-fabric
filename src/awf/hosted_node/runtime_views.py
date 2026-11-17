@@ -437,15 +437,28 @@ class RuntimeViews:
                     # fenced retry marker for that workspace only when the mount
                     # directory is preserved. Keep that generation on ownership
                     # so cancellation can invalidate it after publication is
-                    # cleared, without touching a successor publish.
-                    self._remove_view(parent, preserve_directory=not new)
-                    if not new:
-                        ownership.retry = self._retry_marker(parent, present=True)
-                    else:
-                        ownership.retry = None
-                    self._owners.pop(workspace_id, None)
-                    if ownership.publication is result:
-                        ownership.publication = None
+                    # cleared, without touching a successor publish. Marker
+                    # persistence can fail for the same transient storage fault
+                    # that aborted the refresh; ownership cleanup must still run,
+                    # and a partial on-disk marker must be adopted or cleared.
+                    try:
+                        self._remove_view(parent, preserve_directory=not new)
+                        if not new:
+                            try:
+                                ownership.retry = self._retry_marker(parent, present=True)
+                            except BaseException:
+                                try:
+                                    ownership.retry = self._retry_marker(parent)
+                                except BaseException:
+                                    with suppress(BaseException):
+                                        self._retry_marker(parent, present=False)
+                                    ownership.retry = None
+                        else:
+                            ownership.retry = None
+                    finally:
+                        self._owners.pop(workspace_id, None)
+                        if ownership.publication is result:
+                            ownership.publication = None
                     failure = error
             finally:
                 os.close(directory)
