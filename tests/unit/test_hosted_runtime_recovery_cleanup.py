@@ -1170,6 +1170,70 @@ async def test_cancel_deletes_leftover_credentials_before_clearing_retry_marker(
     assert await runtime.publication("ws_cloud_stable") is None
 
 
+async def test_clear_owned_retracts_failed_refresh_retry_leftovers(authority, monkeypatch):
+    """Shutdown clear_owned must retract failed-refresh fences with leftover credentials.
+
+    When retained refresh fails and credential unlink also fails, creating the retry
+    marker succeeds while readable keys remain. clear_owned previously visited only
+    live publications in _owners, so close_admission(); clear_owned() returned while
+    github.api-key stayed readable. Keep the retry generation registered and retract
+    leftovers with the same generation fencing on shutdown cleanup.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_unlink = os.unlink
+    credential_unlinks = 0
+    fail_cleanup_unlinks = False
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic shutdown leftover refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    def fail_second_credential_unlink(name, *args, **kwargs):
+        nonlocal credential_unlinks
+        if (
+            fail_cleanup_unlinks
+            and isinstance(name, str)
+            and name in {"openai.api-key", "anthropic.api-key", "github.api-key"}
+            and kwargs.get("dir_fd") is not None
+        ):
+            credential_unlinks += 1
+            if credential_unlinks >= 2:
+                raise OSError("synthetic cleanup unlink failure")
+        return real_unlink(name, *args, **kwargs)
+
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        monkeypatch.setattr(os, "unlink", fail_second_credential_unlink)
+        fail_cleanup_unlinks = True
+        with pytest.raises(OSError, match="synthetic shutdown leftover refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        fail_cleanup_unlinks = False
+        monkeypatch.setattr(os, "replace", replace_file)
+        monkeypatch.setattr(os, "unlink", real_unlink)
+        generation = ownership.retry
+        assert ownership.publication is None
+        assert generation is not None
+        assert runtime.views._owners.get("ws_cloud_stable") is ownership
+        assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+        runtime.views.close_admission()
+        runtime.views.clear_owned()
+        assert ownership.retry is None
+        assert "ws_cloud_stable" not in runtime.views._owners
+    assert path.is_dir() and path.stat().st_ino == inode
+    assert not (path.parent / "publication.retry").exists()
+    assert not (path.parent / "publication.retract").exists()
+    assert not list(path.iterdir()), "shutdown must retract leftover credentials with the fence"
+    assert await runtime.publication("ws_cloud_stable") is None
+    assert runtime.views.publication_retry("ws_cloud_stable") is None
+
+
 async def test_retract_publication_rejects_false_invalidate_without_durable_retract(
     authority, monkeypatch
 ):
@@ -1198,6 +1262,7 @@ async def test_retract_publication_rejects_false_invalidate_without_durable_retr
         monkeypatch.setattr(os, "replace", replace_file)
         generation = ownership.retry
         assert generation is not None
+        real_invalidate = runtime.views.invalidate_retry
 
         def false_without_retract(workspace_id: str, token: str) -> bool:
             assert workspace_id == "ws_cloud_stable"
@@ -1212,6 +1277,12 @@ async def test_retract_publication_rejects_false_invalidate_without_durable_retr
             runtime.views.store.root / runtime.views._key("ws_cloud_stable") / "publication.retry"
         ).read_text(encoding="ascii") == generation
         assert runtime.views.publication_retract("ws_cloud_stable") is None
+        # Restore the real invalidator before scope/fixture teardown: failed-refresh
+        # fences stay registered in _owners for shutdown clear_owned, which must not
+        # observe this synthetic False-without-retract stub.
+        monkeypatch.setattr(runtime.views, "invalidate_retry", real_invalidate)
+        await runtime.retract_publication("ws_cloud_stable", None)
+        assert ownership.retry is None
 
 
 async def test_cancel_queues_retract_when_leftover_credential_unlink_fails(

@@ -118,14 +118,30 @@ class RuntimeViews:
 
     def clear_owned(self) -> None:
         with self.store._locked_root():
-            recorded = [(key, owner.publication) for key, owner in self._owners.items()]
+            recorded = [
+                (key, owner.publication, owner.retry) for key, owner in self._owners.items()
+            ]
         errors: list[Exception] = []
-        for workspace_id, publication in recorded:
-            if publication is not None:
-                try:
+        for workspace_id, publication, retry in recorded:
+            try:
+                if publication is not None:
                     self.remove_owned(workspace_id, publication)
-                except Exception as error:  # noqa: BLE001 - finish other owned retractions
-                    errors.append(error)
+                elif retry is not None:
+                    # Failed-refresh fences stay registered without a live
+                    # publication so shutdown can retract leftover credentials
+                    # with the same generation check cancel uses.
+                    cleared = self.invalidate_retry(workspace_id, retry)
+                    if not cleared:
+                        if self.publication_retract(workspace_id) != retry:
+                            raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+                        self.complete_retract(workspace_id, retry)
+                    owner = self._owners.get(workspace_id)
+                    if owner is not None and owner.retry == retry:
+                        owner.retry = None
+                        if owner.publication is None:
+                            self._owners.pop(workspace_id, None)
+            except Exception as error:  # noqa: BLE001 - finish other owned retractions
+                errors.append(error)
         if errors:
             raise ExceptionGroup("Runtime view retraction failed", errors)
 
@@ -575,6 +591,9 @@ class RuntimeViews:
                     # attempt the retry fence, and if fencing also fails keep
                     # ownership of the live token so reconcile can refresh
                     # instead of clearing grace over an ownerless publication.
+                    # A successful retry fence must stay registered too: shutdown
+                    # clear_owned only visits _owners, and credential unlink may
+                    # have failed while the fence landed.
                     preserve_ownership = False
                     try:
                         remove_error: BaseException | None = None
@@ -607,9 +626,12 @@ class RuntimeViews:
                             ownership.retry = None
                     finally:
                         if not preserve_ownership:
-                            self._owners.pop(workspace_id, None)
                             if ownership.publication is result:
                                 ownership.publication = None
+                            if ownership.retry is not None:
+                                self._owners[workspace_id] = ownership
+                            else:
+                                self._owners.pop(workspace_id, None)
                     failure = error
             finally:
                 os.close(directory)
