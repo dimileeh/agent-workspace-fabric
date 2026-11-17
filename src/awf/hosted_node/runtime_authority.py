@@ -47,6 +47,19 @@ AGENT_TARGETS = {
     "codex": ("/run/awf/secrets/openai.api-key", "CODEX_API_KEY"),
     "claude_code": ("/run/awf/secrets/anthropic.api-key", "ANTHROPIC_API_KEY"),
 }
+# Same fields ``stop_workspace`` captures before Compose teardown so a pending
+# stop retry can reject an explicit remonitor/reauthorization replacement that
+# keeps ``node_id`` but changes credential binding / claim fence.
+STOP_FENCE_FIELDS = (
+    "node_id",
+    "status",
+    "version",
+    "task_policy",
+    "execution_claimed_by",
+    "execution_claim_epoch",
+    "monitor_claimed_by",
+)
+
 _HISTORICAL_STATUSES = tuple(
     status.value for status in WorkspaceStatus if WorkspaceStateMachine.is_callback_terminal(status)
 )
@@ -161,11 +174,23 @@ class WorkspaceAuthority:
                 )
             )
 
-    async def owns(self, workspace_id: str) -> bool:
-        """True when the workspace row is still bound to this node identity."""
+    async def stop_fence(self, workspace_id: str) -> tuple[object, ...] | None:
+        """Snapshot compared before retrying a pending authority-lost stop.
+
+        ``None`` when this node no longer owns the row. Callers store the
+        snapshot with ``_pending_stops`` so a later remonitor reauthorization
+        (new credential binding, same ``node_id``) does not inherit the stop.
+        """
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id, options=[raiseload("*")])
-            return row is not None and row.node_id == self.receiver.identity.owner
+            if row is None or row.node_id != self.receiver.identity.owner:
+                return None
+            return tuple(getattr(row, field) for field in STOP_FENCE_FIELDS)
+
+    async def matches_stop_fence(self, workspace_id: str, fence: tuple[object, ...]) -> bool:
+        """True when the row is still owned and its stop fence is unchanged."""
+        current = await self.stop_fence(workspace_id)
+        return current is not None and current == fence
 
     async def reconcile_workspace(self, workspace_id: str) -> bool:
         publication = await self.publication(workspace_id)

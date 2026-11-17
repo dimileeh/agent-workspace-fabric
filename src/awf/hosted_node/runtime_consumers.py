@@ -119,11 +119,15 @@ class WorkspaceConsumers:
         self._history_cursor = ""
         self._retry_cursor = ""
         self._retained_stop_failures: set[str] = set()
-        # Reason/message for authority-lost teardowns still in flight. ``_stop``
-        # records on entry (keeping an existing entry), reapplies that pair on
-        # every retry, and pops after success; admission retries that decision
-        # instead of reconciling.
-        self._pending_stops: dict[str, tuple[str | None, str | None]] = {}
+        # Reason/message/fence for authority-lost teardowns still in flight.
+        # ``_stop`` records on entry (keeping an existing entry + original fence),
+        # reapplies reason/message on every retry, and pops after success;
+        # admission retries that decision instead of reconciling, but only while
+        # the captured stop fence still matches (remonitor reauthorization must
+        # not inherit an old stop).
+        self._pending_stops: dict[
+            str, tuple[str | None, str | None, tuple[object, ...] | None]
+        ] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -645,10 +649,17 @@ class WorkspaceConsumers:
             self._pending_stops.pop(workspace_id, None)
             return
         if authority_lost:
-            # Stop decision is final: keep the first recorded reason across
-            # every retry (sweep and scope finalizer) until teardown succeeds.
-            self._pending_stops.setdefault(workspace_id, (reason_code, message))
-            reason_code, message = self._pending_stops[workspace_id]
+            # Stop decision is final: keep the first recorded reason and stop
+            # fence across every retry (sweep and scope finalizer) until
+            # teardown succeeds. The fence is what remonitor reauthorization
+            # replaces while leaving node_id alone.
+            if workspace_id not in self._pending_stops:
+                try:
+                    fence = await self.authority.stop_fence(workspace_id)
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                    fence = None
+                self._pending_stops[workspace_id] = (reason_code, message, fence)
+            reason_code, message, _fence = self._pending_stops[workspace_id]
         token = self.workspace_id.set(None)
         preserve_directory = False
         try:
@@ -773,9 +784,15 @@ class WorkspaceConsumers:
                         await self.authority.retract_retired(workspace_id)
                     elif workspace_id in self._pending_stops:
                         # Stop decision is final: retry teardown with the
-                        # recorded reason instead of reconciling (no grace).
-                        if await self.authority.owns(workspace_id):
-                            reason_code, message = self._pending_stops[workspace_id]
+                        # recorded reason instead of reconciling (no grace),
+                        # but only while the original stop fence still matches.
+                        # owns(node_id) alone is not enough — remonitor with
+                        # hosted_reauthorization replaces credentials and keeps
+                        # node_id; stop_workspace would capture the new fence.
+                        reason_code, message, fence = self._pending_stops[workspace_id]
+                        if fence is not None and await self.authority.matches_stop_fence(
+                            workspace_id, fence
+                        ):
                             await self._stop(
                                 workspace_id,
                                 reason_code=reason_code,

@@ -133,6 +133,7 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     original reason instead of reconciling a healthy publication
     (PRRT_kwDOSJAM6s64iiNm).
     """
+    fence = ("node", "running", 1, {"hosted_node": {}}, None, 0, None)
     scope, authority = _mock_consumers(tmp_path, grace=1)
     lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
     origin = datetime.now(UTC)
@@ -152,7 +153,8 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     authority.resource_limits = AsyncMock(side_effect=resource_limits)
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=[])
-    authority.owns = AsyncMock(return_value=True)
+    authority.stop_fence = AsyncMock(return_value=fence)
+    authority.matches_stop_fence = AsyncMock(return_value=True)
     authority.reconcile_workspace = AsyncMock(return_value=True)
     authority.retract = AsyncMock()
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
@@ -165,6 +167,7 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     assert "ws_exact" in scope._retained_stop_failures
     assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
     assert "1" in (scope._pending_stops["ws_exact"][1] or "")
+    assert scope._pending_stops["ws_exact"][2] == fence
 
     scope.stop_workspace = AsyncMock()
     assert await scope.admission_check()
@@ -246,6 +249,7 @@ async def test_watcher_finalizer_failed_stop_queues_retained_teardown_retry(tmp_
     retry until it reappeared, and a healthy reconcile path could skip the
     already-required teardown (PRRT_kwDOSJAM6s64jbWa).
     """
+    fence = ("node", "running", 1, {"hosted_node": {}}, None, 0, None)
     scope, authority = _mock_consumers(tmp_path, grace=1)
     material = authority.workspace.return_value
     origin = datetime.now(UTC)
@@ -271,7 +275,8 @@ async def test_watcher_finalizer_failed_stop_queues_retained_teardown_retry(tmp_
     authority.workspace.side_effect = workspace
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=[])
-    authority.owns = AsyncMock(return_value=True)
+    authority.stop_fence = AsyncMock(return_value=fence)
+    authority.matches_stop_fence = AsyncMock(return_value=True)
     authority.reconcile_workspace = AsyncMock(return_value=True)
     authority.retract = AsyncMock()
     scope.stop_workspace = AsyncMock(
@@ -288,6 +293,7 @@ async def test_watcher_finalizer_failed_stop_queues_retained_teardown_retry(tmp_
     assert "ws_exact" in scope._retained_stop_failures
     assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
     assert "1" in (scope._pending_stops["ws_exact"][1] or "")
+    assert scope._pending_stops["ws_exact"][2] == fence
 
     # Row left the owned query: retry must come from retained_stop_failures.
     scope.stop_workspace = AsyncMock()
@@ -304,18 +310,20 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
     """Pending teardown must skip reconcile and keep the original stop reason.
 
     An in-scope explicit denial records ``_pending_stops`` then Compose teardown
-    fails. The next sweep must retry that stop via ``owns`` with the original
-    reason/message — not reconcile (which could ``continue`` into a fresh 600s
-    window and later replace the reason with ``HOSTED_AUTHORITY_UNAVAILABLE``)
-    (PRRT_kwDOSJAM6s64i_dw).
+    fails. The next sweep must retry that stop via matching stop fence with the
+    original reason/message — not reconcile (which could ``continue`` into a
+    fresh 600s window and later replace the reason with
+    ``HOSTED_AUTHORITY_UNAVAILABLE``) (PRRT_kwDOSJAM6s64i_dw).
     """
+    fence = ("node", "monitoring_pr", 1, {"hosted_node": {"credentials": "old"}}, None, 0, None)
     scope, authority = _mock_consumers(tmp_path, grace=600)
     authority.resource_limits = AsyncMock(
         side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
     )
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=[])
-    authority.owns = AsyncMock(return_value=True)
+    authority.stop_fence = AsyncMock(return_value=fence)
+    authority.matches_stop_fence = AsyncMock(return_value=True)
     authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
     authority.retract = AsyncMock()
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
@@ -325,7 +333,7 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
             await scope.resource_limits("ws_exact")
 
     assert "ws_exact" in scope._retained_stop_failures
-    assert scope._pending_stops["ws_exact"] == (None, None)
+    assert scope._pending_stops["ws_exact"] == (None, None, fence)
     assert "ws_exact" not in scope._authority_grace
 
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
@@ -333,7 +341,7 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
     authority.reconcile_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._authority_grace
-    assert scope._pending_stops["ws_exact"] == (None, None)
+    assert scope._pending_stops["ws_exact"] == (None, None, fence)
 
     scope.stop_workspace = AsyncMock()
     assert await scope.admission_check()
@@ -342,6 +350,83 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
     assert "ws_exact" not in scope._retained_stop_failures
     assert "ws_exact" not in scope._pending_stops
     assert "ws_exact" not in scope._authority_grace
+
+
+async def test_pending_stop_records_none_fence_when_stop_fence_read_fails(tmp_path):
+    """A failed fence snapshot must not leave a match-any pending stop."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.resource_limits = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+    )
+    authority.stop_fence = AsyncMock(side_effect=TimeoutError())
+    authority.matches_stop_fence = AsyncMock(return_value=True)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    with pytest.raises(OSError, match="synthetic docker teardown failure"):
+        async with scope.scope("ws_exact"):
+            await scope.resource_limits("ws_exact")
+
+    assert scope._pending_stops["ws_exact"] == (None, None, None)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    authority.matches_stop_fence.assert_not_awaited()
+    authority.retract.assert_awaited_once_with("ws_exact")
+    assert "ws_exact" not in scope._pending_stops
+
+
+async def test_pending_stop_retry_drops_replaced_credential_binding(tmp_path):
+    """Remonitor reauthorization must not inherit a failed idle-stop retry.
+
+    After teardown fails for a monitoring_pr workspace, a controller can remonitor
+    with hosted_reauthorization: credential binding changes, node_id stays.
+    Retrying on owns() alone would stop the fresh authorization; stop_workspace
+    captures its fence anew so it cannot see the pre-retry replacement. Keep the
+    original fence with the pending stop and require a match before retry
+    (PRRT_kwDOSJAM6s64kckB).
+    """
+    old_fence = (
+        "node",
+        "monitoring_pr",
+        1,
+        {"hosted_node": {"credentials": {"agent": "old"}}},
+        None,
+        0,
+        None,
+    )
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.resource_limits = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+    )
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.stop_fence = AsyncMock(return_value=old_fence)
+    authority.matches_stop_fence = AsyncMock(return_value=True)
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    with pytest.raises(OSError, match="synthetic docker teardown failure"):
+        async with scope.scope("ws_exact"):
+            await scope.resource_limits("ws_exact")
+
+    assert "ws_exact" in scope._retained_stop_failures
+    assert scope._pending_stops["ws_exact"] == (None, None, old_fence)
+
+    # Explicit replacement before retry: still owned by node_id, new binding.
+    authority.matches_stop_fence = AsyncMock(return_value=False)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    authority.reconcile_workspace.assert_not_awaited()
+    authority.retract.assert_awaited_once_with("ws_exact")
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
 
 
 async def test_rule_success_clears_only_that_checker_window(tmp_path, monkeypatch):
