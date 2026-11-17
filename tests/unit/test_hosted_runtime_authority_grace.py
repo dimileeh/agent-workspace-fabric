@@ -421,6 +421,79 @@ async def test_scope_entry_waits_out_lapse_then_enters_on_renewal(tmp_path):
     assert "ws_exact" not in scope._authority_grace
 
 
+async def test_scope_entry_publication_denial_stops_and_raises_scope_denied(tmp_path):
+    """Publication (association+materials) denial must stop and wrap like base."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.publication.side_effect = MaterialDeniedError("GRANT_REVOKED", 403)
+    with pytest.raises(WorkspaceScopeDeniedError, match="GRANT_REVOKED"):
+        async with scope.scope("ws_exact"):
+            pytest.fail("explicit publication denial must not enter")
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    authority.workspace.assert_not_awaited()
+
+
+async def test_scope_entry_publication_lapse_waits_then_succeeds(tmp_path):
+    """Publication lapse must wait under grace, start a new snapshot, then enter."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def publication(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise lapse
+        return object()
+
+    authority.publication.side_effect = publication
+    async with scope.scope("ws_exact"):
+        assert scope.workspace_id.get() == "ws_exact"
+        assert calls["n"] >= 2
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_scope_entry_publication_exhausted_stops_unavailable(tmp_path, monkeypatch):
+    """Repeated publication lapses past grace must stop with HOSTED_AUTHORITY_UNAVAILABLE."""
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    authority.publication.side_effect = MaterialLapsedError(
+        expires_at=datetime.now(UTC) - timedelta(seconds=2)
+    )
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def advance_on_sleep(seconds: float) -> None:
+        clock["now"] = origin + timedelta(seconds=1)
+
+    monkeypatch.setattr(
+        "awf.hosted_node.runtime_consumers.asyncio.sleep",
+        advance_on_sleep,
+    )
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope("ws_exact"):
+            pytest.fail("exhausted publication lapse must not enter")
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+
+async def test_scope_entry_publication_grace_zero_stops_on_lapse(tmp_path):
+    """Grace 0 via publication must match base: immediate stop, no wait."""
+    scope, authority = _mock_consumers(tmp_path, grace=0)
+    authority.publication.side_effect = MaterialLapsedError(
+        expires_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope("ws_exact"):
+            pytest.fail("grace 0 publication lapse must stop")
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
 async def test_scope_entry_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
     """Poll-inline recovery opts out of the wait via ContextVar."""
     scope, authority = _mock_consumers(tmp_path, grace=600)

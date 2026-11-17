@@ -212,12 +212,14 @@ class WorkspaceConsumers:
         entry = asyncio.create_task(snapshot())
         waiting_for_grace = False
         try:
-            await asyncio.shield(entry)
-            # workspace_consumer enters this scope before the operation body, so
-            # wait here for a brief renewal gap instead of forcing every caller
-            # to retry. Poll-inline recovery opts out via ContextVar.
+            # Publication (association+materials) and the follow-up workspace
+            # check share one classify/wait/stop path. A denial or lapse usually
+            # surfaces on the entry snapshot first; defer sleeps then starts a
+            # fresh snapshot so cancel cleanup always joins the latest task.
+            # Poll-inline recovery opts out via ContextVar.
             while True:
                 try:
+                    await asyncio.shield(entry)
                     await self.authority.workspace(workspace_id)
                     self._clear_authority_grace(workspace_id)
                     break
@@ -234,6 +236,7 @@ class WorkspaceConsumers:
                                 raise WorkspaceAuthorityDeferredError(error) from error
                             waiting_for_grace = True
                             await asyncio.sleep(self.poll_seconds)
+                            entry = asyncio.create_task(snapshot())
                             continue
                         await self._stop(
                             workspace_id,
