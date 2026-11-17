@@ -574,10 +574,18 @@ class WorkspaceAuthority:
             )
 
             async def retract() -> None:
+                nonlocal write_failed
                 if write_failed:
                     # Writer already cleaned up the partial view in RuntimeViews.
                     return
-                published = await publication
+                try:
+                    published = await publication
+                except OSError:
+                    # Late writer failure after shield was interrupted (e.g. cancel):
+                    # RuntimeViews already removed the partial mount. Do not retract
+                    # again; classify as denial after join so grace cannot retry.
+                    write_failed = True
+                    return
                 if published is not None and not preserve_mounted:
                     await asyncio.to_thread(
                         self.views.remove,
@@ -593,4 +601,10 @@ class WorkspaceAuthority:
                 except asyncio.CancelledError:
                     continue
             cleanup.result()
+            if write_failed:
+                # Shield-site conversion already raised MaterialDeniedError; keep it.
+                # A late join failure must not escape as a grace-eligible OSError.
+                if isinstance(error, MaterialDeniedError):
+                    raise
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW") from publication.exception()
             raise
