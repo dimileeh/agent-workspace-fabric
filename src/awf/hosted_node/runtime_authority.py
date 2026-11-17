@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import raiseload
 
@@ -549,11 +550,14 @@ class WorkspaceAuthority:
                 raise
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication and retract only if it is still the current view.
-            # MaterialLapsedError is grace-eligible: keep the mounted view so a
-            # deferring consumer does not lose Docker-mounted credentials that
-            # cannot be restored in place, while still denying new material.
+            # Grace-eligible failures (lapse, DB/OS/timeout) keep the mounted
+            # view so a deferring consumer does not lose Docker-mounted
+            # credentials that cannot be restored in place, while still denying
+            # new material. Explicit denial still retracts.
             cancelled = isinstance(error, asyncio.CancelledError)
-            preserve_mounted = isinstance(error, MaterialLapsedError)
+            preserve_mounted = isinstance(
+                error, (MaterialLapsedError, SQLAlchemyError, OSError, TimeoutError)
+            )
 
             async def retract() -> None:
                 published = await publication

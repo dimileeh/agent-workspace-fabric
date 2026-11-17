@@ -584,6 +584,47 @@ async def test_lapse_after_refresh_preserves_mounted_view(bound_workspace, monke
     assert view.is_dir()
 
 
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("db timeout"), OSError("offline"), OperationalError("db", {}, None)],
+)
+async def test_transient_after_refresh_preserves_mounted_view(bound_workspace, monkeypatch, error):
+    """Grace-eligible transient failures after refresh must keep the mounted view.
+
+    Watcher/sweep defer for TimeoutError, OSError, and SQLAlchemyError the same
+    way they defer MaterialLapsedError. Retracting the publication on those
+    failures would unlink credentials that a still-running container cannot see
+    again when a later publication lands in a new directory.
+    """
+    runtime, _, _ = bound_workspace
+    await runtime.workspace("ws_cloud_stable")
+    view = runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
+    before = {name: (view / name).read_bytes() for name in ("openai.api-key", "github.api-key")}
+    original_publish = runtime.views.publish
+    original_refresh = runtime.views.refresh
+
+    def _fail_after(write):
+        def wrapped(*args, **kwargs):
+            published = write(*args, **kwargs)
+
+            async def boom(*_args, **_kwargs):
+                raise error
+
+            monkeypatch.setattr(runtime, "_snapshot_status", boom)
+            return published
+
+        return wrapped
+
+    monkeypatch.setattr(runtime.views, "publish", _fail_after(original_publish))
+    monkeypatch.setattr(runtime.views, "refresh", _fail_after(original_refresh))
+    with pytest.raises(type(error)):
+        await runtime.workspace("ws_cloud_stable")
+    assert {
+        name: (view / name).read_bytes() for name in ("openai.api-key", "github.api-key")
+    } == before
+    assert view.is_dir()
+
+
 def test_hosted_authority_grace_seconds_default_and_zero(tmp_path):
     base = {
         "owner": "owner",
