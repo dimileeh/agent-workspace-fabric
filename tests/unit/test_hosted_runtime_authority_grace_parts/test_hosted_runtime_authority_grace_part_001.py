@@ -938,6 +938,45 @@ async def test_scope_entry_cancel_after_failed_snapshot_still_rechecks_authority
     task.cancel("operator cancel during grace wait")
     with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
         await task
-    authority.association.assert_awaited()
-    authority.materials.assert_awaited()
+    # Fresh authority check must run even though the joined snapshot failed
+    # (isolated reproduction previously saw zero association checks).
+    assert authority.association.await_count == 1
+    assert authority.materials.await_count == 1
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
+async def test_scope_entry_cancel_after_failed_snapshot_preserves_when_recheck_ok(
+    tmp_path, monkeypatch
+) -> None:
+    """Joining a failed snapshot separately must still allow preserve-on-ok.
+
+    After a transient publication OSError, cancel during the grace wait must
+    recheck association()/materials(). When that fresh check succeeds, the
+    warm runtime stays (authority_lost=False) rather than treating the stale
+    snapshot failure as a hard stop.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    authority.publication.side_effect = OSError("snapshot offline")
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    authority.materials = AsyncMock()
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    assert authority.association.await_count == 1
+    assert authority.materials.await_count == 1
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
