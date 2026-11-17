@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.db.models import Workspace
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.models import Receipt
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
@@ -455,8 +455,11 @@ async def test_successor_validation_churn_spends_existing_snapshot_budget(
     monkeypatch.setattr(runtime, "_snapshot_status", next_role)
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await runtime.materials(association, agent, current=current_mode)
-    assert reads == 1
-    assert validations == (2 if current_mode else 0)
+    # Status runs before any material read, so cutover during validation never
+    # spends a snapshot read on the superseded binding. One final status call
+    # reclassifies mid-read unavailability (lapse vs denial) after the budget.
+    assert reads == 0
+    assert validations == (4 if current_mode else 2)
     assert await runtime.publication(original["workspace_id"]) is None
     assert (await runtime.association(original["workspace_id"]))[0] == association
 
@@ -880,11 +883,18 @@ async def test_retry_cannot_reinterpret_a_preexisting_cleared_view_as_absence(
         await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
 
 
-async def test_expiry_during_final_association_read_remains_terminal(cutover, monkeypatch):
+async def test_expiry_during_final_association_read_remains_terminal(
+    cutover, tmp_path, monkeypatch
+):
+    """LAPSE after publish keeps the view; grace-0 consumer stop still retracts it.
+
+    Authority preserves an already-published mount on PROTECTED_MATERIAL_LAPSED so a
+    grace-deferring consumer does not orphan Docker-mounted credentials. Removing
+    that view belongs to consumer stop, which still runs at once when grace is 0.
+    """
     _, runtime, original, _, _, clock, _ = cutover
     association = runtime.association
     reads = 0
-    instant = clock.instant
 
     async def cross_expiry(*args):
         nonlocal reads
@@ -895,12 +905,58 @@ async def test_expiry_during_final_association_read_remains_terminal(cutover, mo
         return result
 
     monkeypatch.setattr(runtime, "association", cross_expiry)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        await runtime.workspace(original["workspace_id"])
+    # (a) Authority keeps the published view on lapse and does not enter the
+    # superseded-successor retry loop.
+    assert await runtime.publication(original["workspace_id"]) is not None
+    assert reads == 2
+
+    # (b) With grace 0 the consumer stop path removes the view immediately.
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    assert scope.authority_grace_seconds == 0
+    scope.stop_workspace = AsyncMock()
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope(original["workspace_id"]):
+            pytest.fail("grace 0 must stop on lapse")
+    scope.stop_workspace.assert_awaited_once_with(original["workspace_id"])
+    assert await runtime.publication(original["workspace_id"]) is None
+
+
+async def test_revocation_during_publish_remains_terminal(cutover, monkeypatch):
+    """Revocation after the view write still retracts and stays terminal.
+
+    Unlike LAPSE, an explicit denial must not preserve the mounted publication.
+    Trigger revoke during publish so production's post-publish status check
+    detects it — not an injected status call after the final association read.
+    """
+    client, runtime, original, current, _, _, _ = cutover
+    original_thread = asyncio.to_thread
+    revoked = False
+
+    async def revoke_after_publish(function, *args, **kwargs):
+        nonlocal revoked
+        result = await original_thread(function, *args, **kwargs)
+        if not revoked and function in {runtime.views.publish, runtime.views.refresh}:
+            revoked = True
+            binding = current["agent"]
+            response = await client.post(
+                f"{PREFIX}/materials/revoke",
+                json={
+                    **binding,
+                    "idempotency_key": "publish-revoke",
+                    "fence": binding["fence"] + 1,
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] == "revoked"
+        return result
+
+    monkeypatch.setattr(asyncio, "to_thread", revoke_after_publish)
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await runtime.workspace(original["workspace_id"])
     assert await runtime.publication(original["workspace_id"]) is None
-    clock.instant = instant
-    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
-        await runtime.workspace(original["workspace_id"])
+    assert revoked
 
 
 async def test_absence_witnesses_share_workspace_scope_without_retaining_history(authority):

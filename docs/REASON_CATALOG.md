@@ -571,6 +571,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/cli](https://docs.x.ai/build/cli)
 
+### HOSTED_AUTHORITY_UNAVAILABLE
+**Problem:** The hosted node stopped this workspace after authority could not be confirmed for the full grace window (lapsed materials or transient node-local check errors).
+**Likely Cause:** Protected material lapsed without a timely successor, or consecutive SQLAlchemy/OS/timeout errors exhausted hosted_authority_grace_seconds.
+**Operator Fix:** Inspect controller renewal health and node database/storage connectivity; create a new workspace once materials can be renewed. Unfinished monitor operations and validations were settled as failed.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_authority_unavailable](#hosted_authority_unavailable)
+
 ### HOSTED_DELEGATION_NOT_CONFIGURED
 **Problem:** Hosted PR monitor adoption was requested, but hosted delegation settings are incomplete.
 **Likely Cause:** The AWF service is missing a hosted delegation base URL or bearer token configuration.
@@ -621,8 +628,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_sync_failed](#hosted_remote_head_sync_failed)
 
 ### HOSTED_RUNTIME_STOPPED
-**Problem:** The hosted node stopped this workspace because its consumer authority (credential binding or grant) was revoked or expired.
-**Likely Cause:** Credential material renewal was denied while the workspace was executing or monitoring its PR, so the hosted runtime tore down its stack.
+**Problem:** The hosted node stopped this workspace because its consumer authority was explicitly denied (revoked grant, missing receipt, binding mismatch, or inactive workspace).
+**Likely Cause:** Credential material was revoked or otherwise denied while the workspace was executing or monitoring its PR, so the hosted runtime tore down its stack.
 **Operator Fix:** Renew or re-bind the workspace credentials from the controller and create a new workspace; unfinished monitor operations and validations were settled as failed, never as succeeded.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_runtime_stopped](#hosted_runtime_stopped)
@@ -983,6 +990,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Mark the named secret `required: false` if only local test containers use it, or remove it from the profile; then create a new workspace.
 **Related Command:** `awf profile preview . --profile auto`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_declaration_unsupported](#protected_declaration_unsupported)
+
+### PROTECTED_MATERIAL_LAPSED
+**Problem:** Current protected material expired without a renewed successor; the grant is otherwise healthy (not revoked, receipt present, bindings match).
+**Likely Cause:** The consumer did not renew short-lived materials before expires_at, or the receiver reported the current binding as expired without revocation.
+**Operator Fix:** Ensure the controller renews materials before expiry. Within hosted_authority_grace_seconds the node keeps the stack but will not issue or republish lapsed material bytes.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_material_lapsed](#protected_material_lapsed)
 
 ### PROTECTED_SCOPE_DIFF_UNAVAILABLE
 **Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.

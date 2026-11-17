@@ -37,6 +37,10 @@ class PublicationOwnership:
     workspace_id: str
     publication: PublishedView | None = None
     closing: bool = False
+    # Set after a completed authority-lost/_stop for this ownership so an early
+    # stop (grace exhaustion inside an active scope) and the scope finalizer
+    # cannot both call stop_workspace for the same failure.
+    stopped: bool = False
 
 
 @dataclass(eq=False)

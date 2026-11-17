@@ -24,6 +24,16 @@ class HostedSettings(StrictModel):
     host: HostSettings | None = None
     runtime_enabled: bool = Field(default=False, strict=True)
     runtime_capacity: RuntimeCapacity | None = None
+    hosted_authority_grace_seconds: int = Field(
+        default=600,
+        ge=0,
+        strict=True,
+        description=(
+            "Seconds a hosted node refrains from stopping a workspace while materials "
+            "are only lapsed or authority checks hit transient node-local errors. "
+            "0 restores immediate stop-on-lapse behaviour."
+        ),
+    )
 
     @model_validator(mode="after")
     def physical_identity(self) -> "HostedSettings":

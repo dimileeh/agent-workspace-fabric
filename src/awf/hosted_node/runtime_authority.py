@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import raiseload
 
@@ -17,7 +18,7 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, MaterialLapsedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Grant, Receipt
 from awf.hosted_node.profile_secrets import (
@@ -330,14 +331,56 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
         return binding
 
+    async def _holds_current_authority(self, binding: Binding) -> bool:
+        """True when this binding's grant is still the preparation's current authority.
+
+        Receiver status reports expiry before preparation-wide supersession, so a
+        lapse/grace decision must re-check grant replacement separately. A newer
+        receipt on the same grant (consumer renewal after `_current` selected an
+        expired predecessor) is not replacement: keep lapse so grace recovers
+        instead of stopping the workspace as UNAVAILABLE.
+        """
+        async with self.receiver.factory() as session:
+            await self.receiver.authority(session)
+            prep = await self.receiver.preparation(session, binding)
+            assert prep is not None
+            grant = await self.receiver.grant(session, prep, binding)
+            if (
+                grant is None
+                or grant.revoked
+                or grant.current is None
+                or await self.receiver.superseded(session, grant)
+            ):
+                return False
+            receipt = await self.receiver.receipt(session, binding)
+            return receipt is not None and receipt.grant == grant.id
+
     async def _snapshot_status(self, bindings: dict[str, Binding]) -> datetime:
+        lapsed_at: datetime | None = None
         for binding in bindings.values():
-            if (await self.receiver.status(binding)).status != "current":
-                raise _SnapshotUnavailableError()
+            status = await self.receiver.status(binding)
+            if status.status == "current":
+                continue
+            if (
+                status.status == "expired"
+                and status.reason
+                in {
+                    "EXPIRY",
+                    "EXPIRY_CLEANUP_PENDING",
+                }
+                and await self._holds_current_authority(binding)
+            ):
+                lapsed_at = (
+                    binding.expires_at if lapsed_at is None else min(lapsed_at, binding.expires_at)
+                )
+                continue
+            raise _SnapshotUnavailableError()
         await self.admission()
         expiry = min(binding.expires_at for binding in bindings.values())
         if expiry <= datetime.now(UTC):
-            raise _SnapshotUnavailableError()
+            raise MaterialLapsedError(expires_at=expiry)
+        if lapsed_at is not None:
+            raise MaterialLapsedError(expires_at=lapsed_at)
         return expiry
 
     async def _snapshot_successor(
@@ -469,8 +512,8 @@ class WorkspaceAuthority:
             while True:
                 attempt += 1
                 try:
-                    if attempt > 1:
-                        await self._snapshot_status(bindings)
+                    # Status/expiry before any material read so a lapse never yields bytes.
+                    expires_at = await self._snapshot_status(bindings)
                     values, files = await self._read_snapshot(
                         bindings, association.workspace_id, pair[1]
                     )
@@ -478,7 +521,13 @@ class WorkspaceAuthority:
                     if publish_allowed and not self.views.closed:
                         publication = asyncio.create_task(publish(files, retry=attempt > 1))
                         self.views.track_writer(publication)
-                        published = await asyncio.shield(publication)
+                        try:
+                            published = await asyncio.shield(publication)
+                        except OSError as write_error:
+                            # View write failures are not grace-eligible: surface a
+                            # distinct denial so consumers stop immediately. Base
+                            # RuntimeViews._publish already removed the partial view.
+                            raise MaterialDeniedError("INVALID_RUNTIME_VIEW") from write_error
                         if published is None:
                             publish_allowed = False
                         else:
@@ -489,28 +538,55 @@ class WorkspaceAuthority:
                         if latest != association or latest_agent != agent:
                             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
                     if expires_at <= datetime.now(UTC):
-                        raise _SnapshotUnavailableError()
+                        raise MaterialLapsedError(expires_at=expires_at)
                     values["GITHUB_TOKEN"] = values["GH_TOKEN"]
                     return AuthorizedMaterials(values, expires_at)
                 except _SnapshotUnavailableError:
-                    if not current or attempt == 3:
+                    if current and attempt < 3:
+                        successor = await self._snapshot_successor(anchors, bindings)
+                        if successor is not None:
+                            bindings = successor
+                            # Never return or republish bytes from the superseded read.
+                            values, files = {}, {}
+                            continue
+                    # Mid-read expiry becomes UNAVAILABLE inside resolve/store;
+                    # reclassify benign lapse so grace still applies. Revocation
+                    # and mismatches keep denying (nested catch avoids re-entry).
+                    try:
+                        await self._snapshot_status(bindings)
+                    except MaterialLapsedError:
                         raise
-                    successor = await self._snapshot_successor(anchors, bindings)
-                    if successor is None:
-                        raise
-                    bindings = successor
-                    # Never return or republish bytes from the superseded read.
-                    values, files = {}, {}
+                    except _SnapshotUnavailableError:
+                        pass
+                    raise
         except BaseException as error:
             if publication is None:
                 raise
-            cancelled = isinstance(error, asyncio.CancelledError)
-
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication and retract only if it is still the current view.
+            # Grace covers only authority-read failures (lapse / DB / OS / timeout)
+            # when the view write already succeeded — leave that mount untouched.
+            # Write failures are denied above; other explicit denials still retract.
+            cancelled = isinstance(error, asyncio.CancelledError)
+            write_failed = publication.done() and publication.exception() is not None
+            preserve_mounted = (not write_failed) and isinstance(
+                error, (MaterialLapsedError, SQLAlchemyError, OSError, TimeoutError)
+            )
+
             async def retract() -> None:
-                published = await publication
-                if published is not None:
+                nonlocal write_failed
+                if write_failed:
+                    # Writer already cleaned up the partial view in RuntimeViews.
+                    return
+                try:
+                    published = await publication
+                except OSError:
+                    # Late writer failure after shield was interrupted (e.g. cancel):
+                    # RuntimeViews already removed the partial mount. Do not retract
+                    # again; classify as denial after join so grace cannot retry.
+                    write_failed = True
+                    return
+                if published is not None and not preserve_mounted:
                     await asyncio.to_thread(
                         self.views.remove,
                         association.workspace_id,
@@ -525,4 +601,10 @@ class WorkspaceAuthority:
                 except asyncio.CancelledError:
                     continue
             cleanup.result()
+            if write_failed:
+                # Shield-site conversion already raised MaterialDeniedError; keep it.
+                # A late join failure must not escape as a grace-eligible OSError.
+                if isinstance(error, MaterialDeniedError):
+                    raise
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW") from publication.exception()
             raise

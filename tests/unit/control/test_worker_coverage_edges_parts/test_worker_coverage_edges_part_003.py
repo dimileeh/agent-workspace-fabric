@@ -28,6 +28,7 @@ from awf.control.worker.types import _ActiveExecutionCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.hosted_node.identity import MaterialLapsedError, WorkspaceAuthorityDeferredError
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
@@ -400,3 +401,25 @@ async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
             compose_project_name=f"awf_{workspace_id}",
         )
     )
+
+
+@pytest.mark.unit
+async def test_preserved_active_branch_lookup_propagates_authority_deferred(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Grace opt-out deferrals must reach recovery, not become failed lookups."""
+    worker = _worker(factory)
+    cause = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    class _DeferredResolver:
+        async def resolve(self, **_kwargs: object) -> list[object]:
+            raise WorkspaceAuthorityDeferredError(cause)
+
+    worker._open_pr_resolver = _DeferredResolver()  # type: ignore[assignment]
+
+    with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
+        await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="https://github.com/example/repo.git",
+            branch_name="feature/retry",
+            base_branch="main",
+        )

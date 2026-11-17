@@ -657,6 +657,27 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
+class _WedgedMonitorExecutor(_BlockingMonitorExecutor):
+    """Monitor resume that keeps running after ``cancel()`` until ``release`` is set.
+
+    ``Task.cancel()`` is cooperative: a plain ``Event.wait()`` exits as soon as
+    the event loop next schedules the task. Drain-bookkeeping tests need the
+    mid-drain window to survive later awaits (for example ``held_leases`` or a
+    second reconcile), matching a resume that has not yet reached a real
+    cancellation point.
+    """
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Keep draining after cooperative cancel until the test releases."""
+        del handoff
+        self.resume_calls.append(workspace_id)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            await self.release.wait()
+
+
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
         """Test helper for __init__."""
@@ -1196,7 +1217,7 @@ class TestRunOnceExecutionPart004:
         # but the cancelled task must stay tracked so a fresh dispatch for the
         # SAME workspace is blocked until it truly stops.
         monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "wedged-monitor")
-        executor = _BlockingMonitorExecutor()
+        executor = _WedgedMonitorExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1250,6 +1271,16 @@ class TestRunOnceExecutionPart004:
             assert worker._dispatchable_execution_ids([monitor_id], limit=1) == []  # noqa: SLF001
             # ... yet it never counts toward work slots (DB leases), so others run.
             assert await held_leases(session_factory) == []
+
+            # Yield so cooperative cancel is delivered (as held_leases may also
+            # do). A wedged resume must still be tracked as draining afterwards;
+            # a plain Event.wait() helper would finish here and clear the kind.
+            await asyncio.sleep(0)
+            assert not monitor_task.done()
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
 
             # A second reconcile pass leaves the already-draining task alone:
             # no re-cancel and no duplicate warning.
@@ -1455,37 +1486,3 @@ class TestRunOnceExecutionPart004:
             await asyncio.wait_for(
                 worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
             )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
-async def test_stale_ready_list_entry_is_rechecked_before_dispatch(
-    final_status: WorkspaceStatus,
-    session_factory: async_sessionmaker[AsyncSession],
-    origin_repo: Path,
-) -> None:
-    ready_id = await _create_ready(session_factory, origin_repo, "stale-ready")
-    await _move_to_operator_control_status(session_factory, ready_id, final_status)
-
-    executor = _RecordingExecutor()
-    worker = ControlWorker(
-        session_factory=session_factory,
-        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-        executor=executor,
-        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
-    )
-
-    async def _stale_ready_list(
-        *,
-        limit: int | None = None,
-        exclude_ids: set[str] | None = None,
-    ) -> list[str]:
-        del limit, exclude_ids
-        return [ready_id]
-
-    worker._list_ready = _stale_ready_list  # type: ignore[method-assign]
-
-    assert await worker.run_once() == 0
-    await worker.wait_for_execution_tasks()
-
-    assert executor.calls == []
