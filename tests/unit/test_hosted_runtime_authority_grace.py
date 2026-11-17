@@ -1666,6 +1666,73 @@ async def test_environment_cancel_during_transient_keeps_shared_workspace_clock(
     assert "ws_exact" not in scope._authority_grace
 
 
+async def test_nested_scope_cancel_during_transient_keeps_shared_workspace_clock(
+    tmp_path, monkeypatch
+) -> None:
+    """Cancel during nested ``_scope`` re-entry grace must keep the shared clock.
+
+    Nested same-workspace re-entry shares ``grace_operation=workspace`` with
+    ``environment()`` / watcher / sweep. Clearing that claim on cancel would
+    let the next transient reopen a full deadline while the warm stack remains
+    (PRRT_kwDOSJAM6s64a22J additional location).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    waiting = asyncio.Event()
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise TimeoutError()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async with scope.scope("ws_exact"):
+        task = asyncio.create_task(scope._scope("ws_exact").__aenter__())
+        await asyncio.wait_for(waiting.wait(), 1)
+        assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+        started_at = scope._authority_grace["ws_exact"].started_at
+        clock["now"] = origin + timedelta(seconds=100)
+        task.cancel("operator cancel during nested grace wait")
+        with pytest.raises(
+            asyncio.CancelledError, match="operator cancel during nested grace wait"
+        ):
+            await task
+        assert "ws_exact" in scope._authority_grace
+        assert scope._authority_grace["ws_exact"].started_at == started_at
+        assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+
+        clock["now"] = origin + timedelta(seconds=300)
+        with structlog.testing.capture_logs() as logs:
+            assert (
+                scope._classify_authority_failure("ws_exact", TimeoutError(), operation="workspace")
+                == "defer"
+            )
+        assert scope._authority_grace["ws_exact"].started_at == started_at
+        assert not any(log["event"] == "hosted_node.authority_grace_started" for log in logs)
+        authority.workspace.side_effect = None
+        authority.workspace.return_value = material
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+
 async def test_stack_resource_limits_cancel_releases_claim_so_later_lapse_defers(
     tmp_path, monkeypatch
 ):
