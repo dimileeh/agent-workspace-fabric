@@ -13,6 +13,7 @@ import structlog.testing
 from sqlalchemy.exc import OperationalError
 
 from awf.api.schemas import WorkspaceCreateRequest
+from awf.common.commands import FakeCommandRunner
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import (
     MaterialDeniedError,
@@ -21,7 +22,7 @@ from awf.hosted_node.identity import (
     WorkspaceScopeDeniedError,
 )
 from awf.hosted_node.runtime_authority import AuthorizedMaterials
-from awf.hosted_node.runtime_consumers import WorkspaceConsumers
+from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 from awf.hosted_node.schemas import Binding, Install
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_authority import bound_workspace as bound_workspace
@@ -595,3 +596,134 @@ def test_hosted_authority_grace_seconds_default_and_zero(tmp_path):
     assert (
         HostedSettings(**base, hosted_authority_grace_seconds=0).hosted_authority_grace_seconds == 0
     )
+
+
+async def test_run_during_lapse_blocks_then_uses_renewed_material(tmp_path):
+    """Command prepare must wait out a lapse and then inject renewed credentials."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    entry = authority.workspace.return_value
+    lapsed = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    renewed = AuthorizedMaterials(
+        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return entry
+        if calls["n"] == 2:
+            raise lapsed
+        return renewed
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    runner = HostedCommandRunner(scope, delegate)
+    async with scope.scope("ws_exact"):
+        await runner.run(["gh", "pr", "view"])
+    assert delegate.calls
+    assert delegate.calls[0].env["GH_TOKEN"] == "renewed"
+    assert "ws_exact" not in scope._authority_grace
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError(), OSError("offline"), OperationalError("db", {}, None)],
+)
+async def test_run_during_transient_blocks_then_uses_renewed_material(tmp_path, error):
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    entry = authority.workspace.return_value
+    renewed = AuthorizedMaterials(
+        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return entry
+        if calls["n"] == 2:
+            raise error
+        return renewed
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    async with scope.scope("ws_exact"):
+        await HostedCommandRunner(scope, delegate).run(["git", "fetch", "origin"])
+    assert delegate.calls[0].env["GH_TOKEN"] == "renewed"
+    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_run_exhausts_grace_and_raises(tmp_path, monkeypatch):
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope("ws_exact"):
+            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+                await HostedCommandRunner(scope, delegate).run(["gh", "pr", "checks"])
+    assert not delegate.calls
+
+
+async def test_run_revocation_raises_at_once(tmp_path):
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise MaterialDeniedError("GRANT_REVOKED")
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    with pytest.raises(WorkspaceScopeDeniedError, match="GRANT_REVOKED"):
+        async with scope.scope("ws_exact"):
+            with pytest.raises(MaterialDeniedError, match="GRANT_REVOKED"):
+                await HostedCommandRunner(scope, delegate).run(["gh", "pr", "create"])
+    assert not delegate.calls
+    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_run_grace_zero_raises_lapse_immediately(tmp_path):
+    scope, authority = _mock_consumers(tmp_path, grace=0)
+    material = authority.workspace.return_value
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise lapse
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope("ws_exact"):
+            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+                await HostedCommandRunner(scope, delegate).run(["git", "status"])
+    assert not delegate.calls

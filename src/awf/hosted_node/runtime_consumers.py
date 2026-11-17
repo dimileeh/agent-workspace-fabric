@@ -411,8 +411,22 @@ class WorkspaceConsumers:
         workspace_id = self.workspace_id.get()
         if workspace_id is None:
             raise MaterialDeniedError("WORKSPACE_SCOPE_REQUIRED", 403)
-        material = await self.authority.workspace(workspace_id)
-        return {**self.base_environment, **material.environment}
+        # Every command prepare re-reads current material. A brief consumer
+        # renewal gap must not fail an active monitor/exec; wait inside the
+        # same grace window used by the watcher/sweep until material is
+        # current again, the window is exhausted, or an explicit denial lands.
+        # Never return values from a lapsed or failed check.
+        while True:
+            try:
+                material = await self.authority.workspace(workspace_id)
+            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                action = self._classify_authority_failure(workspace_id, error)
+                if action == "defer":
+                    await asyncio.sleep(self.poll_seconds)
+                    continue
+                raise
+            self._clear_authority_grace(workspace_id)
+            return {**self.base_environment, **material.environment}
 
     async def admission_check(self) -> bool:
         try:
