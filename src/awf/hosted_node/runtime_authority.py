@@ -226,13 +226,17 @@ class WorkspaceAuthority:
         else:
             # Active-scope cancel after a retained refresh failure holds
             # ContextVar ownership with publication=None but a fenced retry
-            # generation. Invalidate that exact marker so reconcile cannot
-            # republish; a successor that already consumed it is untouched.
+            # generation. Invalidate that exact marker (and any leftover view
+            # files) so reconcile cannot republish; a successor that already
+            # consumed it is untouched. If leftover deletion fails, keep the
+            # in-memory fence so cleanup remains retryable.
             ownership = owned_publication(self.views, workspace_id)
             generation = ownership.retry if ownership is not None else None
             if ownership is not None and generation is not None:
-                await asyncio.to_thread(self.views.invalidate_retry, workspace_id, generation)
-                if ownership.retry == generation:
+                cleared = await asyncio.to_thread(
+                    self.views.invalidate_retry, workspace_id, generation
+                )
+                if cleared and ownership.retry == generation:
                     ownership.retry = None
         await self._retract_previous(workspace_id)
 

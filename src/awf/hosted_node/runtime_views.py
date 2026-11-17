@@ -337,12 +337,34 @@ class RuntimeViews:
             return self._retry_marker(parent)
         return None
 
-    def invalidate_retry(self, workspace_id: str, generation: str) -> None:
-        """Drop a fenced retry marker only when it still matches ``generation``."""
+    def invalidate_retry(self, workspace_id: str, generation: str) -> bool:
+        """Clear leftover view material, then drop a matching fenced retry marker.
+
+        Cancel after a retained refresh failure may find credentials that cleanup
+        failed to unlink. Delete those under the same generation check before
+        clearing ``publication.retry``. If deletion fails, leave the marker so a
+        later sweep can finish cleanup instead of stranding readable material.
+
+        Returns True when the matching marker is gone (or was already absent /
+        mismatched). Returns False when leftover deletion failed and the marker
+        was preserved for retryable cleanup.
+        """
         key = self._key(workspace_id)
         with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
-            if self._retry_marker(parent) == generation:
-                self._retry_marker(parent, present=False)
+            if self._retry_marker(parent) != generation:
+                return True
+            try:
+                # preserve_directory keeps the bind-mount inode; _remove_view also
+                # clears publication.retry only after credential unlinks succeed.
+                self._remove_view(parent, preserve_directory=True)
+            except FileNotFoundError:
+                # Mount directory already gone; still drop the matching marker.
+                if self._retry_marker(parent) == generation:
+                    self._retry_marker(parent, present=False)
+            except (OSError, MaterialDeniedError):
+                return False
+            return True
+        return True
 
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
