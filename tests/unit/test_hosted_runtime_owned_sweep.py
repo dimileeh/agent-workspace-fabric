@@ -414,7 +414,11 @@ async def test_pending_cleanup_retry_is_bounded_without_starving_current_rows(
     healthy = await retained(runtime, value, factory, "ws_healthy", other=True)
     scope = WorkspaceConsumers(runtime, tmp_path)
     scope.stop_workspace = AsyncMock()
-    scope._retained_stop_failures = {f"ws_deleted_{index:03}" for index in range(65)}
+    from awf.hosted_node.runtime_consumers import _RetainedStop
+
+    scope._retained_stop_failures = {
+        f"ws_deleted_{index:03}": _RetainedStop() for index in range(65)
+    }
     reconcile = runtime.reconcile_workspace
     checked = []
 

@@ -78,6 +78,18 @@ class _AuthorityGrace:
     expires_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class _RetainedStop:
+    """Pending teardown retry metadata after a failed Compose stop.
+
+    Preserve exhaustion (or other) reason/message across retries so a later
+    successful teardown does not default to ``HOSTED_RUNTIME_STOPPED``.
+    """
+
+    reason_code: str | None = None
+    message: str | None = None
+
+
 class _StopWorkspace(Protocol):
     def __call__(
         self,
@@ -118,7 +130,7 @@ class WorkspaceConsumers:
         self._retained_cursor = ""
         self._history_cursor = ""
         self._retry_cursor = ""
-        self._retained_stop_failures: set[str] = set()
+        self._retained_stop_failures: dict[str, _RetainedStop] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -757,16 +769,26 @@ class WorkspaceConsumers:
                             )
                             if action == "defer":
                                 continue
+                            reason_code = (
+                                _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                            )
+                            message = (
+                                self._authority_unavailable_message()
+                                if action == "stop_exhausted"
+                                else None
+                            )
+                            # Stash before teardown so a failed Compose stop still
+                            # retries with HOSTED_AUTHORITY_UNAVAILABLE, not the
+                            # stop_workspace default HOSTED_RUNTIME_STOPPED.
+                            if reason_code is not None or message is not None:
+                                self._retained_stop_failures[workspace_id] = _RetainedStop(
+                                    reason_code=reason_code,
+                                    message=message,
+                                )
                             await self._stop(
                                 workspace_id,
-                                reason_code=(
-                                    _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                                ),
-                                message=(
-                                    self._authority_unavailable_message()
-                                    if action == "stop_exhausted"
-                                    else None
-                                ),
+                                reason_code=reason_code,
+                                message=message,
                             )
                         else:
                             # Reconcile recovery clears only its own window.
@@ -778,7 +800,14 @@ class WorkspaceConsumers:
                                     # before Docker teardown failed). Healthy
                                     # material without a publication must not clear
                                     # the pending stop — retry teardown.
-                                    await self._stop(workspace_id)
+                                    pending_stop = self._retained_stop_failures.get(
+                                        workspace_id, _RetainedStop()
+                                    )
+                                    await self._stop(
+                                        workspace_id,
+                                        reason_code=pending_stop.reason_code,
+                                        message=pending_stop.message,
+                                    )
                                 else:
                                     # Finish this identity's failed retraction, without
                                     # stopping or touching a successor identity's view.
@@ -786,9 +815,9 @@ class WorkspaceConsumers:
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     # Keep admission closed across pages without starving later
                     # cleanup. The bounded cursor wraps and retries each failure.
-                    self._retained_stop_failures.add(workspace_id)
+                    self._retained_stop_failures.setdefault(workspace_id, _RetainedStop())
                 else:
-                    self._retained_stop_failures.discard(workspace_id)
+                    self._retained_stop_failures.pop(workspace_id, None)
             if retained:
                 self._retained_cursor = retained[-1]
             if history:

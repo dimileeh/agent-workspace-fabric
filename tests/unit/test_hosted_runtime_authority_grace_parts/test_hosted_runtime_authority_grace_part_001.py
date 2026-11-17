@@ -470,6 +470,48 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     )
 
 
+async def test_retained_stop_retry_preserves_exhaustion_reason_after_authority_recovers(
+    tmp_path, monkeypatch
+):
+    """Compose teardown failure must not drop HOSTED_AUTHORITY_UNAVAILABLE on retry.
+
+    If grace exhaustion triggers stop but teardown fails, the workspace enters
+    ``_retained_stop_failures``. When authority recovers before the next sweep,
+    the retry still must forward the original exhaustion reason — otherwise
+    ``stop_workspace`` defaults to ``HOSTED_RUNTIME_STOPPED``.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    assert await scope.admission_check()
+    clock["now"] = origin + timedelta(seconds=1)
+    assert not await scope.admission_check()
+    assert "ws_exact" in scope._retained_stop_failures
+    assert scope.stop_workspace.await_count == 1
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    assert "ws_exact" not in scope._retained_stop_failures
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in scope.stop_workspace.await_args.kwargs["message"]
+
+
 async def test_timeout_then_stale_lapse_backdates_grace_and_exhausts(tmp_path, monkeypatch):
     """A transient-opened window must adopt an earlier material expiry on lapse."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
