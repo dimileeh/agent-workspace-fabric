@@ -7,6 +7,7 @@ import base64
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Self
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import structlog.testing
@@ -22,6 +23,7 @@ from awf.hosted_node.identity import (
     WorkspaceAuthorityDeferredError,
     WorkspaceScopeDeniedError,
 )
+from awf.hosted_node.models import Receipt
 from awf.hosted_node.runtime_authority import AuthorizedMaterials
 from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 from awf.hosted_node.schemas import Binding, Install
@@ -42,6 +44,39 @@ async def _install_replacement_grants(runtime, value) -> None:
         }
         result = await runtime.receiver.install(Install.model_validate(replacement))
         assert result.status == "current"
+
+
+async def _advance_same_grant_current(runtime, factory, selected) -> None:
+    """Point grant.current at a newer same-grant receipt (post-selection renewal race)."""
+    async with factory.begin() as session:
+        for name, prior in selected.items():
+            prep = await runtime.receiver.preparation(session, prior)
+            assert prep is not None
+            grant = await runtime.receiver.grant(session, prep, prior)
+            old = await runtime.receiver.receipt(session, prior)
+            assert grant is not None and old is not None and grant.current == old.id
+            slot = uuid4().hex
+            renewed = {
+                **runtime.receiver.binding(prior),
+                "revision": prior.revision + 1,
+                "fence": prior.fence + 1,
+                "idempotency_key": f"{name}-post-expiry-renewal",
+            }
+            session.add(
+                Receipt(
+                    id=slot,
+                    owner=runtime.receiver.identity.owner,
+                    idempotency_key=renewed["idempotency_key"],
+                    grant=grant.id,
+                    binding=renewed,
+                    operation="refresh",
+                    predecessor=old.id,
+                    state="installed",
+                )
+            )
+            grant.current = slot
+            grant.revision = prior.revision + 1
+            grant.fence = prior.fence + 1
 
 
 def _advance_past_expiry(runtime, value, monkeypatch, *, extra_seconds: float = 1) -> datetime:
@@ -91,6 +126,29 @@ async def test_expired_superseded_binding_is_unavailable_not_lapsed(authority, m
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE") as caught:
         await runtime.admit(WorkspaceCreateRequest.model_validate(value))
     assert not isinstance(caught.value, MaterialLapsedError)
+
+
+async def test_same_grant_renewal_after_expired_selection_still_lapses(authority, monkeypatch):
+    """Renewal that advances grant.current must not deny a selected expired predecessor.
+
+    If refresh finishes after `_current()` selects an expired binding, the grant still
+    holds preparation authority. Classifying that as UNAVAILABLE stops healthy
+    workspaces; preserve LAPSED so grace recovers on the next check.
+    """
+    runtime, value, factory = authority
+    expiry = _advance_past_expiry(runtime, value, monkeypatch)
+    anchors = {
+        name: Binding.model_validate(binding)
+        for name, binding in value["hosted"]["credentials"].items()
+    }
+    selected = {name: await runtime._current(anchor) for name, anchor in anchors.items()}
+    await _advance_same_grant_current(runtime, factory, selected)
+
+    assert await runtime._holds_current_authority(selected["agent"]) is True
+    assert await runtime._holds_current_authority(selected["github"]) is True
+    with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED") as caught:
+        await runtime._snapshot_status(selected)
+    assert caught.value.expires_at == expiry
 
 
 async def test_expiry_during_snapshot_read_is_lapsed_not_unavailable(authority, monkeypatch):

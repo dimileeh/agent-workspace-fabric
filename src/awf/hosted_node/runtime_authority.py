@@ -344,17 +344,25 @@ class WorkspaceAuthority:
         """True when this binding's grant is still the preparation's current authority.
 
         Receiver status reports expiry before preparation-wide supersession, so a
-        lapse/grace decision must re-check grant replacement separately.
+        lapse/grace decision must re-check grant replacement separately. A newer
+        receipt on the same grant (consumer renewal after `_current` selected an
+        expired predecessor) is not replacement: keep lapse so grace recovers
+        instead of stopping the workspace as UNAVAILABLE.
         """
         async with self.receiver.factory() as session:
             await self.receiver.authority(session)
             prep = await self.receiver.preparation(session, binding)
             assert prep is not None
             grant = await self.receiver.grant(session, prep, binding)
-            if grant is None or grant.revoked or await self.receiver.superseded(session, grant):
+            if (
+                grant is None
+                or grant.revoked
+                or grant.current is None
+                or await self.receiver.superseded(session, grant)
+            ):
                 return False
             receipt = await self.receiver.receipt(session, binding)
-            return receipt is not None and grant.current == receipt.id
+            return receipt is not None and receipt.grant == grant.id
 
     async def _snapshot_status(self, bindings: dict[str, Binding]) -> datetime:
         lapsed_at: datetime | None = None
