@@ -175,6 +175,69 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     assert "ws_exact" not in scope._pending_stops
 
 
+async def test_watcher_finalizer_failed_stop_queues_retained_teardown_retry(tmp_path, monkeypatch):
+    """Watcher grace exhaustion must retain pending teardown when Compose fails.
+
+    Unlike ``_await_with_authority_grace``, the ``_scope`` finalizer used to
+    propagate ``HOSTED_RUNTIME_STOP_FAILED`` without adding the workspace to
+    ``_retained_stop_failures``. A row that left the owned query then missed
+    retry until it reappeared, and a healthy reconcile path could skip the
+    already-required teardown (PRRT_kwDOSJAM6s64jbWa).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    material = authority.workspace.return_value
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+    lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=2))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.workspace.side_effect = workspace
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.owns = AsyncMock(return_value=True)
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_RUNTIME_STOP_FAILED", 503)
+    )
+
+    with pytest.raises(MaterialDeniedError, match="HOSTED_RUNTIME_STOP_FAILED"):
+        async with scope.scope("ws_exact"):
+            await asyncio.sleep(1.0)
+
+    assert scope.stop_workspace.await_count == 1
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in (scope.stop_workspace.await_args.kwargs["message"] or "")
+    assert "ws_exact" in scope._retained_stop_failures
+    assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in (scope._pending_stops["ws_exact"][1] or "")
+
+    # Row left the owned query: retry must come from retained_stop_failures.
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in scope.stop_workspace.await_args.kwargs["message"]
+    authority.reconcile_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
+
+
 async def test_pending_stop_retries_through_reconcile_transient_without_grace(tmp_path):
     """Pending teardown must skip reconcile and keep the original stop reason.
 

@@ -548,17 +548,26 @@ class WorkspaceConsumers:
             # check task finishes but before this caller wakes up.
             await join(asyncio.create_task(finish(), name=f"hosted-finalize-{workspace_id}"))
             if failure is not None or cancelled:
-                await join(
-                    asyncio.create_task(
-                        self._stop(
-                            workspace_id,
-                            authority_lost=failure is not None,
-                            reason_code=stop_reason if failure is not None else None,
-                            message=stop_message if failure is not None else None,
-                        ),
-                        name=f"hosted-retract-{workspace_id}",
+                # Mirror ``_await_with_authority_grace``: ``_stop`` records the
+                # classified reason in ``_pending_stops`` before teardown, and a
+                # Compose failure must land in ``_retained_stop_failures`` so the
+                # owned-row sweep retries even when the row left the live query.
+                try:
+                    await join(
+                        asyncio.create_task(
+                            self._stop(
+                                workspace_id,
+                                authority_lost=failure is not None,
+                                reason_code=stop_reason if failure is not None else None,
+                                message=stop_message if failure is not None else None,
+                            ),
+                            name=f"hosted-retract-{workspace_id}",
+                        )
                     )
-                )
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                    if failure is not None:
+                        self._retained_stop_failures.add(workspace_id)
+                    raise
             elif not deferred_authority:
                 # Scope ended without a stop after confirmed authority: drop
                 # checkers that end with it. Deferred finalizers keep the
