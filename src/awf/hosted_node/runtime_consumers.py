@@ -267,6 +267,10 @@ class WorkspaceConsumers:
                     )
                     raise
                 self._clear_authority_grace(workspace_id, operation=grace_operation)
+                # Workspace and reconcile confirm the same association/materials;
+                # recovery of either must release the equivalent claim.
+                if grace_operation == "workspace":
+                    self._clear_authority_grace(workspace_id, operation="reconcile")
                 holding_claim = False
                 return result
         finally:
@@ -328,7 +332,10 @@ class WorkspaceConsumers:
                 try:
                     await asyncio.shield(entry)
                     await self.authority.workspace(workspace_id)
+                    # Workspace recovery also drops a leftover reconcile claim
+                    # from a deferred retained sweep; keep unrelated claims.
                     self._clear_authority_grace(workspace_id, operation="workspace")
+                    self._clear_authority_grace(workspace_id, operation="reconcile")
                     break
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     soft = isinstance(error, MaterialDeniedError) and error.reason in {
@@ -402,7 +409,10 @@ class WorkspaceConsumers:
                         pass
                     try:
                         await self.authority.workspace(workspace_id)
+                        # Drop equivalent reconcile leftovers; preserve
+                        # unrelated claims such as resource_limits.
                         self._clear_authority_grace(workspace_id, operation="workspace")
+                        self._clear_authority_grace(workspace_id, operation="reconcile")
                     except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                         action = self._classify_authority_failure(
                             workspace_id, error, operation="workspace"
@@ -439,6 +449,7 @@ class WorkspaceConsumers:
                 try:
                     await self.authority.workspace(workspace_id)
                     self._clear_authority_grace(workspace_id, operation="workspace")
+                    self._clear_authority_grace(workspace_id, operation="reconcile")
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     action = self._classify_authority_failure(
                         workspace_id, error, operation="workspace"
@@ -692,13 +703,11 @@ class WorkspaceConsumers:
                                 ),
                             )
                         else:
-                            # Reconcile confirms the same association/materials
-                            # the active-scope watcher/finalizer claim under
-                            # ``workspace``. A deferred scope exit can leave that
-                            # claim open; clearing only ``reconcile`` would keep
-                            # the original deadline so a later brief lapse
-                            # exhausts immediately. Do not clear unrelated
-                            # claims such as ``resource_limits``.
+                            # Reconcile and workspace confirm the same
+                            # association/materials. Recovery of either must
+                            # release both claims so a leftover deadline cannot
+                            # exhaust on the next brief timeout. Do not clear
+                            # unrelated claims such as ``resource_limits``.
                             self._clear_authority_grace(workspace_id, operation="reconcile")
                             self._clear_authority_grace(workspace_id, operation="workspace")
                             if not owned and workspace_id in retry:

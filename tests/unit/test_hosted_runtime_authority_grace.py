@@ -366,6 +366,78 @@ async def test_retained_reconcile_preserves_unrelated_resource_limits_claim(tmp_
     assert window.started_at == started_at
 
 
+async def test_workspace_success_releases_leftover_reconcile_claim(tmp_path, monkeypatch):
+    """Healthy active-scope workspace checks must drop a deferred reconcile claim.
+
+    A retained sweep timeout leaves ``failing_operations={"reconcile"}``.
+    Successful workspace checks used to clear only ``workspace``, so the
+    original deadline survived; a later brief workspace timeout after that
+    deadline exhausted immediately instead of opening a fresh grace window
+    (PRRT_kwDOSJAM6s64an_5).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    # Retained-sweep leftover: reconcile claim still open under the shared deadline.
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), operation="reconcile")
+        == "defer"
+    )
+    assert scope._authority_grace["ws_exact"].failing_operations == {"reconcile"}
+
+    # Successful scope entry/finalizer must release the equivalent reconcile claim.
+    async with scope.scope("ws_exact"):
+        assert "ws_exact" not in scope._authority_grace
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()
+
+    # After recovery cleared the leftover claim, a brief new timeout must start
+    # a fresh grace window — not reuse the exhausted deadline.
+    clock["now"] = origin + timedelta(seconds=602)
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), operation="workspace")
+        == "defer"
+    )
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"workspace"}
+    assert (clock["now"] - window.started_at).total_seconds() < 1
+
+
+async def test_workspace_success_preserves_unrelated_resource_limits_claim(tmp_path, monkeypatch):
+    """Successful workspace recovery must not clear an open resource_limits claim."""
+    scope, _authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), operation="reconcile")
+        == "defer"
+    )
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), operation="resource_limits")
+        == "defer"
+    )
+    started_at = scope._authority_grace["ws_exact"].started_at
+
+    async with scope.scope("ws_exact"):
+        window = scope._authority_grace["ws_exact"]
+        assert window.failing_operations == {"resource_limits"}
+        assert window.started_at == started_at
+
+
 async def test_sweep_exhausts_grace_and_stops_with_authority_unavailable(
     authority, tmp_path, monkeypatch
 ):
@@ -1450,8 +1522,10 @@ async def test_watcher_workspace_success_does_not_reset_resource_limits_grace(
         # Simulate wall time advancing across reservation timeouts while the
         # watcher keeps confirming healthy material on each poll cycle.
         clock["now"] = origin + timedelta(seconds=limits_calls["n"])
-        # Same clear the watcher performs after a successful workspace() poll.
+        # Same clear the watcher performs after a successful workspace() poll
+        # (workspace recovery also releases an equivalent reconcile claim).
         scope._clear_authority_grace("ws_exact", operation="workspace")
+        scope._clear_authority_grace("ws_exact", operation="reconcile")
         raise TimeoutError()
 
     authority.resource_limits = AsyncMock(side_effect=resource_limits)
