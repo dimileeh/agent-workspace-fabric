@@ -564,6 +564,49 @@ async def test_failed_mounted_refresh_resets_ownership_so_retry_can_repopulate(
         assert (path.parent / "publication").exists()
 
 
+async def test_retained_reconcile_republishes_after_failed_mounted_refresh(authority, monkeypatch):
+    """Retained reconcile must restore a warm mount after a fenced refresh failure.
+
+    Failure cleanup keeps the mounted inode and deletes the live publication token.
+    Retained reconciliation decides publish_view from on-disk publication state, not
+    active-scope ownership, so without a recoverable retry marker the next sweep
+    would authority-check with publish_view=False, clear grace, and leave the mount
+    empty. Preserve a fenced marker so only that workspace is republished in place.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    other = await retained(runtime, value, factory, "ws_other_stable", other=True)
+    inode = path.stat().st_ino
+    other_token = (await runtime.publication("ws_other_stable")).token
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic retained refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    with pytest.raises(OSError, match="synthetic retained refresh failure"):
+        await runtime.workspace("ws_cloud_stable")
+    assert path.is_dir()
+    assert path.stat().st_ino == inode
+    assert not list(path.iterdir())
+    assert not (path.parent / "publication").exists()
+    assert (path.parent / "publication.retry").exists()
+    assert await runtime.publication("ws_cloud_stable") is None
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert path.stat().st_ino == inode
+    assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+    assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+    assert (path.parent / "publication").exists()
+    assert not (path.parent / "publication.retry").exists()
+    assert await runtime.publication("ws_cloud_stable") is not None
+    assert (await runtime.publication("ws_other_stable")).token == other_token
+    assert (other / "openai.api-key").read_bytes() == b"synthetic-other-agent"
+
+
 async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):
     """A brand-new view is not bind-mounted yet, so failure may remove it entirely."""
     runtime, _, _ = authority

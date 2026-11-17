@@ -21,6 +21,10 @@ _FILES = frozenset({"openai.api-key", "anthropic.api-key", "github.api-key"})
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _SLOT = "0" * 32
 _PUBLICATION = "publication"
+# Fenced marker left when a retained (already-mounted) refresh fails after the
+# live publication token is cleared. Retained reconcile reads this — not scope
+# ownership — to republish only that workspace's mount in place.
+_RETRY = "publication.retry"
 
 
 @dataclass(frozen=True)
@@ -196,11 +200,52 @@ class RuntimeViews:
                     stream.truncate()
                     stream.flush()
                     os.fsync(stream.fileno())
+                with suppress(FileNotFoundError):
+                    os.unlink(_RETRY, dir_fd=parent)
                 return token
             value = os.read(fd, 33)
             if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
                 raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
             return value.decode("ascii")
+        finally:
+            os.close(fd)
+
+    def _retry_marker(self, parent: int, *, present: bool | None = None) -> bool:
+        if present is True:
+            fd = os.open(
+                _RETRY,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, b"retry")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return True
+        if present is False:
+            with suppress(FileNotFoundError):
+                os.unlink(_RETRY, dir_fd=parent)
+            return False
+        try:
+            fd = os.open(
+                _RETRY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            info = os.fstat(fd)
+            if not (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.geteuid()
+                and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600
+                and 0 < info.st_size <= 16
+            ):
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+            return True
         finally:
             os.close(fd)
 
@@ -238,6 +283,13 @@ class RuntimeViews:
                     return owner.publication
                 return PublishedView(self.store.root / key / "view", token)
         return None
+
+    def publication_retry(self, workspace_id: str) -> bool:
+        """True when a retained mount needs republish after a fenced refresh failure."""
+        key = self._key(workspace_id)
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            return self._retry_marker(parent)
+        return False
 
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
@@ -352,7 +404,12 @@ class RuntimeViews:
                     # Drop the failed publication from live ownership too: its token
                     # is gone, and leaving it selected makes materials refresh None
                     # and clear grace without repopulating the retained mount.
+                    # Retained reconcile keys off the on-disk token, so leave a
+                    # fenced retry marker for that workspace only when the mount
+                    # directory is preserved.
                     self._remove_view(parent, preserve_directory=not new)
+                    if not new:
+                        self._retry_marker(parent, present=True)
                     self._owners.pop(workspace_id, None)
                     if ownership.publication is result:
                         ownership.publication = None
@@ -377,6 +434,8 @@ class RuntimeViews:
             os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
         with suppress(FileNotFoundError):
             os.unlink(_PUBLICATION, dir_fd=parent)
+        # Intentional retract must not look like a recoverable refresh failure.
+        self._retry_marker(parent, present=False)
 
     def remove(
         self,

@@ -163,6 +163,12 @@ class WorkspaceAuthority:
 
     async def reconcile_workspace(self, workspace_id: str) -> bool:
         publication = await self.publication(workspace_id)
+        # A retained refresh failure clears the live token but leaves a fenced
+        # retry marker on that workspace's mount. Republish in place without
+        # treating unrelated empty slots as publishable views.
+        retry = publication is None and await asyncio.to_thread(
+            self.views.publication_retry, workspace_id
+        )
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
@@ -184,7 +190,7 @@ class WorkspaceAuthority:
                 association,
                 agent,
                 current=True,
-                publish_view=publication is not None,
+                publish_view=publication is not None or retry,
                 refresh_publication=publication,
             )
         return True
