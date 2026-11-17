@@ -572,7 +572,13 @@ class WorkspaceConsumers:
         stop_reason: str | None = None
         stop_message: str | None = None
         try:
-            await entry
+            # Join the entry snapshot without letting its failure skip the
+            # fresh authority recheck. A transient OSError on publication can
+            # leave entry already failed; awaiting it in the same try as
+            # association()/materials() would classify that stale exception
+            # and never discover a revocation that landed during the grace wait.
+            with suppress(MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                await entry
             association, agent = await self.authority.association(workspace_id)
             await self.authority.materials(association, agent, current=True)
             authorized = True

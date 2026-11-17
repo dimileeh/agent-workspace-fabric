@@ -904,3 +904,40 @@ async def test_scope_entry_cancel_during_grace_reclassifies_cleanup_denial(
     with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
         await task
     scope.stop_workspace.assert_awaited_once_with("ws_exact", **expected_kwargs)
+
+
+async def test_scope_entry_cancel_after_failed_snapshot_still_rechecks_authority(
+    tmp_path, monkeypatch
+) -> None:
+    """Failed publication snapshot must not skip the cleanup authority recheck.
+
+    Cancel during the grace wait after a transient snapshot OSError joins that
+    already-failed entry. Classifying only the old exception would preserve the
+    warm stack (authority_lost=False) without association()/materials(), so a
+    revocation that landed during the wait would go unchecked.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    authority.publication.side_effect = OSError("snapshot offline")
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    authority.materials = AsyncMock(side_effect=MaterialDeniedError("GRANT_REVOKED", 403))
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    authority.association.assert_awaited()
+    authority.materials.assert_awaited()
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
