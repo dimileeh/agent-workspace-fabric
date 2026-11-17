@@ -527,14 +527,23 @@ class WorkspaceAuthority:
                     values["GITHUB_TOKEN"] = values["GH_TOKEN"]
                     return AuthorizedMaterials(values, expires_at)
                 except _SnapshotUnavailableError:
-                    if not current or attempt == 3:
+                    if current and attempt < 3:
+                        successor = await self._snapshot_successor(anchors, bindings)
+                        if successor is not None:
+                            bindings = successor
+                            # Never return or republish bytes from the superseded read.
+                            values, files = {}, {}
+                            continue
+                    # Mid-read expiry becomes UNAVAILABLE inside resolve/store;
+                    # reclassify benign lapse so grace still applies. Revocation
+                    # and mismatches keep denying (nested catch avoids re-entry).
+                    try:
+                        await self._snapshot_status(bindings)
+                    except MaterialLapsedError:
                         raise
-                    successor = await self._snapshot_successor(anchors, bindings)
-                    if successor is None:
-                        raise
-                    bindings = successor
-                    # Never return or republish bytes from the superseded read.
-                    values, files = {}, {}
+                    except _SnapshotUnavailableError:
+                        pass
+                    raise
         except BaseException as error:
             if publication is None:
                 raise

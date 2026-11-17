@@ -89,6 +89,66 @@ async def test_expired_superseded_binding_is_unavailable_not_lapsed(authority, m
     assert not isinstance(caught.value, MaterialLapsedError)
 
 
+async def test_expiry_during_snapshot_read_is_lapsed_not_unavailable(authority, monkeypatch):
+    """Expiry that lands inside resolve_current must still be a lapse for grace."""
+    from awf.hosted_node.resolver import ProtectedResolver
+
+    runtime, value, _ = authority
+    resolve = ProtectedResolver.resolve_current
+    expiry: datetime | None = None
+
+    async def expire_mid_read(*args, **kwargs):
+        nonlocal expiry
+        if expiry is None:
+            expiry = _advance_past_expiry(runtime, value, monkeypatch)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(ProtectedResolver, "resolve_current", expire_mid_read)
+    with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED") as caught:
+        await runtime.admit(WorkspaceCreateRequest.model_validate(value))
+    assert caught.value.expires_at == expiry
+
+
+async def test_expiry_during_snapshot_read_of_superseded_binding_is_unavailable(
+    authority, monkeypatch
+):
+    """Mid-read expiry of a replaced grant must still deny, not open grace."""
+    from awf.hosted_node.resolver import ProtectedResolver
+
+    runtime, value, _ = authority
+    await _install_replacement_grants(runtime, value)
+    resolve = ProtectedResolver.resolve_current
+
+    async def expire_mid_read(*args, **kwargs):
+        _advance_past_expiry(runtime, value, monkeypatch)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(ProtectedResolver, "resolve_current", expire_mid_read)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE") as caught:
+        await runtime.admit(WorkspaceCreateRequest.model_validate(value))
+    assert not isinstance(caught.value, MaterialLapsedError)
+
+
+async def test_revoke_during_snapshot_read_is_unavailable_not_lapsed(authority, monkeypatch):
+    """Revocation mid-read must stay an immediate denial, not a lapse."""
+    from awf.hosted_node.resolver import ProtectedResolver
+
+    runtime, value, _ = authority
+    resolve = ProtectedResolver.resolve_current
+    binding = value["hosted"]["credentials"]["agent"]
+
+    async def revoke_mid_read(*args, **kwargs):
+        await runtime.receiver.revoke(
+            Binding.model_validate({**binding, "idempotency_key": "revoke-mid", "fence": 2})
+        )
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(ProtectedResolver, "resolve_current", revoke_mid_read)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE") as caught:
+        await runtime.admit(WorkspaceCreateRequest.model_validate(value))
+    assert not isinstance(caught.value, MaterialLapsedError)
+
+
 async def test_sweep_stops_expired_superseded_retained_without_grace(
     authority, tmp_path, monkeypatch
 ):

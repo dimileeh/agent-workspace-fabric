@@ -456,9 +456,10 @@ async def test_successor_validation_churn_spends_existing_snapshot_budget(
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await runtime.materials(association, agent, current=current_mode)
     # Status runs before any material read, so cutover during validation never
-    # spends a snapshot read on the superseded binding.
+    # spends a snapshot read on the superseded binding. One final status call
+    # reclassifies mid-read unavailability (lapse vs denial) after the budget.
     assert reads == 0
-    assert validations == (3 if current_mode else 1)
+    assert validations == (4 if current_mode else 2)
     assert await runtime.publication(original["workspace_id"]) is None
     assert (await runtime.association(original["workspace_id"]))[0] == association
 
