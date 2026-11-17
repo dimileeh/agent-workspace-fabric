@@ -6,9 +6,10 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -24,7 +25,11 @@ from awf.common.commands import (
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
-from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
+from awf.hosted_node.identity import (
+    MaterialDeniedError,
+    MaterialLapsedError,
+    WorkspaceScopeDeniedError,
+)
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.hosted_node.runtime_views import owned_publication, track_publications
@@ -33,14 +38,36 @@ from awf.service.logs import _stream_redaction_flushable_length
 
 _log = get_logger(__name__)
 _TIMEOUT_REASONS = (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON)
+_GraceAction = Literal["defer", "stop_exhausted", "stop_denied"]
+_AUTHORITY_UNAVAILABLE = "HOSTED_AUTHORITY_UNAVAILABLE"
+
+
+@dataclass
+class _AuthorityGrace:
+    started_at: datetime
+    reason_code: str
+    expires_at: datetime | None = None
 
 
 class _StopWorkspace(Protocol):
-    def __call__(self, workspace_id: str, *, authority_lost: bool = True) -> Awaitable[None]: ...
+    def __call__(
+        self,
+        workspace_id: str,
+        *,
+        authority_lost: bool = True,
+        reason_code: str | None = None,
+        message: str | None = None,
+    ) -> Awaitable[None]: ...
 
 
-async def _no_stop(workspace_id: str, *, authority_lost: bool = True) -> None:
-    del workspace_id, authority_lost
+async def _no_stop(
+    workspace_id: str,
+    *,
+    authority_lost: bool = True,
+    reason_code: str | None = None,
+    message: str | None = None,
+) -> None:
+    del workspace_id, authority_lost, reason_code, message
 
 
 class WorkspaceConsumers:
@@ -50,6 +77,13 @@ class WorkspaceConsumers:
         self.workspace_id: ContextVar[str | None] = ContextVar("hosted_workspace", default=None)
         self.stop_workspace: _StopWorkspace = _no_stop
         self.poll_seconds = 2.0
+        configured = getattr(
+            getattr(getattr(authority, "receiver", None), "config", None),
+            "hosted_authority_grace_seconds",
+            600,
+        )
+        self.authority_grace_seconds = configured if isinstance(configured, int) else 600
+        self._authority_grace: dict[str, _AuthorityGrace] = {}
         self._retained_cursor = ""
         self._history_cursor = ""
         self._retry_cursor = ""
@@ -69,6 +103,64 @@ class WorkspaceConsumers:
         }
         if os.environ.get("DOCKER_HOST"):
             self.base_environment["DOCKER_HOST"] = os.environ["DOCKER_HOST"]
+
+    def _clear_authority_grace(self, workspace_id: str) -> None:
+        window = self._authority_grace.pop(workspace_id, None)
+        if window is None:
+            return
+        _log.info(
+            "hosted_node.authority_grace_cleared",
+            workspace_id=workspace_id,
+            reason_code=window.reason_code,
+            expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
+        )
+
+    def _classify_authority_failure(self, workspace_id: str, error: BaseException) -> _GraceAction:
+        if isinstance(error, MaterialDeniedError) and not isinstance(error, MaterialLapsedError):
+            self._authority_grace.pop(workspace_id, None)
+            return "stop_denied"
+        if not isinstance(error, (MaterialLapsedError, SQLAlchemyError, OSError, TimeoutError)):
+            self._authority_grace.pop(workspace_id, None)
+            return "stop_denied"
+        if self.authority_grace_seconds <= 0:
+            self._authority_grace.pop(workspace_id, None)
+            return "stop_denied"
+        now = datetime.now(UTC)
+        material_expires_at = error.expires_at if isinstance(error, MaterialLapsedError) else None
+        reason_code = (
+            error.reason if isinstance(error, MaterialDeniedError) else type(error).__name__
+        )
+        window = self._authority_grace.get(workspace_id)
+        if window is None:
+            started_at = now
+            if material_expires_at is not None and material_expires_at < started_at:
+                started_at = material_expires_at
+            window = _AuthorityGrace(started_at, reason_code, material_expires_at)
+            self._authority_grace[workspace_id] = window
+            _log.info(
+                "hosted_node.authority_grace_started",
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+                expires_at=(
+                    None if material_expires_at is None else material_expires_at.isoformat()
+                ),
+            )
+        elapsed = (now - window.started_at).total_seconds()
+        if elapsed >= self.authority_grace_seconds:
+            self._authority_grace.pop(workspace_id, None)
+            _log.info(
+                "hosted_node.authority_grace_exhausted",
+                workspace_id=workspace_id,
+                reason_code=window.reason_code,
+                expires_at=(None if window.expires_at is None else window.expires_at.isoformat()),
+            )
+            return "stop_exhausted"
+        return "defer"
+
+    def _authority_unavailable_message(self) -> str:
+        return (
+            f"Hosted authority could not be confirmed for {self.authority_grace_seconds} seconds."
+        )
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:
         await self.environment()
@@ -110,6 +202,7 @@ class WorkspaceConsumers:
         try:
             await asyncio.shield(entry)
             await self.authority.workspace(workspace_id)
+            self._clear_authority_grace(workspace_id)
         except asyncio.CancelledError:
             # Entry can be cancelled before the watcher/finalizer exists. Do
             # not republish while deciding whether the old warm stack may stay.
@@ -125,11 +218,25 @@ class WorkspaceConsumers:
             cleanup.result()
             raise
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-            if not isinstance(error, MaterialDeniedError) or error.reason not in {
+            soft = isinstance(error, MaterialDeniedError) and error.reason in {
                 "RECOVERY_ATTENTION_REQUIRED",
                 "NODE_ADMISSION_CLOSED",
-            }:
-                await self._stop(workspace_id)
+            }
+            action: _GraceAction | None = None
+            if not soft:
+                action = self._classify_authority_failure(workspace_id, error)
+                if action != "defer":
+                    await self._stop(
+                        workspace_id,
+                        reason_code=(
+                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                        ),
+                        message=(
+                            self._authority_unavailable_message()
+                            if action == "stop_exhausted"
+                            else None
+                        ),
+                    )
             if isinstance(error, MaterialDeniedError):
                 raise WorkspaceScopeDeniedError(error.reason, error.status) from error
             raise
@@ -137,12 +244,14 @@ class WorkspaceConsumers:
         parent = asyncio.current_task()
         assert parent is not None
         failure: Exception | None = None
+        stop_reason: str | None = None
+        stop_message: str | None = None
         cancelled = False
         caller_cancelled = False
         finished = asyncio.Event()
 
         async def watch() -> None:
-            nonlocal failure
+            nonlocal failure, stop_reason, stop_message
             try:
                 while True:
                     try:
@@ -150,7 +259,19 @@ class WorkspaceConsumers:
                         return
                     except TimeoutError:
                         pass
-                    await self.authority.workspace(workspace_id)
+                    try:
+                        await self.authority.workspace(workspace_id)
+                        self._clear_authority_grace(workspace_id)
+                    except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                        action = self._classify_authority_failure(workspace_id, error)
+                        if action == "defer":
+                            continue
+                        failure = error
+                        if action == "stop_exhausted":
+                            stop_reason = _AUTHORITY_UNAVAILABLE
+                            stop_message = self._authority_unavailable_message()
+                        parent.cancel()
+                        return
             except Exception as error:
                 failure = error
                 parent.cancel()
@@ -169,14 +290,21 @@ class WorkspaceConsumers:
             late_cancellation: asyncio.CancelledError | None = None
 
             async def finish() -> None:
-                nonlocal failure
+                nonlocal failure, stop_reason, stop_message
                 with suppress(asyncio.CancelledError):
                     await watcher
                 try:
                     await self.authority.workspace(workspace_id)
+                    self._clear_authority_grace(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                    action = self._classify_authority_failure(workspace_id, error)
+                    if action == "defer":
+                        return
                     if failure is None or isinstance(failure, MaterialDeniedError):
                         failure = error
+                    if action == "stop_exhausted":
+                        stop_reason = _AUTHORITY_UNAVAILABLE
+                        stop_message = self._authority_unavailable_message()
 
             async def join(cleanup: asyncio.Task[None]) -> None:
                 nonlocal cancelled, caller_cancelled, late_cancellation
@@ -200,7 +328,12 @@ class WorkspaceConsumers:
             if failure is not None or cancelled:
                 await join(
                     asyncio.create_task(
-                        self._stop(workspace_id, authority_lost=failure is not None),
+                        self._stop(
+                            workspace_id,
+                            authority_lost=failure is not None,
+                            reason_code=stop_reason if failure is not None else None,
+                            message=stop_message if failure is not None else None,
+                        ),
                         name=f"hosted-retract-{workspace_id}",
                     )
                 )
@@ -223,13 +356,27 @@ class WorkspaceConsumers:
         finally:
             await self._stop(workspace_id, authority_lost=not authorized)
 
-    async def _stop(self, workspace_id: str, *, authority_lost: bool = True) -> None:
+    async def _stop(
+        self,
+        workspace_id: str,
+        *,
+        authority_lost: bool = True,
+        reason_code: str | None = None,
+        message: str | None = None,
+    ) -> None:
         token = self.workspace_id.set(None)
         preserve_directory = False
         try:
             try:
                 if authority_lost:
-                    await self.stop_workspace(workspace_id)
+                    if reason_code is None and message is None:
+                        await self.stop_workspace(workspace_id)
+                    else:
+                        await self.stop_workspace(
+                            workspace_id,
+                            reason_code=reason_code,
+                            message=message,
+                        )
                 else:
                     await self.stop_workspace(workspace_id, authority_lost=False)
                     preserve_directory = True
@@ -296,9 +443,28 @@ class WorkspaceConsumers:
                     else:
                         try:
                             owned = await self.authority.reconcile_workspace(workspace_id)
-                        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                            await self._stop(workspace_id)
+                        except (
+                            MaterialDeniedError,
+                            SQLAlchemyError,
+                            OSError,
+                            TimeoutError,
+                        ) as error:
+                            action = self._classify_authority_failure(workspace_id, error)
+                            if action == "defer":
+                                continue
+                            await self._stop(
+                                workspace_id,
+                                reason_code=(
+                                    _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                                ),
+                                message=(
+                                    self._authority_unavailable_message()
+                                    if action == "stop_exhausted"
+                                    else None
+                                ),
+                            )
                         else:
+                            self._clear_authority_grace(workspace_id)
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.

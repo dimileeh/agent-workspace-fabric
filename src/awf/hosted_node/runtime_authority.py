@@ -17,7 +17,7 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, MaterialLapsedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Grant, Receipt
 from awf.hosted_node.profile_secrets import (
@@ -331,13 +331,26 @@ class WorkspaceAuthority:
         return binding
 
     async def _snapshot_status(self, bindings: dict[str, Binding]) -> datetime:
+        lapsed_at: datetime | None = None
         for binding in bindings.values():
-            if (await self.receiver.status(binding)).status != "current":
-                raise _SnapshotUnavailableError()
+            status = await self.receiver.status(binding)
+            if status.status == "current":
+                continue
+            if status.status == "expired" and status.reason in {
+                "EXPIRY",
+                "EXPIRY_CLEANUP_PENDING",
+            }:
+                lapsed_at = (
+                    binding.expires_at if lapsed_at is None else min(lapsed_at, binding.expires_at)
+                )
+                continue
+            raise _SnapshotUnavailableError()
         await self.admission()
         expiry = min(binding.expires_at for binding in bindings.values())
         if expiry <= datetime.now(UTC):
-            raise _SnapshotUnavailableError()
+            raise MaterialLapsedError(expires_at=expiry)
+        if lapsed_at is not None:
+            raise MaterialLapsedError(expires_at=lapsed_at)
         return expiry
 
     async def _snapshot_successor(
@@ -469,8 +482,8 @@ class WorkspaceAuthority:
             while True:
                 attempt += 1
                 try:
-                    if attempt > 1:
-                        await self._snapshot_status(bindings)
+                    # Status/expiry before any material read so a lapse never yields bytes.
+                    expires_at = await self._snapshot_status(bindings)
                     values, files = await self._read_snapshot(
                         bindings, association.workspace_id, pair[1]
                     )
@@ -489,7 +502,7 @@ class WorkspaceAuthority:
                         if latest != association or latest_agent != agent:
                             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
                     if expires_at <= datetime.now(UTC):
-                        raise _SnapshotUnavailableError()
+                        raise MaterialLapsedError(expires_at=expires_at)
                     values["GITHUB_TOKEN"] = values["GH_TOKEN"]
                     return AuthorizedMaterials(values, expires_at)
                 except _SnapshotUnavailableError:

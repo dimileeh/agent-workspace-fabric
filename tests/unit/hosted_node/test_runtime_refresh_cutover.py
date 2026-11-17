@@ -455,8 +455,10 @@ async def test_successor_validation_churn_spends_existing_snapshot_budget(
     monkeypatch.setattr(runtime, "_snapshot_status", next_role)
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await runtime.materials(association, agent, current=current_mode)
-    assert reads == 1
-    assert validations == (2 if current_mode else 0)
+    # Status runs before any material read, so cutover during validation never
+    # spends a snapshot read on the superseded binding.
+    assert reads == 0
+    assert validations == (3 if current_mode else 1)
     assert await runtime.publication(original["workspace_id"]) is None
     assert (await runtime.association(original["workspace_id"]))[0] == association
 
@@ -884,7 +886,6 @@ async def test_expiry_during_final_association_read_remains_terminal(cutover, mo
     _, runtime, original, _, _, clock, _ = cutover
     association = runtime.association
     reads = 0
-    instant = clock.instant
 
     async def cross_expiry(*args):
         nonlocal reads
@@ -895,12 +896,12 @@ async def test_expiry_during_final_association_read_remains_terminal(cutover, mo
         return result
 
     monkeypatch.setattr(runtime, "association", cross_expiry)
-    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
         await runtime.workspace(original["workspace_id"])
+    # Lapse is terminal for this attempt and must not leave a readable view.
+    # It also must not enter the superseded-successor retry loop.
     assert await runtime.publication(original["workspace_id"]) is None
-    clock.instant = instant
-    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
-        await runtime.workspace(original["workspace_id"])
+    assert reads == 2
 
 
 async def test_absence_witnesses_share_workspace_scope_without_retaining_history(authority):

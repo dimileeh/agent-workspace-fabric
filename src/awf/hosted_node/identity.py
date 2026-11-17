@@ -1,5 +1,7 @@
 """Durable owner/boot fencing. Identity never proves physical VM termination."""
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,6 +17,14 @@ class MaterialDeniedError(ValueError):
         super().__init__(reason)
         self.reason = reason
         self.status = status
+
+
+class MaterialLapsedError(MaterialDeniedError):
+    """Current material expired without renewal; not an explicit revocation or mismatch."""
+
+    def __init__(self, *, expires_at: datetime | None = None):
+        super().__init__("PROTECTED_MATERIAL_LAPSED", 503)
+        self.expires_at = expires_at
 
 
 class WorkspaceScopeDeniedError(MaterialDeniedError):

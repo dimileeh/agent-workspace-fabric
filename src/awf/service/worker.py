@@ -929,7 +929,13 @@ def build_worker_runtime(
     )
     if hosted is not None:
 
-        async def stop_workspace(workspace_id: str, *, authority_lost: bool = True) -> None:
+        async def stop_workspace(
+            workspace_id: str,
+            *,
+            authority_lost: bool = True,
+            reason_code: str | None = None,
+            message: str | None = None,
+        ) -> None:
             # Never stop a successor's workload after losing this boot identity.
             await hosted.authority.receiver.identity_status()
             async with session_factory() as session:
@@ -979,9 +985,11 @@ def build_worker_runtime(
                 # events, reservations and merge-candidate lifecycle together.
                 causality = await load_failure_causality_snapshot(session, current)
                 primary = causality.primary_failure if causality is not None else None
-                reason = "HOSTED_RUNTIME_STOPPED"
-                message = "Hosted execution was stopped by its consumer authority boundary."
-                secondary = {"reason_code": reason, "message": message}
+                reason = reason_code or "HOSTED_RUNTIME_STOPPED"
+                failure_message = (
+                    message or "Hosted execution was stopped by its consumer authority boundary."
+                )
+                secondary = {"reason_code": reason, "message": failure_message}
                 await repo.transition(
                     current,
                     to=WorkspaceStatus.failed,
@@ -1005,7 +1013,7 @@ def build_worker_runtime(
                 current.monitor_claim_expires_at = None
                 if primary is None:
                     current.failure_reason = FailureReason.infrastructure_failure.value
-                    current.failure_message = message
+                    current.failure_message = failure_message
                 else:
                     restore_primary_failure_row_fields(current, primary)
                 await repo.clear_workspace_attention(workspace_id)
