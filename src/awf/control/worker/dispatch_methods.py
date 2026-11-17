@@ -77,9 +77,11 @@ _MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES = frozenset(
     }
 )
 
-# Brief pause between authority-deferred provisioning retries while the
-# execution claim (and its heartbeat) stay held. Tests may pin this to 0.
-_PROVISION_AUTHORITY_DEFER_SECONDS = 1.0
+# Brief pause between authority-deferred consumer retries while the
+# execution/monitor claim (and its heartbeat) stay held. Tests may pin this to 0.
+_AUTHORITY_DEFER_SECONDS = 1.0
+# Back-compat alias for the original provisioning-only name.
+_PROVISION_AUTHORITY_DEFER_SECONDS = _AUTHORITY_DEFER_SECONDS
 
 
 def _is_monitor_recovery_handoff_failure_reason(reason_code: str) -> bool:
@@ -339,43 +341,58 @@ async def _safely_resume_paused_claimed(
         if self._executor is None:
             await self._restore_paused_after_missing_executor(workspace_id, reason=reason)
             return
-        if reason == "recovering":
-            # A stalled-mid-edit worktree is inconsistent; resume from the last
-            # clean commit (stash dirt → reset --hard HEAD) before re-invoking. If
-            # that reset cannot be completed safely (``git status``/``stash``/
-            # ``reset`` failed) the worktree may still hold partial provider edits,
-            # so abort the in-place retry and restore the paused state for a later
-            # safe resume rather than re-running the agent on a contaminated tree.
-            # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
-            # the claim, letting a capable worker re-claim the cooled-down row.
-            # Re-arm the provider cooldown (#647) so the restored row backs off a
-            # full cooldown before it is resumable again: leaving ``not_before`` in
-            # the past would let ``list_resumable_recovering_ids`` re-select it every
-            # poll, busy-looping a persistent ``git`` status/stash/reset failure
-            # through the executor slot instead of waiting for a later safe retry.
-            if not await self._reset_recovering_worktree(workspace_id):
-                await self._restore_paused_resume_claim(
-                    workspace_id,
-                    reason=reason,
-                    reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
-                    rearm_recovering_cooldown=True,
+        # A stalled-mid-edit worktree is inconsistent; resume from the last
+        # clean commit (stash dirt → reset --hard HEAD) before re-invoking. If
+        # that reset cannot be completed safely (``git status``/``stash``/
+        # ``reset`` failed) the worktree may still hold partial provider edits,
+        # so abort the in-place retry and restore the paused state for a later
+        # safe resume rather than re-running the agent on a contaminated tree.
+        # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
+        # the claim, letting a capable worker re-claim the cooled-down row.
+        # Re-arm the provider cooldown (#647) so the restored row backs off a
+        # full cooldown before it is resumable again: leaving ``not_before`` in
+        # the past would let ``list_resumable_recovering_ids`` re-select it every
+        # poll, busy-looping a persistent ``git`` status/stash/reset failure
+        # through the executor slot instead of waiting for a later safe retry.
+        if reason == "recovering" and not await self._reset_recovering_worktree(workspace_id):
+            await self._restore_paused_resume_claim(
+                workspace_id,
+                reason=reason,
+                reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+                rearm_recovering_cooldown=True,
+            )
+            return
+        while True:
+            try:
+                if reason == "recovering":
+                    # The resume starts lease-less and reacquires a work slot at its
+                    # first agent/validation hook, FIFO ahead of new work (slot-release).
+                    async with self._work_slot_task_scope(workspace_id):
+                        await self._executor.resume_recovering_execution(
+                            workspace_id,
+                            execution_owner_id=self._worker_id,
+                            execution_lease_expires_at=self._execution_claim_expires_at(),
+                        )
+                else:
+                    async with self._work_slot_task_scope(workspace_id):
+                        await self._executor.resume_blocked_execution(
+                            workspace_id,
+                            execution_owner_id=self._worker_id,
+                            execution_lease_expires_at=self._execution_claim_expires_at(),
+                        )
+                break
+            except WorkspaceAuthorityDeferredError as deferred:
+                # Scope entry deferred inside grace: keep the post-claim
+                # ``running`` row and retry instead of restoring the paused
+                # status (and re-arming recovering cooldown) on a brief lapse.
+                _log.info(
+                    f"worker.resume_{reason}_authority_deferred",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                    reason_code=deferred.reason,
                 )
-                return
-            # The resume starts lease-less and reacquires a work slot at its
-            # first agent/validation hook, FIFO ahead of new work (slot-release).
-            async with self._work_slot_task_scope(workspace_id):
-                await self._executor.resume_recovering_execution(
-                    workspace_id,
-                    execution_owner_id=self._worker_id,
-                    execution_lease_expires_at=self._execution_claim_expires_at(),
-                )
-        else:
-            async with self._work_slot_task_scope(workspace_id):
-                await self._executor.resume_blocked_execution(
-                    workspace_id,
-                    execution_owner_id=self._worker_id,
-                    execution_lease_expires_at=self._execution_claim_expires_at(),
-                )
+                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                continue
         executor_drove_resume = True
     except asyncio.CancelledError:
         # The resume CAS already committed ``<paused> -> running`` before dispatch.
@@ -649,7 +666,7 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
                         worker_id=self._worker_id,
                         reason_code=deferred.reason,
                     )
-                    await asyncio.sleep(_PROVISION_AUTHORITY_DEFER_SECONDS)
+                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
                     epoch = await self._read_execution_claim_epoch(workspace_id)
                     if epoch is None:
                         _log.warning(
@@ -746,6 +763,9 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
             execution_owner_id=self._worker_id,
             execution_lease_expires_at=self._execution_claim_expires_at(),
         )
+    except WorkspaceAuthorityDeferredError:
+        # Caller retries while the claim/slot stay held; do not treat as failure.
+        raise
     except Exception:
         # WorkspaceExecutor.execute() owns state transitions, including
         # skip-if-no-longer-ready semantics. The worker must keep polling
@@ -771,7 +791,21 @@ async def _safely_execute_claimed(
         # hook. Either way the scope is released when the workspace first waits
         # (monitor ``release_idle``) or when the task ends.
         async with self._work_slot_task_scope(workspace_id, lease=work_slot_lease):
-            await self._safely_execute(workspace_id)
+            while True:
+                try:
+                    await self._safely_execute(workspace_id)
+                    break
+                except WorkspaceAuthorityDeferredError as deferred:
+                    # Scope entry deferred inside grace: keep the work slot and
+                    # retry instead of logging execute_failed and releasing.
+                    _log.info(
+                        "worker.execute_authority_deferred",
+                        workspace_id=workspace_id,
+                        worker_id=self._worker_id,
+                        reason_code=deferred.reason,
+                    )
+                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                    continue
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -884,7 +918,19 @@ async def _safely_resume_pr_monitor_legacy(
 ) -> bool:
     """Resume via ``resume_pr_monitor()`` for protocol-only executor implementations."""
     try:
-        await self._executor.resume_pr_monitor(workspace_id)
+        while True:
+            try:
+                await self._executor.resume_pr_monitor(workspace_id)
+                break
+            except WorkspaceAuthorityDeferredError as deferred:
+                _log.info(
+                    "worker.pr_monitor_resume_authority_deferred",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                    reason_code=deferred.reason,
+                )
+                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                continue
     except asyncio.CancelledError:
         finalized = await self._finish_monitor_recovery_operation_after_cancellation(
             workspace_id,
@@ -953,7 +999,21 @@ async def _safely_resume_pr_monitor(
     handoff_finalized = False
     verify_start_pending = False
     try:
-        handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
+        while True:
+            try:
+                handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
+                break
+            except WorkspaceAuthorityDeferredError as deferred:
+                # Scope entry deferred inside grace: keep the remonitor op
+                # running and retry instead of failing MONITOR_RECOVERY_FAILED.
+                _log.info(
+                    "worker.pr_monitor_handoff_authority_deferred",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                    reason_code=deferred.reason,
+                )
+                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                continue
         if handoff is None:
             (
                 status,
@@ -1057,7 +1117,19 @@ async def _safely_resume_pr_monitor(
             self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             return False
 
-        monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
+        while True:
+            try:
+                monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
+                break
+            except WorkspaceAuthorityDeferredError as deferred:
+                _log.info(
+                    "worker.pr_monitor_run_authority_deferred",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                    reason_code=deferred.reason,
+                )
+                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                continue
         if monitor_started is False:
             # The remonitor bookkeeping op already succeeded at handoff; a
             # post-handoff start recheck bail must not downgrade it.

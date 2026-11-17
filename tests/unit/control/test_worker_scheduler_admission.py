@@ -306,7 +306,7 @@ async def test_safely_provision_claimed_retries_authority_defer_instead_of_aband
     """
     from awf.control.worker import dispatch_methods as worker_dispatch
 
-    monkeypatch.setattr(worker_dispatch, "_PROVISION_AUTHORITY_DEFER_SECONDS", 0.0)
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.0)
     workspace_id = await _create_requested(
         session_factory,
         create_attempt=False,

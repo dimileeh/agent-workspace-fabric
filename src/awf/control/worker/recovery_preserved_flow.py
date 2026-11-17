@@ -73,7 +73,10 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.hosted_node.identity import WorkspaceScopeDeniedError
+from awf.hosted_node.identity import (
+    WorkspaceAuthorityDeferredError,
+    WorkspaceScopeDeniedError,
+)
 from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
@@ -342,6 +345,16 @@ async def _recover_preserved_active_execution(
                 # Recover by head branch and let match/ambiguity checks below guard safety.
                 base_branch=None,
             )
+    except WorkspaceAuthorityDeferredError as deferred:
+        # Scope entry deferred inside grace: keep the preserved candidate for a
+        # later stale scan. Returning True stops this cycle from falling through
+        # into fail/replace paths that would destroy salvageable work.
+        _log.info(
+            "worker.preserved_active_authority_deferred",
+            workspace_id=workspace_id,
+            reason_code=deferred.reason,
+        )
+        return True
     except WorkspaceScopeDeniedError as error:
         # This outcome certifies successful stop/retraction, not a cleanup
         # failure. Block only this candidate; do not continue its salvage.
