@@ -905,6 +905,46 @@ async def test_environment_opt_out_raises_deferred_without_waiting(tmp_path, mon
     scope.stop_workspace.assert_not_awaited()
 
 
+async def test_hosted_command_prepare_opt_out_raises_deferred_without_waiting(
+    tmp_path, monkeypatch
+):
+    """BranchOpenPullRequestResolver uses HostedCommandRunner; prepare must honor opt-out.
+
+    After scope entry succeeds, a lapse during command prepare must raise
+    WorkspaceAuthorityDeferredError instead of sleeping the remaining grace
+    window — otherwise preserved-recovery blocks the shared worker poll.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    material = authority.workspace.return_value
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    slept: list[float] = []
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise lapse
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        raise AssertionError("HostedCommandRunner prepare must not sleep under grace opt-out")
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    delegate = FakeCommandRunner()
+    async with scope.scope("ws_exact"):
+        with (
+            without_authority_grace_wait(),
+            pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"),
+        ):
+            await HostedCommandRunner(scope, delegate).run(["gh", "pr", "list"])
+    assert slept == []
+    assert not delegate.calls
+    scope.stop_workspace.assert_not_awaited()
+
+
 async def test_under_lock_defer_unlocks_and_retries_outside_mirror_lock(tmp_path):
     """A lapse under the lock must release it and succeed on an outside retry."""
     from awf.node.git_manager import holding_mirror_lock, holding_shared_mirror_lock
