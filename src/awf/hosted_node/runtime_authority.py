@@ -547,13 +547,17 @@ class WorkspaceAuthority:
         except BaseException as error:
             if publication is None:
                 raise
-            cancelled = isinstance(error, asyncio.CancelledError)
-
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication and retract only if it is still the current view.
+            # MaterialLapsedError is grace-eligible: keep the mounted view so a
+            # deferring consumer does not lose Docker-mounted credentials that
+            # cannot be restored in place, while still denying new material.
+            cancelled = isinstance(error, asyncio.CancelledError)
+            preserve_mounted = isinstance(error, MaterialLapsedError)
+
             async def retract() -> None:
                 published = await publication
-                if published is not None:
+                if published is not None and not preserve_mounted:
                     await asyncio.to_thread(
                         self.views.remove,
                         association.workspace_id,

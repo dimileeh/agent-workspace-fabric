@@ -24,6 +24,7 @@ from awf.hosted_node.runtime_authority import AuthorizedMaterials
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
 from awf.hosted_node.schemas import Binding, Install
 from tests.unit.test_hosted_runtime_authority import authority as authority
+from tests.unit.test_hosted_runtime_authority import bound_workspace as bound_workspace
 from tests.unit.test_hosted_runtime_review_retained import retained
 
 
@@ -539,6 +540,47 @@ async def test_grace_zero_matches_today_stop_on_lapse(tmp_path, place):
         authority.reconcile_workspace = AsyncMock(side_effect=lapse)
         assert await scope.admission_check()
         scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
+async def test_lapse_after_refresh_preserves_mounted_view(bound_workspace, monkeypatch):
+    """A grace-eligible lapse after refresh must not strip Docker-mounted credentials.
+
+    If material expires between a successful view refresh and the final checks,
+    MaterialLapsedError must still reject new credential access, but the already
+    mounted view must remain so consumers can defer without orphaning the mount.
+    """
+    runtime, value, _ = bound_workspace
+    await runtime.workspace("ws_cloud_stable")
+    view = runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
+    before = {name: (view / name).read_bytes() for name in ("openai.api-key", "github.api-key")}
+    expiry = Binding.model_validate(value["hosted"]["credentials"]["agent"]).expires_at
+    original_publish = runtime.views.publish
+    original_refresh = runtime.views.refresh
+
+    def _lapse_after(write):
+        def wrapped(*args, **kwargs):
+            published = write(*args, **kwargs)
+            now = expiry + timedelta(seconds=1)
+
+            class Clock(datetime):
+                @classmethod
+                def now(cls, tz: tzinfo | None = None) -> Self:
+                    return cls.fromtimestamp(now.timestamp(), tz=tz)
+
+            monkeypatch.setattr("awf.hosted_node.runtime_authority.datetime", Clock)
+            monkeypatch.setattr("awf.hosted_node.receiver.datetime", Clock)
+            return published
+
+        return wrapped
+
+    monkeypatch.setattr(runtime.views, "publish", _lapse_after(original_publish))
+    monkeypatch.setattr(runtime.views, "refresh", _lapse_after(original_refresh))
+    with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+        await runtime.workspace("ws_cloud_stable")
+    assert {
+        name: (view / name).read_bytes() for name in ("openai.api-key", "github.api-key")
+    } == before
+    assert view.is_dir()
 
 
 def test_hosted_authority_grace_seconds_default_and_zero(tmp_path):
