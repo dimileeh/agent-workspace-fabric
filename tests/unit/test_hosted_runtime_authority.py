@@ -161,6 +161,61 @@ async def bound_workspace(authority):
     return runtime, value, factory
 
 
+async def test_stop_fence_matches_until_binding_or_owner_changes(bound_workspace):
+    """Pending-stop retries compare the same fence stop_workspace uses.
+
+    Remonitor reauthorization replaces task_policy credentials while keeping
+    node_id; matches_stop_fence must then fail so the old stop is not retried
+    (PRRT_kwDOSJAM6s64kckB).
+    """
+    from awf.hosted_node.runtime_authority import STOP_FENCE_FIELDS
+
+    runtime, value, factory = bound_workspace
+    owner = runtime.receiver.identity.owner
+    async with factory.begin() as session:
+        row = await session.get(Workspace, "ws_cloud_stable")
+        assert row is not None
+        row.node_id = owner
+        row.status = "monitoring_pr"
+
+    fence = await runtime.stop_fence("ws_cloud_stable")
+    assert fence is not None
+    assert len(fence) == len(STOP_FENCE_FIELDS)
+    assert fence[STOP_FENCE_FIELDS.index("node_id")] == owner
+    assert fence[STOP_FENCE_FIELDS.index("status")] == "monitoring_pr"
+    assert await runtime.matches_stop_fence("ws_cloud_stable", fence)
+
+    async with factory.begin() as session:
+        row = await session.get(Workspace, "ws_cloud_stable")
+        assert row is not None
+        policy = dict(row.task_policy or {})
+        hosted = dict(policy.get("hosted_node") or {})
+        hosted["credentials"] = {
+            **(hosted.get("credentials") or {}),
+            "agent": {
+                **((hosted.get("credentials") or {}).get("agent") or {}),
+                "grant_id": "replaced-after-remonitor",
+            },
+        }
+        policy["hosted_node"] = hosted
+        row.task_policy = policy
+        row.version += 1
+
+    assert not await runtime.matches_stop_fence("ws_cloud_stable", fence)
+    replaced = await runtime.stop_fence("ws_cloud_stable")
+    assert replaced is not None and replaced != fence
+    assert await runtime.matches_stop_fence("ws_cloud_stable", replaced)
+
+    async with factory.begin() as session:
+        row = await session.get(Workspace, "ws_cloud_stable")
+        assert row is not None
+        row.node_id = "other-owner/node"
+
+    assert await runtime.stop_fence("ws_cloud_stable") is None
+    assert not await runtime.matches_stop_fence("ws_cloud_stable", replaced)
+    assert await runtime.stop_fence("missing") is None
+
+
 async def test_runtime_profile_uses_only_readable_workspace_view(bound_workspace):
     from awf.profiles.models import WorkspaceProfile
 

@@ -1,6 +1,7 @@
 """Owned-row sweep before Compose placement and throughout the real lifecycle."""
 
 import asyncio
+import os
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Self
@@ -314,6 +315,43 @@ async def test_failed_stop_does_not_starve_later_owned_credential_cleanup(
     ]
 
 
+async def test_failed_stop_after_view_write_failure_retries_until_teardown(
+    authority, tmp_path, monkeypatch
+):
+    """Healthy material alone must not clear a pending stop after the view is gone.
+
+    A refresh write failure deletes the mounted view and requests an immediate
+    stop. If Docker teardown fails once, admission_check records a retry. The
+    next sweep must call stop again even when reconcile reads healthy material
+    without republishing (publication is already gone).
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic materials write failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    assert not await scope.admission_check()
+    assert not path.parent.exists()
+    assert "ws_cloud_stable" in scope._retained_stop_failures
+    scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    scope.stop_workspace.side_effect = None
+    scope.stop_workspace.reset_mock()
+
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+    assert "ws_cloud_stable" not in scope._retained_stop_failures
+
+
 @pytest.mark.parametrize("change", ["deleted", "rebound"])
 @pytest.mark.parametrize("cleanup", ["stop", "retract_recovers", "retract_broken"])
 async def test_failed_stop_does_not_block_after_row_leaves_owner(
@@ -367,6 +405,50 @@ async def test_failed_stop_does_not_block_after_row_leaves_owner(
     assert not path.exists()
     assert not scope._retained_stop_failures
     assert successor.path.is_dir() and other.is_dir()
+
+
+async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_after_open(
+    tmp_path,
+):
+    """Closed-boot retract_retired errors must not become teardown retries.
+
+    While admission is closed the sweep only retires previous-boot views. Those
+    failures share ``_retained_stop_failures`` so the next open poll retries them,
+    but they must not enter ``_pending_stops`` (that map is only for authority-lost
+    ``_stop`` decisions). A still-owned reconcile success must clear the pending
+    retract — never call ``_stop`` on healthy retained work that was never meant
+    to tear down.
+    """
+    from tests.unit.test_hosted_runtime_authority_grace_parts.helpers import (
+        _mock_consumers,
+    )
+
+    scope, authority = _mock_consumers(tmp_path)
+    authority.admission = AsyncMock(
+        side_effect=[
+            MaterialDeniedError("NODE_ADMISSION_CLOSED", 409),
+            MaterialDeniedError("NODE_ADMISSION_CLOSED", 409),
+            None,
+            None,
+        ]
+    )
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.retract_retired = AsyncMock(side_effect=OSError("synthetic closed retract"))
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.retract = AsyncMock()
+
+    assert not await scope.admission_check()
+    assert "ws_exact" in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
+    scope.stop_workspace.assert_not_awaited()
+    authority.retract_retired.assert_awaited_once_with("ws_exact")
+
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    authority.reconcile_workspace.assert_awaited_once_with("ws_exact")
+    authority.retract.assert_not_awaited()
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
 
 
 async def test_pending_cleanup_retry_is_bounded_without_starving_current_rows(
