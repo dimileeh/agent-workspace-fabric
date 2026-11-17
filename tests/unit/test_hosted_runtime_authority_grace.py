@@ -196,6 +196,44 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     )
 
 
+async def test_timeout_then_stale_lapse_backdates_grace_and_exhausts(tmp_path, monkeypatch):
+    """A transient-opened window must adopt an earlier material expiry on lapse."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    expiry = origin - timedelta(seconds=601)
+    authority.reconcile_workspace = AsyncMock(
+        side_effect=[TimeoutError(), MaterialLapsedError(expires_at=expiry)]
+    )
+
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    window = scope._authority_grace["ws_exact"]
+    assert window.started_at == origin
+    assert window.expires_at is None
+
+    with structlog.testing.capture_logs() as logs:
+        assert await scope.admission_check()
+    exhausted = [log for log in logs if log["event"] == "hosted_node.authority_grace_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0]["expires_at"] == expiry.isoformat()
+    assert exhausted[0]["reason_code"] == "PROTECTED_MATERIAL_LAPSED"
+    # Successful stop clears the exhausted window; exhaustion without advancing
+    # the clock proves the transient-started window was backdated to expiry.
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+
 async def test_watcher_lapse_inside_grace_keeps_activity(tmp_path):
     scope, authority = _mock_consumers(tmp_path, grace=600)
     material = authority.workspace.return_value

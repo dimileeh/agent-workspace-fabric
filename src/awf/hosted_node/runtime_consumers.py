@@ -145,6 +145,13 @@ class WorkspaceConsumers:
                     None if material_expires_at is None else material_expires_at.isoformat()
                 ),
             )
+        elif material_expires_at is not None and material_expires_at < window.started_at:
+            # A later lapse must not keep a transient-started clock when the
+            # material already expired earlier; otherwise failure-type switches
+            # extend the permitted lapse interval.
+            window.started_at = material_expires_at
+            window.expires_at = material_expires_at
+            window.reason_code = reason_code
         elapsed = (now - window.started_at).total_seconds()
         if elapsed >= self.authority_grace_seconds:
             # Keep the exhausted window until teardown succeeds or a later
