@@ -199,6 +199,20 @@ class WorkspaceConsumers:
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue
+                # Stop with the classified reason before exposing the raw error.
+                # Command/stack-prepare callers (and nested scope re-entry) often
+                # hit a generic terminal handler inside the active scope; if that
+                # marks the workspace failed first, the scope finalizer's later
+                # HOSTED_AUTHORITY_UNAVAILABLE stop is skipped as already-terminal.
+                await self._stop(
+                    workspace_id,
+                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
+                    message=(
+                        self._authority_unavailable_message()
+                        if action == "stop_exhausted"
+                        else None
+                    ),
+                )
                 raise
             self._clear_authority_grace(workspace_id)
             return result

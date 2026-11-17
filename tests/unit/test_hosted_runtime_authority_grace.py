@@ -1217,8 +1217,47 @@ async def test_stack_profile_mounts_opt_out_raises_deferred_without_waiting(tmp_
     scope.stop_workspace.assert_not_awaited()
 
 
-async def test_stack_resource_limits_explicit_denial_raises_immediately(tmp_path):
-    """Non-lapse denials during stack prepare must not open a grace window."""
+async def test_stack_profile_mounts_exhaustion_stops_unavailable_before_raise(
+    tmp_path, monkeypatch
+):
+    """Grace exhaustion during stack prepare must stop with HOSTED_AUTHORITY_UNAVAILABLE.
+
+    ``_await_with_authority_grace`` used to bare-raise after classifying
+    ``stop_exhausted``. Provisioner's generic handler then marked the workspace
+    failed with an unexpected-provisioning error before the scope finalizer's
+    classified stop ran; ``stop_workspace`` skipped recording because the row
+    was already terminal. Stop with the exhaustion reason before exposing the
+    raw error so history keeps the documented reason (PRRT_kwDOSJAM6s64WTdF).
+    """
+    from awf.profiles.models import WorkspaceProfile
+
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def profile_mounts(_profile: WorkspaceProfile, _workspace_id: str):
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.profile_mounts = AsyncMock(side_effect=profile_mounts)
+    with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+        await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.args == ("ws_exact",)
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in scope.stop_workspace.await_args.kwargs["message"]
+
+
+async def test_stack_resource_limits_explicit_denial_stops_before_raise(tmp_path):
+    """Non-lapse denials during stack prepare must stop, then re-raise."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
     authority.resource_limits = AsyncMock(
         side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
@@ -1226,4 +1265,4 @@ async def test_stack_resource_limits_explicit_denial_raises_immediately(tmp_path
     with pytest.raises(MaterialDeniedError, match="HOSTED_WORKSPACE_RESERVATION_REQUIRED"):
         await scope.resource_limits("ws_exact")
     assert "ws_exact" not in scope._authority_grace
-    scope.stop_workspace.assert_not_awaited()
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
