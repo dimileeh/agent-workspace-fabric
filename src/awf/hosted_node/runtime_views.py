@@ -217,6 +217,13 @@ class RuntimeViews:
     def _retry_marker(self, parent: int, *, present: bool | None = None) -> str | None:
         if present is True:
             generation = uuid4().hex
+            # Prefer converting the live publication inode into the retry fence.
+            # Retained refresh cleanup may have already deleted credentials; a
+            # fresh create can then fail with ENOSPC, leaving neither a live
+            # token nor a retry marker. Rename within the same directory is
+            # space-neutral and still yields an exact generation fence.
+            with suppress(FileNotFoundError):
+                os.rename(_PUBLICATION, _RETRY, src_dir_fd=parent, dst_dir_fd=parent)
             fd = os.open(
                 _RETRY,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -441,8 +448,15 @@ class RuntimeViews:
                     # persistence can fail for the same transient storage fault
                     # that aborted the refresh; ownership cleanup must still run,
                     # and a partial on-disk marker must be adopted or cleared.
+                    # Keep the publication inode on retained failures so
+                    # _retry_marker can rename it into publication.retry without
+                    # allocating a new file under ENOSPC.
                     try:
-                        self._remove_view(parent, preserve_directory=not new)
+                        self._remove_view(
+                            parent,
+                            preserve_directory=not new,
+                            keep_publication=not new,
+                        )
                         if not new:
                             try:
                                 ownership.retry = self._retry_marker(parent, present=True)
@@ -452,6 +466,8 @@ class RuntimeViews:
                                 except BaseException:
                                     with suppress(BaseException):
                                         self._retry_marker(parent, present=False)
+                                    with suppress(BaseException):
+                                        os.unlink(_PUBLICATION, dir_fd=parent)
                                     ownership.retry = None
                         else:
                             ownership.retry = None
@@ -467,7 +483,13 @@ class RuntimeViews:
         assert result is not None
         return result
 
-    def _remove_view(self, parent: int, *, preserve_directory: bool = False) -> None:
+    def _remove_view(
+        self,
+        parent: int,
+        *,
+        preserve_directory: bool = False,
+        keep_publication: bool = False,
+    ) -> None:
         directory = os.open("view", _DIRECTORY, dir_fd=parent)
         try:
             self._view_directory(directory)
@@ -478,6 +500,11 @@ class RuntimeViews:
             os.close(directory)
         if not preserve_directory:
             os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
+        if keep_publication:
+            # Drop a stale retry so publication→retry rename cannot collide; the
+            # live publication inode is left for space-neutral fence conversion.
+            self._retry_marker(parent, present=False)
+            return
         with suppress(FileNotFoundError):
             os.unlink(_PUBLICATION, dir_fd=parent)
         # Intentional retract must not look like a recoverable refresh failure.

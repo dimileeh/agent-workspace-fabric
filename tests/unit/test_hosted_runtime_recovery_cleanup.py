@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import errno
 import fcntl
 import json
 import os
@@ -676,6 +677,70 @@ async def test_unreadable_partial_retry_marker_is_cleared_with_ownership(authori
         assert path.stat().st_ino == inode
         assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
         assert ownership.publication is not None
+
+
+async def test_retry_marker_enospc_before_create_still_fences_retained_mount(
+    authority, monkeypatch
+):
+    """ENOSPC on creating publication.retry must not leave an empty retained mount.
+
+    After a mounted refresh clears credentials, unlink(publication)+create(retry)
+    can also fail with ENOSPC before any retry token exists. The fallback read then
+    returns None and clears ownership, so reconcile_workspace(publish_view=False)
+    never restores the mount once storage recovers. Convert the live publication
+    inode into the retry fence so the marker remains space-neutral under ENOSPC.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_open = os.open
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError(errno.ENOSPC, "synthetic retained refresh ENOSPC")
+        return replace_file(source, destination, **kwargs)
+
+    def open_enospc_on_new_retry(path_or_fd, flags, *args, **kwargs):
+        creating = bool(flags & os.O_CREAT)
+        name = path_or_fd if isinstance(path_or_fd, str) else None
+        if name == "publication.retry" and creating:
+            dir_fd = kwargs.get("dir_fd")
+            try:
+                probe = real_open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=dir_fd,
+                )
+            except FileNotFoundError as error:
+                raise OSError(errno.ENOSPC, "synthetic retry create ENOSPC") from error
+            else:
+                os.close(probe)
+        return real_open(path_or_fd, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    monkeypatch.setattr(os, "open", open_enospc_on_new_retry)
+    with pytest.raises(OSError, match="synthetic retained refresh ENOSPC"):
+        await runtime.workspace("ws_cloud_stable")
+    assert path.is_dir()
+    assert path.stat().st_ino == inode
+    assert not list(path.iterdir())
+    assert not (path.parent / "publication").exists()
+    marker = path.parent / "publication.retry"
+    assert marker.exists(), "retained failure must leave a retry fence under ENOSPC"
+    generation = marker.read_text(encoding="ascii")
+    assert len(generation) == 32
+    assert await runtime.publication("ws_cloud_stable") is None
+    assert runtime.views.publication_retry("ws_cloud_stable") == generation
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    monkeypatch.setattr(os, "open", real_open)
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert path.stat().st_ino == inode
+    assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+    assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+    assert (path.parent / "publication").exists()
+    assert not marker.exists()
 
 
 async def test_retained_reconcile_republishes_after_failed_mounted_refresh(authority, monkeypatch):
