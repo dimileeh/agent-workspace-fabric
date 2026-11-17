@@ -35,7 +35,6 @@ from awf.hosted_node.identity import (
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.hosted_node.runtime_views import owned_publication, track_publications
-from awf.node.git_manager import holding_shared_mirror_lock
 from awf.runtime.inspection import inspection_environment
 from awf.service.logs import _stream_redaction_flushable_length
 
@@ -453,21 +452,21 @@ class WorkspaceConsumers:
         # renewal gap must not fail an active monitor/exec; wait inside the
         # same grace window used by the watcher/sweep until material is
         # current again, the window is exhausted, or an explicit denial lands.
-        # Never return values from a lapsed or failed check.
-        # Two callers must not sleep here: GitManager under the shared per-repo
-        # mirror lock (see holding_mirror_lock), and poll-inline preserved
-        # recovery via without_authority_grace_wait — both raise DeferredError
-        # so the shared worker poll / peer workspaces are not stalled.
+        # Never return values from a lapsed or failed check — including when
+        # called under a shared git mirror lock (operator-accepted trade-off:
+        # the bounded wait may delay peers on the same mirror; failing here
+        # would fail the workspace). Poll-inline preserved recovery opts out
+        # via without_authority_grace_wait and raises DeferredError instead.
         while True:
             try:
                 material = await self.authority.workspace(workspace_id)
             except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                 action = self._classify_authority_failure(workspace_id, error)
                 if action == "defer":
-                    if holding_shared_mirror_lock.get() or skip_authority_grace_wait.get():
-                        # Convert to the same defer signal so callers unlock /
-                        # requeue instead of sleeping. Re-raising the raw
-                        # lapse/transient would reach terminal failure handlers.
+                    if skip_authority_grace_wait.get():
+                        # Convert to the same defer signal so callers requeue
+                        # instead of sleeping. Re-raising the raw lapse/transient
+                        # would reach terminal failure handlers.
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue

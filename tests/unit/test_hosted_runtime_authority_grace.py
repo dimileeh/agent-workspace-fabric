@@ -874,41 +874,6 @@ async def test_run_grace_zero_raises_lapse_immediately(tmp_path):
     assert not delegate.calls
 
 
-async def test_environment_does_not_sleep_under_shared_mirror_lock(tmp_path, monkeypatch):
-    """Grace waits must not run while GitManager holds the shared mirror lock.
-
-    Under the lock, a grace-eligible failure raises WorkspaceAuthorityDeferredError
-    (not the raw lapse) so callers unlock and retry outside it instead of hitting
-    terminal provision/execute failure handlers.
-    """
-    from awf.node.git_manager import holding_shared_mirror_lock
-
-    scope, authority = _mock_consumers(tmp_path, grace=600)
-    scope.poll_seconds = 10.0
-    material = authority.workspace.return_value
-    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
-    slept: list[float] = []
-
-    async def workspace(_workspace_id: str):
-        if holding_shared_mirror_lock.get():
-            raise lapse
-        return material
-
-    async def record_sleep(seconds: float) -> None:
-        slept.append(seconds)
-
-    authority.workspace.side_effect = workspace
-    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
-    async with scope.scope("ws_exact"):
-        token = holding_shared_mirror_lock.set(True)
-        try:
-            with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
-                await scope.environment()
-        finally:
-            holding_shared_mirror_lock.reset(token)
-    assert slept == []
-
-
 async def test_environment_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
     """Poll-inline recovery must not sleep in environment() during command prepare.
 
@@ -986,42 +951,13 @@ async def test_hosted_command_prepare_opt_out_raises_deferred_without_waiting(
     scope.stop_workspace.assert_not_awaited()
 
 
-async def test_under_lock_defer_unlocks_and_retries_outside_mirror_lock(tmp_path):
-    """A lapse under the lock must release it and succeed on an outside retry."""
-    from awf.node.git_manager import holding_mirror_lock, holding_shared_mirror_lock
+async def test_git_environment_waits_out_authority_lapse(tmp_path):
+    """git_environment waits out a brief lapse wherever it is called.
 
-    scope, authority = _mock_consumers(tmp_path, grace=600)
-    entry = authority.workspace.return_value
-    renewed = AuthorizedMaterials(
-        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
-        datetime.now(UTC) + timedelta(minutes=1),
-    )
-    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
-    calls = {"n": 0}
-    mirror = tmp_path / "mirror.git"
-    mirror.mkdir()
-
-    async def workspace(_workspace_id: str):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return entry
-        if holding_shared_mirror_lock.get():
-            raise lapse
-        return renewed
-
-    authority.workspace.side_effect = workspace
-    async with scope.scope("ws_exact"):
-        with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
-            async with holding_mirror_lock(mirror, command_environment=scope.git_environment):
-                await scope.git_environment()
-        assert holding_shared_mirror_lock.get() is False
-        env = await scope.git_environment()
-    assert env["GH_TOKEN"] == "renewed"
-    assert "ws_exact" not in scope._authority_grace
-
-
-async def test_git_environment_waits_outside_shared_mirror_lock(tmp_path):
-    """Outside the lock, git_environment still waits out a brief lapse."""
+    Including under a shared git mirror lock (operator-accepted trade-off):
+    failing or deferring a git step there fails the workspace; the wait is
+    bounded by hosted_authority_grace_seconds.
+    """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     entry = authority.workspace.return_value
     renewed = AuthorizedMaterials(

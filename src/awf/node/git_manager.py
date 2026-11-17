@@ -24,8 +24,7 @@ import os
 import re
 import shutil
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,13 +42,6 @@ from awf.node.git_manager_expected_base import locked_worktree_start_point
 from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
 _log = get_logger(__name__)
-
-# Set while a shared per-repo mirror lock is held. Hosted command-environment
-# callbacks must not sleep for authority grace under this flag — that would
-# stall clone/fetch/worktree-add for every peer workspace on the same mirror.
-holding_shared_mirror_lock: ContextVar[bool] = ContextVar(
-    "awf_git_holding_shared_mirror_lock", default=False
-)
 
 _chown_tree = _git_manager_ownership._chown_tree
 _ensure_owner_writable_dir = _git_manager_ownership._ensure_owner_writable_dir
@@ -533,18 +525,6 @@ class GitManager:
             cls._mirror_locks[loop] = loop_locks
         return loop_locks.setdefault(str(mirror_path.resolve()), asyncio.Lock())
 
-    @asynccontextmanager
-    async def _holding_mirror_lock(self, mirror_path: Path) -> AsyncIterator[None]:
-        """Hold the shared mirror lock without parking authority grace under it.
-
-        Resolve ``command_environment`` (which may wait out a hosted authority
-        grace window) before acquiring the lock, then mark
-        ``holding_shared_mirror_lock`` so nested env refreshes inside ``_run``
-        fail fast instead of sleeping while peers are blocked.
-        """
-        async with holding_mirror_lock(mirror_path, command_environment=self._command_environment):
-            yield
-
     @property
     def work_dir(self) -> Path:
         return self._work_dir
@@ -635,7 +615,9 @@ class GitManager:
             repo_url,
             operation="mirror.update" if mirror_path.exists() else "mirror.clone",
         )
-        async with self._holding_mirror_lock(mirror_path):
+        lock = self._lock_for_mirror(mirror_path)
+
+        async with lock:
             if mirror_path.exists():
                 # Before the fetch, because the fetch is what fires root-side
                 # auto-gc: a mirror created before #1033 would otherwise get its
@@ -790,7 +772,8 @@ class GitManager:
         # under the new refspec) never targets the worktree's own branch.
         tracking_ref, fetch_refspec = _checkout_tracking_ref(base_branch)
 
-        async with self._holding_mirror_lock(mirror_path):
+        lock = self._lock_for_mirror(mirror_path)
+        async with lock:
             start_point = await locked_worktree_start_point(
                 self._run,
                 mirror_path=mirror_path,
@@ -943,7 +926,8 @@ class GitManager:
         """Delete a leftover local branch so ``worktree add -b`` can recreate it."""
         if not mirror_path.exists():
             return
-        async with self._holding_mirror_lock(mirror_path):
+        lock = self._lock_for_mirror(mirror_path)
+        async with lock:
             try:
                 await self._run(
                     [
@@ -1209,32 +1193,6 @@ class GitManager:
         )
 
 
-@asynccontextmanager
-async def holding_mirror_lock(
-    mirror_path: Path,
-    *,
-    command_environment: Callable[[], Awaitable[Mapping[str, str]]] | None = None,
-) -> AsyncIterator[None]:
-    """Acquire the shared mirror lock after optional command-environment prepare.
-
-    Hosted authority grace may sleep inside ``command_environment``; that wait
-    must finish before the lock is taken so one lapsed workspace cannot stall
-    every peer sharing the mirror. While the lock is held,
-    ``holding_shared_mirror_lock`` is true so nested env refreshes fail fast by
-    raising ``WorkspaceAuthorityDeferredError`` (never sleeping under the lock);
-    callers unlock and retry outside it where hosted scope/environment waits.
-    """
-    if command_environment is not None:
-        await command_environment()
-    lock = GitManager._lock_for_mirror(mirror_path)
-    token = holding_shared_mirror_lock.set(True)
-    try:
-        async with lock:
-            yield
-    finally:
-        holding_shared_mirror_lock.reset(token)
-
-
 def _agent_writable_git_targets(
     *,
     layout_mirror: Path,
@@ -1454,7 +1412,8 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
     Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
     was needed. Raises ``GitOperationError`` if the probe or unset fails.
     """
-    async with holding_mirror_lock(mirror_path):
+    lock = GitManager._lock_for_mirror(mirror_path)
+    async with lock:
         repaired, stale_worktree_metadata = await _repair_mirror_hooks_path_once(mirror_path)
         if not stale_worktree_metadata:
             return repaired

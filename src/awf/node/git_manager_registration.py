@@ -153,9 +153,9 @@ async def lock_reused_registration(
     *, mirror_path: Path, worktree_path: Path, workspace_id: str
 ) -> bool:
     """Lock a reused checkout's registration under the mirror lock."""
-    from awf.node.git_manager import holding_mirror_lock
+    from awf.node.git_manager import GitManager
 
-    async with holding_mirror_lock(mirror_path):
+    async with GitManager._lock_for_mirror(mirror_path):
         return await ensure_registration_locked(
             mirror_path=mirror_path, worktree_path=worktree_path, workspace_id=workspace_id
         )
@@ -318,7 +318,7 @@ async def remove_worktree_under_mirror_lock(
     """Remove a (possibly locked) managed worktree and reap its registration."""
     from awf.node.git_manager import GitOperationError
 
-    async with manager._holding_mirror_lock(mirror_path):
+    async with manager._lock_for_mirror(mirror_path):
         if worktree_path.exists():
             # A standalone repository (``.git`` as a directory) is not proven
             # AWF-linked leftover metadata. Fail closed rather than

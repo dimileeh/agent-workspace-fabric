@@ -570,9 +570,9 @@ async def _resolve_preserved_active_branch_open_pr(
             base_branch=base_branch,
         )
     except WorkspaceAuthorityDeferredError:
-        # Poll-inline grace opt-out (or under-lock defer) during command prepare
-        # must reach recovery_preserved_flow's DeferredError handler so the
-        # candidate stays preserved for a later stale scan — not a failed lookup.
+        # Poll-inline grace opt-out during command prepare must reach
+        # recovery_preserved_flow's DeferredError handler so the candidate
+        # stays preserved for a later stale scan — not a failed lookup.
         raise
     except Exception as exc:
         _log.warning(

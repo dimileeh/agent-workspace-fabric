@@ -57,7 +57,7 @@ async def fixture_worktree(manager: Any, workspace_id: str) -> WorktreeLayout:
     mirror.parent.mkdir(parents=True, exist_ok=True)
     worktree.parent.mkdir(parents=True, exist_ok=True)
     branch = "awf-diagnostic/" + workspace_id
-    async with manager._holding_mirror_lock(mirror):
+    async with manager._lock_for_mirror(mirror):
         # Initialization may have stopped after mkdir or before the fixture ref.
         # Repair in place so registered worktrees and their branches survive.
         if not (mirror / "HEAD").exists():

@@ -32,13 +32,13 @@ class WorkspaceScopeDeniedError(MaterialDeniedError):
 
 
 class WorkspaceAuthorityDeferredError(Exception):
-    """Grace-eligible authority failure surfaced without waiting (or under a lock).
+    """Grace-eligible authority failure surfaced without waiting.
 
     Hosted ``_scope`` and ``environment()`` normally wait out
-    ``hosted_authority_grace_seconds`` on a lapse/transient. This error is raised
-    instead when the caller opted out of that wait (poll-inline recovery via
-    ``awf.common.workspace_scope.without_authority_grace_wait``) or when
-    ``environment()`` refuses to sleep under the shared mirror lock. The
+    ``hosted_authority_grace_seconds`` on a lapse/transient — including when
+    ``environment()`` is called under a shared git mirror lock. This error is
+    raised instead when the caller opted out of that wait (poll-inline recovery
+    via ``awf.common.workspace_scope.without_authority_grace_wait``). The
     workspace is not stopped; the caller must keep or requeue work.
     """
 
