@@ -238,13 +238,21 @@ class WorkspaceAuthority:
             # generation. Invalidate that exact marker (and any leftover view
             # files) so reconcile cannot republish; a successor that already
             # consumed it is untouched. If leftover deletion fails,
-            # invalidate_retry queues publication.retract and this drops the
-            # in-memory restore fence so scope exit cannot look like permission
-            # to republish.
+            # invalidate_retry must queue publication.retract (or raise); only
+            # then drop the in-memory restore fence so scope exit cannot look
+            # like permission to republish a still-pending cancel retract.
             ownership = owned_publication(self.views, workspace_id)
             generation = ownership.retry if ownership is not None else None
             if ownership is not None and generation is not None:
-                await asyncio.to_thread(self.views.invalidate_retry, workspace_id, generation)
+                cleared = await asyncio.to_thread(
+                    self.views.invalidate_retry, workspace_id, generation
+                )
+                if not cleared:
+                    retract = await asyncio.to_thread(self.views.publication_retract, workspace_id)
+                    if retract != generation:
+                        # Deletion failed and no durable retract was queued —
+                        # keep the in-memory fence and fail cancel cleanup.
+                        raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
                 if ownership.retry == generation:
                     ownership.retry = None
         await self._retract_previous(workspace_id)

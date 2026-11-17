@@ -412,8 +412,13 @@ class RuntimeViews:
                 if self._retry_marker(parent) == generation:
                     self._retry_marker(parent, present=False)
                 self._retract_marker(parent, present=False)
-            except (OSError, MaterialDeniedError):
+            except (OSError, MaterialDeniedError) as error:
                 self._queue_retract(parent, generation)
+                # Durable retract is the only successful alternative to clearing
+                # the retry fence; if the rename did not land, propagate so the
+                # caller keeps its in-memory restore fence for another attempt.
+                if self._retract_marker(parent) != generation:
+                    raise error
                 return False
             return True
         return True

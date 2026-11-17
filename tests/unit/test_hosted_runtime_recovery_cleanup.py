@@ -1170,6 +1170,50 @@ async def test_cancel_deletes_leftover_credentials_before_clearing_retry_marker(
     assert await runtime.publication("ws_cloud_stable") is None
 
 
+async def test_retract_publication_rejects_false_invalidate_without_durable_retract(
+    authority, monkeypatch
+):
+    """Cancel must not clear the restore fence when invalidate_retry fails to queue retract.
+
+    A False return without publication.retract would previously let retract_publication
+    complete and drop ownership.retry, so scope exit looked like a successful retract
+    while leftovers stayed republishable. Require the durable marker (or raise).
+    """
+    runtime, value, factory = authority
+    await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic false-invalidate refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        with pytest.raises(OSError, match="synthetic false-invalidate refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", replace_file)
+        generation = ownership.retry
+        assert generation is not None
+
+        def false_without_retract(workspace_id: str, token: str) -> bool:
+            assert workspace_id == "ws_cloud_stable"
+            assert token == generation
+            return False
+
+        monkeypatch.setattr(runtime.views, "invalidate_retry", false_without_retract)
+        with pytest.raises(MaterialDeniedError, match="INVALID_RUNTIME_VIEW"):
+            await runtime.retract_publication("ws_cloud_stable", None)
+        assert ownership.retry == generation
+        assert (
+            runtime.views.store.root / runtime.views._key("ws_cloud_stable") / "publication.retry"
+        ).read_text(encoding="ascii") == generation
+        assert runtime.views.publication_retract("ws_cloud_stable") is None
+
+
 async def test_cancel_queues_retract_when_leftover_credential_unlink_fails(
     authority, tmp_path, monkeypatch
 ):
