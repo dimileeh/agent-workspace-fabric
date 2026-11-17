@@ -34,7 +34,8 @@ class WorkspaceScopeDeniedError(MaterialDeniedError):
 class WorkspaceAuthorityDeferredError(Exception):
     """Grace-eligible authority failure surfaced without waiting.
 
-    Hosted ``_scope`` and ``environment()`` normally wait out
+    Hosted ``_scope``, ``environment()``, and stack-prepare callbacks
+    (``profile_mounts`` / ``resource_limits``) normally wait out
     ``hosted_authority_grace_seconds`` on a lapse/transient — including when
     ``environment()`` is called under a shared git mirror lock. This error is
     raised instead when the caller opted out of that wait (poll-inline recovery

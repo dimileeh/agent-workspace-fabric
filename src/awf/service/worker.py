@@ -468,8 +468,12 @@ def build_worker_runtime(
     worker_options: _HostedWorkerOptions = {}
     if hosted is not None:
         stack_options = {
-            "protected_profile_mounts": hosted.authority.profile_mounts,
-            "resource_limits": hosted.authority.resource_limits,
+            # Consumer wrappers wait out grace-eligible lapses/transients the
+            # same way environment()/scope entry do. Raw authority methods would
+            # fail provisioning immediately during a brief renewal gap after
+            # successful scope entry (PRRT_kwDOSJAM6s64V4rF).
+            "protected_profile_mounts": hosted.profile_mounts,
+            "resource_limits": hosted.resource_limits,
         }
         consumer_options = {"workspace_scope": hosted.scope}
         worker_options = {

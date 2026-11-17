@@ -1059,3 +1059,87 @@ async def test_git_environment_waits_out_authority_lapse(tmp_path):
         env = await scope.git_environment()
     assert env["GH_TOKEN"] == "renewed"
     assert "ws_exact" not in scope._authority_grace
+
+
+async def test_stack_profile_mounts_waits_out_authority_lapse(tmp_path):
+    """Stack prepare must wait a brief lapse instead of failing provisioning.
+
+    After scope entry succeeds, ComposeStackLauncher calls consumer
+    profile_mounts during _compose_spec. A renewal gap must use the same
+    grace window as environment()/scope entry, not mark the workspace failed.
+    """
+    from awf.node.secret_mounts import LocalSecretLeaseResolution
+    from awf.profiles.models import WorkspaceProfile
+
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    renewed = LocalSecretLeaseResolution(mounts=(), metadata={"phase": "renewed"})
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def profile_mounts(_profile: WorkspaceProfile, _workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise lapse
+        return renewed
+
+    authority.profile_mounts = AsyncMock(side_effect=profile_mounts)
+    result = await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
+    assert result.metadata == {"phase": "renewed"}
+    assert calls["n"] == 2
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()
+
+
+async def test_stack_resource_limits_waits_out_authority_lapse(tmp_path):
+    """resource_limits during stack prepare must honor the same grace wait."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def resource_limits(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise lapse
+        return (4.0, 8.0)
+
+    authority.resource_limits = AsyncMock(side_effect=resource_limits)
+    assert await scope.resource_limits("ws_exact") == (4.0, 8.0)
+    assert calls["n"] == 2
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()
+
+
+async def test_stack_profile_mounts_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
+    """Poll-inline opt-out must not sleep in stack-prepare authority callbacks."""
+    from awf.profiles.models import WorkspaceProfile
+
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        raise AssertionError("stack profile_mounts must not sleep under grace opt-out")
+
+    authority.profile_mounts = AsyncMock(side_effect=lapse)
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    with (
+        without_authority_grace_wait(),
+        pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"),
+    ):
+        await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
+    assert slept == []
+    scope.stop_workspace.assert_not_awaited()
+
+
+async def test_stack_resource_limits_explicit_denial_raises_immediately(tmp_path):
+    """Non-lapse denials during stack prepare must not open a grace window."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.resource_limits = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+    )
+    with pytest.raises(MaterialDeniedError, match="HOSTED_WORKSPACE_RESERVATION_REQUIRED"):
+        await scope.resource_limits("ws_exact")
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()

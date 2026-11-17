@@ -3,7 +3,7 @@
 import asyncio
 import inspect
 import os
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -35,6 +35,8 @@ from awf.hosted_node.identity import (
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.hosted_node.runtime_views import owned_publication, track_publications
+from awf.node.secret_mounts import LocalSecretLeaseResolution
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import inspection_environment
 from awf.service.logs import _stream_redaction_flushable_length
 
@@ -172,6 +174,33 @@ class WorkspaceConsumers:
         return (
             f"Hosted authority could not be confirmed for {self.authority_grace_seconds} seconds."
         )
+
+    async def _await_with_authority_grace[T](
+        self, workspace_id: str, operation: Callable[[], Awaitable[T]]
+    ) -> T:
+        """Wait out a grace-eligible lapse/transient, or raise after exhaustion.
+
+        Used by command prepare (``environment``) and stack-prepare callbacks
+        (``profile_mounts`` / ``resource_limits``). Poll-inline recovery opts
+        out via ``without_authority_grace_wait`` and gets
+        ``WorkspaceAuthorityDeferredError`` instead of sleeping.
+        """
+        while True:
+            try:
+                result = await operation()
+            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                action = self._classify_authority_failure(workspace_id, error)
+                if action == "defer":
+                    if skip_authority_grace_wait.get():
+                        # Convert to the same defer signal so callers requeue
+                        # instead of sleeping. Re-raising the raw lapse/transient
+                        # would reach terminal failure handlers.
+                        raise WorkspaceAuthorityDeferredError(error) from error
+                    await asyncio.sleep(self.poll_seconds)
+                    continue
+                raise
+            self._clear_authority_grace(workspace_id)
+            return result
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:
         await self.environment()
@@ -469,22 +498,30 @@ class WorkspaceConsumers:
         # the bounded wait may delay peers on the same mirror; failing here
         # would fail the workspace). Poll-inline preserved recovery opts out
         # via without_authority_grace_wait and raises DeferredError instead.
-        while True:
-            try:
-                material = await self.authority.workspace(workspace_id)
-            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                action = self._classify_authority_failure(workspace_id, error)
-                if action == "defer":
-                    if skip_authority_grace_wait.get():
-                        # Convert to the same defer signal so callers requeue
-                        # instead of sleeping. Re-raising the raw lapse/transient
-                        # would reach terminal failure handlers.
-                        raise WorkspaceAuthorityDeferredError(error) from error
-                    await asyncio.sleep(self.poll_seconds)
-                    continue
-                raise
-            self._clear_authority_grace(workspace_id)
-            return {**self.base_environment, **material.environment}
+        material = await self._await_with_authority_grace(
+            workspace_id, lambda: self.authority.workspace(workspace_id)
+        )
+        return {**self.base_environment, **material.environment}
+
+    async def profile_mounts(
+        self, profile: WorkspaceProfile, workspace_id: str
+    ) -> LocalSecretLeaseResolution:
+        """Resolve protected mounts for stack launch with the same grace wait.
+
+        ``ComposeStackLauncher`` invokes this after successful scope entry.
+        A renewal gap during stack preparation must not fail provisioning
+        while grace remains; raw authority errors would hit the provisioner's
+        generic failure handler.
+        """
+        return await self._await_with_authority_grace(
+            workspace_id, lambda: self.authority.profile_mounts(profile, workspace_id)
+        )
+
+    async def resource_limits(self, workspace_id: str) -> tuple[float, float]:
+        """Read reservation limits for stack launch with the same grace wait."""
+        return await self._await_with_authority_grace(
+            workspace_id, lambda: self.authority.resource_limits(workspace_id)
+        )
 
     async def admission_check(self) -> bool:
         try:

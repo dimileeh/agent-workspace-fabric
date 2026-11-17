@@ -8,7 +8,8 @@ from typing import Any, cast
 
 WorkspaceScope = Callable[[str], AbstractAsyncContextManager[None]]
 
-# When true, hosted ``_scope`` and ``environment()`` raise
+# When true, hosted ``_scope``, ``environment()``, and stack-prepare callbacks
+# (``profile_mounts`` / ``resource_limits``) raise
 # ``WorkspaceAuthorityDeferredError`` on a grace-eligible failure instead of
 # waiting. Only the worker poll-inline preserved-recovery path sets this —
 # blocking the poll on a full grace wait would stall every other workspace.
@@ -20,7 +21,7 @@ skip_authority_grace_wait: ContextVar[bool] = ContextVar(
 
 @contextmanager
 def without_authority_grace_wait() -> Iterator[None]:
-    """Opt out of hosted scope-entry and command-prepare grace waits."""
+    """Opt out of hosted scope-entry, command-prepare, and stack-prepare grace waits."""
     token = skip_authority_grace_wait.set(True)
     try:
         yield
