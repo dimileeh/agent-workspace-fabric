@@ -174,6 +174,46 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     assert "ws_exact" not in scope._pending_stops
 
 
+async def test_pending_stop_retries_through_reconcile_transient_without_grace(tmp_path):
+    """Pending teardown must not open reconcile grace over recorded stop metadata.
+
+    An in-scope explicit denial queues ``_pending_stops`` then Compose teardown
+    fails. A transient on the next retained reconcile must retry that stop with
+    the original reason/message — not ``continue`` into a fresh 600s window that
+    later exhausts as ``HOSTED_AUTHORITY_UNAVAILABLE`` (PRRT_kwDOSJAM6s64i_dw).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.resource_limits = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+    )
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    with pytest.raises(OSError, match="synthetic docker teardown failure"):
+        async with scope.scope("ws_exact"):
+            await scope.resource_limits("ws_exact")
+
+    assert "ws_exact" in scope._retained_stop_failures
+    assert scope._pending_stops["ws_exact"] == (None, None)
+    assert "ws_exact" not in scope._authority_grace
+
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+    assert not await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    assert "ws_exact" not in scope._authority_grace
+    assert scope._pending_stops["ws_exact"] == (None, None)
+
+    scope.stop_workspace = AsyncMock()
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
+    assert "ws_exact" not in scope._authority_grace
+
+
 async def test_rule_success_clears_only_that_checker_window(tmp_path, monkeypatch):
     """Independent checkers: reconcile success does not clear resource_limits.
 

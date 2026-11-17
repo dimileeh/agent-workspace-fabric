@@ -781,19 +781,29 @@ class WorkspaceConsumers:
                             OSError,
                             TimeoutError,
                         ) as error:
-                            action = self._classify_authority_failure(
-                                workspace_id, error, checker=_CHECKER_RECONCILE
-                            )
-                            if action == "defer":
-                                continue
-                            reason_code = (
-                                _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                            )
-                            message = (
-                                self._authority_unavailable_message()
-                                if action == "stop_exhausted"
-                                else None
-                            )
+                            queued_stop = self._pending_stops.get(workspace_id)
+                            if queued_stop is not None:
+                                # Stop already required (in-scope denial or a
+                                # prior sweep ``_stop`` raise). Do not open a
+                                # reconcile grace window that would later
+                                # exhaust as HOSTED_AUTHORITY_UNAVAILABLE over
+                                # the recorded reason — retry teardown with
+                                # that reason/message immediately.
+                                reason_code, message = queued_stop
+                            else:
+                                action = self._classify_authority_failure(
+                                    workspace_id, error, checker=_CHECKER_RECONCILE
+                                )
+                                if action == "defer":
+                                    continue
+                                reason_code = (
+                                    _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                                )
+                                message = (
+                                    self._authority_unavailable_message()
+                                    if action == "stop_exhausted"
+                                    else None
+                                )
                             try:
                                 await self._stop(
                                     workspace_id,
