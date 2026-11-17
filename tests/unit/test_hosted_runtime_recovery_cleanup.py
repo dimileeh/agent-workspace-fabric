@@ -20,7 +20,7 @@ from awf.db.models import Workspace
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
-from awf.hosted_node.runtime_views import RuntimeViews
+from awf.hosted_node.runtime_views import RuntimeViews, owned_publication, track_publications
 from awf.hosted_node.schemas import Binding, Refresh
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.service.controls import WorkspaceControlService
@@ -489,6 +489,79 @@ async def test_partial_publication_failure_retracts_only_its_own_view(authority,
     assert recovered is not None
     assert recovered.path.stat().st_ino == inode
     assert (path / "openai.api-key").read_bytes() == b"synthetic-recovered"
+
+
+async def test_failed_mounted_refresh_resets_ownership_so_retry_can_repopulate(
+    authority, monkeypatch
+):
+    """Active-scope refresh failure must not stick ownership on a dead publication.
+
+    Failure cleanup keeps the mounted directory inode and deletes the publication
+    token. If ownership.publication still names that failed publication, a later
+    materials() retry can refresh the stale token, get None, clear grace, and leave
+    the retained directory empty. Reset ownership so a later publish can rewrite
+    the same mount.
+    """
+    from awf.hosted_node import runtime_authority as authority_module
+    from awf.hosted_node.runtime_views import PublishedView
+
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic mounted refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        assert ownership.publication is not None
+        assert ownership.publication.path == path
+
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        with pytest.raises(OSError, match="synthetic mounted refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        assert path.is_dir()
+        assert path.stat().st_ino == inode
+        assert not list(path.iterdir())
+        assert not (path.parent / "publication").exists()
+        assert ownership.publication is None
+
+        monkeypatch.setattr(os, "replace", replace_file)
+        # Re-stick a dead publication to prove materials refresh selection: a
+        # snapshot cutover retry refreshes that token, gets None, and would leave
+        # the mount empty unless ownership was reset by failure cleanup above.
+        dead = PublishedView(path, "0" * 32, retained_directory=True, owner=ownership)
+        ownership.publication = dead
+        calls = {"n": 0}
+        original_status = runtime._snapshot_status
+
+        async def flaky_status(bindings):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise authority_module._SnapshotUnavailableError()
+            return await original_status(bindings)
+
+        async def keep_bindings(anchors, previous):
+            return previous
+
+        monkeypatch.setattr(runtime, "_snapshot_status", flaky_status)
+        monkeypatch.setattr(runtime, "_snapshot_successor", keep_bindings)
+        await runtime.workspace("ws_cloud_stable")
+        assert not list(path.iterdir())
+        assert ownership.publication is dead
+
+        ownership.publication = None
+        await runtime.workspace("ws_cloud_stable")
+        assert path.stat().st_ino == inode
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+        assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+        assert ownership.publication is not None
+        assert (path.parent / "publication").exists()
 
 
 async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):

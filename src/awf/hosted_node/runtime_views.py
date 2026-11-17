@@ -345,8 +345,13 @@ class RuntimeViews:
                     # No other publisher can interleave with partial-write cleanup.
                     # Keep an already-mounted view directory so Docker bind mounts
                     # retain the same inode; a later publish can rewrite in place.
+                    # Drop the failed publication from live ownership too: its token
+                    # is gone, and leaving it selected makes materials refresh None
+                    # and clear grace without repopulating the retained mount.
                     self._remove_view(parent, preserve_directory=not new)
                     self._owners.pop(workspace_id, None)
+                    if ownership.publication is result:
+                        ownership.publication = None
                     failure = error
             finally:
                 os.close(directory)
