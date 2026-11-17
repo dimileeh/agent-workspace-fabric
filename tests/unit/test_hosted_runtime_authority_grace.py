@@ -634,6 +634,65 @@ async def test_scope_entry_cancel_during_grace_wait_is_not_authority_lost(
     scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
 
 
+async def test_scope_entry_cancel_during_grace_keeps_grace_clock(tmp_path, monkeypatch) -> None:
+    """Retaining the warm stack on cancel must not reset the grace allowance.
+
+    ``_stop(..., authority_lost=False)`` leaves the runtime running; clearing
+    the grace window would let a later scope/sweep reopen a full 600s bound
+    while the same transient continues.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=1))
+    authority.workspace.side_effect = lapse
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    authority.materials = AsyncMock(side_effect=lapse)
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    assert "ws_exact" in scope._authority_grace
+    started_at = scope._authority_grace["ws_exact"].started_at
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
+    assert "ws_exact" in scope._authority_grace
+    assert scope._authority_grace["ws_exact"].started_at == started_at
+
+    # Same continuing transient on a retained sweep must reuse the clock, not
+    # open another full allowance after cancel cleanup preserved the stack.
+    clock["now"] = origin + timedelta(seconds=300)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(side_effect=lapse)
+    with structlog.testing.capture_logs() as logs:
+        assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once()
+    assert "ws_exact" in scope._authority_grace
+    assert scope._authority_grace["ws_exact"].started_at == started_at
+    assert not any(log["event"] == "hosted_node.authority_grace_started" for log in logs)
+
+
 @pytest.mark.parametrize(
     ("cleanup_error", "expected_kwargs"),
     [

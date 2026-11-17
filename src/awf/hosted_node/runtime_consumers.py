@@ -509,7 +509,13 @@ class WorkspaceConsumers:
                         await self.authority.retract(workspace_id, preserve_directory=True)
                 else:
                     await self.authority.retract(workspace_id)
-            self._clear_authority_grace(workspace_id)
+            # Keep the grace clock when cancellation (or another non-teardown
+            # path) preserves the warm stack. Clearing here would let the next
+            # scope/sweep reopen a full allowance despite no confirmed recovery
+            # or actual runtime stop. Successful authority checks and
+            # authority-lost teardown clear the window elsewhere / below.
+            if authority_lost:
+                self._clear_authority_grace(workspace_id)
         finally:
             self.workspace_id.reset(token)
 
