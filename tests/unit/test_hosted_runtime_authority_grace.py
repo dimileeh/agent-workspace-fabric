@@ -1054,6 +1054,41 @@ async def test_run_exhausts_grace_and_raises(tmp_path, monkeypatch):
     assert not delegate.calls
 
 
+async def test_in_scope_grace_exhaustion_stops_once(tmp_path, monkeypatch):
+    """Early HOSTED_AUTHORITY_UNAVAILABLE stop must not be repeated by the finalizer."""
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.workspace.side_effect = workspace
+    delegate = FakeCommandRunner()
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope("ws_exact"):
+            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+                await HostedCommandRunner(scope, delegate).run(["gh", "pr", "checks"])
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.args == ("ws_exact",)
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert not delegate.calls
+
+
 async def test_run_revocation_raises_at_once(tmp_path):
     scope, authority = _mock_consumers(tmp_path, grace=600)
     material = authority.workspace.return_value

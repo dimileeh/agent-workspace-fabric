@@ -199,26 +199,34 @@ class WorkspaceConsumers:
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue
-                # Stop with the classified reason before exposing the raw error.
-                # Command/stack-prepare callers (and nested scope re-entry) often
-                # hit a generic terminal handler inside the active scope; if that
-                # marks the workspace failed first, the scope finalizer's later
-                # HOSTED_AUTHORITY_UNAVAILABLE stop is skipped as already-terminal.
-                # Fence the live outer ownership first: the watcher may still be
-                # polling, and association() does not treat failed as inactive, so
-                # a post-retract workspace() could otherwise republish material.
-                ownership = owned_publication(self.authority.views, workspace_id)
-                if ownership is not None:
-                    ownership.closing = True
-                await self._stop(
-                    workspace_id,
-                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
-                    message=(
-                        self._authority_unavailable_message()
-                        if action == "stop_exhausted"
-                        else None
-                    ),
-                )
+                # Explicit denial inside an active scope: raise only. The scope
+                # finalizer performs the single stop as stop_workspace(id) with
+                # no extra kwargs (same as pre-grace base behaviour).
+                # Outside a scope (stack prepare) stop here so a generic caller
+                # handler cannot swallow the denial. Grace exhaustion always
+                # stops here with HOSTED_AUTHORITY_UNAVAILABLE before the raw
+                # error is exposed — otherwise a generic in-scope handler can
+                # mark the row failed first and the finalizer's classified stop
+                # is skipped as already-terminal. ownership.stopped then makes
+                # the scope finalizer's later _stop a no-op (one stop per
+                # failure). Fence closing first: the watcher may still be
+                # polling, and association() does not treat failed as inactive.
+                in_scope = self.workspace_id.get() is not None
+                if action == "stop_exhausted" or not in_scope:
+                    ownership = owned_publication(self.authority.views, workspace_id)
+                    if ownership is not None:
+                        ownership.closing = True
+                    await self._stop(
+                        workspace_id,
+                        reason_code=(
+                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                        ),
+                        message=(
+                            self._authority_unavailable_message()
+                            if action == "stop_exhausted"
+                            else None
+                        ),
+                    )
                 raise
             self._clear_authority_grace(workspace_id)
             return result
@@ -482,6 +490,11 @@ class WorkspaceConsumers:
         reason_code: str | None = None,
         message: str | None = None,
     ) -> None:
+        ownership = owned_publication(self.authority.views, workspace_id)
+        if ownership is not None and ownership.stopped:
+            # Early grace-exhaustion stop already completed for this ownership;
+            # the scope finalizer must not stop_workspace a second time.
+            return
         token = self.workspace_id.set(None)
         preserve_directory = False
         try:
@@ -500,7 +513,6 @@ class WorkspaceConsumers:
                     preserve_directory = True
             finally:
                 if preserve_directory:
-                    ownership = owned_publication(self.authority.views, workspace_id)
                     if ownership is not None:
                         await self.authority.retract_publication(
                             workspace_id, ownership.publication
@@ -516,6 +528,8 @@ class WorkspaceConsumers:
             # authority-lost teardown clear the window elsewhere / below.
             if authority_lost:
                 self._clear_authority_grace(workspace_id)
+            if ownership is not None:
+                ownership.stopped = True
         finally:
             self.workspace_id.reset(token)
 
