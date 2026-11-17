@@ -452,6 +452,63 @@ async def test_scope_entry_publication_lapse_waits_then_succeeds(tmp_path):
     assert "ws_exact" not in scope._authority_grace
 
 
+async def test_nested_same_workspace_scope_waits_out_lapse(tmp_path):
+    """Nested same-workspace re-entry must use grace, not raw authority.workspace().
+
+    Hosted monitor-resume enters an outer consumer scope then nests into
+    Provisioner.ensure_hosted_monitor_worktree; a lapse at that nested check
+    must wait inside grace instead of failing the checkout handler.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    material = authority.workspace.return_value
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise lapse
+        return material
+
+    authority.workspace.side_effect = workspace
+    async with scope.scope("ws_exact"):
+        async with scope.scope("ws_exact"):
+            assert scope.workspace_id.get() == "ws_exact"
+        assert calls["n"] >= 3
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_nested_same_workspace_scope_opt_out_raises_deferred(tmp_path, monkeypatch):
+    """Nested re-entry honors without_authority_grace_wait like outer entry."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        return material
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    async with scope.scope("ws_exact"):
+        with (
+            without_authority_grace_wait(),
+            pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"),
+        ):
+            async with scope.scope("ws_exact"):
+                pytest.fail("nested opt-out must not wait or enter")
+    assert slept == []
+    scope.stop_workspace.assert_not_awaited()
+
+
 async def test_scope_entry_publication_exhausted_stops_unavailable(tmp_path, monkeypatch):
     """Repeated publication lapses past grace must stop with HOSTED_AUTHORITY_UNAVAILABLE."""
     scope, authority = _mock_consumers(tmp_path, grace=1)

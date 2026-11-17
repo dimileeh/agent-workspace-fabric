@@ -229,7 +229,14 @@ class WorkspaceConsumers:
         if existing is not None:
             if existing != workspace_id:
                 raise MaterialDeniedError("WORKSPACE_SCOPE_MISMATCH", 403)
-            await self.authority.workspace(workspace_id)
+            # Nested same-workspace re-entry (e.g. monitor-resume outer consumer
+            # then Provisioner.ensure_hosted_monitor_worktree) must share the
+            # bounded grace wait used by outer entry / environment / stack
+            # prepare. A raw authority.workspace() raise here bypasses grace and
+            # can mark the workspace failed from a generic caller handler.
+            await self._await_with_authority_grace(
+                workspace_id, lambda: self.authority.workspace(workspace_id)
+            )
             yield
             return
         ownership = owned_publication(self.authority.views, workspace_id)
