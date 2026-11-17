@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.db.models import Workspace
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.models import Receipt
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
@@ -883,7 +883,15 @@ async def test_retry_cannot_reinterpret_a_preexisting_cleared_view_as_absence(
         await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
 
 
-async def test_expiry_during_final_association_read_remains_terminal(cutover, monkeypatch):
+async def test_expiry_during_final_association_read_remains_terminal(
+    cutover, tmp_path, monkeypatch
+):
+    """LAPSE after publish keeps the view; grace-0 consumer stop still retracts it.
+
+    Authority preserves an already-published mount on PROTECTED_MATERIAL_LAPSED so a
+    grace-deferring consumer does not orphan Docker-mounted credentials. Removing
+    that view belongs to consumer stop, which still runs at once when grace is 0.
+    """
     _, runtime, original, _, _, clock, _ = cutover
     association = runtime.association
     reads = 0
@@ -899,8 +907,61 @@ async def test_expiry_during_final_association_read_remains_terminal(cutover, mo
     monkeypatch.setattr(runtime, "association", cross_expiry)
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
         await runtime.workspace(original["workspace_id"])
-    # Lapse is terminal for this attempt and must not leave a readable view.
-    # It also must not enter the superseded-successor retry loop.
+    # (a) Authority keeps the published view on lapse and does not enter the
+    # superseded-successor retry loop.
+    assert await runtime.publication(original["workspace_id"]) is not None
+    assert reads == 2
+
+    # (b) With grace 0 the consumer stop path removes the view immediately.
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    assert scope.authority_grace_seconds == 0
+    scope.stop_workspace = AsyncMock()
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+        async with scope.scope(original["workspace_id"]):
+            pytest.fail("grace 0 must stop on lapse")
+    scope.stop_workspace.assert_awaited_once_with(original["workspace_id"])
+    assert await runtime.publication(original["workspace_id"]) is None
+
+
+async def test_revocation_during_final_association_read_remains_terminal(cutover, monkeypatch):
+    """Revocation after publish still retracts the view and stays terminal.
+
+    Unlike LAPSE, an explicit denial must not preserve the mounted publication.
+    """
+    client, runtime, original, current, _, _, _ = cutover
+    association = runtime.association
+    snapshot_status = runtime._snapshot_status
+    reads = 0
+
+    async def cross_revoke(*args):
+        nonlocal reads
+        result = await association(*args)
+        reads += 1
+        if reads == 2:
+            binding = current["agent"]
+            response = await client.post(
+                f"{PREFIX}/materials/revoke",
+                json={
+                    **binding,
+                    "idempotency_key": "final-association-revoke",
+                    "fence": binding["fence"] + 1,
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] == "revoked"
+            # Re-enter the post-publish status path so revocation is classified
+            # the same way as other explicit authority losses after a view write.
+            await snapshot_status(
+                {
+                    name: Binding.model_validate(original["credentials"][name])
+                    for name in ("agent", "github")
+                }
+            )
+        return result
+
+    monkeypatch.setattr(runtime, "association", cross_revoke)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+        await runtime.workspace(original["workspace_id"])
     assert await runtime.publication(original["workspace_id"]) is None
     assert reads == 2
 
