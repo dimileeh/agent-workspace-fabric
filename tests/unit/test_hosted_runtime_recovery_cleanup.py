@@ -607,6 +607,74 @@ async def test_retained_reconcile_republishes_after_failed_mounted_refresh(autho
     assert (other / "openai.api-key").read_bytes() == b"synthetic-other-agent"
 
 
+@pytest.mark.parametrize("change", ["retracted", "successor"])
+async def test_retained_retry_publish_respects_generation_fence(authority, monkeypatch, change):
+    """Retained reconcile must not republish after concurrent retract or successor.
+
+    Observing publication.retry as a boolean before authority reads is not a write
+    fence: cancellation cleanup can clear the mount, or another consumer can publish
+    a successor, while materials() awaits. The first publish must validate the exact
+    retry generation under the publication lock.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic retained refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    with pytest.raises(OSError, match="synthetic retained refresh failure"):
+        await runtime.workspace("ws_cloud_stable")
+    monkeypatch.setattr(os, "replace", replace_file)
+    assert (path.parent / "publication.retry").exists()
+    generation = (path.parent / "publication.retry").read_text(encoding="ascii")
+    assert len(generation) == 32
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_current = runtime._current
+
+    async def pause_current(anchor):
+        if not entered.is_set():
+            entered.set()
+            await asyncio.wait_for(release.wait(), 5)
+        return await original_current(anchor)
+
+    monkeypatch.setattr(runtime, "_current", pause_current)
+    task = asyncio.create_task(runtime.reconcile_workspace("ws_cloud_stable"))
+    await asyncio.wait_for(entered.wait(), 5)
+    successor = None
+    if change == "retracted":
+        runtime.views.remove("ws_cloud_stable", preserve_directory=True)
+        assert not (path.parent / "publication.retry").exists()
+    else:
+        successor = runtime.views.publish(
+            "ws_cloud_stable",
+            {
+                "openai.api-key": b"synthetic-successor",
+                "github.api-key": b"synthetic-successor",
+            },
+        )
+        assert successor is not None
+        assert not (path.parent / "publication.retry").exists()
+    release.set()
+    assert await asyncio.wait_for(task, 5) is True
+    assert runtime.views.publication_retry("ws_cloud_stable") != generation
+    if change == "retracted":
+        assert await runtime.publication("ws_cloud_stable") is None
+        assert path.is_dir() and path.stat().st_ino == inode
+        assert not list(path.iterdir())
+        assert not (path.parent / "publication.retry").exists()
+    else:
+        published = await runtime.publication("ws_cloud_stable")
+        assert published is not None and published.token == successor.token
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-successor"
+        assert (path / "github.api-key").read_bytes() == b"synthetic-successor"
+
+
 async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):
     """A brand-new view is not bind-mounted yet, so failure may remove it entirely."""
     runtime, _, _ = authority

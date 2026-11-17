@@ -210,8 +210,9 @@ class RuntimeViews:
         finally:
             os.close(fd)
 
-    def _retry_marker(self, parent: int, *, present: bool | None = None) -> bool:
+    def _retry_marker(self, parent: int, *, present: bool | None = None) -> str | None:
         if present is True:
+            generation = uuid4().hex
             fd = os.open(
                 _RETRY,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -220,21 +221,21 @@ class RuntimeViews:
             )
             try:
                 os.fchmod(fd, 0o600)
-                os.write(fd, b"retry")
+                os.write(fd, generation.encode("ascii"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            return True
+            return generation
         if present is False:
             with suppress(FileNotFoundError):
                 os.unlink(_RETRY, dir_fd=parent)
-            return False
+            return None
         try:
             fd = os.open(
                 _RETRY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
             )
         except FileNotFoundError:
-            return False
+            return None
         try:
             info = os.fstat(fd)
             if not (
@@ -242,10 +243,13 @@ class RuntimeViews:
                 and info.st_uid == os.geteuid()
                 and info.st_nlink == 1
                 and stat.S_IMODE(info.st_mode) == 0o600
-                and 0 < info.st_size <= 16
+                and 0 < info.st_size <= 32
             ):
                 raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-            return True
+            value = os.read(fd, 33)
+            if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+            return value.decode("ascii")
         finally:
             os.close(fd)
 
@@ -266,8 +270,14 @@ class RuntimeViews:
         files: dict[str, bytes],
         *,
         expected_absence: AbsentPublication | None = None,
+        expected_retry: str | None = None,
     ) -> PublishedView | None:
-        return self._publish(workspace_id, files, expected_absence=expected_absence)
+        return self._publish(
+            workspace_id,
+            files,
+            expected_absence=expected_absence,
+            expected_retry=expected_retry,
+        )
 
     def publication(self, workspace_id: str) -> PublishedView | None:
         key = self._key(workspace_id)
@@ -284,12 +294,12 @@ class RuntimeViews:
                 return PublishedView(self.store.root / key / "view", token)
         return None
 
-    def publication_retry(self, workspace_id: str) -> bool:
-        """True when a retained mount needs republish after a fenced refresh failure."""
+    def publication_retry(self, workspace_id: str) -> str | None:
+        """Exact retry generation for a retained mount after a fenced refresh failure."""
         key = self._key(workspace_id)
         with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
             return self._retry_marker(parent)
-        return False
+        return None
 
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
@@ -303,6 +313,7 @@ class RuntimeViews:
         *,
         publication: PublishedView | None = None,
         expected_absence: AbsentPublication | None = None,
+        expected_retry: str | None = None,
     ) -> PublishedView | None:
         if not (set(files) <= _FILES and len(files) == 2 and "github.api-key" in files):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
@@ -324,6 +335,12 @@ class RuntimeViews:
                 or workspace_id in self._owners
                 or os.listdir(parent)  # noqa: PTH208 - locked directory fd
             ):
+                return None
+            # Retained reconcile carries the exact retry generation observed
+            # before authority reads. Retract or a successor publish clears or
+            # replaces that marker; do not resurrect or overwrite from a stale
+            # boolean observation.
+            if expected_retry is not None and self._retry_marker(parent) != expected_retry:
                 return None
             ownership = owned_publication(self, workspace_id)
             if ownership is not None and ownership.closing:

@@ -164,10 +164,12 @@ class WorkspaceAuthority:
     async def reconcile_workspace(self, workspace_id: str) -> bool:
         publication = await self.publication(workspace_id)
         # A retained refresh failure clears the live token but leaves a fenced
-        # retry marker on that workspace's mount. Republish in place without
-        # treating unrelated empty slots as publishable views.
-        retry = publication is None and await asyncio.to_thread(
-            self.views.publication_retry, workspace_id
+        # retry generation on that workspace's mount. Carry that exact token
+        # into the write; a boolean observation alone is not a publish fence.
+        retry = (
+            None
+            if publication is not None
+            else await asyncio.to_thread(self.views.publication_retry, workspace_id)
         )
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
@@ -190,8 +192,9 @@ class WorkspaceAuthority:
                 association,
                 agent,
                 current=True,
-                publish_view=publication is not None or retry,
+                publish_view=publication is not None or retry is not None,
                 refresh_publication=publication,
+                refresh_retry=retry,
             )
         return True
 
@@ -455,6 +458,7 @@ class WorkspaceAuthority:
         current: bool,
         publish_view: bool = False,
         refresh_publication: PublishedView | None = None,
+        refresh_retry: str | None = None,
     ) -> AuthorizedMaterials:
         await self.admission()
         pair = AGENT_TARGETS.get(agent)
@@ -470,7 +474,7 @@ class WorkspaceAuthority:
         }
         retry_publication = refresh_publication
         absence = None
-        if publish_view and retry_publication is None:
+        if publish_view and retry_publication is None and refresh_retry is None:
             owner = owned_publication(self.views, association.workspace_id)
             prior = owner.publication if owner is not None else None
             if prior is not None:
@@ -493,6 +497,13 @@ class WorkspaceAuthority:
             if expected is not None:
                 return await asyncio.to_thread(
                     self.views.refresh, association.workspace_id, files, expected
+                )
+            if refresh_retry is not None:
+                return await asyncio.to_thread(
+                    self.views.publish,
+                    association.workspace_id,
+                    files,
+                    expected_retry=refresh_retry,
                 )
             if retry:
                 if absence is None:
