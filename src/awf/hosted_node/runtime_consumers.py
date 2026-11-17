@@ -389,13 +389,15 @@ class WorkspaceConsumers:
             await self.authority.materials(association, agent, current=True)
             authorized = True
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-            if not grace_defer:
-                soft = isinstance(error, MaterialDeniedError) and error.reason in {
-                    "RECOVERY_ATTENTION_REQUIRED",
-                    "NODE_ADMISSION_CLOSED",
-                }
-                if not soft:
-                    grace_defer = self._classify_authority_failure(workspace_id, error) == "defer"
+            soft = isinstance(error, MaterialDeniedError) and error.reason in {
+                "RECOVERY_ATTENTION_REQUIRED",
+                "NODE_ADMISSION_CLOSED",
+            }
+            if not soft:
+                # Always classify the latest cleanup failure. An earlier
+                # grace-wait decision must not override a subsequent denial
+                # or grace exhaustion discovered here.
+                grace_defer = self._classify_authority_failure(workspace_id, error) == "defer"
         finally:
             # Grace-eligible cancel: retract without treating the lapse as an
             # authority-lost stop (preserve_on_grace / classifier agree).

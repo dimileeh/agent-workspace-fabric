@@ -478,6 +478,47 @@ async def test_scope_entry_cancel_during_grace_wait_is_not_authority_lost(
 
 
 @pytest.mark.parametrize(
+    "cleanup_error",
+    [
+        MaterialDeniedError("GRANT_REVOKED", 403),
+        MaterialDeniedError("WORKSPACE_BINDING_MISMATCH", 403),
+        MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=700)),
+    ],
+    ids=["revoked", "binding_mismatch", "grace_exhausted"],
+)
+async def test_scope_entry_cancel_during_grace_reclassifies_cleanup_denial(
+    tmp_path, monkeypatch, cleanup_error
+) -> None:
+    """Cancel during grace wait must not preserve when cleanup finds a hard denial."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    authority.workspace.side_effect = MaterialLapsedError(
+        expires_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    authority.materials = AsyncMock(side_effect=cleanup_error)
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    assert "ws_exact" in scope._authority_grace
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
+@pytest.mark.parametrize(
     "error", [TimeoutError(), OSError("offline"), OperationalError("db", {}, None)]
 )
 @pytest.mark.parametrize("place", ["scope", "watcher", "sweep"])
