@@ -166,10 +166,17 @@ class WorkspaceAuthority:
         # A retained refresh failure clears the live token but leaves a fenced
         # retry generation on that workspace's mount. Carry that exact token
         # into the write; a boolean observation alone is not a publish fence.
+        # A cancel that could not finish leftover unlink queues publication.retract
+        # instead — that is pending retraction, never permission to restore.
         retry = (
             None
             if publication is not None
             else await asyncio.to_thread(self.views.publication_retry, workspace_id)
+        )
+        retract = (
+            None
+            if publication is not None or retry is not None
+            else await asyncio.to_thread(self.views.publication_retract, workspace_id)
         )
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
@@ -184,6 +191,8 @@ class WorkspaceAuthority:
             # Destroy/GC already completed runtime cleanup. Reclaim only the
             # readable view; never republish or restart an inactive workspace.
             await self.retract(workspace_id)
+        elif retract is not None:
+            await asyncio.to_thread(self.views.complete_retract, workspace_id, retract)
         else:
             # Checkout can publish before Compose placement. Sweep every owned
             # association, but never create a readable view just by polling.
@@ -228,15 +237,15 @@ class WorkspaceAuthority:
             # ContextVar ownership with publication=None but a fenced retry
             # generation. Invalidate that exact marker (and any leftover view
             # files) so reconcile cannot republish; a successor that already
-            # consumed it is untouched. If leftover deletion fails, keep the
-            # in-memory fence so cleanup remains retryable.
+            # consumed it is untouched. If leftover deletion fails,
+            # invalidate_retry queues publication.retract and this drops the
+            # in-memory restore fence so scope exit cannot look like permission
+            # to republish.
             ownership = owned_publication(self.views, workspace_id)
             generation = ownership.retry if ownership is not None else None
             if ownership is not None and generation is not None:
-                cleared = await asyncio.to_thread(
-                    self.views.invalidate_retry, workspace_id, generation
-                )
-                if cleared and ownership.retry == generation:
+                await asyncio.to_thread(self.views.invalidate_retry, workspace_id, generation)
+                if ownership.retry == generation:
                     ownership.retry = None
         await self._retract_previous(workspace_id)
 

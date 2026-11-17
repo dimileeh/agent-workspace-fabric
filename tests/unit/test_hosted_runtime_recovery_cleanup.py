@@ -1170,12 +1170,19 @@ async def test_cancel_deletes_leftover_credentials_before_clearing_retry_marker(
     assert await runtime.publication("ws_cloud_stable") is None
 
 
-async def test_cancel_preserves_retry_marker_when_leftover_credential_unlink_fails(
+async def test_cancel_queues_retract_when_leftover_credential_unlink_fails(
     authority, tmp_path, monkeypatch
 ):
-    """If cancel cannot delete leftovers, keep publication.retry for retryable cleanup."""
+    """Failed cancel leftover unlink must queue retract, not leave a republish retry.
+
+    Leaving publication.retry after _stop completes lets the next retained reconcile
+    treat the marker as permission to restore credentials cancel intended to retract.
+    Convert the fence into a durable retract marker and clear the in-memory restore
+    fence before scope exit.
+    """
     runtime, value, factory = authority
     path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
     replace_file = os.replace
     real_unlink = os.unlink
     credential_unlinks = 0
@@ -1224,12 +1231,84 @@ async def test_cancel_preserves_retry_marker_when_leftover_credential_unlink_fai
         await consumers._stop("ws_cloud_stable", authority_lost=False)
         fail_cancel_unlinks = False
         monkeypatch.setattr(os, "unlink", real_unlink)
-        assert ownership.retry == generation
-        assert (path.parent / "publication.retry").read_text(encoding="ascii") == generation
+        assert ownership.retry is None
+        assert not (path.parent / "publication.retry").exists()
+        assert (path.parent / "publication.retract").read_text(encoding="ascii") == generation
         assert list(path.iterdir()) == leftovers
+    # Scope exit discarded ContextVar ownership; reconcile must finish retract,
+    # not treat a surviving retry marker as permission to republish.
     monkeypatch.setattr(os, "unlink", real_unlink)
-    assert runtime.views.invalidate_retry("ws_cloud_stable", generation) is True
+    assert runtime.views.publication_retry("ws_cloud_stable") is None
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert path.is_dir() and path.stat().st_ino == inode
+    assert not (path.parent / "publication.retract").exists()
     assert not (path.parent / "publication.retry").exists()
+    assert not list(path.iterdir())
+    assert await runtime.publication("ws_cloud_stable") is None
+
+
+async def test_queued_retract_survives_failed_reconcile_cleanup(authority, tmp_path, monkeypatch):
+    """If queued retract cleanup still cannot unlink, keep publication.retract."""
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+    real_unlink = os.unlink
+    credential_unlinks = 0
+    fail_cleanup_unlinks = False
+    fail_cancel_unlinks = False
+    fail_reconcile_unlinks = False
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic queued retract refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    def fail_credential_unlink(name, *args, **kwargs):
+        nonlocal credential_unlinks
+        if (
+            (fail_cleanup_unlinks or fail_cancel_unlinks or fail_reconcile_unlinks)
+            and isinstance(name, str)
+            and name in {"openai.api-key", "anthropic.api-key", "github.api-key"}
+            and kwargs.get("dir_fd") is not None
+        ):
+            credential_unlinks += 1
+            if fail_cleanup_unlinks and credential_unlinks >= 2:
+                raise OSError("synthetic cleanup unlink failure")
+            if fail_cancel_unlinks or fail_reconcile_unlinks:
+                raise OSError("synthetic retract unlink failure")
+        return real_unlink(name, *args, **kwargs)
+
+    consumers = WorkspaceConsumers(runtime, tmp_path)
+    consumers.stop_workspace = AsyncMock()
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        monkeypatch.setattr(os, "unlink", fail_credential_unlink)
+        fail_cleanup_unlinks = True
+        with pytest.raises(OSError, match="synthetic queued retract refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        fail_cleanup_unlinks = False
+        monkeypatch.setattr(os, "replace", replace_file)
+        generation = ownership.retry
+        assert generation is not None
+        credential_unlinks = 0
+        fail_cancel_unlinks = True
+        await consumers._stop("ws_cloud_stable", authority_lost=False)
+        fail_cancel_unlinks = False
+        assert (path.parent / "publication.retract").read_text(encoding="ascii") == generation
+    credential_unlinks = 0
+    fail_reconcile_unlinks = True
+    monkeypatch.setattr(os, "unlink", fail_credential_unlink)
+    with pytest.raises(OSError, match="synthetic retract unlink failure"):
+        await runtime.reconcile_workspace("ws_cloud_stable")
+    fail_reconcile_unlinks = False
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    assert (path.parent / "publication.retract").read_text(encoding="ascii") == generation
+    assert list(path.iterdir())
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert not (path.parent / "publication.retract").exists()
     assert not list(path.iterdir())
 
 

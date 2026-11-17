@@ -25,6 +25,10 @@ _PUBLICATION = "publication"
 # live publication token is cleared. Retained reconcile reads this — not scope
 # ownership — to republish only that workspace's mount in place.
 _RETRY = "publication.retry"
+# Cancel leftover cleanup that cannot unlink credentials renames the matching
+# retry fence here so reconcile finishes retraction instead of treating the
+# surviving generation as permission to restore the publication.
+_RETRACT = "publication.retract"
 
 
 @dataclass(frozen=True)
@@ -206,6 +210,8 @@ class RuntimeViews:
                     os.fsync(stream.fileno())
                 with suppress(FileNotFoundError):
                     os.unlink(_RETRY, dir_fd=parent)
+                with suppress(FileNotFoundError):
+                    os.unlink(_RETRACT, dir_fd=parent)
                 return token
             value = os.read(fd, 33)
             if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
@@ -337,17 +343,61 @@ class RuntimeViews:
             return self._retry_marker(parent)
         return None
 
+    def publication_retract(self, workspace_id: str) -> str | None:
+        """Exact generation queued for leftover retract after a failed cancel invalidate."""
+        key = self._key(workspace_id)
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            return self._retract_marker(parent)
+        return None
+
+    def _retract_marker(self, parent: int, *, present: bool | None = None) -> str | None:
+        if present is False:
+            with suppress(FileNotFoundError):
+                os.unlink(_RETRACT, dir_fd=parent)
+            return None
+        try:
+            fd = os.open(
+                _RETRACT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            info = os.fstat(fd)
+            if not (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.geteuid()
+                and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600
+                and 0 < info.st_size <= 32
+            ):
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+            value = os.read(fd, 33)
+            if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+            return value.decode("ascii")
+        finally:
+            os.close(fd)
+
+    def _queue_retract(self, parent: int, generation: str) -> None:
+        """Convert a matching retry fence into a durable pending-retract marker."""
+        if self._retry_marker(parent) != generation:
+            return
+        with suppress(FileNotFoundError):
+            os.unlink(_RETRACT, dir_fd=parent)
+        os.rename(_RETRY, _RETRACT, src_dir_fd=parent, dst_dir_fd=parent)
+
     def invalidate_retry(self, workspace_id: str, generation: str) -> bool:
         """Clear leftover view material, then drop a matching fenced retry marker.
 
         Cancel after a retained refresh failure may find credentials that cleanup
         failed to unlink. Delete those under the same generation check before
-        clearing ``publication.retry``. If deletion fails, leave the marker so a
-        later sweep can finish cleanup instead of stranding readable material.
+        clearing ``publication.retry``. If deletion fails, rename the matching
+        retry fence to ``publication.retract`` so a later sweep finishes cleanup
+        without treating the generation as permission to restore the publication.
 
-        Returns True when the matching marker is gone (or was already absent /
-        mismatched). Returns False when leftover deletion failed and the marker
-        was preserved for retryable cleanup.
+        Returns True when the matching retry marker is gone (or was already absent /
+        mismatched). Returns False when leftover deletion failed and a durable
+        retract marker was queued instead.
         """
         key = self._key(workspace_id)
         with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
@@ -361,10 +411,28 @@ class RuntimeViews:
                 # Mount directory already gone; still drop the matching marker.
                 if self._retry_marker(parent) == generation:
                     self._retry_marker(parent, present=False)
+                self._retract_marker(parent, present=False)
             except (OSError, MaterialDeniedError):
+                self._queue_retract(parent, generation)
                 return False
             return True
         return True
+
+    def complete_retract(self, workspace_id: str, generation: str) -> None:
+        """Finish a queued cancel retract for ``generation``.
+
+        Raises the underlying ``OSError`` / ``MaterialDeniedError`` when leftover
+        unlinks still fail so the retract marker remains for a later sweep.
+        """
+        key = self._key(workspace_id)
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            if self._retract_marker(parent) != generation:
+                return
+            try:
+                self._remove_view(parent, preserve_directory=True)
+            except FileNotFoundError:
+                if self._retract_marker(parent) == generation:
+                    self._retract_marker(parent, present=False)
 
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
@@ -563,14 +631,17 @@ class RuntimeViews:
         if not preserve_directory:
             os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
         if keep_publication:
-            # Drop a stale retry so publication→retry rename cannot collide; the
-            # live publication inode is left for space-neutral fence conversion.
+            # Drop a stale retry/retract so publication→retry rename cannot collide;
+            # the live publication inode is left for space-neutral fence conversion.
             self._retry_marker(parent, present=False)
+            self._retract_marker(parent, present=False)
             return
         with suppress(FileNotFoundError):
             os.unlink(_PUBLICATION, dir_fd=parent)
-        # Intentional retract must not look like a recoverable refresh failure.
+        # Intentional retract must not look like a recoverable refresh failure
+        # or a still-pending cancel leftover queue.
         self._retry_marker(parent, present=False)
+        self._retract_marker(parent, present=False)
 
     def remove(
         self,
