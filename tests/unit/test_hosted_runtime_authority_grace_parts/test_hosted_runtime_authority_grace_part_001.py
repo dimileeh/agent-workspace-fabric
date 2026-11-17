@@ -1003,3 +1003,69 @@ async def test_scope_entry_cancel_after_failed_snapshot_preserves_when_recheck_o
     assert authority.association.await_count == 1
     assert authority.materials.await_count == 1
     scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
+
+
+async def test_scope_entry_cancel_cleanup_renewal_clears_stale_grace(tmp_path, monkeypatch) -> None:
+    """Successful cancelled-start recheck must drop the old grace window.
+
+    If renewal lands before cleanup's fresh material check, that check
+    authorizes and ``_stop(authority_lost=False)`` preserves the warm stack.
+    Retaining the pre-renewal ``scope_entry`` clock would let a later separate
+    lapse (material expiry near the new now) immediately exhaust a 600s window
+    started before the renewal. Clear the cohort on success so the new lapse
+    opens a fresh allowance.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    # Grace opened one second before origin (stale window start).
+    clock["now"] = origin - timedelta(seconds=1)
+    early_lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=1))
+    authority.workspace.side_effect = early_lapse
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    # Cleanup discovers renewal: fresh material check succeeds.
+    authority.materials = AsyncMock()
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    assert "scope_entry" in scope._authority_grace["ws_exact"]
+    stale_started = scope._authority_grace["ws_exact"]["scope_entry"].started_at
+    clock["now"] = origin + timedelta(seconds=1)
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
+    assert "ws_exact" not in scope._authority_grace
+
+    # Separate lapse ~601s after original material expiry: must open a fresh
+    # window, not reuse the pre-renewal clock that would already be exhausted.
+    clock["now"] = origin + timedelta(seconds=602)
+    new_lapse = MaterialLapsedError(expires_at=origin + timedelta(seconds=601))
+    with structlog.testing.capture_logs() as logs:
+        assert (
+            scope._classify_authority_failure("ws_exact", new_lapse, checker="scope_entry")
+            == "defer"
+        )
+    window = scope._authority_grace["ws_exact"]["scope_entry"]
+    assert window.started_at == new_lapse.expires_at
+    assert window.started_at != stale_started
+    assert any(log["event"] == "hosted_node.authority_grace_started" for log in logs)

@@ -613,6 +613,13 @@ class WorkspaceConsumers:
             # Grace-eligible cancel: retract without treating the lapse as an
             # authority-lost stop (preserve_on_grace / classifier agree).
             authority_lost = not authorized and not grace_defer
+            # Successful fresh material confirms workspace authority again.
+            # ``_stop(authority_lost=False)`` keeps the warm stack and would
+            # otherwise retain the pre-renewal ``scope_entry`` clock so a later
+            # separate lapse could immediately exhaust that stale window.
+            # Grace-eligible cleanup failures keep their windows via ``_stop``.
+            if authorized:
+                self._clear_authority_check_success(workspace_id, checker=_CHECKER_SCOPE_ENTRY)
             await self._stop(
                 workspace_id,
                 authority_lost=authority_lost,
