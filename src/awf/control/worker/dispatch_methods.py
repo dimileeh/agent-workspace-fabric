@@ -317,8 +317,18 @@ async def _safely_resume_paused_claimed(
     semantics — ``blocked`` resumes the operator-cleared protected-gate pause;
     ``recovering`` (#612) first stashes + resets the worktree to HEAD, then
     re-runs the agent in place on the warm stack after the provider cooldown."""
+    # Heartbeat fencing must outlive the current resume attempt: during an
+    # authority-defer sleep the attempt has already raised, so cancelling an
+    # in-flight task is a no-op. Without this flag a lost heartbeat during the
+    # defer sleep would restart resume with no live refresh loop.
+    claim_lost = False
+
+    def _mark_claim_lost() -> None:
+        nonlocal claim_lost
+        claim_lost = True
+
     heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id),
+        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=_mark_claim_lost),
         name=f"awf-{reason}-resume-claim-{workspace_id}",
     )
     # Whether the executor drove the resume to a clean return (vs. the worker
@@ -396,6 +406,15 @@ async def _safely_resume_paused_claimed(
                         reason_code=deferred.reason,
                     )
                     await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                    if claim_lost:
+                        _log.warning(
+                            "worker.execution_claim_fenced",
+                            workspace_id=workspace_id,
+                            worker_id=self._worker_id,
+                            phase=f"resume_{reason}_deferred",
+                            reason_code=EXECUTION_CLAIM_FENCED,
+                        )
+                        return
                     continue
         executor_drove_resume = True
     except asyncio.CancelledError:
@@ -802,8 +821,19 @@ async def _safely_execute_claimed(
     work_slot_lease: WorkSlotLeaseRef | None = None,
 ) -> None:
     """Run executor for a claimed ready workspace while heartbeating the execution claim."""
+    # Heartbeat fencing must outlive the current execute attempt: during an
+    # authority-defer sleep the attempt has already raised, so cancelling an
+    # in-flight task is a no-op. Without this flag a lost heartbeat during the
+    # defer sleep would restart execute with no live refresh loop — racing
+    # stale-active recovery on a long retry.
+    claim_lost = False
+
+    def _mark_claim_lost() -> None:
+        nonlocal claim_lost
+        claim_lost = True
+
     heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id),
+        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=_mark_claim_lost),
         name=f"awf-execution-claim-{workspace_id}",
     )
     try:
@@ -827,6 +857,15 @@ async def _safely_execute_claimed(
                         reason_code=deferred.reason,
                     )
                     await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                    if claim_lost:
+                        _log.warning(
+                            "worker.execution_claim_fenced",
+                            workspace_id=workspace_id,
+                            worker_id=self._worker_id,
+                            phase="execute_deferred",
+                            reason_code=EXECUTION_CLAIM_FENCED,
+                        )
+                        return
                     continue
     finally:
         heartbeat.cancel()
@@ -937,6 +976,7 @@ async def _safely_resume_pr_monitor_legacy(
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
+    claim_lost: Callable[[], bool] | None = None,
 ) -> bool:
     """Resume via ``resume_pr_monitor()`` for protocol-only executor implementations."""
     try:
@@ -952,6 +992,15 @@ async def _safely_resume_pr_monitor_legacy(
                     reason_code=deferred.reason,
                 )
                 await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                if claim_lost is not None and claim_lost():
+                    _log.warning(
+                        "worker.monitor_claim_fenced",
+                        workspace_id=workspace_id,
+                        worker_id=self._worker_id,
+                        phase="pr_monitor_resume_deferred",
+                        reason_code=EXECUTION_CLAIM_FENCED,
+                    )
+                    return False
                 continue
     except asyncio.CancelledError:
         finalized = await self._finish_monitor_recovery_operation_after_cancellation(
@@ -992,6 +1041,7 @@ async def _safely_resume_pr_monitor(
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
+    claim_lost: Callable[[], bool] | None = None,
 ) -> bool:
     """Hand off monitor recovery, finalize the remonitor op, then run the monitor loop.
 
@@ -1016,6 +1066,7 @@ async def _safely_resume_pr_monitor(
             self,
             workspace_id,
             recovery_operation_id=recovery_operation_id,
+            claim_lost=claim_lost,
         )
     handoff_succeeded = False
     handoff_finalized = False
@@ -1035,6 +1086,15 @@ async def _safely_resume_pr_monitor(
                     reason_code=deferred.reason,
                 )
                 await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                if claim_lost is not None and claim_lost():
+                    _log.warning(
+                        "worker.monitor_claim_fenced",
+                        workspace_id=workspace_id,
+                        worker_id=self._worker_id,
+                        phase="pr_monitor_handoff_deferred",
+                        reason_code=EXECUTION_CLAIM_FENCED,
+                    )
+                    return False
                 continue
         if handoff is None:
             (
@@ -1151,6 +1211,15 @@ async def _safely_resume_pr_monitor(
                     reason_code=deferred.reason,
                 )
                 await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                if claim_lost is not None and claim_lost():
+                    _log.warning(
+                        "worker.monitor_claim_fenced",
+                        workspace_id=workspace_id,
+                        worker_id=self._worker_id,
+                        phase="pr_monitor_run_deferred",
+                        reason_code=EXECUTION_CLAIM_FENCED,
+                    )
+                    return False
                 continue
         if monitor_started is False:
             # The remonitor bookkeeping op already succeeded at handoff; a
@@ -1266,7 +1335,12 @@ async def _safely_resume_pr_monitor(
     return True
 
 
-async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> None:
+async def _refresh_monitoring_pr_claim_loop(
+    self: Any,
+    workspace_id: str,
+    *,
+    on_claim_lost: Callable[[], object] | None = None,
+) -> None:
     interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))
     while True:
         await asyncio.sleep(interval)
@@ -1278,6 +1352,8 @@ async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> Non
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            if on_claim_lost is not None:
+                on_claim_lost()
             return
         if not refreshed:
             _log.warning(
@@ -1285,6 +1361,8 @@ async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> Non
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            if on_claim_lost is not None:
+                on_claim_lost()
             return
 
 
@@ -1321,7 +1399,8 @@ async def _refresh_execution_claim_loop(
             # ``_list_stale_active_execution_candidates``) and cleans up and
             # fails the interrupted attempt for retry-policy/operator retry —
             # the same recovery contract as any other interrupted active work.
-            # The executor path passes no callback.
+            # Execute/resume pass ``on_claim_lost`` so authority-defer retries
+            # abort once the heartbeat dies instead of restarting unfenced.
             if on_claim_lost is not None:
                 on_claim_lost()
             return
@@ -1333,7 +1412,7 @@ async def _refresh_execution_claim_loop(
             )
             # D4: on the provisioning path this cancels the in-flight provision
             # task so a fenced worker stops before any destructive filesystem op.
-            # The executor path passes no callback, preserving its behavior.
+            # Execute/resume use the same callback to abort defer retries.
             if on_claim_lost is not None:
                 on_claim_lost()
             return

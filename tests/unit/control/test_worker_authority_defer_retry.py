@@ -8,6 +8,7 @@ brief material lapse cannot fail or strand those workspaces during grace.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -62,6 +63,75 @@ class _DeferThenSucceedExecutor:
 
     async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
         raise AssertionError("execute defer test must not resume monitors")
+
+
+class _DeferOnceSignalingExecutor:
+    """Defers once from execute and signals so a test can fence during defer sleep."""
+
+    def __init__(self) -> None:
+        self.execute_calls = 0
+        self.deferred = asyncio.Event()
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        del workspace_id
+        self.execute_calls += 1
+        if self.execute_calls == 1:
+            self.deferred.set()
+            raise _deferred() from None
+
+    async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("execute defer fence test must not resume monitors")
+
+
+class _DeferOnceSignalingBlockedExecutor:
+    """Defers once from blocked resume and signals for claim-lost fencing."""
+
+    def __init__(self) -> None:
+        self.resume_calls = 0
+        self.deferred = asyncio.Event()
+
+    async def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("blocked resume fence test must not execute")
+
+    async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("blocked resume fence test must not resume monitors")
+
+    async def resume_blocked_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        del workspace_id
+        self.resume_calls += 1
+        if self.resume_calls == 1:
+            self.deferred.set()
+            raise _deferred() from None
+
+
+class _DeferOnceSignalingMonitorExecutor:
+    """Defers once from monitor handoff and signals for claim-lost fencing."""
+
+    def __init__(self) -> None:
+        self.handoff_calls = 0
+        self.deferred = asyncio.Event()
+
+    async def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("monitor fence test must not execute")
+
+    async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("monitor fence test uses the handoff API")
+
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        self.handoff_calls += 1
+        if self.handoff_calls == 1:
+            self.deferred.set()
+            raise _deferred() from None
+        return SimpleNamespace(run_kwargs={})
+
+    async def verify_resume_monitor_start(self, workspace_id: str, **_kwargs: object) -> bool:
+        del workspace_id, _kwargs
+        return True
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
+        del workspace_id, handoff
+        raise AssertionError("monitor fence abort must not reach run")
 
 
 class _DeferThenSucceedBlockedExecutor:
@@ -181,6 +251,43 @@ async def test_safely_execute_claimed_retries_authority_defer(
 
 
 @pytest.mark.unit
+async def test_safely_execute_claimed_aborts_defer_retry_when_heartbeat_fences(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim-lost during execute defer sleep must abort — not restart unfenced."""
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.05)
+    workspace_id = await _create_ready_with_runtime_metadata(session_factory)
+    executor = _DeferOnceSignalingExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=0, max_concurrent_executions=1),
+    )
+
+    async def _fence_during_defer(
+        _workspace_id: str,
+        *,
+        on_claim_lost: object | None = None,
+    ) -> None:
+        await executor.deferred.wait()
+        await asyncio.sleep(0)
+        if callable(on_claim_lost):
+            on_claim_lost()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_refresh_execution_claim_loop", _fence_during_defer)
+
+    await asyncio.wait_for(
+        worker._safely_execute_claimed(workspace_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.execute_calls == 1
+
+
+@pytest.mark.unit
 async def test_safely_resume_blocked_claimed_retries_authority_defer(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -229,6 +336,67 @@ async def test_safely_resume_blocked_claimed_retries_authority_defer(
     # Successful resume leaves the row wherever the executor left it (still
     # ``running`` for this stub) rather than reverting to ``blocked`` on defer.
     assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
+async def test_safely_resume_blocked_claimed_aborts_defer_retry_when_heartbeat_fences(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim-lost during blocked-resume defer sleep must abort retries."""
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.05)
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@example.com:org/repo.git",
+            branch_base="development",
+            task_title="blocked defer fence",
+            task_prompt="abort resume after claim lost during defer",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        workspace.compose_project_name = f"awf_{workspace.id}"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.blocked, reason_code="SEED")
+        workspace.block_reason_code = "PROTECTED_PATH_VIOLATION"
+        workspace.block_type = "protected_path"
+        workspace.block_epoch = 1
+        workspace.execution_claimed_by = "control-worker"
+        workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+        workspace_id = workspace.id
+
+    executor = _DeferOnceSignalingBlockedExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=0, max_concurrent_executions=1),
+    )
+
+    async def _fence_during_defer(
+        _workspace_id: str,
+        *,
+        on_claim_lost: object | None = None,
+    ) -> None:
+        await executor.deferred.wait()
+        await asyncio.sleep(0)
+        if callable(on_claim_lost):
+            on_claim_lost()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_refresh_execution_claim_loop", _fence_during_defer)
+    assert await worker._claim_blocked_for_resume(workspace_id)  # noqa: SLF001
+
+    await asyncio.wait_for(
+        worker._safely_resume_blocked_claimed(workspace_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.resume_calls == 1
 
 
 @pytest.mark.unit
@@ -330,6 +498,63 @@ async def test_safely_resume_pr_monitor_retries_authority_defer(
     assert executor.run_calls == 1
     assert len(finish_calls) == 1
     assert finish_calls[0]["status"] == OperationStatus.succeeded
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_aborts_defer_retry_when_claim_lost(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monitor-claim lost during handoff defer sleep must abort retries."""
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.05)
+    executor = _DeferOnceSignalingMonitorExecutor()
+    finish_calls: list[dict[str, object]] = []
+    claim_lost = False
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    async def _drive() -> bool:
+        nonlocal claim_lost
+
+        async def _mark_after_defer() -> None:
+            nonlocal claim_lost
+            await executor.deferred.wait()
+            await asyncio.sleep(0)
+            claim_lost = True
+
+        marker = asyncio.create_task(_mark_after_defer())
+        try:
+            return await worker._safely_resume_pr_monitor(  # noqa: SLF001
+                "ws_monitor_fence",
+                recovery_operation_id="op_authority_defer_fence",
+                claim_lost=lambda: claim_lost,
+            )
+        finally:
+            marker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await marker
+
+    result = await asyncio.wait_for(_drive(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    assert result is False
+    assert executor.handoff_calls == 1
+    assert finish_calls == []
 
 
 @pytest.mark.unit

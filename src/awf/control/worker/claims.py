@@ -1191,8 +1191,17 @@ async def _safely_resume_claimed_pr_monitor(
 ) -> None:
     """Run monitor recovery under a refreshed claim lease and finalize bookkeeping."""
     await _cancel_monitor_claim_heartbeat(self, workspace_id)
+    # Heartbeat fencing must outlive the current resume attempt: during an
+    # authority-defer sleep the attempt has already raised, so without this
+    # flag a lost monitor claim would restart handoff/run with no live refresh.
+    claim_lost = False
+
+    def _mark_claim_lost() -> None:
+        nonlocal claim_lost
+        claim_lost = True
+
     heartbeat = asyncio.create_task(
-        self._refresh_monitoring_pr_claim_loop(workspace_id),
+        self._refresh_monitoring_pr_claim_loop(workspace_id, on_claim_lost=_mark_claim_lost),
         name=f"awf-monitor-claim-{workspace_id}",
     )
     resume_succeeded = False
@@ -1202,6 +1211,7 @@ async def _safely_resume_claimed_pr_monitor(
             resume_succeeded = await self._safely_resume_pr_monitor(
                 workspace_id,
                 recovery_operation_id=recovery_operation_id,
+                claim_lost=lambda: claim_lost,
             )
     finally:
         recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
