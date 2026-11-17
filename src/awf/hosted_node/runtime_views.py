@@ -21,14 +21,6 @@ _FILES = frozenset({"openai.api-key", "anthropic.api-key", "github.api-key"})
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _SLOT = "0" * 32
 _PUBLICATION = "publication"
-# Fenced marker left when a retained (already-mounted) refresh fails after the
-# live publication token is cleared. Retained reconcile reads this — not scope
-# ownership — to republish only that workspace's mount in place.
-_RETRY = "publication.retry"
-# Cancel leftover cleanup that cannot unlink credentials renames the matching
-# retry fence here so reconcile finishes retraction instead of treating the
-# surviving generation as permission to restore the publication.
-_RETRACT = "publication.retract"
 
 
 @dataclass(frozen=True)
@@ -44,10 +36,6 @@ class PublicationOwnership:
     views: "RuntimeViews"
     workspace_id: str
     publication: PublishedView | None = None
-    # Exact publication.retry generation after a retained refresh failure. Cancel
-    # retract invalidates this fence without requiring a live publication token,
-    # and without removing a successor that already consumed the marker.
-    retry: str | None = None
     closing: bool = False
     # Set after a completed authority-lost/_stop for this ownership so an early
     # stop (grace exhaustion inside an active scope) and the scope finalizer
@@ -118,30 +106,14 @@ class RuntimeViews:
 
     def clear_owned(self) -> None:
         with self.store._locked_root():
-            recorded = [
-                (key, owner.publication, owner.retry) for key, owner in self._owners.items()
-            ]
+            recorded = [(key, owner.publication) for key, owner in self._owners.items()]
         errors: list[Exception] = []
-        for workspace_id, publication, retry in recorded:
-            try:
-                if publication is not None:
+        for workspace_id, publication in recorded:
+            if publication is not None:
+                try:
                     self.remove_owned(workspace_id, publication)
-                elif retry is not None:
-                    # Failed-refresh fences stay registered without a live
-                    # publication so shutdown can retract leftover credentials
-                    # with the same generation check cancel uses.
-                    cleared = self.invalidate_retry(workspace_id, retry)
-                    if not cleared:
-                        if self.publication_retract(workspace_id) != retry:
-                            raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-                        self.complete_retract(workspace_id, retry)
-                    owner = self._owners.get(workspace_id)
-                    if owner is not None and owner.retry == retry:
-                        owner.retry = None
-                        if owner.publication is None:
-                            self._owners.pop(workspace_id, None)
-            except Exception as error:  # noqa: BLE001 - finish other owned retractions
-                errors.append(error)
+                except Exception as error:  # noqa: BLE001 - finish other owned retractions
+                    errors.append(error)
         if errors:
             raise ExceptionGroup("Runtime view retraction failed", errors)
 
@@ -224,86 +196,7 @@ class RuntimeViews:
                     stream.truncate()
                     stream.flush()
                     os.fsync(stream.fileno())
-                with suppress(FileNotFoundError):
-                    os.unlink(_RETRY, dir_fd=parent)
-                with suppress(FileNotFoundError):
-                    os.unlink(_RETRACT, dir_fd=parent)
                 return token
-            value = os.read(fd, 33)
-            if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
-                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-            return value.decode("ascii")
-        finally:
-            os.close(fd)
-
-    def _retry_marker(self, parent: int, *, present: bool | None = None) -> str | None:
-        if present is True:
-            # Prefer converting the live publication inode into the retry fence.
-            # Retained refresh cleanup may have already deleted credentials; a
-            # fresh create can then fail with ENOSPC, leaving neither a live
-            # token nor a retry marker. Rename within the same directory is
-            # space-neutral and the former publication token is already a valid
-            # 32-hex generation fence — do not O_TRUNC+rewrite it, or ENOSPC on
-            # the write can empty the mount with no recoverable marker.
-            with suppress(FileNotFoundError):
-                os.rename(_PUBLICATION, _RETRY, src_dir_fd=parent, dst_dir_fd=parent)
-            try:
-                existing = os.open(
-                    _RETRY,
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                    dir_fd=parent,
-                )
-            except FileNotFoundError:
-                existing = None
-            if existing is not None:
-                try:
-                    info = os.fstat(existing)
-                    if (
-                        stat.S_ISREG(info.st_mode)
-                        and info.st_uid == os.geteuid()
-                        and info.st_nlink == 1
-                        and stat.S_IMODE(info.st_mode) == 0o600
-                        and info.st_size == 32
-                    ):
-                        value = os.read(existing, 33)
-                        if len(value) == 32 and all(byte in b"0123456789abcdef" for byte in value):
-                            return value.decode("ascii")
-                finally:
-                    os.close(existing)
-            generation = uuid4().hex
-            fd = os.open(
-                _RETRY,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=parent,
-            )
-            try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, generation.encode("ascii"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            return generation
-        if present is False:
-            with suppress(FileNotFoundError):
-                os.unlink(_RETRY, dir_fd=parent)
-            return None
-        try:
-            fd = os.open(
-                _RETRY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
-            )
-        except FileNotFoundError:
-            return None
-        try:
-            info = os.fstat(fd)
-            if not (
-                stat.S_ISREG(info.st_mode)
-                and info.st_uid == os.geteuid()
-                and info.st_nlink == 1
-                and stat.S_IMODE(info.st_mode) == 0o600
-                and 0 < info.st_size <= 32
-            ):
-                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
             value = os.read(fd, 33)
             if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
                 raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
@@ -328,14 +221,8 @@ class RuntimeViews:
         files: dict[str, bytes],
         *,
         expected_absence: AbsentPublication | None = None,
-        expected_retry: str | None = None,
     ) -> PublishedView | None:
-        return self._publish(
-            workspace_id,
-            files,
-            expected_absence=expected_absence,
-            expected_retry=expected_retry,
-        )
+        return self._publish(workspace_id, files, expected_absence=expected_absence)
 
     def publication(self, workspace_id: str) -> PublishedView | None:
         key = self._key(workspace_id)
@@ -352,109 +239,6 @@ class RuntimeViews:
                 return PublishedView(self.store.root / key / "view", token)
         return None
 
-    def publication_retry(self, workspace_id: str) -> str | None:
-        """Exact retry generation for a retained mount after a fenced refresh failure."""
-        key = self._key(workspace_id)
-        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
-            return self._retry_marker(parent)
-        return None
-
-    def publication_retract(self, workspace_id: str) -> str | None:
-        """Exact generation queued for leftover retract after a failed cancel invalidate."""
-        key = self._key(workspace_id)
-        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
-            return self._retract_marker(parent)
-        return None
-
-    def _retract_marker(self, parent: int, *, present: bool | None = None) -> str | None:
-        if present is False:
-            with suppress(FileNotFoundError):
-                os.unlink(_RETRACT, dir_fd=parent)
-            return None
-        try:
-            fd = os.open(
-                _RETRACT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
-            )
-        except FileNotFoundError:
-            return None
-        try:
-            info = os.fstat(fd)
-            if not (
-                stat.S_ISREG(info.st_mode)
-                and info.st_uid == os.geteuid()
-                and info.st_nlink == 1
-                and stat.S_IMODE(info.st_mode) == 0o600
-                and 0 < info.st_size <= 32
-            ):
-                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-            value = os.read(fd, 33)
-            if len(value) != 32 or any(byte not in b"0123456789abcdef" for byte in value):
-                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-            return value.decode("ascii")
-        finally:
-            os.close(fd)
-
-    def _queue_retract(self, parent: int, generation: str) -> None:
-        """Convert a matching retry fence into a durable pending-retract marker."""
-        if self._retry_marker(parent) != generation:
-            return
-        with suppress(FileNotFoundError):
-            os.unlink(_RETRACT, dir_fd=parent)
-        os.rename(_RETRY, _RETRACT, src_dir_fd=parent, dst_dir_fd=parent)
-
-    def invalidate_retry(self, workspace_id: str, generation: str) -> bool:
-        """Clear leftover view material, then drop a matching fenced retry marker.
-
-        Cancel after a retained refresh failure may find credentials that cleanup
-        failed to unlink. Delete those under the same generation check before
-        clearing ``publication.retry``. If deletion fails, rename the matching
-        retry fence to ``publication.retract`` so a later sweep finishes cleanup
-        without treating the generation as permission to restore the publication.
-
-        Returns True when the matching retry marker is gone (or was already absent /
-        mismatched). Returns False when leftover deletion failed and a durable
-        retract marker was queued instead.
-        """
-        key = self._key(workspace_id)
-        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
-            if self._retry_marker(parent) != generation:
-                return True
-            try:
-                # preserve_directory keeps the bind-mount inode; _remove_view also
-                # clears publication.retry only after credential unlinks succeed.
-                self._remove_view(parent, preserve_directory=True)
-            except FileNotFoundError:
-                # Mount directory already gone; still drop the matching marker.
-                if self._retry_marker(parent) == generation:
-                    self._retry_marker(parent, present=False)
-                self._retract_marker(parent, present=False)
-            except (OSError, MaterialDeniedError) as error:
-                self._queue_retract(parent, generation)
-                # Durable retract is the only successful alternative to clearing
-                # the retry fence; if the rename did not land, propagate so the
-                # caller keeps its in-memory restore fence for another attempt.
-                if self._retract_marker(parent) != generation:
-                    raise error
-                return False
-            return True
-        return True
-
-    def complete_retract(self, workspace_id: str, generation: str) -> None:
-        """Finish a queued cancel retract for ``generation``.
-
-        Raises the underlying ``OSError`` / ``MaterialDeniedError`` when leftover
-        unlinks still fail so the retract marker remains for a later sweep.
-        """
-        key = self._key(workspace_id)
-        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
-            if self._retract_marker(parent) != generation:
-                return
-            try:
-                self._remove_view(parent, preserve_directory=True)
-            except FileNotFoundError:
-                if self._retract_marker(parent) == generation:
-                    self._retract_marker(parent, present=False)
-
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
     ) -> PublishedView | None:
@@ -467,7 +251,6 @@ class RuntimeViews:
         *,
         publication: PublishedView | None = None,
         expected_absence: AbsentPublication | None = None,
-        expected_retry: str | None = None,
     ) -> PublishedView | None:
         if not (set(files) <= _FILES and len(files) == 2 and "github.api-key" in files):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
@@ -489,12 +272,6 @@ class RuntimeViews:
                 or workspace_id in self._owners
                 or os.listdir(parent)  # noqa: PTH208 - locked directory fd
             ):
-                return None
-            # Retained reconcile carries the exact retry generation observed
-            # before authority reads. Retract or a successor publish clears or
-            # replaces that marker; do not resurrect or overwrite from a stale
-            # boolean observation.
-            if expected_retry is not None and self._retry_marker(parent) != expected_retry:
                 return None
             ownership = owned_publication(self, workspace_id)
             if ownership is not None and ownership.closing:
@@ -546,7 +323,6 @@ class RuntimeViews:
                     # a later clear cannot make their old token valid again.
                     self._absence_tokens.pop(key, None)
                     ownership.publication = result
-                    ownership.retry = None
                     self._owners[workspace_id] = ownership
                     self._publication(parent, token)
                     for name, value in files.items():
@@ -571,67 +347,8 @@ class RuntimeViews:
                     os.fsync(directory)
                 except BaseException as error:
                     # No other publisher can interleave with partial-write cleanup.
-                    # Keep an already-mounted view directory so Docker bind mounts
-                    # retain the same inode; a later publish can rewrite in place.
-                    # Drop the failed publication from live ownership too: its token
-                    # is gone, and leaving it selected makes materials refresh None
-                    # and clear grace without repopulating the retained mount.
-                    # Retained reconcile keys off the on-disk token, so leave a
-                    # fenced retry marker for that workspace only when the mount
-                    # directory is preserved. Keep that generation on ownership
-                    # so cancellation can invalidate it after publication is
-                    # cleared, without touching a successor publish. Marker
-                    # persistence can fail for the same transient storage fault
-                    # that aborted the refresh; ownership cleanup must still run,
-                    # and a partial on-disk marker must be adopted or cleared.
-                    # Keep the publication inode on retained failures so
-                    # _retry_marker can rename it into publication.retry without
-                    # allocating a new file under ENOSPC. Credential unlink in
-                    # _remove_view can fail for the same storage fault; still
-                    # attempt the retry fence, and if fencing also fails keep
-                    # ownership of the live token so reconcile can refresh
-                    # instead of clearing grace over an ownerless publication.
-                    # A successful retry fence must stay registered too: shutdown
-                    # clear_owned only visits _owners, and credential unlink may
-                    # have failed while the fence landed.
-                    preserve_ownership = False
-                    try:
-                        remove_error: BaseException | None = None
-                        try:
-                            self._remove_view(
-                                parent,
-                                preserve_directory=not new,
-                                keep_publication=not new,
-                            )
-                        except BaseException as cleanup:
-                            if new:
-                                raise
-                            remove_error = cleanup
-                        if not new:
-                            try:
-                                ownership.retry = self._retry_marker(parent, present=True)
-                            except BaseException:
-                                try:
-                                    ownership.retry = self._retry_marker(parent)
-                                except BaseException:
-                                    with suppress(BaseException):
-                                        self._retry_marker(parent, present=False)
-                                    if remove_error is None:
-                                        with suppress(BaseException):
-                                            os.unlink(_PUBLICATION, dir_fd=parent)
-                                    ownership.retry = None
-                            if remove_error is not None and ownership.retry is None:
-                                preserve_ownership = True
-                        else:
-                            ownership.retry = None
-                    finally:
-                        if not preserve_ownership:
-                            if ownership.publication is result:
-                                ownership.publication = None
-                            if ownership.retry is not None:
-                                self._owners[workspace_id] = ownership
-                            else:
-                                self._owners.pop(workspace_id, None)
+                    self._remove_view(parent)
+                    self._owners.pop(workspace_id, None)
                     failure = error
             finally:
                 os.close(directory)
@@ -640,13 +357,7 @@ class RuntimeViews:
         assert result is not None
         return result
 
-    def _remove_view(
-        self,
-        parent: int,
-        *,
-        preserve_directory: bool = False,
-        keep_publication: bool = False,
-    ) -> None:
+    def _remove_view(self, parent: int, *, preserve_directory: bool = False) -> None:
         directory = os.open("view", _DIRECTORY, dir_fd=parent)
         try:
             self._view_directory(directory)
@@ -657,18 +368,8 @@ class RuntimeViews:
             os.close(directory)
         if not preserve_directory:
             os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
-        if keep_publication:
-            # Drop a stale retry/retract so publication→retry rename cannot collide;
-            # the live publication inode is left for space-neutral fence conversion.
-            self._retry_marker(parent, present=False)
-            self._retract_marker(parent, present=False)
-            return
         with suppress(FileNotFoundError):
             os.unlink(_PUBLICATION, dir_fd=parent)
-        # Intentional retract must not look like a recoverable refresh failure
-        # or a still-pending cancel leftover queue.
-        self._retry_marker(parent, present=False)
-        self._retract_marker(parent, present=False)
 
     def remove(
         self,

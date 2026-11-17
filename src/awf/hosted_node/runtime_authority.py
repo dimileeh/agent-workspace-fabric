@@ -163,21 +163,6 @@ class WorkspaceAuthority:
 
     async def reconcile_workspace(self, workspace_id: str) -> bool:
         publication = await self.publication(workspace_id)
-        # A retained refresh failure clears the live token but leaves a fenced
-        # retry generation on that workspace's mount. Carry that exact token
-        # into the write; a boolean observation alone is not a publish fence.
-        # A cancel that could not finish leftover unlink queues publication.retract
-        # instead — that is pending retraction, never permission to restore.
-        retry = (
-            None
-            if publication is not None
-            else await asyncio.to_thread(self.views.publication_retry, workspace_id)
-        )
-        retract = (
-            None
-            if publication is not None or retry is not None
-            else await asyncio.to_thread(self.views.publication_retract, workspace_id)
-        )
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
@@ -191,14 +176,6 @@ class WorkspaceAuthority:
             # Destroy/GC already completed runtime cleanup. Reclaim only the
             # readable view; never republish or restart an inactive workspace.
             await self.retract(workspace_id)
-        elif retract is not None:
-            # Pending leftover cancel cleanup is never republish permission, but
-            # it must not skip live authority: a delivered revocation/mismatch
-            # has to stop immediately instead of waiting out grace on repeated
-            # unlink OSError → HOSTED_AUTHORITY_UNAVAILABLE.
-            association, agent = await self.association(workspace_id)
-            await self.materials(association, agent, current=True, publish_view=False)
-            await asyncio.to_thread(self.views.complete_retract, workspace_id, retract)
         else:
             # Checkout can publish before Compose placement. Sweep every owned
             # association, but never create a readable view just by polling.
@@ -207,9 +184,8 @@ class WorkspaceAuthority:
                 association,
                 agent,
                 current=True,
-                publish_view=publication is not None or retry is not None,
+                publish_view=publication is not None,
                 refresh_publication=publication,
-                refresh_retry=retry,
             )
         return True
 
@@ -238,29 +214,6 @@ class WorkspaceAuthority:
                 workspace_id,
                 publication,
             )
-        else:
-            # Active-scope cancel after a retained refresh failure holds
-            # ContextVar ownership with publication=None but a fenced retry
-            # generation. Invalidate that exact marker (and any leftover view
-            # files) so reconcile cannot republish; a successor that already
-            # consumed it is untouched. If leftover deletion fails,
-            # invalidate_retry must queue publication.retract (or raise); only
-            # then drop the in-memory restore fence so scope exit cannot look
-            # like permission to republish a still-pending cancel retract.
-            ownership = owned_publication(self.views, workspace_id)
-            generation = ownership.retry if ownership is not None else None
-            if ownership is not None and generation is not None:
-                cleared = await asyncio.to_thread(
-                    self.views.invalidate_retry, workspace_id, generation
-                )
-                if not cleared:
-                    retract = await asyncio.to_thread(self.views.publication_retract, workspace_id)
-                    if retract != generation:
-                        # Deletion failed and no durable retract was queued —
-                        # keep the in-memory fence and fail cancel cleanup.
-                        raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
-                if ownership.retry == generation:
-                    ownership.retry = None
         await self._retract_previous(workspace_id)
 
     async def _retract_previous(self, workspace_id: str) -> None:
@@ -504,7 +457,6 @@ class WorkspaceAuthority:
         current: bool,
         publish_view: bool = False,
         refresh_publication: PublishedView | None = None,
-        refresh_retry: str | None = None,
     ) -> AuthorizedMaterials:
         await self.admission()
         pair = AGENT_TARGETS.get(agent)
@@ -520,7 +472,7 @@ class WorkspaceAuthority:
         }
         retry_publication = refresh_publication
         absence = None
-        if publish_view and retry_publication is None and refresh_retry is None:
+        if publish_view and retry_publication is None:
             owner = owned_publication(self.views, association.workspace_id)
             prior = owner.publication if owner is not None else None
             if prior is not None:
@@ -543,13 +495,6 @@ class WorkspaceAuthority:
             if expected is not None:
                 return await asyncio.to_thread(
                     self.views.refresh, association.workspace_id, files, expected
-                )
-            if refresh_retry is not None:
-                return await asyncio.to_thread(
-                    self.views.publish,
-                    association.workspace_id,
-                    files,
-                    expected_retry=refresh_retry,
                 )
             if retry:
                 if absence is None:
@@ -576,7 +521,13 @@ class WorkspaceAuthority:
                     if publish_allowed and not self.views.closed:
                         publication = asyncio.create_task(publish(files, retry=attempt > 1))
                         self.views.track_writer(publication)
-                        published = await asyncio.shield(publication)
+                        try:
+                            published = await asyncio.shield(publication)
+                        except OSError as write_error:
+                            # View write failures are not grace-eligible: surface a
+                            # distinct denial so consumers stop immediately. Base
+                            # RuntimeViews._publish already removed the partial view.
+                            raise MaterialDeniedError("INVALID_RUNTIME_VIEW") from write_error
                         if published is None:
                             publish_allowed = False
                         else:
@@ -613,16 +564,19 @@ class WorkspaceAuthority:
                 raise
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication and retract only if it is still the current view.
-            # Grace-eligible failures (lapse, DB/OS/timeout) keep the mounted
-            # view so a deferring consumer does not lose Docker-mounted
-            # credentials that cannot be restored in place, while still denying
-            # new material. Explicit denial still retracts.
+            # Grace covers only authority-read failures (lapse / DB / OS / timeout)
+            # when the view write already succeeded — leave that mount untouched.
+            # Write failures are denied above; other explicit denials still retract.
             cancelled = isinstance(error, asyncio.CancelledError)
-            preserve_mounted = isinstance(
+            write_failed = publication.done() and publication.exception() is not None
+            preserve_mounted = (not write_failed) and isinstance(
                 error, (MaterialLapsedError, SQLAlchemyError, OSError, TimeoutError)
             )
 
             async def retract() -> None:
+                if write_failed:
+                    # Writer already cleaned up the partial view in RuntimeViews.
+                    return
                 published = await publication
                 if published is not None and not preserve_mounted:
                     await asyncio.to_thread(
