@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -44,6 +44,25 @@ _log = get_logger(__name__)
 _TIMEOUT_REASONS = (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON)
 _GraceAction = Literal["defer", "stop_exhausted", "stop_denied"]
 _AUTHORITY_UNAVAILABLE = "HOSTED_AUTHORITY_UNAVAILABLE"
+# One independent grace window per (workspace, checker). Do not share or
+# cross-clear deadlines across these names.
+_CHECKER_SCOPE_ENTRY = "scope_entry"
+_CHECKER_NESTED_ENTRY = "nested_entry"
+_CHECKER_WATCHER = "watcher"
+_CHECKER_COMMAND_PREPARE = "command_prepare"
+_CHECKER_PROFILE_MOUNTS = "profile_mounts"
+_CHECKER_RESOURCE_LIMITS = "resource_limits"
+_CHECKER_RECONCILE = "reconcile"
+_SCOPE_BOUND_CHECKERS = frozenset(
+    {
+        _CHECKER_SCOPE_ENTRY,
+        _CHECKER_NESTED_ENTRY,
+        _CHECKER_WATCHER,
+        _CHECKER_COMMAND_PREPARE,
+        _CHECKER_PROFILE_MOUNTS,
+        _CHECKER_RESOURCE_LIMITS,
+    }
+)
 
 
 @dataclass
@@ -51,10 +70,6 @@ class _AuthorityGrace:
     started_at: datetime
     reason_code: str
     expires_at: datetime | None = None
-    # Operations still failing under this shared deadline. A successful check
-    # for one operation must not clear the window while another remains open
-    # (e.g. watcher workspace() healthy while resource_limits keeps timing out).
-    failing_operations: set[str] = field(default_factory=set)
 
 
 class _StopWorkspace(Protocol):
@@ -91,7 +106,9 @@ class WorkspaceConsumers:
             600,
         )
         self.authority_grace_seconds = configured if isinstance(configured, int) else 600
-        self._authority_grace: dict[str, _AuthorityGrace] = {}
+        # Independent window per (workspace_id, checker). Nested dict keeps
+        # ``workspace_id in _authority_grace`` meaning any checker is open.
+        self._authority_grace: dict[str, dict[str, _AuthorityGrace]] = {}
         self._retained_cursor = ""
         self._history_cursor = ""
         self._retry_cursor = ""
@@ -112,30 +129,51 @@ class WorkspaceConsumers:
         if os.environ.get("DOCKER_HOST"):
             self.base_environment["DOCKER_HOST"] = os.environ["DOCKER_HOST"]
 
-    def _clear_authority_grace(self, workspace_id: str, *, operation: str | None = None) -> None:
-        """Clear grace for one recovered operation, or the whole workspace window.
+    def _clear_authority_grace(self, workspace_id: str, *, checker: str | None = None) -> None:
+        """Clear one checker window, or every window for the workspace.
 
-        ``operation=None`` drops the shared deadline (denial / authority-lost
-        stop). A named operation only releases its claim; the window stays
-        while another operation is still failing under the same deadline.
+        ``checker=None`` drops all windows (denial / authority-lost stop). A
+        named checker clears only that window; other checkers keep their own
+        deadlines.
         """
-        window = self._authority_grace.get(workspace_id)
-        if window is None:
+        windows = self._authority_grace.get(workspace_id)
+        if windows is None:
             return
-        if operation is not None:
-            window.failing_operations.discard(operation)
-            if window.failing_operations:
+        if checker is not None:
+            window = windows.pop(checker, None)
+            if window is None:
                 return
+            if not windows:
+                self._authority_grace.pop(workspace_id, None)
+            _log.info(
+                "hosted_node.authority_grace_cleared",
+                workspace_id=workspace_id,
+                checker=checker,
+                reason_code=window.reason_code,
+                expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
+            )
+            return
         self._authority_grace.pop(workspace_id, None)
-        _log.info(
-            "hosted_node.authority_grace_cleared",
-            workspace_id=workspace_id,
-            reason_code=window.reason_code,
-            expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
-        )
+        for name, window in windows.items():
+            _log.info(
+                "hosted_node.authority_grace_cleared",
+                workspace_id=workspace_id,
+                checker=name,
+                reason_code=window.reason_code,
+                expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
+            )
+
+    def _clear_scope_bound_grace(self, workspace_id: str) -> None:
+        """Drop checkers that end when an outer scope exits without a stop."""
+        windows = self._authority_grace.get(workspace_id)
+        if windows is None:
+            return
+        for name in list(windows):
+            if name in _SCOPE_BOUND_CHECKERS:
+                self._clear_authority_grace(workspace_id, checker=name)
 
     def _classify_authority_failure(
-        self, workspace_id: str, error: BaseException, *, operation: str = "workspace"
+        self, workspace_id: str, error: BaseException, *, checker: str
     ) -> _GraceAction:
         if isinstance(error, MaterialDeniedError) and not isinstance(error, MaterialLapsedError):
             self._authority_grace.pop(workspace_id, None)
@@ -151,30 +189,30 @@ class WorkspaceConsumers:
         reason_code = (
             error.reason if isinstance(error, MaterialDeniedError) else type(error).__name__
         )
-        window = self._authority_grace.get(workspace_id)
+        windows = self._authority_grace.setdefault(workspace_id, {})
+        window = windows.get(checker)
         if window is None:
             started_at = now
             if material_expires_at is not None and material_expires_at < started_at:
                 started_at = material_expires_at
-            window = _AuthorityGrace(started_at, reason_code, material_expires_at, {operation})
-            self._authority_grace[workspace_id] = window
+            window = _AuthorityGrace(started_at, reason_code, material_expires_at)
+            windows[checker] = window
             _log.info(
                 "hosted_node.authority_grace_started",
                 workspace_id=workspace_id,
+                checker=checker,
                 reason_code=reason_code,
                 expires_at=(
                     None if material_expires_at is None else material_expires_at.isoformat()
                 ),
             )
-        else:
-            window.failing_operations.add(operation)
-            if material_expires_at is not None and material_expires_at < window.started_at:
-                # A later lapse must not keep a transient-started clock when the
-                # material already expired earlier; otherwise failure-type switches
-                # extend the permitted lapse interval.
-                window.started_at = material_expires_at
-                window.expires_at = material_expires_at
-                window.reason_code = reason_code
+        elif material_expires_at is not None and material_expires_at < window.started_at:
+            # A later lapse must not keep a transient-started clock when the
+            # material already expired earlier; otherwise failure-type switches
+            # extend the permitted lapse interval.
+            window.started_at = material_expires_at
+            window.expires_at = material_expires_at
+            window.reason_code = reason_code
         elapsed = (now - window.started_at).total_seconds()
         if elapsed >= self.authority_grace_seconds:
             # Keep the exhausted window until teardown succeeds or a later
@@ -183,6 +221,7 @@ class WorkspaceConsumers:
             _log.info(
                 "hosted_node.authority_grace_exhausted",
                 workspace_id=workspace_id,
+                checker=checker,
                 reason_code=window.reason_code,
                 expires_at=(None if window.expires_at is None else window.expires_at.isoformat()),
             )
@@ -199,7 +238,7 @@ class WorkspaceConsumers:
         workspace_id: str,
         operation: Callable[[], Awaitable[T]],
         *,
-        grace_operation: str = "workspace",
+        checker: str,
     ) -> T:
         """Wait out a grace-eligible lapse/transient, or raise after exhaustion.
 
@@ -209,18 +248,11 @@ class WorkspaceConsumers:
         ``without_authority_grace_wait`` and gets
         ``WorkspaceAuthorityDeferredError`` instead of sleeping.
 
-        ``grace_operation`` names the check whose recovery clears its claim on
-        the shared workspace deadline without resetting unrelated failures.
-
-        Cancel and opt-out ``WorkspaceAuthorityDeferredError`` exit without
-        success and without a stop. Unique ``profile_mounts`` /
-        ``resource_limits`` claims must be released so they cannot leak past a
-        cancelled wait and exhaust on a later brief lapse. The shared
-        ``workspace`` claim (nested ``_scope`` re-entry / ``environment()``,
-        same name as watcher/sweep) must stay: clearing it lets the next
-        TimeoutError/OSError/SQLAlchemyError reopen a full deadline and extend
-        grace past ``hosted_authority_grace_seconds`` while the warm stack
-        remains. Classified stops keep the window for exhaustion / teardown.
+        ``checker`` names this wait's independent grace window. Success clears
+        only that window. Cancel and opt-out ``WorkspaceAuthorityDeferredError``
+        exit without success and without a stop, so they clear only this
+        checker's window. Classified stops keep the window for exhaustion /
+        teardown (cleared when the authority-lost stop completes).
         """
         holding_claim = False
         try:
@@ -228,9 +260,7 @@ class WorkspaceConsumers:
                 try:
                     result = await operation()
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                    action = self._classify_authority_failure(
-                        workspace_id, error, operation=grace_operation
-                    )
+                    action = self._classify_authority_failure(workspace_id, error, checker=checker)
                     if action == "defer":
                         holding_claim = True
                         if skip_authority_grace_wait.get():
@@ -270,16 +300,12 @@ class WorkspaceConsumers:
                         ),
                     )
                     raise
-                self._clear_authority_grace(workspace_id, operation=grace_operation)
-                # Workspace and reconcile confirm the same association/materials;
-                # recovery of either must release the equivalent claim.
-                if grace_operation == "workspace":
-                    self._clear_authority_grace(workspace_id, operation="reconcile")
+                self._clear_authority_grace(workspace_id, checker=checker)
                 holding_claim = False
                 return result
         finally:
-            if holding_claim and grace_operation in {"profile_mounts", "resource_limits"}:
-                self._clear_authority_grace(workspace_id, operation=grace_operation)
+            if holding_claim:
+                self._clear_authority_grace(workspace_id, checker=checker)
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:
         await self.environment()
@@ -309,12 +335,14 @@ class WorkspaceConsumers:
             if existing != workspace_id:
                 raise MaterialDeniedError("WORKSPACE_SCOPE_MISMATCH", 403)
             # Nested same-workspace re-entry (e.g. monitor-resume outer consumer
-            # then Provisioner.ensure_hosted_monitor_worktree) must share the
-            # bounded grace wait used by outer entry / environment / stack
-            # prepare. A raw authority.workspace() raise here bypasses grace and
-            # can mark the workspace failed from a generic caller handler.
+            # then Provisioner.ensure_hosted_monitor_worktree) waits under its
+            # own checker window. A raw authority.workspace() raise here
+            # bypasses grace and can mark the workspace failed from a generic
+            # caller handler.
             await self._await_with_authority_grace(
-                workspace_id, lambda: self.authority.workspace(workspace_id)
+                workspace_id,
+                lambda: self.authority.workspace(workspace_id),
+                checker=_CHECKER_NESTED_ENTRY,
             )
             yield
             return
@@ -328,18 +356,16 @@ class WorkspaceConsumers:
         waiting_for_grace = False
         try:
             # Publication (association+materials) and the follow-up workspace
-            # check share one classify/wait/stop path. A denial or lapse usually
-            # surfaces on the entry snapshot first; defer sleeps then starts a
-            # fresh snapshot so cancel cleanup always joins the latest task.
-            # Poll-inline recovery opts out via ContextVar.
+            # check share one classify/wait/stop path under scope_entry. A
+            # denial or lapse usually surfaces on the entry snapshot first;
+            # defer sleeps then starts a fresh snapshot so cancel cleanup
+            # always joins the latest task. Poll-inline recovery opts out via
+            # ContextVar.
             while True:
                 try:
                     await asyncio.shield(entry)
                     await self.authority.workspace(workspace_id)
-                    # Workspace recovery also drops a leftover reconcile claim
-                    # from a deferred retained sweep; keep unrelated claims.
-                    self._clear_authority_grace(workspace_id, operation="workspace")
-                    self._clear_authority_grace(workspace_id, operation="reconcile")
+                    self._clear_authority_grace(workspace_id, checker=_CHECKER_SCOPE_ENTRY)
                     break
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     soft = isinstance(error, MaterialDeniedError) and error.reason in {
@@ -349,7 +375,7 @@ class WorkspaceConsumers:
                     action: _GraceAction | None = None
                     if not soft:
                         action = self._classify_authority_failure(
-                            workspace_id, error, operation="workspace"
+                            workspace_id, error, checker=_CHECKER_SCOPE_ENTRY
                         )
                         if action == "defer":
                             if skip_authority_grace_wait.get():
@@ -413,13 +439,10 @@ class WorkspaceConsumers:
                         pass
                     try:
                         await self.authority.workspace(workspace_id)
-                        # Drop equivalent reconcile leftovers; preserve
-                        # unrelated claims such as resource_limits.
-                        self._clear_authority_grace(workspace_id, operation="workspace")
-                        self._clear_authority_grace(workspace_id, operation="reconcile")
+                        self._clear_authority_grace(workspace_id, checker=_CHECKER_WATCHER)
                     except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                         action = self._classify_authority_failure(
-                            workspace_id, error, operation="workspace"
+                            workspace_id, error, checker=_CHECKER_WATCHER
                         )
                         if action == "defer":
                             continue
@@ -452,11 +475,10 @@ class WorkspaceConsumers:
                     await watcher
                 try:
                     await self.authority.workspace(workspace_id)
-                    self._clear_authority_grace(workspace_id, operation="workspace")
-                    self._clear_authority_grace(workspace_id, operation="reconcile")
+                    self._clear_authority_grace(workspace_id, checker=_CHECKER_WATCHER)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     action = self._classify_authority_failure(
-                        workspace_id, error, operation="workspace"
+                        workspace_id, error, checker=_CHECKER_WATCHER
                     )
                     if action == "defer":
                         return
@@ -497,6 +519,9 @@ class WorkspaceConsumers:
                         name=f"hosted-retract-{workspace_id}",
                     )
                 )
+            else:
+                # Scope ended without a stop: drop checkers that end with it.
+                self._clear_scope_bound_grace(workspace_id)
             if failure is not None and not caller_cancelled:
                 if isinstance(failure, MaterialDeniedError):
                     raise WorkspaceScopeDeniedError(failure.reason, failure.status) from failure
@@ -530,7 +555,7 @@ class WorkspaceConsumers:
                 # grace-wait decision must not override a subsequent denial
                 # or grace exhaustion discovered here.
                 action = self._classify_authority_failure(
-                    workspace_id, error, operation="workspace"
+                    workspace_id, error, checker=_CHECKER_SCOPE_ENTRY
                 )
                 grace_defer = action == "defer"
                 if action == "stop_exhausted":
@@ -602,19 +627,19 @@ class WorkspaceConsumers:
         workspace_id = self.workspace_id.get()
         if workspace_id is None:
             raise MaterialDeniedError("WORKSPACE_SCOPE_REQUIRED", 403)
-        # Every command prepare re-reads current material. A brief consumer
-        # renewal gap must not fail an active monitor/exec; wait inside the
-        # same grace window used by the watcher/sweep until material is
-        # current again, the window is exhausted, or an explicit denial lands.
-        # Never return values from a lapsed or failed check — including when
-        # called under a shared git mirror lock (operator-accepted trade-off:
-        # the bounded wait may delay peers on the same mirror; failing here
-        # would fail the workspace). Poll-inline preserved recovery opts out
-        # via without_authority_grace_wait and raises DeferredError instead.
+        # Every command prepare re-reads current material under its own
+        # command_prepare window. A brief consumer renewal gap must not fail
+        # an active monitor/exec; wait until material is current again, the
+        # window is exhausted, or an explicit denial lands. Never return
+        # values from a lapsed or failed check — including when called under a
+        # shared git mirror lock (operator-accepted trade-off: the bounded
+        # wait may delay peers on the same mirror; failing here would fail the
+        # workspace). Poll-inline preserved recovery opts out via
+        # without_authority_grace_wait and raises DeferredError instead.
         material = await self._await_with_authority_grace(
             workspace_id,
             lambda: self.authority.workspace(workspace_id),
-            grace_operation="workspace",
+            checker=_CHECKER_COMMAND_PREPARE,
         )
         return {**self.base_environment, **material.environment}
 
@@ -631,7 +656,7 @@ class WorkspaceConsumers:
         return await self._await_with_authority_grace(
             workspace_id,
             lambda: self.authority.profile_mounts(profile, workspace_id),
-            grace_operation="profile_mounts",
+            checker=_CHECKER_PROFILE_MOUNTS,
         )
 
     async def resource_limits(self, workspace_id: str) -> tuple[float, float]:
@@ -639,7 +664,7 @@ class WorkspaceConsumers:
         return await self._await_with_authority_grace(
             workspace_id,
             lambda: self.authority.resource_limits(workspace_id),
-            grace_operation="resource_limits",
+            checker=_CHECKER_RESOURCE_LIMITS,
         )
 
     async def admission_check(self) -> bool:
@@ -691,7 +716,7 @@ class WorkspaceConsumers:
                             TimeoutError,
                         ) as error:
                             action = self._classify_authority_failure(
-                                workspace_id, error, operation="reconcile"
+                                workspace_id, error, checker=_CHECKER_RECONCILE
                             )
                             if action == "defer":
                                 continue
@@ -707,21 +732,8 @@ class WorkspaceConsumers:
                                 ),
                             )
                         else:
-                            # Reconcile recovery always releases its own claim.
-                            # Clear the equivalent workspace claim only when a
-                            # live published view exists: reconcile often runs
-                            # with publish_view=False (no token/retry), while
-                            # in-scope workspace() always publishes. Clearing
-                            # on a non-publishing check would reset a concurrent
-                            # first-publish OSError grace window so exhaustion
-                            # never fires. Do not clear unrelated claims such
-                            # as ``resource_limits``.
-                            self._clear_authority_grace(workspace_id, operation="reconcile")
-                            if (
-                                not owned
-                                or await self.authority.publication(workspace_id) is not None
-                            ):
-                                self._clear_authority_grace(workspace_id, operation="workspace")
+                            # Reconcile recovery clears only its own window.
+                            self._clear_authority_grace(workspace_id, checker=_CHECKER_RECONCILE)
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.
