@@ -65,6 +65,27 @@ class _RaisingProvisioner:
         raise RuntimeError("provision failed")
 
 
+class _DeferThenSucceedProvisioner:
+    """Raises WorkspaceAuthorityDeferredError once, then succeeds."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.epochs: list[int | None] = []
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        from awf.hosted_node.identity import (
+            MaterialLapsedError,
+            WorkspaceAuthorityDeferredError,
+        )
+
+        self.calls += 1
+        self.epochs.append(execution_claim_epoch)
+        if self.calls == 1:
+            raise WorkspaceAuthorityDeferredError(MaterialLapsedError(expires_at=None)) from None
+
+
 class _FenceThenBlockProvisioner:
     """Advances the epoch (a later claimant) then blocks until cancelled."""
 

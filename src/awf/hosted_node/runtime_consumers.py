@@ -28,6 +28,7 @@ from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.hosted_node.identity import (
     MaterialDeniedError,
     MaterialLapsedError,
+    WorkspaceAuthorityDeferredError,
     WorkspaceScopeDeniedError,
 )
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
@@ -234,18 +235,20 @@ class WorkspaceConsumers:
             action: _GraceAction | None = None
             if not soft:
                 action = self._classify_authority_failure(workspace_id, error)
-                if action != "defer":
-                    await self._stop(
-                        workspace_id,
-                        reason_code=(
-                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                        ),
-                        message=(
-                            self._authority_unavailable_message()
-                            if action == "stop_exhausted"
-                            else None
-                        ),
-                    )
+                if action == "defer":
+                    # Distinct from stop-then-deny: the worker must keep or
+                    # requeue a claimed provisioning attempt instead of
+                    # treating this as a terminal provision failure.
+                    raise WorkspaceAuthorityDeferredError(error) from error
+                await self._stop(
+                    workspace_id,
+                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
+                    message=(
+                        self._authority_unavailable_message()
+                        if action == "stop_exhausted"
+                        else None
+                    ),
+                )
             if isinstance(error, MaterialDeniedError):
                 raise WorkspaceScopeDeniedError(error.reason, error.status) from error
             raise

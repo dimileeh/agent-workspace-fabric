@@ -31,6 +31,21 @@ class WorkspaceScopeDeniedError(MaterialDeniedError):
     """A consumer was denied after its stop and credential retraction succeeded."""
 
 
+class WorkspaceAuthorityDeferredError(Exception):
+    """Scope entry deferred inside authority grace; callers must keep or requeue work.
+
+    Raised when materials are only lapsed or an authority check hits a transient
+    node-local error within ``hosted_authority_grace_seconds``. The workspace is
+    not stopped; the caller must retry without failing or abandoning the attempt.
+    """
+
+    def __init__(self, cause: BaseException):
+        reason = getattr(cause, "reason", None)
+        self.reason = str(reason) if reason is not None else type(cause).__name__
+        self.cause = cause
+        super().__init__(self.reason)
+
+
 async def boot(
     config: HostedSettings,
     factory: async_sessionmaker[AsyncSession],

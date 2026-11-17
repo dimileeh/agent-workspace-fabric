@@ -17,6 +17,7 @@ from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import (
     MaterialDeniedError,
     MaterialLapsedError,
+    WorkspaceAuthorityDeferredError,
     WorkspaceScopeDeniedError,
 )
 from awf.hosted_node.runtime_authority import AuthorizedMaterials
@@ -398,7 +399,7 @@ async def test_scope_entry_lapse_denies_without_stop_then_renewal_succeeds(tmp_p
     authority.workspace.side_effect = MaterialLapsedError(
         expires_at=datetime.now(UTC) - timedelta(seconds=1)
     )
-    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
+    with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
         async with scope.scope("ws_exact"):
             pytest.fail("lapsed scope must not start")
     scope.stop_workspace.assert_not_awaited()
@@ -418,9 +419,10 @@ async def test_single_transient_then_success_does_not_stop(tmp_path, error, plac
     material = authority.workspace.return_value
     if place == "scope":
         authority.workspace.side_effect = [error, material, material]
-        with pytest.raises(type(error)):
+        with pytest.raises(WorkspaceAuthorityDeferredError) as deferred:
             async with scope.scope("ws_exact"):
                 pytest.fail("transient scope entry must defer")
+        assert deferred.value.cause is error
         scope.stop_workspace.assert_not_awaited()
         async with scope.scope("ws_exact"):
             pass
@@ -467,7 +469,7 @@ async def test_transient_failures_past_window_stop_unavailable(tmp_path, monkeyp
 
     if place == "scope":
         authority.workspace.side_effect = error
-        with pytest.raises(type(error)):
+        with pytest.raises(WorkspaceAuthorityDeferredError):
             async with scope.scope("ws_exact"):
                 pytest.fail("first transient defers")
         scope.stop_workspace.assert_not_awaited()
