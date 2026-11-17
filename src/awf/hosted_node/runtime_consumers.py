@@ -468,9 +468,10 @@ class WorkspaceConsumers:
             self.workspace_id.reset(token)
             ownership.closing = True
             late_cancellation: asyncio.CancelledError | None = None
+            deferred_authority = False
 
             async def finish() -> None:
-                nonlocal failure, stop_reason, stop_message
+                nonlocal failure, stop_reason, stop_message, deferred_authority
                 with suppress(asyncio.CancelledError):
                     await watcher
                 try:
@@ -481,6 +482,10 @@ class WorkspaceConsumers:
                         workspace_id, error, checker=_CHECKER_WATCHER
                     )
                     if action == "defer":
+                        # Keep the watcher window: a clean-exit clear would
+                        # reset TimeoutError/OSError/SQLAlchemyError clocks
+                        # (no expires_at backdate) past hosted_authority_grace_seconds.
+                        deferred_authority = True
                         return
                     if failure is None or isinstance(failure, MaterialDeniedError):
                         failure = error
@@ -519,8 +524,10 @@ class WorkspaceConsumers:
                         name=f"hosted-retract-{workspace_id}",
                     )
                 )
-            else:
-                # Scope ended without a stop: drop checkers that end with it.
+            elif not deferred_authority:
+                # Scope ended without a stop after confirmed authority: drop
+                # checkers that end with it. Deferred finalizers keep the
+                # watcher window for the in-progress grace clock.
                 self._clear_scope_bound_grace(workspace_id)
             if failure is not None and not caller_cancelled:
                 if isinstance(failure, MaterialDeniedError):

@@ -220,6 +220,57 @@ async def test_rule_scope_end_without_stop_drops_scope_bound_checkers(tmp_path, 
     scope.stop_workspace.assert_not_awaited()
 
 
+async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(tmp_path, monkeypatch):
+    """Deferred finalizer must not let scope exit reset the watcher grace clock.
+
+    When the finalizer still sees a TimeoutError/OSError/SQLAlchemyError and
+    defers, failure stays unset so the clean-exit path used to call
+    ``_clear_scope_bound_grace`` and drop the watcher window. The next scope or
+    classify then opened a fresh clock; unlike lapses, those errors have no
+    ``expires_at`` backdate, so consecutive node-local errors could outlast
+    ``hosted_authority_grace_seconds`` (PRRT_kwDOSJAM6s64bvKZ).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise TimeoutError()
+
+    authority.workspace.side_effect = workspace
+    async with scope.scope("ws_exact"):
+        pass
+
+    scope.stop_workspace.assert_not_awaited()
+    assert set(scope._authority_grace["ws_exact"]) == {"watcher"}
+    started_at = scope._authority_grace["ws_exact"]["watcher"].started_at
+    assert started_at == origin
+
+    clock["now"] = origin + timedelta(seconds=300)
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher") == "defer"
+    )
+    assert scope._authority_grace["ws_exact"]["watcher"].started_at == started_at
+
+    clock["now"] = origin + timedelta(seconds=600)
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher")
+        == "stop_exhausted"
+    )
+
+
 async def test_rule_denial_or_completed_stop_clears_every_workspace_window(tmp_path):
     """Rule 4: explicit denial or authority-lost stop clears all checker windows."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
