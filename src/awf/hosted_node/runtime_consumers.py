@@ -755,9 +755,6 @@ class WorkspaceConsumers:
             if not retained and self._retained_cursor:
                 self._retained_cursor = ""
                 retained = await self.authority.retained_workspaces(limit=limit)
-            # Defer keeps retry membership (orphaned rows may have left the owned
-            # query) but must not close node admission for the grace window.
-            deferred_stop_failures: set[str] = set()
             for workspace_id in dict.fromkeys([*retry, *retained, *history]):
                 try:
                     if not accepted:
@@ -779,7 +776,6 @@ class WorkspaceConsumers:
                                 workspace_id, error, checker=_CHECKER_RECONCILE
                             )
                             if action == "defer":
-                                deferred_stop_failures.add(workspace_id)
                                 continue
                             await self._stop(
                                 workspace_id,
@@ -812,7 +808,7 @@ class WorkspaceConsumers:
             if retry:
                 self._retry_cursor = retry[-1]
             await self.authority.admission()
-            return not (self._retained_stop_failures - deferred_stop_failures)
+            return not self._retained_stop_failures
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
             return False
 

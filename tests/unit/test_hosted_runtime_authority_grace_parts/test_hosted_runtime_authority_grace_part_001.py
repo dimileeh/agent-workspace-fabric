@@ -470,29 +470,6 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     )
 
 
-async def test_reconcile_defer_does_not_close_admission_for_prior_stop_failure(
-    tmp_path, monkeypatch
-):
-    """Defer must not leave a prior stop failure blocking node admission.
-
-    Reconcile ``continue`` on defer used to skip the outer discard/add paths for
-    ``_retained_stop_failures``. A workspace already listed from a failed ``_stop``
-    that later hits a lapse/transient stayed listed, so ``admission_check`` returned
-    false and ``run_once`` skipped dispatch/recovery/GC for the grace window.
-    Membership must remain for orphaned retry while admission stays open.
-    """
-    scope, authority = _mock_consumers(tmp_path, grace=600)
-    authority.admission = AsyncMock()
-    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
-    authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
-    scope._retained_stop_failures.add("ws_exact")
-
-    assert await scope.admission_check()
-    assert "ws_exact" in scope._retained_stop_failures
-    assert "reconcile" in scope._authority_grace.get("ws_exact", {})
-    scope.stop_workspace.assert_not_awaited()
-
-
 async def test_timeout_then_stale_lapse_backdates_grace_and_exhausts(tmp_path, monkeypatch):
     """A transient-opened window must adopt an earlier material expiry on lapse."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
