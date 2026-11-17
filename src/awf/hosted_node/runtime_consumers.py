@@ -80,21 +80,14 @@ class _AuthorityGrace:
 
 @dataclass(frozen=True)
 class _RetainedStop:
-    """Pending cleanup retry metadata for the owned-row sweep.
+    """Marker that the owned-row sweep must retry cleanup for this identity.
 
-    ``teardown=True`` means ``_stop`` already ran (or was about to) for this
-    identity. Closed-admission ``retract_retired`` failures share the same retry
-    set so they stay prioritized across polls, but they must not inherit the
-    owned-reconcile stop path — that would tear down healthy retained work that
-    was only cleaning a previous-boot view.
-
-    Preserve exhaustion (or other) reason/message across teardown retries so a
-    later successful stop does not default to ``HOSTED_RUNTIME_STOPPED``.
+    Closed-admission ``retract_retired`` misses and failed Compose stops share
+    this set so they stay prioritized across polls. Owned teardown retries must
+    consult ``_pending_stops`` — only identities whose sweep ``_stop`` raised
+    carry a recorded reason/message there; a retract-only miss must not stop
+    healthy retained work once admission opens.
     """
-
-    reason_code: str | None = None
-    message: str | None = None
-    teardown: bool = False
 
 
 class _StopWorkspace(Protocol):
@@ -138,6 +131,9 @@ class WorkspaceConsumers:
         self._history_cursor = ""
         self._retry_cursor = ""
         self._retained_stop_failures: dict[str, _RetainedStop] = {}
+        # Reason/message for owned teardown retries: recorded only when a sweep
+        # ``_stop`` raises, dropped when that ``_stop`` returns successfully.
+        self._pending_stops: dict[str, tuple[str | None, str | None]] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -784,55 +780,52 @@ class WorkspaceConsumers:
                                 if action == "stop_exhausted"
                                 else None
                             )
-                            # Mark teardown before Compose stop so a failed stop
-                            # still retries with the stashed reason (including
-                            # HOSTED_AUTHORITY_UNAVAILABLE) instead of clearing as a
-                            # closed-admission retract_retired miss or defaulting to
-                            # HOSTED_RUNTIME_STOPPED.
-                            prior = self._retained_stop_failures.get(workspace_id, _RetainedStop())
-                            self._retained_stop_failures[workspace_id] = _RetainedStop(
-                                reason_code=(
-                                    reason_code if reason_code is not None else prior.reason_code
-                                ),
-                                message=message if message is not None else prior.message,
-                                teardown=True,
-                            )
-                            await self._stop(
-                                workspace_id,
-                                reason_code=reason_code,
-                                message=message,
-                            )
+                            try:
+                                await self._stop(
+                                    workspace_id,
+                                    reason_code=reason_code,
+                                    message=message,
+                                )
+                            except (
+                                MaterialDeniedError,
+                                SQLAlchemyError,
+                                OSError,
+                                TimeoutError,
+                            ):
+                                # Record only on raise so closed-admission
+                                # retract_retired misses never look like a
+                                # pending Compose teardown.
+                                self._pending_stops[workspace_id] = (reason_code, message)
+                                raise
+                            else:
+                                self._pending_stops.pop(workspace_id, None)
                         else:
                             # Reconcile recovery clears only its own window.
                             self._clear_authority_grace(workspace_id, checker=_CHECKER_RECONCILE)
-                            if workspace_id in retry:
-                                pending_stop = self._retained_stop_failures.get(
-                                    workspace_id, _RetainedStop()
+                            if owned and workspace_id in self._pending_stops:
+                                # A prior stop removed the view (refresh write
+                                # failure already deleted it, or retract ran
+                                # before Docker teardown failed). Healthy
+                                # material without a publication must not clear
+                                # the pending stop — retry teardown with the
+                                # reason recorded when ``_stop`` raised.
+                                reason_code, message = self._pending_stops[workspace_id]
+                                await self._stop(
+                                    workspace_id,
+                                    reason_code=reason_code,
+                                    message=message,
                                 )
-                                if owned and pending_stop.teardown:
-                                    # A prior stop removed the view (refresh write
-                                    # failure already deleted it, or retract ran
-                                    # before Docker teardown failed). Healthy
-                                    # material without a publication must not clear
-                                    # the pending stop — retry teardown.
-                                    # Closed-admission retract_retired failures share
-                                    # this retry set with teardown=False; an owned
-                                    # reconcile success then clears without stopping.
-                                    await self._stop(
-                                        workspace_id,
-                                        reason_code=pending_stop.reason_code,
-                                        message=pending_stop.message,
-                                    )
-                                elif not owned:
-                                    # Finish this identity's failed retraction, without
-                                    # stopping or touching a successor identity's view.
-                                    await self.authority.retract(workspace_id)
+                            elif not owned and workspace_id in retry:
+                                # Finish this identity's failed retraction, without
+                                # stopping or touching a successor identity's view.
+                                await self.authority.retract(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     # Keep admission closed across pages without starving later
                     # cleanup. The bounded cursor wraps and retries each failure.
                     self._retained_stop_failures.setdefault(workspace_id, _RetainedStop())
                 else:
                     self._retained_stop_failures.pop(workspace_id, None)
+                    self._pending_stops.pop(workspace_id, None)
             if retained:
                 self._retained_cursor = retained[-1]
             if history:

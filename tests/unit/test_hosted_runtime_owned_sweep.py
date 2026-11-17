@@ -414,8 +414,10 @@ async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_af
 
     While admission is closed the sweep only retires previous-boot views. Those
     failures share ``_retained_stop_failures`` so the next open poll retries them,
-    but a still-owned reconcile success must clear the pending retract — never
-    call ``_stop`` on healthy retained work that was never meant to tear down.
+    but they must not enter ``_pending_stops`` (that set is only for raised sweep
+    ``_stop`` calls). A still-owned reconcile success must clear the pending
+    retract — never call ``_stop`` on healthy retained work that was never meant
+    to tear down.
     """
     from tests.unit.test_hosted_runtime_authority_grace_parts.helpers import (
         _mock_consumers,
@@ -437,7 +439,7 @@ async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_af
 
     assert not await scope.admission_check()
     assert "ws_exact" in scope._retained_stop_failures
-    assert scope._retained_stop_failures["ws_exact"].teardown is False
+    assert "ws_exact" not in scope._pending_stops
     scope.stop_workspace.assert_not_awaited()
     authority.retract_retired.assert_awaited_once_with("ws_exact")
 
@@ -446,6 +448,7 @@ async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_af
     authority.reconcile_workspace.assert_awaited_once_with("ws_exact")
     authority.retract.assert_not_awaited()
     assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
 
 
 async def test_pending_cleanup_retry_is_bounded_without_starving_current_rows(
