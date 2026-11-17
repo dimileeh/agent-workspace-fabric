@@ -1,6 +1,7 @@
 """Owned-row sweep before Compose placement and throughout the real lifecycle."""
 
 import asyncio
+import os
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Self
@@ -312,6 +313,43 @@ async def test_failed_stop_does_not_starve_later_owned_credential_cleanup(
         "ws_cloud_stable",
         "ws_other",
     ]
+
+
+async def test_failed_stop_after_view_write_failure_retries_until_teardown(
+    authority, tmp_path, monkeypatch
+):
+    """Healthy material alone must not clear a pending stop after the view is gone.
+
+    A refresh write failure deletes the mounted view and requests an immediate
+    stop. If Docker teardown fails once, admission_check records a retry. The
+    next sweep must call stop again even when reconcile reads healthy material
+    without republishing (publication is already gone).
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic materials write failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
+
+    assert not await scope.admission_check()
+    assert not path.parent.exists()
+    assert "ws_cloud_stable" in scope._retained_stop_failures
+    scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    scope.stop_workspace.side_effect = None
+    scope.stop_workspace.reset_mock()
+
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+    assert "ws_cloud_stable" not in scope._retained_stop_failures
 
 
 @pytest.mark.parametrize("change", ["deleted", "rebound"])

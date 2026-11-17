@@ -771,10 +771,18 @@ class WorkspaceConsumers:
                         else:
                             # Reconcile recovery clears only its own window.
                             self._clear_authority_grace(workspace_id, checker=_CHECKER_RECONCILE)
-                            if not owned and workspace_id in retry:
-                                # Finish this identity's failed retraction, without
-                                # stopping or touching a successor identity's view.
-                                await self.authority.retract(workspace_id)
+                            if workspace_id in retry:
+                                if owned:
+                                    # A prior stop removed the view (refresh write
+                                    # failure already deleted it, or retract ran
+                                    # before Docker teardown failed). Healthy
+                                    # material without a publication must not clear
+                                    # the pending stop — retry teardown.
+                                    await self._stop(workspace_id)
+                                else:
+                                    # Finish this identity's failed retraction, without
+                                    # stopping or touching a successor identity's view.
+                                    await self.authority.retract(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     # Keep admission closed across pages without starving later
                     # cleanup. The bounded cursor wraps and retries each failure.
