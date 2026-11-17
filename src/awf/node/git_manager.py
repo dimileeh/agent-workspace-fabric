@@ -1220,7 +1220,9 @@ async def holding_mirror_lock(
     Hosted authority grace may sleep inside ``command_environment``; that wait
     must finish before the lock is taken so one lapsed workspace cannot stall
     every peer sharing the mirror. While the lock is held,
-    ``holding_shared_mirror_lock`` is true so nested env refreshes fail fast.
+    ``holding_shared_mirror_lock`` is true so nested env refreshes fail fast by
+    raising ``WorkspaceAuthorityDeferredError`` (never sleeping under the lock);
+    callers unlock and retry outside it via the worker defer loops.
     """
     if command_environment is not None:
         await command_environment()
