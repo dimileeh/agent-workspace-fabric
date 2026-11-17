@@ -80,14 +80,21 @@ class _AuthorityGrace:
 
 @dataclass(frozen=True)
 class _RetainedStop:
-    """Pending teardown retry metadata after a failed Compose stop.
+    """Pending cleanup retry metadata for the owned-row sweep.
 
-    Preserve exhaustion (or other) reason/message across retries so a later
-    successful teardown does not default to ``HOSTED_RUNTIME_STOPPED``.
+    ``teardown=True`` means ``_stop`` already ran (or was about to) for this
+    identity. Closed-admission ``retract_retired`` failures share the same retry
+    set so they stay prioritized across polls, but they must not inherit the
+    owned-reconcile stop path — that would tear down healthy retained work that
+    was only cleaning a previous-boot view.
+
+    Preserve exhaustion (or other) reason/message across teardown retries so a
+    later successful stop does not default to ``HOSTED_RUNTIME_STOPPED``.
     """
 
     reason_code: str | None = None
     message: str | None = None
+    teardown: bool = False
 
 
 class _StopWorkspace(Protocol):
@@ -777,14 +784,19 @@ class WorkspaceConsumers:
                                 if action == "stop_exhausted"
                                 else None
                             )
-                            # Stash before teardown so a failed Compose stop still
-                            # retries with HOSTED_AUTHORITY_UNAVAILABLE, not the
-                            # stop_workspace default HOSTED_RUNTIME_STOPPED.
-                            if reason_code is not None or message is not None:
-                                self._retained_stop_failures[workspace_id] = _RetainedStop(
-                                    reason_code=reason_code,
-                                    message=message,
-                                )
+                            # Mark teardown before Compose stop so a failed stop
+                            # still retries with the stashed reason (including
+                            # HOSTED_AUTHORITY_UNAVAILABLE) instead of clearing as a
+                            # closed-admission retract_retired miss or defaulting to
+                            # HOSTED_RUNTIME_STOPPED.
+                            prior = self._retained_stop_failures.get(workspace_id, _RetainedStop())
+                            self._retained_stop_failures[workspace_id] = _RetainedStop(
+                                reason_code=(
+                                    reason_code if reason_code is not None else prior.reason_code
+                                ),
+                                message=message if message is not None else prior.message,
+                                teardown=True,
+                            )
                             await self._stop(
                                 workspace_id,
                                 reason_code=reason_code,
@@ -794,21 +806,24 @@ class WorkspaceConsumers:
                             # Reconcile recovery clears only its own window.
                             self._clear_authority_grace(workspace_id, checker=_CHECKER_RECONCILE)
                             if workspace_id in retry:
-                                if owned:
+                                pending_stop = self._retained_stop_failures.get(
+                                    workspace_id, _RetainedStop()
+                                )
+                                if owned and pending_stop.teardown:
                                     # A prior stop removed the view (refresh write
                                     # failure already deleted it, or retract ran
                                     # before Docker teardown failed). Healthy
                                     # material without a publication must not clear
                                     # the pending stop — retry teardown.
-                                    pending_stop = self._retained_stop_failures.get(
-                                        workspace_id, _RetainedStop()
-                                    )
+                                    # Closed-admission retract_retired failures share
+                                    # this retry set with teardown=False; an owned
+                                    # reconcile success then clears without stopping.
                                     await self._stop(
                                         workspace_id,
                                         reason_code=pending_stop.reason_code,
                                         message=pending_stop.message,
                                     )
-                                else:
+                                elif not owned:
                                     # Finish this identity's failed retraction, without
                                     # stopping or touching a successor identity's view.
                                     await self.authority.retract(workspace_id)
