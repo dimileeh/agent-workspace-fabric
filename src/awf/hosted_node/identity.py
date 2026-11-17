@@ -1,5 +1,7 @@
 """Durable owner/boot fencing. Identity never proves physical VM termination."""
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,8 +19,35 @@ class MaterialDeniedError(ValueError):
         self.status = status
 
 
+class MaterialLapsedError(MaterialDeniedError):
+    """Current material expired without renewal; not an explicit revocation or mismatch."""
+
+    def __init__(self, *, expires_at: datetime | None = None):
+        super().__init__("PROTECTED_MATERIAL_LAPSED", 503)
+        self.expires_at = expires_at
+
+
 class WorkspaceScopeDeniedError(MaterialDeniedError):
     """A consumer was denied after its stop and credential retraction succeeded."""
+
+
+class WorkspaceAuthorityDeferredError(Exception):
+    """Grace-eligible authority failure surfaced without waiting.
+
+    Hosted ``_scope``, ``environment()``, and stack-prepare callbacks
+    (``profile_mounts`` / ``resource_limits``) normally wait out
+    ``hosted_authority_grace_seconds`` on a lapse/transient — including when
+    ``environment()`` is called under a shared git mirror lock. This error is
+    raised instead when the caller opted out of that wait (poll-inline recovery
+    via ``awf.common.workspace_scope.without_authority_grace_wait``). The
+    workspace is not stopped; the caller must keep or requeue work.
+    """
+
+    def __init__(self, cause: BaseException):
+        reason = getattr(cause, "reason", None)
+        self.reason = str(reason) if reason is not None else type(cause).__name__
+        self.cause = cause
+        super().__init__(self.reason)
 
 
 async def boot(

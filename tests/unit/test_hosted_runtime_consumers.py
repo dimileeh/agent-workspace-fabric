@@ -25,6 +25,8 @@ def consumers(tmp_path, monkeypatch):
         datetime.now(UTC) + timedelta(minutes=1),
     )
     scope = WorkspaceConsumers(authority, tmp_path)
+    # Existing consumer suites pin today's immediate stop-on-transient behaviour.
+    scope.authority_grace_seconds = 0
     return scope, authority
 
 

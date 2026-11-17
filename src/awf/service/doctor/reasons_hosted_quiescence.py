@@ -20,7 +20,8 @@ def get_hosted_quiescence_reasons(
         "HOSTED_RUNTIME_STOPPED": reason_text_cls(
             (
                 "The hosted node stopped this workspace because its consumer authority "
-                "(credential binding or grant) was revoked or expired."
+                "was explicitly denied (revoked grant, missing receipt, binding mismatch, "
+                "or inactive workspace)."
             ),
             (
                 "Renew or re-bind the workspace credentials from the controller and create "
@@ -28,11 +29,46 @@ def get_hosted_quiescence_reasons(
                 "as failed, never as succeeded."
             ),
             (
-                "Credential material renewal was denied while the workspace was executing "
-                "or monitoring its PR, so the hosted runtime tore down its stack."
+                "Credential material was revoked or otherwise denied while the workspace was "
+                "executing or monitoring its PR, so the hosted runtime tore down its stack."
             ),
             "awf workspace show <workspace_id>",
             "docs/REASON_CATALOG.md#hosted_runtime_stopped",
+        ),
+        "HOSTED_AUTHORITY_UNAVAILABLE": reason_text_cls(
+            (
+                "The hosted node stopped this workspace after authority could not be "
+                "confirmed for the full grace window (lapsed materials or transient "
+                "node-local check errors)."
+            ),
+            (
+                "Inspect controller renewal health and node database/storage connectivity; "
+                "create a new workspace once materials can be renewed. Unfinished monitor "
+                "operations and validations were settled as failed."
+            ),
+            (
+                "Protected material lapsed without a timely successor, or consecutive "
+                "SQLAlchemy/OS/timeout errors exhausted hosted_authority_grace_seconds."
+            ),
+            "awf workspace show <workspace_id>",
+            "docs/REASON_CATALOG.md#hosted_authority_unavailable",
+        ),
+        "PROTECTED_MATERIAL_LAPSED": reason_text_cls(
+            (
+                "Current protected material expired without a renewed successor; the grant "
+                "is otherwise healthy (not revoked, receipt present, bindings match)."
+            ),
+            (
+                "Ensure the controller renews materials before expiry. Within "
+                "hosted_authority_grace_seconds the node keeps the stack but will not "
+                "issue or republish lapsed material bytes."
+            ),
+            (
+                "The consumer did not renew short-lived materials before expires_at, or "
+                "the receiver reported the current binding as expired without revocation."
+            ),
+            "awf workspace show <workspace_id>",
+            "docs/REASON_CATALOG.md#protected_material_lapsed",
         ),
         "TERMINAL_OWNED_ROW_REAPED": reason_text_cls(
             (

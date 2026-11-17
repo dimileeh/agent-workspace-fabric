@@ -45,6 +45,14 @@ async def test_real_worker_composition_is_identity_bound_and_has_no_local_auth_f
         assert provisioner._before_provision is None
         assert provisioner._stack_launcher._auth_mount_resolver is None
         assert provisioner._stack_launcher._secret_lease_resolver is None
+        # Stack prepare must use consumer wrappers that honor authority grace,
+        # not raw WorkspaceAuthority methods (PRRT_kwDOSJAM6s64V4rF).
+        mounts = provisioner._stack_launcher._protected_profile_mounts
+        limits = provisioner._stack_launcher._resource_limits
+        assert mounts.__self__ is consumers
+        assert mounts.__func__ is WorkspaceConsumers.profile_mounts
+        assert limits.__self__ is consumers
+        assert limits.__func__ is WorkspaceConsumers.resource_limits
         factory = executor._session_factory
         assert (
             json.loads(factory.kw["info"]["awf_node_identity"])

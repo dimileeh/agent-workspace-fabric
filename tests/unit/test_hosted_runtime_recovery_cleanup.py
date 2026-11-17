@@ -472,6 +472,69 @@ async def test_partial_publication_failure_retracts_only_its_own_view(authority,
     assert other.is_dir()
 
 
+async def test_materials_view_write_failure_is_explicit_denial_and_removes_view(
+    authority, monkeypatch
+):
+    """A publish/refresh OSError must not stay grace-eligible as a bare OSError.
+
+    materials() converts the write failure into MaterialDeniedError so consumers
+    stop immediately, and base view cleanup removes the whole publication.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic materials write failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    with pytest.raises(MaterialDeniedError, match="INVALID_RUNTIME_VIEW") as denied:
+        await runtime.workspace("ws_cloud_stable")
+    assert denied.value.reason == "INVALID_RUNTIME_VIEW"
+    assert not path.parent.exists()
+
+
+async def test_cancelled_materials_late_write_failure_is_explicit_denial(authority, monkeypatch):
+    """Cancel while the shielded writer is mid-flight must still deny on OSError.
+
+    Cleanup joins that writer. A late OSError must become INVALID_RUNTIME_VIEW
+    (not a bare grace-eligible OSError); the writer already removed the mount.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    started, release = threading.Event(), threading.Event()
+    replace_file = os.replace
+
+    def fail_second_file_after_cancel(source, destination, **kwargs):
+        if destination == "github.api-key":
+            started.set()
+            assert release.wait(10)
+            raise OSError("late synthetic materials write failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file_after_cancel)
+    task = asyncio.create_task(runtime.workspace("ws_cloud_stable"))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        # Deliver cancellation into the shield await while the writer is blocked.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not task.done(), "writer must still be blocked so cleanup joins it"
+        release.set()
+        with pytest.raises(MaterialDeniedError, match="INVALID_RUNTIME_VIEW") as denied:
+            await task
+        assert denied.value.reason == "INVALID_RUNTIME_VIEW"
+        assert not path.parent.exists()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_publication_fence_is_shared_by_view_instances_and_workspace_bound(authority):
     runtime, _, _ = authority
     files = {"openai.api-key": b"synthetic-agent", "github.api-key": b"synthetic-github"}

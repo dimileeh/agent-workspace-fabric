@@ -63,6 +63,9 @@ async def authority(engine, tmp_path, monkeypatch):
         material_root=root,
         runtime_enabled=True,
         runtime_capacity=RuntimeCapacity(cpu_headroom_cores=4, memory_headroom_gb=8),
+        # Existing expiry→stop suites pin today's immediate behaviour; grace
+        # coverage lives in test_hosted_runtime_authority_grace.py.
+        hosted_authority_grace_seconds=0,
         lifecycle=LifecycleSettings(disk_ref="disk", database_ref="db"),
         host=HostSettings(
             state_root=tmp_path,
@@ -194,7 +197,7 @@ async def test_expiry_during_final_database_checks_denies_material(authority, mo
             monkeypatch.setattr(runtime_authority, "datetime", Clock)
 
     monkeypatch.setattr(runtime, "admission", admission)
-    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_LAPSED"):
         await runtime.admit(payload)
 
 

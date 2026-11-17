@@ -19,6 +19,7 @@ Normal local Core is unchanged. No hosted configuration means all
 | `recovery_generation` | Positive monotonic signed int64 |
 | `controller_token` | Separate private controller bearer, at least 16 characters |
 | `material_root` | Existing absolute private directory on Linux tmpfs, mode 0700, owned by the Core effective UID |
+| `hosted_authority_grace_seconds` | Non-negative integer seconds (default **600**) a hosted node refrains from stopping a workspace while materials are only lapsed or an authority check hits a transient node-local error (`SQLAlchemyError`, `OSError`, `TimeoutError`). Explicit denials still stop immediately. `0` restores immediate stop-on-lapse behaviour. |
 
 Do not put real credentials in checked-in configuration, profiles, task text or
 command arguments. Supply settings through the trusted deployment's secret
