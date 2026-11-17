@@ -951,9 +951,16 @@ def build_worker_runtime(
                     # commands. The ordinary worker owns warm-stack recovery;
                     # tearing it down here breaks an in-place paused resume.
                     return
-                from awf.hosted_node.runtime_authority import STOP_FENCE_FIELDS
-
-                fence = tuple(getattr(workspace, field) for field in STOP_FENCE_FIELDS)
+                fence_fields = (
+                    "node_id",
+                    "status",
+                    "version",
+                    "task_policy",
+                    "execution_claimed_by",
+                    "execution_claim_epoch",
+                    "monitor_claimed_by",
+                )
+                fence = tuple(getattr(workspace, field) for field in fence_fields)
             result = await compose.teardown_project(
                 project_name=f"awf_{workspace_id}",
                 compose_file=work_dir / "compose" / workspace_id / "compose.yml",
@@ -971,7 +978,7 @@ def build_worker_runtime(
                 current = await repo.get_for_update(workspace_id)
                 if (
                     current is None
-                    or tuple(getattr(current, field) for field in STOP_FENCE_FIELDS) != fence
+                    or tuple(getattr(current, field) for field in fence_fields) != fence
                 ):
                     return
                 status = WorkspaceStatus(current.status)

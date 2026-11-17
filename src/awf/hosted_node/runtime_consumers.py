@@ -119,15 +119,6 @@ class WorkspaceConsumers:
         self._history_cursor = ""
         self._retry_cursor = ""
         self._retained_stop_failures: set[str] = set()
-        # Reason/message/fence for authority-lost teardowns still in flight.
-        # ``_stop`` records on entry (keeping an existing entry + original fence),
-        # reapplies reason/message on every retry, and pops after success;
-        # admission retries that decision instead of reconciling, but only while
-        # the captured stop fence still matches (remonitor reauthorization must
-        # not inherit an old stop).
-        self._pending_stops: dict[
-            str, tuple[str | None, str | None, tuple[object, ...] | None]
-        ] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -318,27 +309,20 @@ class WorkspaceConsumers:
                     # the finalizer's later _stop a no-op (one stop per failure).
                     # Fence closing first: the watcher may still be polling, and
                     # association() does not treat failed as inactive.
-                    # ``_stop`` records the pending decision; on Compose failure
-                    # keep the id in ``_retained_stop_failures`` so the sweep
-                    # retries until teardown succeeds.
-                    reason_code = _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                    message = (
-                        self._authority_unavailable_message()
-                        if action == "stop_exhausted"
-                        else None
-                    )
                     ownership = owned_publication(self.authority.views, workspace_id)
                     if ownership is not None:
                         ownership.closing = True
-                    try:
-                        await self._stop(
-                            workspace_id,
-                            reason_code=reason_code,
-                            message=message,
-                        )
-                    except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                        self._retained_stop_failures.add(workspace_id)
-                        raise
+                    await self._stop(
+                        workspace_id,
+                        reason_code=(
+                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                        ),
+                        message=(
+                            self._authority_unavailable_message()
+                            if action == "stop_exhausted"
+                            else None
+                        ),
+                    )
                     raise
                 self._clear_authority_check_success(workspace_id, checker=checker)
                 holding_claim = False
@@ -553,26 +537,17 @@ class WorkspaceConsumers:
             # check task finishes but before this caller wakes up.
             await join(asyncio.create_task(finish(), name=f"hosted-finalize-{workspace_id}"))
             if failure is not None or cancelled:
-                # Mirror ``_await_with_authority_grace``: ``_stop`` records the
-                # classified reason in ``_pending_stops`` before teardown, and a
-                # Compose failure must land in ``_retained_stop_failures`` so the
-                # owned-row sweep retries even when the row left the live query.
-                try:
-                    await join(
-                        asyncio.create_task(
-                            self._stop(
-                                workspace_id,
-                                authority_lost=failure is not None,
-                                reason_code=stop_reason if failure is not None else None,
-                                message=stop_message if failure is not None else None,
-                            ),
-                            name=f"hosted-retract-{workspace_id}",
-                        )
+                await join(
+                    asyncio.create_task(
+                        self._stop(
+                            workspace_id,
+                            authority_lost=failure is not None,
+                            reason_code=stop_reason if failure is not None else None,
+                            message=stop_message if failure is not None else None,
+                        ),
+                        name=f"hosted-retract-{workspace_id}",
                     )
-                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                    if failure is not None:
-                        self._retained_stop_failures.add(workspace_id)
-                    raise
+                )
             elif not deferred_authority:
                 # Scope ended without a stop after confirmed authority: drop
                 # checkers that end with it. Deferred finalizers keep the
@@ -646,20 +621,7 @@ class WorkspaceConsumers:
         if ownership is not None and ownership.stopped:
             # Early grace-exhaustion stop already completed for this ownership;
             # the scope finalizer must not stop_workspace a second time.
-            self._pending_stops.pop(workspace_id, None)
             return
-        if authority_lost:
-            # Stop decision is final: keep the first recorded reason and stop
-            # fence across every retry (sweep and scope finalizer) until
-            # teardown succeeds. The fence is what remonitor reauthorization
-            # replaces while leaving node_id alone.
-            if workspace_id not in self._pending_stops:
-                try:
-                    fence = await self.authority.stop_fence(workspace_id)
-                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                    fence = None
-                self._pending_stops[workspace_id] = (reason_code, message, fence)
-            reason_code, message, _fence = self._pending_stops[workspace_id]
         token = self.workspace_id.set(None)
         preserve_directory = False
         try:
@@ -693,7 +655,6 @@ class WorkspaceConsumers:
             # authority-lost teardown clear the window elsewhere / below.
             if authority_lost:
                 self._clear_authority_grace(workspace_id)
-                self._pending_stops.pop(workspace_id, None)
             if ownership is not None:
                 ownership.stopped = True
         finally:
@@ -782,25 +743,6 @@ class WorkspaceConsumers:
                         # exact older binding; an obsolete process cannot
                         # retract its successor's publication.
                         await self.authority.retract_retired(workspace_id)
-                    elif workspace_id in self._pending_stops:
-                        # Stop decision is final: retry teardown with the
-                        # recorded reason instead of reconciling (no grace),
-                        # but only while the original stop fence still matches.
-                        # owns(node_id) alone is not enough — remonitor with
-                        # hosted_reauthorization replaces credentials and keeps
-                        # node_id; stop_workspace would capture the new fence.
-                        reason_code, message, fence = self._pending_stops[workspace_id]
-                        if fence is not None and await self.authority.matches_stop_fence(
-                            workspace_id, fence
-                        ):
-                            await self._stop(
-                                workspace_id,
-                                reason_code=reason_code,
-                                message=message,
-                            )
-                        else:
-                            await self.authority.retract(workspace_id)
-                            self._pending_stops.pop(workspace_id, None)
                     else:
                         try:
                             owned = await self.authority.reconcile_workspace(workspace_id)
@@ -832,10 +774,6 @@ class WorkspaceConsumers:
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.
-                                # Closed-admission retract_retired misses share
-                                # ``_retained_stop_failures`` but never enter
-                                # ``_pending_stops``, so an owned reconcile success
-                                # clears without stopping healthy retained work.
                                 await self.authority.retract(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     # Keep admission closed across pages without starving later

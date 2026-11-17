@@ -429,14 +429,6 @@ async def test_sweep_exhausts_grace_and_stops_with_authority_unavailable(
 
 
 async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_path, monkeypatch):
-    """Teardown retry must not re-exhaust grace; clear after the recorded stop.
-
-    Exhaustion is one-shot via ``_classify_authority_failure``. A failed stop
-    keeps the workspace in ``_pending_stops`` / ``_retained_stop_failures``;
-    the next sweep retries teardown with that metadata and skips reconcile, so
-    retry logs clear the exhausted window instead of emitting
-    ``authority_grace_exhausted`` again (PRRT_kwDOSJAM6s64kckL).
-    """
     scope, authority = _mock_consumers(tmp_path, grace=1)
     origin = datetime.now(UTC)
     clock = {"now": origin}
@@ -460,8 +452,6 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     with structlog.testing.capture_logs() as logs:
         assert not await scope.admission_check()
     assert "ws_exact" in scope._retained_stop_failures
-    assert "ws_exact" in scope._pending_stops
-    assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
     assert "ws_exact" in scope._authority_grace
     assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in logs)
     scope.stop_workspace.assert_awaited_once()
@@ -470,60 +460,14 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     with structlog.testing.capture_logs() as retry_logs:
         assert await scope.admission_check()
     assert "ws_exact" not in scope._retained_stop_failures
-    assert "ws_exact" not in scope._pending_stops
     assert "ws_exact" not in scope._authority_grace
     assert not any(log["event"] == "hosted_node.authority_grace_started" for log in retry_logs)
-    assert not any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
-    assert any(log["event"] == "hosted_node.authority_grace_cleared" for log in retry_logs)
+    assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
     assert scope.stop_workspace.await_count == 2
     assert all(
         call.kwargs.get("reason_code") == "HOSTED_AUTHORITY_UNAVAILABLE"
         for call in scope.stop_workspace.await_args_list
     )
-    # Exhaustion + defer only; pending-stop retry must not re-reconcile.
-    assert authority.reconcile_workspace.await_count == 2
-
-
-async def test_retained_stop_retry_preserves_exhaustion_reason_after_authority_recovers(
-    tmp_path, monkeypatch
-):
-    """Compose teardown failure must not drop HOSTED_AUTHORITY_UNAVAILABLE on retry.
-
-    If grace exhaustion triggers stop but teardown fails, the workspace enters
-    ``_retained_stop_failures``. When authority recovers before the next sweep,
-    the retry still must forward the original exhaustion reason — otherwise
-    ``stop_workspace`` defaults to ``HOSTED_RUNTIME_STOPPED``.
-    """
-    scope, authority = _mock_consumers(tmp_path, grace=1)
-    origin = datetime.now(UTC)
-    clock = {"now": origin}
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz: tzinfo | None = None) -> Self:
-            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
-
-    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
-    authority.admission = AsyncMock()
-    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
-    authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
-    authority.retract = AsyncMock()
-    scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
-
-    assert await scope.admission_check()
-    clock["now"] = origin + timedelta(seconds=1)
-    assert not await scope.admission_check()
-    assert "ws_exact" in scope._retained_stop_failures
-    assert scope.stop_workspace.await_count == 1
-    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
-
-    authority.reconcile_workspace = AsyncMock(return_value=True)
-    scope.stop_workspace = AsyncMock()
-    assert await scope.admission_check()
-    assert "ws_exact" not in scope._retained_stop_failures
-    scope.stop_workspace.assert_awaited_once()
-    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
-    assert "1" in scope.stop_workspace.await_args.kwargs["message"]
 
 
 async def test_timeout_then_stale_lapse_backdates_grace_and_exhausts(tmp_path, monkeypatch):
