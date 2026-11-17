@@ -28,8 +28,6 @@ from tests.unit.control._worker_admission_support import (
     _create_active_slot,
     _create_ready_with_runtime_metadata,
     _create_requested,
-    _DeferOnceSignalingProvisioner,
-    _DeferThenSucceedProvisioner,
     _EpochCapturingProvisioner,
     _FenceThenBlockProvisioner,
     _gate_admission_prechecks,
@@ -292,104 +290,6 @@ async def test_safely_provision_claimed_swallows_provision_exception(
     await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
 
     assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
-
-
-@pytest.mark.unit
-async def test_safely_provision_claimed_retries_authority_defer_instead_of_abandoning(
-    session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Authority grace defer at scope entry must keep the claim and retry.
-
-    Releasing on the first ``WorkspaceAuthorityDeferredError`` strands the row
-    in ``provisioning`` (the poll only claims ``requested``); stale recovery can
-    then fail it for missing Compose metadata even after credentials recover.
-    """
-    from awf.control.worker import dispatch_methods as worker_dispatch
-
-    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.0)
-    workspace_id = await _create_requested(
-        session_factory,
-        create_attempt=False,
-        node_id=None,
-    )
-    provisioner = _DeferThenSucceedProvisioner()
-    worker = ControlWorker(
-        session_factory=session_factory,
-        provisioner=provisioner,  # type: ignore[arg-type]
-        executor=_UnusedExecutor(),  # type: ignore[arg-type]
-        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=1),
-    )
-    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
-    claim_epoch = await _workspace_execution_epoch(session_factory, workspace_id)
-
-    await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
-
-    assert provisioner.calls == 2
-    assert provisioner.epochs == [claim_epoch, claim_epoch]
-    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.provisioning
-    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
-    # Claim released only after the successful retry finishes — not mid-defer.
-    claimed_by, expires_at = await _workspace_execution_claim(session_factory, workspace_id)
-    assert claimed_by is None
-    assert expires_at is None
-
-
-@pytest.mark.unit
-async def test_safely_provision_claimed_aborts_defer_retry_when_heartbeat_fences(
-    session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Claim-lost during defer sleep must abort — not restart without a heartbeat.
-
-    ``_cancel_provision`` is a no-op once the deferred provision task has
-    finished, and ``read_execution_claim_epoch`` only checks ownership (not
-    lease expiry). Without an independent fencing flag, a lost heartbeat during
-    the defer sleep lets provisioning restart while the refresh loop is already
-    dead, racing stale-active recovery on a long retry.
-    """
-    from awf.control.worker import dispatch_methods as worker_dispatch
-
-    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.05)
-    workspace_id = await _create_requested(
-        session_factory,
-        create_attempt=False,
-        node_id=None,
-    )
-    provisioner = _DeferOnceSignalingProvisioner()
-    worker = ControlWorker(
-        session_factory=session_factory,
-        provisioner=provisioner,  # type: ignore[arg-type]
-        executor=_UnusedExecutor(),  # type: ignore[arg-type]
-        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=1),
-    )
-
-    async def _fence_during_defer(
-        _workspace_id: str,
-        *,
-        on_claim_lost: object | None = None,
-    ) -> None:
-        await provisioner.deferred.wait()
-        # Yield so ``_safely_provision_claimed`` enters the defer sleep before
-        # the fence fires (matching the real race: task already done).
-        await asyncio.sleep(0)
-        if callable(on_claim_lost):
-            on_claim_lost()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(worker, "_refresh_execution_claim_loop", _fence_during_defer)
-    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
-
-    await asyncio.wait_for(
-        worker._safely_provision_claimed(workspace_id),  # noqa: SLF001
-        timeout=WORKER_TEST_TIMEOUT_SECONDS,
-    )
-
-    assert provisioner.calls == 1
-    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
-    claimed_by, expires_at = await _workspace_execution_claim(session_factory, workspace_id)
-    assert claimed_by is None
-    assert expires_at is None
 
 
 @pytest.mark.unit

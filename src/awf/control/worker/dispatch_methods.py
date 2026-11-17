@@ -37,7 +37,6 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
-from awf.hosted_node.identity import WorkspaceAuthorityDeferredError
 
 # Per-pause-reason wiring for the shared resume path: the slot-tracking task kind
 # and the restore reason codes that revert a stranded ``running`` row back to its
@@ -76,12 +75,6 @@ _MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES = frozenset(
         MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
     }
 )
-
-# Brief pause between authority-deferred consumer retries while the
-# execution/monitor claim (and its heartbeat) stay held. Tests may pin this to 0.
-_AUTHORITY_DEFER_SECONDS = 1.0
-# Back-compat alias for the original provisioning-only name.
-_PROVISION_AUTHORITY_DEFER_SECONDS = _AUTHORITY_DEFER_SECONDS
 
 
 def _is_monitor_recovery_handoff_failure_reason(reason_code: str) -> bool:
@@ -317,18 +310,8 @@ async def _safely_resume_paused_claimed(
     semantics — ``blocked`` resumes the operator-cleared protected-gate pause;
     ``recovering`` (#612) first stashes + resets the worktree to HEAD, then
     re-runs the agent in place on the warm stack after the provider cooldown."""
-    # Heartbeat fencing must outlive the current resume attempt: during an
-    # authority-defer sleep the attempt has already raised, so cancelling an
-    # in-flight task is a no-op. Without this flag a lost heartbeat during the
-    # defer sleep would restart resume with no live refresh loop.
-    claim_lost = False
-
-    def _mark_claim_lost() -> None:
-        nonlocal claim_lost
-        claim_lost = True
-
     heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=_mark_claim_lost),
+        self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-{reason}-resume-claim-{workspace_id}",
     )
     # Whether the executor drove the resume to a clean return (vs. the worker
@@ -351,71 +334,43 @@ async def _safely_resume_paused_claimed(
         if self._executor is None:
             await self._restore_paused_after_missing_executor(workspace_id, reason=reason)
             return
-        # A stalled-mid-edit worktree is inconsistent; resume from the last
-        # clean commit (stash dirt → reset --hard HEAD) before re-invoking. If
-        # that reset cannot be completed safely (``git status``/``stash``/
-        # ``reset`` failed) the worktree may still hold partial provider edits,
-        # so abort the in-place retry and restore the paused state for a later
-        # safe resume rather than re-running the agent on a contaminated tree.
-        # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
-        # the claim, letting a capable worker re-claim the cooled-down row.
-        # Re-arm the provider cooldown (#647) so the restored row backs off a
-        # full cooldown before it is resumable again: leaving ``not_before`` in
-        # the past would let ``list_resumable_recovering_ids`` re-select it every
-        # poll, busy-looping a persistent ``git`` status/stash/reset failure
-        # through the executor slot instead of waiting for a later safe retry.
-        if reason == "recovering" and not await self._reset_recovering_worktree(workspace_id):
-            await self._restore_paused_resume_claim(
-                workspace_id,
-                reason=reason,
-                reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
-                rearm_recovering_cooldown=True,
-            )
-            return
-        # Hold the work slot across authority-defer retries the same way
-        # ``_safely_execute_claimed`` does, so a brief material lapse cannot
-        # drop capacity and strand the post-claim ``running`` resume.
-        async with self._work_slot_task_scope(workspace_id):
-            while True:
-                try:
-                    if reason == "recovering":
-                        # Resume starts lease-less and reacquires a work slot at
-                        # its first agent/validation hook, FIFO ahead of new
-                        # work (slot-release); this outer scope is the claim's
-                        # capacity fence for the retry loop itself.
-                        await self._executor.resume_recovering_execution(
-                            workspace_id,
-                            execution_owner_id=self._worker_id,
-                            execution_lease_expires_at=self._execution_claim_expires_at(),
-                        )
-                    else:
-                        await self._executor.resume_blocked_execution(
-                            workspace_id,
-                            execution_owner_id=self._worker_id,
-                            execution_lease_expires_at=self._execution_claim_expires_at(),
-                        )
-                    break
-                except WorkspaceAuthorityDeferredError as deferred:
-                    # Scope entry deferred inside grace: keep the post-claim
-                    # ``running`` row and retry instead of restoring the paused
-                    # status (and re-arming recovering cooldown) on a brief lapse.
-                    _log.info(
-                        f"worker.resume_{reason}_authority_deferred",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        reason_code=deferred.reason,
-                    )
-                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                    if claim_lost:
-                        _log.warning(
-                            "worker.execution_claim_fenced",
-                            workspace_id=workspace_id,
-                            worker_id=self._worker_id,
-                            phase=f"resume_{reason}_deferred",
-                            reason_code=EXECUTION_CLAIM_FENCED,
-                        )
-                        return
-                    continue
+        if reason == "recovering":
+            # A stalled-mid-edit worktree is inconsistent; resume from the last
+            # clean commit (stash dirt → reset --hard HEAD) before re-invoking. If
+            # that reset cannot be completed safely (``git status``/``stash``/
+            # ``reset`` failed) the worktree may still hold partial provider edits,
+            # so abort the in-place retry and restore the paused state for a later
+            # safe resume rather than re-running the agent on a contaminated tree.
+            # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
+            # the claim, letting a capable worker re-claim the cooled-down row.
+            # Re-arm the provider cooldown (#647) so the restored row backs off a
+            # full cooldown before it is resumable again: leaving ``not_before`` in
+            # the past would let ``list_resumable_recovering_ids`` re-select it every
+            # poll, busy-looping a persistent ``git`` status/stash/reset failure
+            # through the executor slot instead of waiting for a later safe retry.
+            if not await self._reset_recovering_worktree(workspace_id):
+                await self._restore_paused_resume_claim(
+                    workspace_id,
+                    reason=reason,
+                    reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+                    rearm_recovering_cooldown=True,
+                )
+                return
+            # The resume starts lease-less and reacquires a work slot at its
+            # first agent/validation hook, FIFO ahead of new work (slot-release).
+            async with self._work_slot_task_scope(workspace_id):
+                await self._executor.resume_recovering_execution(
+                    workspace_id,
+                    execution_owner_id=self._worker_id,
+                    execution_lease_expires_at=self._execution_claim_expires_at(),
+                )
+        else:
+            async with self._work_slot_task_scope(workspace_id):
+                await self._executor.resume_blocked_execution(
+                    workspace_id,
+                    execution_owner_id=self._worker_id,
+                    execution_lease_expires_at=self._execution_claim_expires_at(),
+                )
         executor_drove_resume = True
     except asyncio.CancelledError:
         # The resume CAS already committed ``<paused> -> running`` before dispatch.
@@ -657,101 +612,48 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
             )
             return
         self._execution_claim_epochs[workspace_id] = epoch
-        provision_task: asyncio.Task[None] | None = None
-        # Heartbeat fencing must outlive the current provision task: during an
-        # authority-defer sleep the task is already done, so cancelling it is a
-        # no-op. ``read_execution_claim_epoch`` only checks ownership (not lease
-        # expiry), so without this flag a lost heartbeat would let the retry
-        # restart provisioning with no live refresh loop — racing stale-active
-        # recovery on a long attempt.
-        claim_lost = False
-
-        def _cancel_provision() -> None:
-            nonlocal claim_lost
-            claim_lost = True
-            if provision_task is not None and not provision_task.done():
-                provision_task.cancel()
-
+        provision_task = asyncio.create_task(
+            self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
+            name=f"awf-provision-{workspace_id}",
+        )
         # D4: the heartbeat CAS is epoch-gated; if a later claimant fences us it
         # returns False and cancels the in-flight provision before any rmtree.
         heartbeat = asyncio.create_task(
-            self._refresh_execution_claim_loop(workspace_id, on_claim_lost=_cancel_provision),
+            self._refresh_execution_claim_loop(workspace_id, on_claim_lost=provision_task.cancel),
             name=f"awf-provisioning-claim-{workspace_id}",
         )
         try:
-            while True:
-                provision_task = asyncio.create_task(
-                    self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
-                    name=f"awf-provision-{workspace_id}",
-                )
-                try:
-                    await provision_task
-                    break
-                except WorkspaceAuthorityDeferredError as deferred:
-                    # Scope entry deferred inside grace: keep the claim leased
-                    # and retry instead of releasing into stranded ``provisioning``
-                    # (the normal poll only claims ``requested``; stale recovery
-                    # can fail a compose-less row even after credentials recover).
-                    _log.info(
-                        "worker.provision_authority_deferred",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        reason_code=deferred.reason,
-                    )
-                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                    if claim_lost:
-                        _log.warning(
-                            "worker.execution_claim_fenced",
-                            workspace_id=workspace_id,
-                            worker_id=self._worker_id,
-                            phase="provision_deferred",
-                            reason_code=EXECUTION_CLAIM_FENCED,
-                        )
-                        return
-                    epoch = await self._read_execution_claim_epoch(workspace_id)
-                    if epoch is None:
-                        _log.warning(
-                            "worker.execution_claim_fenced",
-                            workspace_id=workspace_id,
-                            worker_id=self._worker_id,
-                            phase="provision_deferred",
-                            reason_code=EXECUTION_CLAIM_FENCED,
-                        )
-                        return
-                    self._execution_claim_epochs[workspace_id] = epoch
-                    continue
-                except asyncio.CancelledError:
-                    # Two cancellations land here: the heartbeat fence (``on_claim_lost``
-                    # cancels ``provision_task``) and an external cancel of *this* task —
-                    # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
-                    # fence is ours to abort quietly; an external cancel must propagate so
-                    # cooperative cancellation is never suppressed (D7's CAS leaves the row
-                    # untouched either way). ``current_task().cancelling()`` is the
-                    # discriminator: cancelling this task increments its own request count
-                    # even though the cancel is delegated to the awaited ``provision_task``,
-                    # whereas a pure heartbeat fence never touches this task's count.
-                    outer = cast("asyncio.Task[None]", asyncio.current_task())
-                    if outer.cancelling() > 0:
-                        raise
-                    # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
-                    # leaves the row untouched (D7 CAS), so just abort this attempt.
-                    _log.warning(
-                        "worker.execution_claim_fenced",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        phase="provision_cancelled",
-                        reason_code=EXECUTION_CLAIM_FENCED,
-                    )
-                    break
-                except Exception:
-                    # Provisioner.provision_claimed() logs the failure and attempts to
-                    # transition to ``failed``; on the fenced path the epoch-CAS in
-                    # _mark_failed updates 0 rows, so the workspace stays in
-                    # ``provisioning`` for the new claimant rather than landing in
-                    # ``failed``. Swallow either way so one bad workspace doesn't abort
-                    # the batch.
-                    _log.exception("worker.provision_failed", workspace_id=workspace_id)
-                    break
+            await provision_task
+        except asyncio.CancelledError:
+            # Two cancellations land here: the heartbeat fence (``on_claim_lost``
+            # cancels ``provision_task``) and an external cancel of *this* task —
+            # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
+            # fence is ours to abort quietly; an external cancel must propagate so
+            # cooperative cancellation is never suppressed (D7's CAS leaves the row
+            # untouched either way). ``current_task().cancelling()`` is the
+            # discriminator: cancelling this task increments its own request count
+            # even though the cancel is delegated to the awaited ``provision_task``,
+            # whereas a pure heartbeat fence never touches this task's count.
+            outer = cast("asyncio.Task[None]", asyncio.current_task())
+            if outer.cancelling() > 0:
+                raise
+            # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
+            # leaves the row untouched (D7 CAS), so just abort this attempt.
+            _log.warning(
+                "worker.execution_claim_fenced",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+                phase="provision_cancelled",
+                reason_code=EXECUTION_CLAIM_FENCED,
+            )
+        except Exception:
+            # Provisioner.provision_claimed() logs the failure and attempts to
+            # transition to ``failed``; on the fenced path the epoch-CAS in
+            # _mark_failed updates 0 rows, so the workspace stays in
+            # ``provisioning`` for the new claimant rather than landing in
+            # ``failed``. Swallow either way so one bad workspace doesn't abort
+            # the batch.
+            _log.exception("worker.provision_failed", workspace_id=workspace_id)
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -804,9 +706,6 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
             execution_owner_id=self._worker_id,
             execution_lease_expires_at=self._execution_claim_expires_at(),
         )
-    except WorkspaceAuthorityDeferredError:
-        # Caller retries while the claim/slot stay held; do not treat as failure.
-        raise
     except Exception:
         # WorkspaceExecutor.execute() owns state transitions, including
         # skip-if-no-longer-ready semantics. The worker must keep polling
@@ -821,19 +720,8 @@ async def _safely_execute_claimed(
     work_slot_lease: WorkSlotLeaseRef | None = None,
 ) -> None:
     """Run executor for a claimed ready workspace while heartbeating the execution claim."""
-    # Heartbeat fencing must outlive the current execute attempt: during an
-    # authority-defer sleep the attempt has already raised, so cancelling an
-    # in-flight task is a no-op. Without this flag a lost heartbeat during the
-    # defer sleep would restart execute with no live refresh loop — racing
-    # stale-active recovery on a long retry.
-    claim_lost = False
-
-    def _mark_claim_lost() -> None:
-        nonlocal claim_lost
-        claim_lost = True
-
     heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=_mark_claim_lost),
+        self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-execution-claim-{workspace_id}",
     )
     try:
@@ -843,30 +731,7 @@ async def _safely_execute_claimed(
         # hook. Either way the scope is released when the workspace first waits
         # (monitor ``release_idle``) or when the task ends.
         async with self._work_slot_task_scope(workspace_id, lease=work_slot_lease):
-            while True:
-                try:
-                    await self._safely_execute(workspace_id)
-                    break
-                except WorkspaceAuthorityDeferredError as deferred:
-                    # Scope entry deferred inside grace: keep the work slot and
-                    # retry instead of logging execute_failed and releasing.
-                    _log.info(
-                        "worker.execute_authority_deferred",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        reason_code=deferred.reason,
-                    )
-                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                    if claim_lost:
-                        _log.warning(
-                            "worker.execution_claim_fenced",
-                            workspace_id=workspace_id,
-                            worker_id=self._worker_id,
-                            phase="execute_deferred",
-                            reason_code=EXECUTION_CLAIM_FENCED,
-                        )
-                        return
-                    continue
+            await self._safely_execute(workspace_id)
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -976,32 +841,10 @@ async def _safely_resume_pr_monitor_legacy(
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
-    claim_lost: Callable[[], bool] | None = None,
 ) -> bool:
     """Resume via ``resume_pr_monitor()`` for protocol-only executor implementations."""
     try:
-        while True:
-            try:
-                await self._executor.resume_pr_monitor(workspace_id)
-                break
-            except WorkspaceAuthorityDeferredError as deferred:
-                _log.info(
-                    "worker.pr_monitor_resume_authority_deferred",
-                    workspace_id=workspace_id,
-                    worker_id=self._worker_id,
-                    reason_code=deferred.reason,
-                )
-                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                if claim_lost is not None and claim_lost():
-                    _log.warning(
-                        "worker.monitor_claim_fenced",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        phase="pr_monitor_resume_deferred",
-                        reason_code=EXECUTION_CLAIM_FENCED,
-                    )
-                    return False
-                continue
+        await self._executor.resume_pr_monitor(workspace_id)
     except asyncio.CancelledError:
         finalized = await self._finish_monitor_recovery_operation_after_cancellation(
             workspace_id,
@@ -1041,7 +884,6 @@ async def _safely_resume_pr_monitor(
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
-    claim_lost: Callable[[], bool] | None = None,
 ) -> bool:
     """Hand off monitor recovery, finalize the remonitor op, then run the monitor loop.
 
@@ -1066,36 +908,12 @@ async def _safely_resume_pr_monitor(
             self,
             workspace_id,
             recovery_operation_id=recovery_operation_id,
-            claim_lost=claim_lost,
         )
     handoff_succeeded = False
     handoff_finalized = False
     verify_start_pending = False
     try:
-        while True:
-            try:
-                handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
-                break
-            except WorkspaceAuthorityDeferredError as deferred:
-                # Scope entry deferred inside grace: keep the remonitor op
-                # running and retry instead of failing MONITOR_RECOVERY_FAILED.
-                _log.info(
-                    "worker.pr_monitor_handoff_authority_deferred",
-                    workspace_id=workspace_id,
-                    worker_id=self._worker_id,
-                    reason_code=deferred.reason,
-                )
-                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                if claim_lost is not None and claim_lost():
-                    _log.warning(
-                        "worker.monitor_claim_fenced",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        phase="pr_monitor_handoff_deferred",
-                        reason_code=EXECUTION_CLAIM_FENCED,
-                    )
-                    return False
-                continue
+        handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
             (
                 status,
@@ -1199,28 +1017,7 @@ async def _safely_resume_pr_monitor(
             self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             return False
 
-        while True:
-            try:
-                monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
-                break
-            except WorkspaceAuthorityDeferredError as deferred:
-                _log.info(
-                    "worker.pr_monitor_run_authority_deferred",
-                    workspace_id=workspace_id,
-                    worker_id=self._worker_id,
-                    reason_code=deferred.reason,
-                )
-                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                if claim_lost is not None and claim_lost():
-                    _log.warning(
-                        "worker.monitor_claim_fenced",
-                        workspace_id=workspace_id,
-                        worker_id=self._worker_id,
-                        phase="pr_monitor_run_deferred",
-                        reason_code=EXECUTION_CLAIM_FENCED,
-                    )
-                    return False
-                continue
+        monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
         if monitor_started is False:
             # The remonitor bookkeeping op already succeeded at handoff; a
             # post-handoff start recheck bail must not downgrade it.
@@ -1335,12 +1132,7 @@ async def _safely_resume_pr_monitor(
     return True
 
 
-async def _refresh_monitoring_pr_claim_loop(
-    self: Any,
-    workspace_id: str,
-    *,
-    on_claim_lost: Callable[[], object] | None = None,
-) -> None:
+async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> None:
     interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))
     while True:
         await asyncio.sleep(interval)
@@ -1352,8 +1144,6 @@ async def _refresh_monitoring_pr_claim_loop(
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
-            if on_claim_lost is not None:
-                on_claim_lost()
             return
         if not refreshed:
             _log.warning(
@@ -1361,8 +1151,6 @@ async def _refresh_monitoring_pr_claim_loop(
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
-            if on_claim_lost is not None:
-                on_claim_lost()
             return
 
 
@@ -1399,8 +1187,7 @@ async def _refresh_execution_claim_loop(
             # ``_list_stale_active_execution_candidates``) and cleans up and
             # fails the interrupted attempt for retry-policy/operator retry —
             # the same recovery contract as any other interrupted active work.
-            # Execute/resume pass ``on_claim_lost`` so authority-defer retries
-            # abort once the heartbeat dies instead of restarting unfenced.
+            # The executor path passes no callback.
             if on_claim_lost is not None:
                 on_claim_lost()
             return
@@ -1412,7 +1199,7 @@ async def _refresh_execution_claim_loop(
             )
             # D4: on the provisioning path this cancels the in-flight provision
             # task so a fenced worker stops before any destructive filesystem op.
-            # Execute/resume use the same callback to abort defer retries.
+            # The executor path passes no callback, preserving its behavior.
             if on_claim_lost is not None:
                 on_claim_lost()
             return
