@@ -178,5 +178,9 @@ async def settle_hosted_stop_activity(
             payload={
                 "operation_ids": [op.id for op in operations],
                 "validation_run_ids": [run.id for run in validations],
+                # Keep settlement audit aligned with operation.error_message so
+                # HOSTED_AUTHORITY_UNAVAILABLE exhaustion is not mistaken for an
+                # explicit consumer-authority denial in history.
+                "error_message": error_message,
             },
         )

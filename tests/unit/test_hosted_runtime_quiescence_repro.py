@@ -237,6 +237,7 @@ async def test_hosted_stop_settles_monitor_operation_and_validation(authority, s
         assert events[0].payload == {
             "operation_ids": [monitor.id],
             "validation_run_ids": ["validation-hosted-stop"],
+            "error_message": "Hosted execution was stopped by its consumer authority boundary.",
         }
         assert await leftovers(session) == []
 
@@ -292,6 +293,12 @@ async def test_hosted_authority_unavailable_settles_operations_with_exhaustion_m
         )
         assert len(events) == 1
         assert events[0].reason_code == "HOSTED_AUTHORITY_UNAVAILABLE"
+        assert events[0].payload == {
+            "operation_ids": [monitor.id],
+            "validation_run_ids": ["validation-hosted-unavailable"],
+            "error_message": exhaustion,
+        }
+        assert "consumer authority boundary" not in events[0].payload["error_message"]
 
 
 async def test_hosted_stop_without_activity_writes_no_settlement_event(authority, stop_worker):
