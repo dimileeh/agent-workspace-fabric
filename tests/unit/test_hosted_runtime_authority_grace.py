@@ -509,6 +509,33 @@ async def test_nested_same_workspace_scope_opt_out_raises_deferred(tmp_path, mon
     scope.stop_workspace.assert_not_awaited()
 
 
+async def test_nested_same_workspace_scope_grace_zero_raises_without_waiting(tmp_path, monkeypatch):
+    """Nested re-entry with grace 0 must fail the lapse immediately (no sleep)."""
+    scope, authority = _mock_consumers(tmp_path, grace=0)
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        # Only the nested re-check lapses; outer entry/finalize stay healthy.
+        if calls["n"] == 2:
+            raise MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        return material
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    async with scope.scope("ws_exact"):
+        with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+            async with scope.scope("ws_exact"):
+                pytest.fail("grace 0 nested lapse must not enter")
+    assert slept == []
+    assert calls["n"] >= 2
+
+
 async def test_scope_entry_publication_exhausted_stops_unavailable(tmp_path, monkeypatch):
     """Repeated publication lapses past grace must stop with HOSTED_AUTHORITY_UNAVAILABLE."""
     scope, authority = _mock_consumers(tmp_path, grace=1)

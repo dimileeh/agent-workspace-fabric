@@ -180,9 +180,10 @@ class WorkspaceConsumers:
     ) -> T:
         """Wait out a grace-eligible lapse/transient, or raise after exhaustion.
 
-        Used by command prepare (``environment``) and stack-prepare callbacks
-        (``profile_mounts`` / ``resource_limits``). Poll-inline recovery opts
-        out via ``without_authority_grace_wait`` and gets
+        Used by nested same-workspace ``_scope`` re-entry, command prepare
+        (``environment``), and stack-prepare callbacks (``profile_mounts`` /
+        ``resource_limits``). Poll-inline recovery opts out via
+        ``without_authority_grace_wait`` and gets
         ``WorkspaceAuthorityDeferredError`` instead of sleeping.
         """
         while True:
