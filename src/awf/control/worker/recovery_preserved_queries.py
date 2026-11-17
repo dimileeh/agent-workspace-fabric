@@ -68,6 +68,7 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.hosted_node.identity import WorkspaceAuthorityDeferredError
 from awf.runtime.worktree_writer_lock import (
     exclusive_worktree_writer_lock,
     git_args_mutate_worktree,
@@ -568,6 +569,11 @@ async def _resolve_preserved_active_branch_open_pr(
             branch_name=lookup_branch,
             base_branch=base_branch,
         )
+    except WorkspaceAuthorityDeferredError:
+        # Poll-inline grace opt-out (or under-lock defer) during command prepare
+        # must reach recovery_preserved_flow's DeferredError handler so the
+        # candidate stays preserved for a later stale scan — not a failed lookup.
+        raise
     except Exception as exc:
         _log.warning(
             "worker.preserved_active_open_pr_lookup_failed",

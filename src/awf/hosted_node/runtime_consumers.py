@@ -452,21 +452,20 @@ class WorkspaceConsumers:
         # same grace window used by the watcher/sweep until material is
         # current again, the window is exhausted, or an explicit denial lands.
         # Never return values from a lapsed or failed check.
-        # GitManager may call this via git_environment while the shared per-repo
-        # mirror lock is held: never sleep in that path — wait outside the lock
-        # (see holding_mirror_lock) so one lapse cannot stall peer workspaces.
+        # Two callers must not sleep here: GitManager under the shared per-repo
+        # mirror lock (see holding_mirror_lock), and poll-inline preserved
+        # recovery via without_authority_grace_wait — both raise DeferredError
+        # so the shared worker poll / peer workspaces are not stalled.
         while True:
             try:
                 material = await self.authority.workspace(workspace_id)
             except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                 action = self._classify_authority_failure(workspace_id, error)
                 if action == "defer":
-                    if holding_shared_mirror_lock.get():
-                        # Never sleep under the shared mirror lock. Convert to the
-                        # same defer signal so callers release the lock and retry
-                        # outside it (scope entry / environment wait then covers
-                        # the grace window). Re-raising the raw lapse/transient
-                        # would reach terminal failure handlers.
+                    if holding_shared_mirror_lock.get() or skip_authority_grace_wait.get():
+                        # Convert to the same defer signal so callers unlock /
+                        # requeue instead of sleeping. Re-raising the raw
+                        # lapse/transient would reach terminal failure handlers.
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue

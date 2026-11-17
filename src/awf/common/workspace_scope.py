@@ -8,10 +8,10 @@ from typing import Any, cast
 
 WorkspaceScope = Callable[[str], AbstractAsyncContextManager[None]]
 
-# When true, hosted ``_scope`` raises ``WorkspaceAuthorityDeferredError`` on a
-# grace-eligible entry failure instead of waiting inside the scope. Only the
-# worker poll-inline preserved-recovery path sets this — blocking the poll on a
-# full grace wait would stall every other workspace.
+# When true, hosted ``_scope`` and ``environment()`` raise
+# ``WorkspaceAuthorityDeferredError`` on a grace-eligible failure instead of
+# waiting. Only the worker poll-inline preserved-recovery path sets this —
+# blocking the poll on a full grace wait would stall every other workspace.
 skip_authority_grace_wait: ContextVar[bool] = ContextVar(
     "awf_skip_authority_grace_wait",
     default=False,
@@ -20,7 +20,7 @@ skip_authority_grace_wait: ContextVar[bool] = ContextVar(
 
 @contextmanager
 def without_authority_grace_wait() -> Iterator[None]:
-    """Opt out of hosted scope-entry grace waits for the current context."""
+    """Opt out of hosted scope-entry and command-prepare grace waits."""
     token = skip_authority_grace_wait.set(True)
     try:
         yield
