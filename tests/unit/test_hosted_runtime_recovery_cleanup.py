@@ -798,6 +798,136 @@ async def test_retry_marker_enospc_on_rewrite_reuses_renamed_publication(authori
     assert not marker.exists()
 
 
+async def test_remove_view_unlink_failure_still_fences_retained_refresh(authority, monkeypatch):
+    """Credential unlink failure during cleanup must not strand an ownerless publication.
+
+    A retained refresh can fail on fsync/replace and then raise again while
+    ``_remove_view`` deletes credentials. Dropping ownership before a retry fence
+    leaves the live publication token on disk; later reconcile refreshes an
+    ownerless view (returns None) and clears grace without restoring materials.
+    Still convert publication→retry when unlink fails so reconcile can republish.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_unlink = os.unlink
+    credential_unlinks = 0
+    fail_cleanup_unlinks = False
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic retained refresh fsync failure")
+        return replace_file(source, destination, **kwargs)
+
+    def fail_second_credential_unlink(name, *args, **kwargs):
+        nonlocal credential_unlinks
+        if (
+            fail_cleanup_unlinks
+            and isinstance(name, str)
+            and name in {"openai.api-key", "anthropic.api-key", "github.api-key"}
+            and kwargs.get("dir_fd") is not None
+        ):
+            credential_unlinks += 1
+            if credential_unlinks >= 2:
+                raise OSError("synthetic cleanup unlink failure")
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    monkeypatch.setattr(os, "unlink", fail_second_credential_unlink)
+    fail_cleanup_unlinks = True
+    with pytest.raises(OSError, match="synthetic retained refresh fsync failure"):
+        await runtime.workspace("ws_cloud_stable")
+    fail_cleanup_unlinks = False
+    assert path.is_dir()
+    assert path.stat().st_ino == inode
+    assert not (path.parent / "publication").exists()
+    marker = path.parent / "publication.retry"
+    assert marker.exists(), "remove_view failure must still leave a retry fence"
+    assert await runtime.publication("ws_cloud_stable") is None
+    assert runtime.views.publication_retry("ws_cloud_stable") == marker.read_text(encoding="ascii")
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert path.stat().st_ino == inode
+    assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+    assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+    assert (path.parent / "publication").exists()
+    assert not marker.exists()
+
+
+async def test_remove_view_and_retry_fence_failure_preserves_ownership(authority, monkeypatch):
+    """When unlink and retry fencing both fail, keep ownership of the live token.
+
+    Without a retry marker or live ownership, publication() returns an ownerless
+    view and every subsequent refresh fails the owner fence, so credentials that
+    were deleted before the unlink error never come back.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_unlink = os.unlink
+    real_retry = runtime.views._retry_marker
+    credential_unlinks = 0
+    fail_cleanup_unlinks = False
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic retained refresh fsync failure")
+        return replace_file(source, destination, **kwargs)
+
+    def fail_second_credential_unlink(name, *args, **kwargs):
+        nonlocal credential_unlinks
+        if (
+            fail_cleanup_unlinks
+            and isinstance(name, str)
+            and name in {"openai.api-key", "anthropic.api-key", "github.api-key"}
+            and kwargs.get("dir_fd") is not None
+        ):
+            credential_unlinks += 1
+            if credential_unlinks >= 2:
+                raise OSError("synthetic cleanup unlink failure")
+        return real_unlink(name, *args, **kwargs)
+
+    def fail_retry_fence(parent, *, present=None):
+        if present is True:
+            raise OSError("synthetic retry fence failure")
+        return real_retry(parent, present=present)
+
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        assert ownership.publication is not None
+
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        monkeypatch.setattr(os, "unlink", fail_second_credential_unlink)
+        monkeypatch.setattr(runtime.views, "_retry_marker", fail_retry_fence)
+        fail_cleanup_unlinks = True
+        with pytest.raises(OSError, match="synthetic retained refresh fsync failure"):
+            await runtime.workspace("ws_cloud_stable")
+        fail_cleanup_unlinks = False
+        assert path.is_dir()
+        assert path.stat().st_ino == inode
+        assert (path.parent / "publication").exists()
+        assert not (path.parent / "publication.retry").exists()
+        assert ownership.publication is not None
+        assert runtime.views._owners.get("ws_cloud_stable") is ownership
+        assert await runtime.publication("ws_cloud_stable") is ownership.publication
+
+        monkeypatch.setattr(os, "replace", replace_file)
+        monkeypatch.setattr(os, "unlink", real_unlink)
+        monkeypatch.setattr(runtime.views, "_retry_marker", real_retry)
+        await runtime.workspace("ws_cloud_stable")
+        assert path.stat().st_ino == inode
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+        assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+        assert ownership.publication is not None
+        assert (path.parent / "publication").exists()
+
+
 async def test_retained_reconcile_republishes_after_failed_mounted_refresh(authority, monkeypatch):
     """Retained reconcile must restore a warm mount after a fenced refresh failure.
 

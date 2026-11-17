@@ -475,13 +475,24 @@ class RuntimeViews:
                     # and a partial on-disk marker must be adopted or cleared.
                     # Keep the publication inode on retained failures so
                     # _retry_marker can rename it into publication.retry without
-                    # allocating a new file under ENOSPC.
+                    # allocating a new file under ENOSPC. Credential unlink in
+                    # _remove_view can fail for the same storage fault; still
+                    # attempt the retry fence, and if fencing also fails keep
+                    # ownership of the live token so reconcile can refresh
+                    # instead of clearing grace over an ownerless publication.
+                    preserve_ownership = False
                     try:
-                        self._remove_view(
-                            parent,
-                            preserve_directory=not new,
-                            keep_publication=not new,
-                        )
+                        remove_error: BaseException | None = None
+                        try:
+                            self._remove_view(
+                                parent,
+                                preserve_directory=not new,
+                                keep_publication=not new,
+                            )
+                        except BaseException as cleanup:
+                            if new:
+                                raise
+                            remove_error = cleanup
                         if not new:
                             try:
                                 ownership.retry = self._retry_marker(parent, present=True)
@@ -491,15 +502,19 @@ class RuntimeViews:
                                 except BaseException:
                                     with suppress(BaseException):
                                         self._retry_marker(parent, present=False)
-                                    with suppress(BaseException):
-                                        os.unlink(_PUBLICATION, dir_fd=parent)
+                                    if remove_error is None:
+                                        with suppress(BaseException):
+                                            os.unlink(_PUBLICATION, dir_fd=parent)
                                     ownership.retry = None
+                            if remove_error is not None and ownership.retry is None:
+                                preserve_ownership = True
                         else:
                             ownership.retry = None
                     finally:
-                        self._owners.pop(workspace_id, None)
-                        if ownership.publication is result:
-                            ownership.publication = None
+                        if not preserve_ownership:
+                            self._owners.pop(workspace_id, None)
+                            if ownership.publication is result:
+                                ownership.publication = None
                     failure = error
             finally:
                 os.close(directory)
