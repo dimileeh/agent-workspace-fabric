@@ -161,6 +161,12 @@ class WorkspaceAuthority:
                 )
             )
 
+    async def owns(self, workspace_id: str) -> bool:
+        """True when the workspace row is still bound to this node identity."""
+        async with self.receiver.factory() as session:
+            row = await session.get(Workspace, workspace_id, options=[raiseload("*")])
+            return row is not None and row.node_id == self.receiver.identity.owner
+
     async def reconcile_workspace(self, workspace_id: str) -> bool:
         publication = await self.publication(workspace_id)
         async with self.receiver.factory() as session:

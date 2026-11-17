@@ -127,10 +127,9 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
 
     When ``resource_limits()`` exhausts grace and Compose teardown fails, the
     scope finalizer can still see healthy ``workspace()`` material and skip
-    another stop. Without queueing ``_pending_stops`` /
-    ``_retained_stop_failures`` before the attempt, the next sweep reconciles
-    the (possibly already retracted) publication as owned and returns success
-    with no further teardown — leaving the stack running
+    another stop. ``_stop`` records ``_pending_stops`` and the failure lands in
+    ``_retained_stop_failures`` so the next sweep retries teardown with the
+    original reason instead of reconciling a healthy publication
     (PRRT_kwDOSJAM6s64iiNm).
     """
     scope, authority = _mock_consumers(tmp_path, grace=1)
@@ -152,6 +151,7 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     authority.resource_limits = AsyncMock(side_effect=resource_limits)
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.owns = AsyncMock(return_value=True)
     authority.reconcile_workspace = AsyncMock(return_value=True)
     authority.retract = AsyncMock()
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
@@ -170,17 +170,19 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     scope.stop_workspace.assert_awaited_once()
     assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
     assert "1" in scope.stop_workspace.await_args.kwargs["message"]
+    authority.reconcile_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._retained_stop_failures
     assert "ws_exact" not in scope._pending_stops
 
 
 async def test_pending_stop_retries_through_reconcile_transient_without_grace(tmp_path):
-    """Pending teardown must not open reconcile grace over recorded stop metadata.
+    """Pending teardown must skip reconcile and keep the original stop reason.
 
-    An in-scope explicit denial queues ``_pending_stops`` then Compose teardown
-    fails. A transient on the next retained reconcile must retry that stop with
-    the original reason/message — not ``continue`` into a fresh 600s window that
-    later exhausts as ``HOSTED_AUTHORITY_UNAVAILABLE`` (PRRT_kwDOSJAM6s64i_dw).
+    An in-scope explicit denial records ``_pending_stops`` then Compose teardown
+    fails. The next sweep must retry that stop via ``owns`` with the original
+    reason/message — not reconcile (which could ``continue`` into a fresh 600s
+    window and later replace the reason with ``HOSTED_AUTHORITY_UNAVAILABLE``)
+    (PRRT_kwDOSJAM6s64i_dw).
     """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     authority.resource_limits = AsyncMock(
@@ -188,6 +190,7 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
     )
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=[])
+    authority.owns = AsyncMock(return_value=True)
     authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
     authority.retract = AsyncMock()
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
@@ -203,12 +206,14 @@ async def test_pending_stop_retries_through_reconcile_transient_without_grace(tm
     scope.stop_workspace = AsyncMock(side_effect=OSError("synthetic docker teardown failure"))
     assert not await scope.admission_check()
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    authority.reconcile_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._authority_grace
     assert scope._pending_stops["ws_exact"] == (None, None)
 
     scope.stop_workspace = AsyncMock()
     assert await scope.admission_check()
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    authority.reconcile_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._retained_stop_failures
     assert "ws_exact" not in scope._pending_stops
     assert "ws_exact" not in scope._authority_grace

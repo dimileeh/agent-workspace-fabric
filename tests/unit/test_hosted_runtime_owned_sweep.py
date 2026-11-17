@@ -414,10 +414,10 @@ async def test_closed_admission_retract_failure_does_not_stop_owned_workspace_af
 
     While admission is closed the sweep only retires previous-boot views. Those
     failures share ``_retained_stop_failures`` so the next open poll retries them,
-    but they must not enter ``_pending_stops`` (that set is only for classified
-    teardown retries whose ``_stop`` was queued or raised). A still-owned
-    reconcile success must clear the pending retract — never call ``_stop`` on
-    healthy retained work that was never meant to tear down.
+    but they must not enter ``_pending_stops`` (that map is only for authority-lost
+    ``_stop`` decisions). A still-owned reconcile success must clear the pending
+    retract — never call ``_stop`` on healthy retained work that was never meant
+    to tear down.
     """
     from tests.unit.test_hosted_runtime_authority_grace_parts.helpers import (
         _mock_consumers,
@@ -458,11 +458,7 @@ async def test_pending_cleanup_retry_is_bounded_without_starving_current_rows(
     healthy = await retained(runtime, value, factory, "ws_healthy", other=True)
     scope = WorkspaceConsumers(runtime, tmp_path)
     scope.stop_workspace = AsyncMock()
-    from awf.hosted_node.runtime_consumers import _RetainedStop
-
-    scope._retained_stop_failures = {
-        f"ws_deleted_{index:03}": _RetainedStop() for index in range(65)
-    }
+    scope._retained_stop_failures = {f"ws_deleted_{index:03}" for index in range(65)}
     reconcile = runtime.reconcile_workspace
     checked = []
 
