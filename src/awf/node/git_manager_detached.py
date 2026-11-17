@@ -127,8 +127,7 @@ async def add_detached_worktree_at_commit(
 
     trusted_env = git_env_for_trusted_base_materialization(manager._effective_env())
 
-    lock = manager._lock_for_mirror(mirror_path)
-    async with lock:
+    async with manager._holding_mirror_lock(mirror_path):
         try:
             await manager._run(
                 _trusted_git_args(

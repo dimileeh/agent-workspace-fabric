@@ -768,3 +768,59 @@ async def test_run_grace_zero_raises_lapse_immediately(tmp_path):
             with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
                 await HostedCommandRunner(scope, delegate).run(["git", "status"])
     assert not delegate.calls
+
+
+async def test_environment_does_not_sleep_under_shared_mirror_lock(tmp_path, monkeypatch):
+    """Grace waits must not run while GitManager holds the shared mirror lock."""
+    from awf.node.git_manager import holding_shared_mirror_lock
+
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    material = authority.workspace.return_value
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    slept: list[float] = []
+
+    async def workspace(_workspace_id: str):
+        if holding_shared_mirror_lock.get():
+            raise lapse
+        return material
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    async with scope.scope("ws_exact"):
+        token = holding_shared_mirror_lock.set(True)
+        try:
+            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+                await scope.environment()
+        finally:
+            holding_shared_mirror_lock.reset(token)
+    assert slept == []
+
+
+async def test_git_environment_waits_outside_shared_mirror_lock(tmp_path):
+    """Outside the lock, git_environment still waits out a brief lapse."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    entry = authority.workspace.return_value
+    renewed = AuthorizedMaterials(
+        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return entry
+        if calls["n"] == 2:
+            raise lapse
+        return renewed
+
+    authority.workspace.side_effect = workspace
+    async with scope.scope("ws_exact"):
+        env = await scope.git_environment()
+    assert env["GH_TOKEN"] == "renewed"
+    assert "ws_exact" not in scope._authority_grace

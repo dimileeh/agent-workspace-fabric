@@ -34,6 +34,7 @@ from awf.hosted_node.identity import (
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.hosted_node.runtime_views import owned_publication, track_publications
+from awf.node.git_manager import holding_shared_mirror_lock
 from awf.runtime.inspection import inspection_environment
 from awf.service.logs import _stream_redaction_flushable_length
 
@@ -416,12 +417,17 @@ class WorkspaceConsumers:
         # same grace window used by the watcher/sweep until material is
         # current again, the window is exhausted, or an explicit denial lands.
         # Never return values from a lapsed or failed check.
+        # GitManager may call this via git_environment while the shared per-repo
+        # mirror lock is held: never sleep in that path — wait outside the lock
+        # (see holding_mirror_lock) so one lapse cannot stall peer workspaces.
         while True:
             try:
                 material = await self.authority.workspace(workspace_id)
             except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                 action = self._classify_authority_failure(workspace_id, error)
                 if action == "defer":
+                    if holding_shared_mirror_lock.get():
+                        raise
                     await asyncio.sleep(self.poll_seconds)
                     continue
                 raise
