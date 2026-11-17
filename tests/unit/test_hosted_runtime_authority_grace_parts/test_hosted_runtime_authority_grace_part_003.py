@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from awf.hosted_node.identity import (
     MaterialDeniedError,
     MaterialLapsedError,
+    WorkspaceScopeDeniedError,
 )
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_authority import bound_workspace as bound_workspace
@@ -172,6 +173,67 @@ async def test_in_scope_failed_stop_queues_retained_teardown_retry(tmp_path, mon
     assert "1" in scope.stop_workspace.await_args.kwargs["message"]
     authority.reconcile_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
+
+
+async def test_scope_finalizer_retry_applies_pending_stop_metadata(tmp_path, monkeypatch):
+    """Scope finalizer retry must reuse exhaustion reason from ``_pending_stops``.
+
+    When in-scope ``resource_limits()`` exhausts grace and Compose teardown
+    fails, ``_stop`` records ``HOSTED_AUTHORITY_UNAVAILABLE`` in
+    ``_pending_stops``. If the scope finalizer then discovers an explicit
+    workspace denial, it retries ``_stop`` with no reason/message.
+    ``setdefault`` keeps the pending entry, but the invocation must read that
+    metadata back before ``stop_workspace`` — otherwise a successful retry
+    records ``HOSTED_RUNTIME_STOPPED`` and drops the exhaustion evidence
+    (PRRT_kwDOSJAM6s64kFSk).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    material = authority.workspace.return_value
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    workspace_calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        workspace_calls["n"] += 1
+        if workspace_calls["n"] == 1:
+            return material
+        raise MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+
+    async def resource_limits(_workspace_id: str):
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    stop_kwargs: list[dict[str, object]] = []
+
+    async def stop_workspace(workspace_id: str, **kwargs: object) -> None:
+        stop_kwargs.append(dict(kwargs))
+        if len(stop_kwargs) == 1:
+            raise OSError("synthetic docker teardown failure")
+
+    authority.workspace.side_effect = workspace
+    authority.resource_limits = AsyncMock(side_effect=resource_limits)
+    authority.retract = AsyncMock()
+    scope.stop_workspace = AsyncMock(side_effect=stop_workspace)
+
+    with pytest.raises(WorkspaceScopeDeniedError, match="HOSTED_WORKSPACE_RESERVATION_REQUIRED"):
+        async with scope.scope("ws_exact"):
+            await scope.resource_limits("ws_exact")
+
+    assert len(stop_kwargs) == 2
+    assert stop_kwargs[0]["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in str(stop_kwargs[0].get("message") or "")
+    assert stop_kwargs[1]["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+    assert "1" in str(stop_kwargs[1].get("message") or "")
     assert "ws_exact" not in scope._pending_stops
 
 

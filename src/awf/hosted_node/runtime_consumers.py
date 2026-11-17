@@ -120,8 +120,9 @@ class WorkspaceConsumers:
         self._retry_cursor = ""
         self._retained_stop_failures: set[str] = set()
         # Reason/message for authority-lost teardowns still in flight. ``_stop``
-        # records on entry (keeping an existing entry) and pops after success;
-        # admission retries that decision instead of reconciling.
+        # records on entry (keeping an existing entry), reapplies that pair on
+        # every retry, and pops after success; admission retries that decision
+        # instead of reconciling.
         self._pending_stops: dict[str, tuple[str | None, str | None]] = {}
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
@@ -645,8 +646,9 @@ class WorkspaceConsumers:
             return
         if authority_lost:
             # Stop decision is final: keep the first recorded reason across
-            # sweep retries until teardown succeeds.
+            # every retry (sweep and scope finalizer) until teardown succeeds.
             self._pending_stops.setdefault(workspace_id, (reason_code, message))
+            reason_code, message = self._pending_stops[workspace_id]
         token = self.workspace_id.set(None)
         preserve_directory = False
         try:
