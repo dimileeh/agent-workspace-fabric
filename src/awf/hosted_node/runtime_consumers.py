@@ -147,7 +147,9 @@ class WorkspaceConsumers:
             )
         elapsed = (now - window.started_at).total_seconds()
         if elapsed >= self.authority_grace_seconds:
-            self._authority_grace.pop(workspace_id, None)
+            # Keep the exhausted window until teardown succeeds or a later
+            # successful authority check clears it. Dropping it here lets a
+            # failed stop reopen a full grace period on the next transient.
             _log.info(
                 "hosted_node.authority_grace_exhausted",
                 workspace_id=workspace_id,
@@ -391,6 +393,7 @@ class WorkspaceConsumers:
                         await self.authority.retract(workspace_id, preserve_directory=True)
                 else:
                     await self.authority.retract(workspace_id)
+            self._clear_authority_grace(workspace_id)
         finally:
             self.workspace_id.reset(token)
 

@@ -154,6 +154,48 @@ async def test_sweep_exhausts_grace_and_stops_with_authority_unavailable(
     assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in logs)
 
 
+async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_path, monkeypatch):
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(side_effect=TimeoutError())
+    authority.retract = AsyncMock(side_effect=[OperationalError("db", {}, None), None])
+
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" in scope._authority_grace
+
+    clock["now"] = origin + timedelta(seconds=1)
+    with structlog.testing.capture_logs() as logs:
+        assert not await scope.admission_check()
+    assert "ws_exact" in scope._retained_stop_failures
+    assert "ws_exact" in scope._authority_grace
+    assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in logs)
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+    with structlog.testing.capture_logs() as retry_logs:
+        assert await scope.admission_check()
+    assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._authority_grace
+    assert not any(log["event"] == "hosted_node.authority_grace_started" for log in retry_logs)
+    assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
+    assert scope.stop_workspace.await_count == 2
+    assert all(
+        call.kwargs.get("reason_code") == "HOSTED_AUTHORITY_UNAVAILABLE"
+        for call in scope.stop_workspace.await_args_list
+    )
+
+
 async def test_watcher_lapse_inside_grace_keeps_activity(tmp_path):
     scope, authority = _mock_consumers(tmp_path, grace=600)
     material = authority.workspace.return_value
