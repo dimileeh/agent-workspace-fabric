@@ -923,47 +923,40 @@ async def test_expiry_during_final_association_read_remains_terminal(
     assert await runtime.publication(original["workspace_id"]) is None
 
 
-async def test_revocation_during_final_association_read_remains_terminal(cutover, monkeypatch):
-    """Revocation after publish still retracts the view and stays terminal.
+async def test_revocation_during_publish_remains_terminal(cutover, monkeypatch):
+    """Revocation after the view write still retracts and stays terminal.
 
     Unlike LAPSE, an explicit denial must not preserve the mounted publication.
+    Trigger revoke during publish so production's post-publish status check
+    detects it — not an injected status call after the final association read.
     """
     client, runtime, original, current, _, _, _ = cutover
-    association = runtime.association
-    snapshot_status = runtime._snapshot_status
-    reads = 0
+    original_thread = asyncio.to_thread
+    revoked = False
 
-    async def cross_revoke(*args):
-        nonlocal reads
-        result = await association(*args)
-        reads += 1
-        if reads == 2:
+    async def revoke_after_publish(function, *args, **kwargs):
+        nonlocal revoked
+        result = await original_thread(function, *args, **kwargs)
+        if not revoked and function in {runtime.views.publish, runtime.views.refresh}:
+            revoked = True
             binding = current["agent"]
             response = await client.post(
                 f"{PREFIX}/materials/revoke",
                 json={
                     **binding,
-                    "idempotency_key": "final-association-revoke",
+                    "idempotency_key": "publish-revoke",
                     "fence": binding["fence"] + 1,
                 },
             )
             assert response.status_code == 200
             assert response.json()["status"] == "revoked"
-            # Re-enter the post-publish status path so revocation is classified
-            # the same way as other explicit authority losses after a view write.
-            await snapshot_status(
-                {
-                    name: Binding.model_validate(original["credentials"][name])
-                    for name in ("agent", "github")
-                }
-            )
         return result
 
-    monkeypatch.setattr(runtime, "association", cross_revoke)
+    monkeypatch.setattr(asyncio, "to_thread", revoke_after_publish)
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await runtime.workspace(original["workspace_id"])
     assert await runtime.publication(original["workspace_id"]) is None
-    assert reads == 2
+    assert revoked
 
 
 async def test_absence_witnesses_share_workspace_scope_without_retaining_history(authority):
