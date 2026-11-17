@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.commands import FakeCommandRunner
+from awf.common.workspace_scope import without_authority_grace_wait
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import (
     MaterialDeniedError,
@@ -395,21 +396,85 @@ async def test_watcher_grace_exhaustion_stops_with_authority_unavailable(tmp_pat
     assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
 
 
-async def test_scope_entry_lapse_denies_without_stop_then_renewal_succeeds(tmp_path):
+async def test_scope_entry_waits_out_lapse_then_enters_on_renewal(tmp_path):
+    """Scope entry waits inside grace until material is current; no caller retry."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
     material = authority.workspace.return_value
+    renewed = AuthorizedMaterials(
+        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise lapse
+        return renewed if calls["n"] > 2 else material
+
+    authority.workspace.side_effect = workspace
+    async with scope.scope("ws_exact"):
+        assert scope.workspace_id.get() == "ws_exact"
+        assert calls["n"] >= 2
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_scope_entry_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
+    """Poll-inline recovery opts out of the wait via ContextVar."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
     authority.workspace.side_effect = MaterialLapsedError(
         expires_at=datetime.now(UTC) - timedelta(seconds=1)
     )
-    with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    with (
+        without_authority_grace_wait(),
+        pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"),
+    ):
         async with scope.scope("ws_exact"):
-            pytest.fail("lapsed scope must not start")
+            pytest.fail("opt-out must not wait or enter")
+    assert slept == []
     scope.stop_workspace.assert_not_awaited()
-    authority.workspace.side_effect = None
-    authority.workspace.return_value = material
-    async with scope.scope("ws_exact"):
-        assert scope.workspace_id.get() == "ws_exact"
-    assert "ws_exact" not in scope._authority_grace
+
+
+async def test_scope_entry_cancel_during_grace_wait_is_not_authority_lost(
+    tmp_path, monkeypatch
+) -> None:
+    """Cancel while waiting out a lapse must not stop as authority-lost."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    authority.workspace.side_effect = MaterialLapsedError(
+        expires_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    authority.association = AsyncMock(return_value=(object(), "codex"))
+    authority.materials = AsyncMock(
+        side_effect=MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    )
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async def operation() -> None:
+        async with scope.scope("ws_exact"):
+            pytest.fail("cancelled grace wait must not enter")
+
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
 
 
 @pytest.mark.parametrize(
@@ -421,11 +486,6 @@ async def test_single_transient_then_success_does_not_stop(tmp_path, error, plac
     material = authority.workspace.return_value
     if place == "scope":
         authority.workspace.side_effect = [error, material, material]
-        with pytest.raises(WorkspaceAuthorityDeferredError) as deferred:
-            async with scope.scope("ws_exact"):
-                pytest.fail("transient scope entry must defer")
-        assert deferred.value.cause is error
-        scope.stop_workspace.assert_not_awaited()
         async with scope.scope("ws_exact"):
             pass
         scope.stop_workspace.assert_not_awaited()
@@ -470,12 +530,15 @@ async def test_transient_failures_past_window_stop_unavailable(tmp_path, monkeyp
     monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
 
     if place == "scope":
+
+        async def advance_on_sleep(seconds: float) -> None:
+            clock["now"] = origin + timedelta(seconds=1)
+
         authority.workspace.side_effect = error
-        with pytest.raises(WorkspaceAuthorityDeferredError):
-            async with scope.scope("ws_exact"):
-                pytest.fail("first transient defers")
-        scope.stop_workspace.assert_not_awaited()
-        clock["now"] = origin + timedelta(seconds=1)
+        monkeypatch.setattr(
+            "awf.hosted_node.runtime_consumers.asyncio.sleep",
+            advance_on_sleep,
+        )
         with pytest.raises(type(error)):
             async with scope.scope("ws_exact"):
                 pytest.fail("exhausted must not start")

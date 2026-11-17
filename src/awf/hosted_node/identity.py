@@ -32,11 +32,14 @@ class WorkspaceScopeDeniedError(MaterialDeniedError):
 
 
 class WorkspaceAuthorityDeferredError(Exception):
-    """Scope entry deferred inside authority grace; callers must keep or requeue work.
+    """Grace-eligible authority failure surfaced without waiting (or under a lock).
 
-    Raised when materials are only lapsed or an authority check hits a transient
-    node-local error within ``hosted_authority_grace_seconds``. The workspace is
-    not stopped; the caller must retry without failing or abandoning the attempt.
+    Hosted ``_scope`` normally waits out ``hosted_authority_grace_seconds`` on a
+    lapse/transient at entry. This error is raised instead when the caller opted
+    out of that wait (poll-inline recovery via
+    ``awf.common.workspace_scope.without_authority_grace_wait``) or when
+    ``environment()`` refuses to sleep under the shared mirror lock. The
+    workspace is not stopped; the caller must keep or requeue work.
     """
 
     def __init__(self, cause: BaseException):

@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.workspace_scope import without_authority_grace_wait
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_SUBPHASE,
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
@@ -332,19 +333,23 @@ async def _recover_preserved_active_execution(
     scope = getattr(self, "_workspace_scope", None)
     # Recovery runs in the worker poll, outside provisioner/executor scopes.
     # Resolve with this candidate's authority after releasing the row lock.
+    # Opt out of hosted scope-entry grace waits: blocking the poll on a full
+    # grace window would stall every other workspace. DeferredError keeps the
+    # candidate for a later stale scan instead.
     try:
-        async with scope(workspace_id) if scope is not None else nullcontext():
-            branch_lookup = await self._resolve_preserved_active_branch_open_pr(
-                repo_url=repo_url,
-                branch_name=lookup_branch_name,
-                expected_head_repo_slug=expected_head_repo_slug,
-                # Honor the persisted/resolved forge so a bare-slug Bitbucket workspace
-                # fails fast instead of slipping into the GitHub-only resolver.
-                resolved_forge=resolved_forge,
-                # A preserved branch PR may have been retargeted after creation.
-                # Recover by head branch and let match/ambiguity checks below guard safety.
-                base_branch=None,
-            )
+        with without_authority_grace_wait():
+            async with scope(workspace_id) if scope is not None else nullcontext():
+                branch_lookup = await self._resolve_preserved_active_branch_open_pr(
+                    repo_url=repo_url,
+                    branch_name=lookup_branch_name,
+                    expected_head_repo_slug=expected_head_repo_slug,
+                    # Honor the persisted/resolved forge so a bare-slug Bitbucket workspace
+                    # fails fast instead of slipping into the GitHub-only resolver.
+                    resolved_forge=resolved_forge,
+                    # A preserved branch PR may have been retargeted after creation.
+                    # Recover by head branch and let match/ambiguity checks below guard safety.
+                    base_branch=None,
+                )
     except WorkspaceAuthorityDeferredError as deferred:
         # Scope entry deferred inside grace: keep the preserved candidate for a
         # later stale scan. Returning True stops this cycle from falling through

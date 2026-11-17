@@ -25,6 +25,7 @@ from awf.common.commands import (
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
+from awf.common.workspace_scope import skip_authority_grace_wait
 from awf.hosted_node.identity import (
     MaterialDeniedError,
     MaterialLapsedError,
@@ -210,15 +211,56 @@ class WorkspaceConsumers:
             ownership.publication = await self.authority.publication(workspace_id)
 
         entry = asyncio.create_task(snapshot())
+        waiting_for_grace = False
         try:
             await asyncio.shield(entry)
-            await self.authority.workspace(workspace_id)
-            self._clear_authority_grace(workspace_id)
+            # workspace_consumer enters this scope before the operation body, so
+            # wait here for a brief renewal gap instead of forcing every caller
+            # to retry. Poll-inline recovery opts out via ContextVar.
+            while True:
+                try:
+                    await self.authority.workspace(workspace_id)
+                    self._clear_authority_grace(workspace_id)
+                    break
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                    soft = isinstance(error, MaterialDeniedError) and error.reason in {
+                        "RECOVERY_ATTENTION_REQUIRED",
+                        "NODE_ADMISSION_CLOSED",
+                    }
+                    action: _GraceAction | None = None
+                    if not soft:
+                        action = self._classify_authority_failure(workspace_id, error)
+                        if action == "defer":
+                            if skip_authority_grace_wait.get():
+                                raise WorkspaceAuthorityDeferredError(error) from error
+                            waiting_for_grace = True
+                            await asyncio.sleep(self.poll_seconds)
+                            continue
+                        await self._stop(
+                            workspace_id,
+                            reason_code=(
+                                _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                            ),
+                            message=(
+                                self._authority_unavailable_message()
+                                if action == "stop_exhausted"
+                                else None
+                            ),
+                        )
+                    if isinstance(error, MaterialDeniedError):
+                        raise WorkspaceScopeDeniedError(error.reason, error.status) from error
+                    raise
         except asyncio.CancelledError:
             # Entry can be cancelled before the watcher/finalizer exists. Do
             # not republish while deciding whether the old warm stack may stay.
+            # A cancel during a grace wait must not turn a grace-eligible lapse
+            # into an authority-lost stop.
             cleanup = asyncio.create_task(
-                self._cancelled_start(workspace_id, entry),
+                self._cancelled_start(
+                    workspace_id,
+                    entry,
+                    preserve_on_grace=waiting_for_grace,
+                ),
                 name=f"hosted-initial-retract-{workspace_id}",
             )
             while not cleanup.done():
@@ -227,31 +269,6 @@ class WorkspaceConsumers:
                 except asyncio.CancelledError:
                     continue
             cleanup.result()
-            raise
-        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-            soft = isinstance(error, MaterialDeniedError) and error.reason in {
-                "RECOVERY_ATTENTION_REQUIRED",
-                "NODE_ADMISSION_CLOSED",
-            }
-            action: _GraceAction | None = None
-            if not soft:
-                action = self._classify_authority_failure(workspace_id, error)
-                if action == "defer":
-                    # Distinct from stop-then-deny: the worker must keep or
-                    # requeue a claimed provisioning attempt instead of
-                    # treating this as a terminal provision failure.
-                    raise WorkspaceAuthorityDeferredError(error) from error
-                await self._stop(
-                    workspace_id,
-                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
-                    message=(
-                        self._authority_unavailable_message()
-                        if action == "stop_exhausted"
-                        else None
-                    ),
-                )
-            if isinstance(error, MaterialDeniedError):
-                raise WorkspaceScopeDeniedError(error.reason, error.status) from error
             raise
         token = self.workspace_id.set(workspace_id)
         parent = asyncio.current_task()
@@ -357,17 +374,35 @@ class WorkspaceConsumers:
             if late_cancellation is not None:
                 raise late_cancellation
 
-    async def _cancelled_start(self, workspace_id: str, entry: asyncio.Task[None]) -> None:
+    async def _cancelled_start(
+        self,
+        workspace_id: str,
+        entry: asyncio.Task[None],
+        *,
+        preserve_on_grace: bool = False,
+    ) -> None:
         authorized = False
+        grace_defer = preserve_on_grace
         try:
             await entry
             association, agent = await self.authority.association(workspace_id)
             await self.authority.materials(association, agent, current=True)
             authorized = True
-        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-            pass
+        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+            if not grace_defer:
+                soft = isinstance(error, MaterialDeniedError) and error.reason in {
+                    "RECOVERY_ATTENTION_REQUIRED",
+                    "NODE_ADMISSION_CLOSED",
+                }
+                if not soft:
+                    grace_defer = self._classify_authority_failure(workspace_id, error) == "defer"
         finally:
-            await self._stop(workspace_id, authority_lost=not authorized)
+            # Grace-eligible cancel: retract without treating the lapse as an
+            # authority-lost stop (preserve_on_grace / classifier agree).
+            await self._stop(
+                workspace_id,
+                authority_lost=not authorized and not grace_defer,
+            )
 
     async def _stop(
         self,
@@ -428,10 +463,10 @@ class WorkspaceConsumers:
                 if action == "defer":
                     if holding_shared_mirror_lock.get():
                         # Never sleep under the shared mirror lock. Convert to the
-                        # same defer signal scope entry uses so callers release the
-                        # lock and retry outside it (worker provision/execute loops
-                        # catch WorkspaceAuthorityDeferredError). Re-raising the
-                        # raw lapse/transient would reach terminal failure handlers.
+                        # same defer signal so callers release the lock and retry
+                        # outside it (scope entry / environment wait then covers
+                        # the grace window). Re-raising the raw lapse/transient
+                        # would reach terminal failure handlers.
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue
