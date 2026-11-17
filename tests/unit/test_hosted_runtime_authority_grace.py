@@ -289,6 +289,83 @@ async def test_sweep_clears_grace_after_successful_recheck(tmp_path):
     assert any(log["event"] == "hosted_node.authority_grace_cleared" for log in logs)
 
 
+async def test_retained_reconcile_releases_leftover_workspace_claim(tmp_path, monkeypatch):
+    """Healthy retained reconcile must drop a deferred workspace grace claim.
+
+    An active-scope finalizer that defers on a transient leaves
+    ``failing_operations={"workspace"}``. Successful retained sweeps used to
+    clear only ``reconcile``, so the original deadline survived; a later
+    one-second lapse after that deadline exhausted immediately instead of
+    opening a fresh grace window (PRRT_kwDOSJAM6s64aTnL).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=1))
+    # Scope-exit leftover: workspace claim still open under the shared deadline.
+    assert scope._classify_authority_failure("ws_exact", lapse, operation="workspace") == "defer"
+    assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+    # After a healthy reconcile cleared the leftover claim, a brief new lapse
+    # must start a fresh grace window — not reuse the exhausted deadline.
+    clock["now"] = origin + timedelta(seconds=601)
+    fresh_lapse = MaterialLapsedError(expires_at=clock["now"] - timedelta(seconds=1))
+    authority.reconcile_workspace = AsyncMock(side_effect=fresh_lapse)
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"reconcile"}
+    assert window.started_at == fresh_lapse.expires_at
+
+
+async def test_retained_reconcile_preserves_unrelated_resource_limits_claim(tmp_path, monkeypatch):
+    """Successful reconcile must not clear an open resource_limits grace claim."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=1))
+    assert scope._classify_authority_failure("ws_exact", lapse, operation="workspace") == "defer"
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), operation="resource_limits")
+        == "defer"
+    )
+    assert scope._authority_grace["ws_exact"].failing_operations == {
+        "workspace",
+        "resource_limits",
+    }
+    started_at = scope._authority_grace["ws_exact"].started_at
+
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"resource_limits"}
+    assert window.started_at == started_at
+
+
 async def test_sweep_exhausts_grace_and_stops_with_authority_unavailable(
     authority, tmp_path, monkeypatch
 ):

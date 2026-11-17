@@ -674,7 +674,15 @@ class WorkspaceConsumers:
                                 ),
                             )
                         else:
+                            # Reconcile confirms the same association/materials
+                            # the active-scope watcher/finalizer claim under
+                            # ``workspace``. A deferred scope exit can leave that
+                            # claim open; clearing only ``reconcile`` would keep
+                            # the original deadline so a later brief lapse
+                            # exhausts immediately. Do not clear unrelated
+                            # claims such as ``resource_limits``.
                             self._clear_authority_grace(workspace_id, operation="reconcile")
+                            self._clear_authority_grace(workspace_id, operation="workspace")
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.
