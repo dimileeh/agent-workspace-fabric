@@ -204,6 +204,12 @@ class WorkspaceConsumers:
                 # hit a generic terminal handler inside the active scope; if that
                 # marks the workspace failed first, the scope finalizer's later
                 # HOSTED_AUTHORITY_UNAVAILABLE stop is skipped as already-terminal.
+                # Fence the live outer ownership first: the watcher may still be
+                # polling, and association() does not treat failed as inactive, so
+                # a post-retract workspace() could otherwise republish material.
+                ownership = owned_publication(self.authority.views, workspace_id)
+                if ownership is not None:
+                    ownership.closing = True
                 await self._stop(
                     workspace_id,
                     reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),

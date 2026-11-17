@@ -1256,6 +1256,55 @@ async def test_stack_profile_mounts_exhaustion_stops_unavailable_before_raise(
     assert "1" in scope.stop_workspace.await_args.kwargs["message"]
 
 
+async def test_in_scope_grace_stop_fences_publication_before_teardown(tmp_path, monkeypatch):
+    """Early stop from environment() must set ownership.closing before teardown.
+
+    ``_await_with_authority_grace`` stops while the outer watcher may still be
+    running. association() does not treat failed as inactive, so a later
+    successful watcher workspace() can republish after retract unless closing
+    fences publication first (PRRT_kwDOSJAM6s64W4Hb).
+    """
+    from awf.hosted_node.runtime_views import owned_publication, track_publications
+
+    scope, authority = _mock_consumers(tmp_path, grace=1)
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=2))
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+    closing_at_stop: list[bool] = []
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def workspace(_workspace_id: str):
+        clock["now"] = origin + timedelta(seconds=1)
+        raise lapse
+
+    authority.workspace.side_effect = workspace
+
+    async def stop_workspace(workspace_id: str, **_kwargs: object) -> None:
+        ownership = owned_publication(scope.authority.views, workspace_id)
+        closing_at_stop.append(ownership is not None and ownership.closing)
+
+    scope.stop_workspace = AsyncMock(side_effect=stop_workspace)
+
+    # Active outer ownership without starting the watcher: isolates the fence
+    # that early stop must set before compose teardown / retract.
+    with track_publications(scope.authority.views, "ws_exact"):
+        token = scope.workspace_id.set("ws_exact")
+        try:
+            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+                await scope.environment()
+        finally:
+            scope.workspace_id.reset(token)
+
+    assert closing_at_stop == [True]
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+
 async def test_stack_resource_limits_explicit_denial_stops_before_raise(tmp_path):
     """Non-lapse denials during stack prepare must stop, then re-raise."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
