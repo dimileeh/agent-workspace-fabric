@@ -192,6 +192,12 @@ class WorkspaceAuthority:
             # readable view; never republish or restart an inactive workspace.
             await self.retract(workspace_id)
         elif retract is not None:
+            # Pending leftover cancel cleanup is never republish permission, but
+            # it must not skip live authority: a delivered revocation/mismatch
+            # has to stop immediately instead of waiting out grace on repeated
+            # unlink OSError → HOSTED_AUTHORITY_UNAVAILABLE.
+            association, agent = await self.association(workspace_id)
+            await self.materials(association, agent, current=True, publish_view=False)
             await asyncio.to_thread(self.views.complete_retract, workspace_id, retract)
         else:
             # Checkout can publish before Compose placement. Sweep every owned

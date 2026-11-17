@@ -1427,6 +1427,77 @@ async def test_queued_retract_survives_failed_reconcile_cleanup(authority, tmp_p
     assert not list(path.iterdir())
 
 
+async def test_revoke_during_pending_retract_is_observed_before_unlink_oserror(
+    authority, tmp_path, monkeypatch
+):
+    """Pending retract cleanup must not skip live authority checks.
+
+    While leftover unlink keeps failing, sweep grace would otherwise absorb the
+    OSError and miss a delivered revocation until HOSTED_AUTHORITY_UNAVAILABLE.
+    Reconcile must raise the denial immediately (publish_view=False).
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    replace_file = os.replace
+    real_unlink = os.unlink
+    credential_unlinks = 0
+    fail_cleanup_unlinks = False
+    fail_cancel_unlinks = False
+    fail_reconcile_unlinks = False
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic revoke-retract refresh failure")
+        return replace_file(source, destination, **kwargs)
+
+    def fail_credential_unlink(name, *args, **kwargs):
+        nonlocal credential_unlinks
+        if (
+            (fail_cleanup_unlinks or fail_cancel_unlinks or fail_reconcile_unlinks)
+            and isinstance(name, str)
+            and name in {"openai.api-key", "anthropic.api-key", "github.api-key"}
+            and kwargs.get("dir_fd") is not None
+        ):
+            credential_unlinks += 1
+            if fail_cleanup_unlinks and credential_unlinks >= 2:
+                raise OSError("synthetic cleanup unlink failure")
+            if fail_cancel_unlinks or fail_reconcile_unlinks:
+                raise OSError("synthetic retract unlink failure")
+        return real_unlink(name, *args, **kwargs)
+
+    consumers = WorkspaceConsumers(runtime, tmp_path)
+    consumers.stop_workspace = AsyncMock()
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        monkeypatch.setattr(os, "unlink", fail_credential_unlink)
+        fail_cleanup_unlinks = True
+        with pytest.raises(OSError, match="synthetic revoke-retract refresh failure"):
+            await runtime.workspace("ws_cloud_stable")
+        fail_cleanup_unlinks = False
+        monkeypatch.setattr(os, "replace", replace_file)
+        generation = ownership.retry
+        assert generation is not None
+        credential_unlinks = 0
+        fail_cancel_unlinks = True
+        await consumers._stop("ws_cloud_stable", authority_lost=False)
+        fail_cancel_unlinks = False
+        assert (path.parent / "publication.retract").read_text(encoding="ascii") == generation
+    await deny_agent(runtime, value, "revoke", monkeypatch)
+    fail_reconcile_unlinks = True
+    monkeypatch.setattr(os, "unlink", fail_credential_unlink)
+    try:
+        with pytest.raises(MaterialDeniedError) as denied:
+            await runtime.reconcile_workspace("ws_cloud_stable")
+        assert denied.value.reason != "HOSTED_AUTHORITY_UNAVAILABLE"
+        assert (path.parent / "publication.retract").read_text(encoding="ascii") == generation
+    finally:
+        fail_reconcile_unlinks = False
+        monkeypatch.setattr(os, "unlink", real_unlink)
+
+
 async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):
     """A brand-new view is not bind-mounted yet, so failure may remove it entirely."""
     runtime, _, _ = authority
