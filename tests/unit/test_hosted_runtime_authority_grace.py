@@ -1409,3 +1409,43 @@ async def test_stack_resource_limits_explicit_denial_stops_before_raise(tmp_path
         await scope.resource_limits("ws_exact")
     assert "ws_exact" not in scope._authority_grace
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
+async def test_in_scope_stack_prepare_denial_stops_even_when_workspace_ok(tmp_path):
+    """In-scope stack-prepare denials must stop before the raw error escapes.
+
+    Production ``@workspace_consumer`` enters scope first; ComposeStackLauncher
+    then calls ``resource_limits`` / ``profile_mounts``. A reservation denial
+    does not make the finalizer's ``workspace()`` check fail, so skipping
+    ``_stop`` for in-scope ``stop_denied`` leaves the row stuck (or lets a
+    generic provisioner handler mark failed without HOSTED_RUNTIME_STOPPED).
+    Stop once before re-raising; ownership.stopped keeps the finalizer quiet
+    (PRRT_kwDOSJAM6s64YBYE).
+    """
+    from awf.hosted_node.runtime_views import owned_publication
+
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.resource_limits = AsyncMock(
+        side_effect=MaterialDeniedError("HOSTED_WORKSPACE_RESERVATION_REQUIRED", 503)
+    )
+    stop_order: list[str] = []
+
+    async def stop_workspace(workspace_id: str, **_kwargs: object) -> None:
+        ownership = owned_publication(scope.authority.views, workspace_id)
+        stop_order.append("stop")
+        assert ownership is not None and ownership.closing
+
+    scope.stop_workspace = AsyncMock(side_effect=stop_workspace)
+
+    with pytest.raises(MaterialDeniedError, match="HOSTED_WORKSPACE_RESERVATION_REQUIRED"):
+        async with scope.scope("ws_exact"):
+            stop_order.append("before_limits")
+            try:
+                await scope.resource_limits("ws_exact")
+            except MaterialDeniedError:
+                stop_order.append("after_limits_raise")
+                raise
+
+    assert stop_order == ["before_limits", "stop", "after_limits_raise"]
+    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    assert "ws_exact" not in scope._authority_grace

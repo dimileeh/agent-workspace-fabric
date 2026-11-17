@@ -199,34 +199,30 @@ class WorkspaceConsumers:
                         raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue
-                # Explicit denial inside an active scope: raise only. The scope
-                # finalizer performs the single stop as stop_workspace(id) with
-                # no extra kwargs (same as pre-grace base behaviour).
-                # Outside a scope (stack prepare) stop here so a generic caller
-                # handler cannot swallow the denial. Grace exhaustion always
-                # stops here with HOSTED_AUTHORITY_UNAVAILABLE before the raw
-                # error is exposed — otherwise a generic in-scope handler can
-                # mark the row failed first and the finalizer's classified stop
-                # is skipped as already-terminal. ownership.stopped then makes
-                # the scope finalizer's later _stop a no-op (one stop per
-                # failure). Fence closing first: the watcher may still be
-                # polling, and association() does not treat failed as inactive.
-                in_scope = self.workspace_id.get() is not None
-                if action == "stop_exhausted" or not in_scope:
-                    ownership = owned_publication(self.authority.views, workspace_id)
-                    if ownership is not None:
-                        ownership.closing = True
-                    await self._stop(
-                        workspace_id,
-                        reason_code=(
-                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
-                        ),
-                        message=(
-                            self._authority_unavailable_message()
-                            if action == "stop_exhausted"
-                            else None
-                        ),
-                    )
+                # Stop with the classified reason before exposing the raw error.
+                # Command/stack-prepare run inside ``@workspace_consumer`` after
+                # scope entry, so "in scope" is the production path — not an
+                # out-of-scope edge. A reservation/mount denial may leave
+                # ``workspace()`` healthy, so the scope finalizer would not
+                # stop on its own check. Generic in-scope handlers can also
+                # mark the row failed first and skip a later finalizer stop as
+                # already-terminal (losing HOSTED_RUNTIME_STOPPED /
+                # HOSTED_AUTHORITY_UNAVAILABLE). ownership.stopped then makes
+                # the finalizer's later _stop a no-op (one stop per failure).
+                # Fence closing first: the watcher may still be polling, and
+                # association() does not treat failed as inactive.
+                ownership = owned_publication(self.authority.views, workspace_id)
+                if ownership is not None:
+                    ownership.closing = True
+                await self._stop(
+                    workspace_id,
+                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
+                    message=(
+                        self._authority_unavailable_message()
+                        if action == "stop_exhausted"
+                        else None
+                    ),
+                )
                 raise
             self._clear_authority_grace(workspace_id)
             return result
