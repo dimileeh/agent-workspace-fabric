@@ -32,6 +32,7 @@ from awf.hosted_node.identity import (
     WorkspaceAuthorityDeferredError,
     WorkspaceScopeDeniedError,
 )
+from awf.hosted_node.profile_secrets import HostedProfileSecretError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.hosted_node.runtime_views import owned_publication, track_publications
@@ -283,6 +284,16 @@ class WorkspaceConsumers:
             while True:
                 try:
                     result = await operation()
+                except HostedProfileSecretError:
+                    # Deterministic declaration errors are MaterialDeniedError
+                    # subclasses so the broad catch below would classify them as
+                    # stop_denied and call _stop() first. Production stop records
+                    # infrastructure_failure / HOSTED_RUNTIME_STOPPED, and the
+                    # provisioner's ProfileResolutionError handler cannot restore
+                    # PROTECTED_DECLARATION_* once the row left provisioning.
+                    # Propagate unchanged so that handler keeps the reason.
+                    self._authority_grace.pop(workspace_id, None)
+                    raise
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     action = self._classify_authority_failure(workspace_id, error, checker=checker)
                     if action == "defer":
@@ -687,8 +698,10 @@ class WorkspaceConsumers:
 
         ``ComposeStackLauncher`` invokes this after successful scope entry.
         A renewal gap during stack preparation must not fail provisioning
-        while grace remains; raw authority errors would hit the provisioner's
-        generic failure handler.
+        while grace remains. ``HostedProfileSecretError`` still propagates
+        without an authority-loss stop so the provisioner's profile handler
+        keeps ``PROTECTED_DECLARATION_*``; other authority denials/exhaustion
+        stop first so generic handlers do not lose ``HOSTED_RUNTIME_STOPPED``.
         """
         return await self._await_with_authority_grace(
             workspace_id,

@@ -14,6 +14,13 @@ from awf.hosted_node.identity import (
     MaterialDeniedError,
     MaterialLapsedError,
 )
+from awf.hosted_node.profile_secrets import (
+    PROTECTED_DECLARATION_MISMATCH,
+    PROTECTED_DECLARATION_UNSUPPORTED,
+    HostedProfileSecretError,
+)
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import ProfileResolutionError
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_authority import bound_workspace as bound_workspace
 from tests.unit.test_hosted_runtime_authority_grace_parts.helpers import (
@@ -80,6 +87,51 @@ async def test_stack_resource_limits_explicit_denial_stops_before_raise(tmp_path
         await scope.resource_limits("ws_exact")
     assert "ws_exact" not in scope._authority_grace
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [PROTECTED_DECLARATION_UNSUPPORTED, PROTECTED_DECLARATION_MISMATCH],
+)
+async def test_stack_profile_mounts_profile_resolution_error_does_not_stop(tmp_path, reason: str):
+    """Deterministic profile-secret errors must reach the provisioner handler.
+
+    ``HostedProfileSecretError`` is a ``MaterialDeniedError``, so the grace
+    wrapper used to classify it as ``stop_denied`` and call ``_stop()`` before
+    re-raising. Production ``stop_workspace()`` then records
+    ``infrastructure_failure`` / ``HOSTED_RUNTIME_STOPPED``, and the
+    provisioner's ``ProfileResolutionError`` handler cannot restore
+    ``PROTECTED_DECLARATION_*`` because ``_mark_failed`` skips non-provisioning
+    rows (PRRT_kwDOSJAM6s64m6NJ).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.profile_mounts = AsyncMock(
+        side_effect=HostedProfileSecretError(reason, "local_db_password")
+    )
+    with pytest.raises(HostedProfileSecretError) as caught:
+        await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
+    assert isinstance(caught.value, ProfileResolutionError)
+    assert caught.value.reason == caught.value.reason_code == reason
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()
+
+
+async def test_in_scope_profile_mounts_profile_resolution_error_does_not_stop(tmp_path):
+    """In-scope profile-resolution failures must not record authority-loss stop.
+
+    Scope entry succeeded; ComposeStackLauncher then hits a declaration error.
+    Stopping here would leave the row failed as infrastructure before the
+    provisioner can classify ``profile_resolution_failure``.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    authority.profile_mounts = AsyncMock(
+        side_effect=HostedProfileSecretError(PROTECTED_DECLARATION_UNSUPPORTED, "local_db_password")
+    )
+    with pytest.raises(HostedProfileSecretError) as caught:
+        async with scope.scope("ws_exact"):
+            await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
+    assert caught.value.reason_code == PROTECTED_DECLARATION_UNSUPPORTED
+    scope.stop_workspace.assert_not_awaited()
 
 
 async def test_in_scope_stack_prepare_denial_stops_even_when_workspace_ok(tmp_path):
