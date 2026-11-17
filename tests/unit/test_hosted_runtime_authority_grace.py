@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Self
 from unittest.mock import AsyncMock
@@ -20,9 +21,23 @@ from awf.hosted_node.identity import (
 )
 from awf.hosted_node.runtime_authority import AuthorizedMaterials
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
-from awf.hosted_node.schemas import Binding
+from awf.hosted_node.schemas import Binding, Install
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_review_retained import retained
+
+
+async def _install_replacement_grants(runtime, value) -> None:
+    """Install higher-fence grants so the association's grants are preparation-superseded."""
+    for role, binding in value["hosted"]["credentials"].items():
+        replacement = {
+            **binding,
+            "grant_id": f"{role}-replacement",
+            "idempotency_key": f"{role}-replacement",
+            "fence": binding["fence"] + 1,
+            "material": base64.b64encode(f"replacement-{role}".encode()).decode(),
+        }
+        result = await runtime.receiver.install(Install.model_validate(replacement))
+        assert result.status == "current"
 
 
 def _advance_past_expiry(runtime, value, monkeypatch, *, extra_seconds: float = 1) -> datetime:
@@ -62,6 +77,33 @@ async def test_expired_current_binding_with_healthy_grant_is_lapsed(authority, m
         await runtime.admit(WorkspaceCreateRequest.model_validate(value))
     assert caught.value.status == 503
     assert caught.value.expires_at == expiry
+
+
+async def test_expired_superseded_binding_is_unavailable_not_lapsed(authority, monkeypatch):
+    """A replaced grant must not be classified as a benign lapse when it expires."""
+    runtime, value, _ = authority
+    await _install_replacement_grants(runtime, value)
+    _advance_past_expiry(runtime, value, monkeypatch)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE") as caught:
+        await runtime.admit(WorkspaceCreateRequest.model_validate(value))
+    assert not isinstance(caught.value, MaterialLapsedError)
+
+
+async def test_sweep_stops_expired_superseded_retained_without_grace(
+    authority, tmp_path, monkeypatch
+):
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable", status="monitoring_pr")
+    await _install_replacement_grants(runtime, value)
+    _advance_past_expiry(runtime, value, monkeypatch)
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    scope.authority_grace_seconds = 600
+    scope.stop_workspace = AsyncMock()
+    with structlog.testing.capture_logs() as logs:
+        assert await scope.admission_check()
+    scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+    assert not path.exists()
+    assert not any(log["event"] == "hosted_node.authority_grace_started" for log in logs)
 
 
 @pytest.mark.parametrize("failure", ["revoked", "missing_receipt", "identity_mismatch"])

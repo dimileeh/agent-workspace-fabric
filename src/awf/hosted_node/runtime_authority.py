@@ -330,16 +330,37 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
         return binding
 
+    async def _holds_current_authority(self, binding: Binding) -> bool:
+        """True when this binding's grant is still the preparation's current authority.
+
+        Receiver status reports expiry before preparation-wide supersession, so a
+        lapse/grace decision must re-check grant replacement separately.
+        """
+        async with self.receiver.factory() as session:
+            await self.receiver.authority(session)
+            prep = await self.receiver.preparation(session, binding)
+            assert prep is not None
+            grant = await self.receiver.grant(session, prep, binding)
+            if grant is None or grant.revoked or await self.receiver.superseded(session, grant):
+                return False
+            receipt = await self.receiver.receipt(session, binding)
+            return receipt is not None and grant.current == receipt.id
+
     async def _snapshot_status(self, bindings: dict[str, Binding]) -> datetime:
         lapsed_at: datetime | None = None
         for binding in bindings.values():
             status = await self.receiver.status(binding)
             if status.status == "current":
                 continue
-            if status.status == "expired" and status.reason in {
-                "EXPIRY",
-                "EXPIRY_CLEANUP_PENDING",
-            }:
+            if (
+                status.status == "expired"
+                and status.reason
+                in {
+                    "EXPIRY",
+                    "EXPIRY_CLEANUP_PENDING",
+                }
+                and await self._holds_current_authority(binding)
+            ):
                 lapsed_at = (
                     binding.expires_at if lapsed_at is None else min(lapsed_at, binding.expires_at)
                 )
