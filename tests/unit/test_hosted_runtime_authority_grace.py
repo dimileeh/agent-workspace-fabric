@@ -771,7 +771,12 @@ async def test_run_grace_zero_raises_lapse_immediately(tmp_path):
 
 
 async def test_environment_does_not_sleep_under_shared_mirror_lock(tmp_path, monkeypatch):
-    """Grace waits must not run while GitManager holds the shared mirror lock."""
+    """Grace waits must not run while GitManager holds the shared mirror lock.
+
+    Under the lock, a grace-eligible failure raises WorkspaceAuthorityDeferredError
+    (not the raw lapse) so callers unlock and retry outside it instead of hitting
+    terminal provision/execute failure handlers.
+    """
     from awf.node.git_manager import holding_shared_mirror_lock
 
     scope, authority = _mock_consumers(tmp_path, grace=600)
@@ -793,11 +798,45 @@ async def test_environment_does_not_sleep_under_shared_mirror_lock(tmp_path, mon
     async with scope.scope("ws_exact"):
         token = holding_shared_mirror_lock.set(True)
         try:
-            with pytest.raises(MaterialLapsedError, match="PROTECTED_MATERIAL_LAPSED"):
+            with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
                 await scope.environment()
         finally:
             holding_shared_mirror_lock.reset(token)
     assert slept == []
+
+
+async def test_under_lock_defer_unlocks_and_retries_outside_mirror_lock(tmp_path):
+    """A lapse under the lock must release it and succeed on an outside retry."""
+    from awf.node.git_manager import holding_mirror_lock, holding_shared_mirror_lock
+
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    entry = authority.workspace.return_value
+    renewed = AuthorizedMaterials(
+        {"GH_TOKEN": "renewed", "GITHUB_TOKEN": "renewed", "CODEX_API_KEY": "renewed-agent"},
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    lapse = MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    calls = {"n": 0}
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return entry
+        if holding_shared_mirror_lock.get():
+            raise lapse
+        return renewed
+
+    authority.workspace.side_effect = workspace
+    async with scope.scope("ws_exact"):
+        with pytest.raises(WorkspaceAuthorityDeferredError, match="PROTECTED_MATERIAL_LAPSED"):
+            async with holding_mirror_lock(mirror, command_environment=scope.git_environment):
+                await scope.git_environment()
+        assert holding_shared_mirror_lock.get() is False
+        env = await scope.git_environment()
+    assert env["GH_TOKEN"] == "renewed"
+    assert "ws_exact" not in scope._authority_grace
 
 
 async def test_git_environment_waits_outside_shared_mirror_lock(tmp_path):

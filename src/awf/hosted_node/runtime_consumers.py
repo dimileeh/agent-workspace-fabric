@@ -427,7 +427,12 @@ class WorkspaceConsumers:
                 action = self._classify_authority_failure(workspace_id, error)
                 if action == "defer":
                     if holding_shared_mirror_lock.get():
-                        raise
+                        # Never sleep under the shared mirror lock. Convert to the
+                        # same defer signal scope entry uses so callers release the
+                        # lock and retry outside it (worker provision/execute loops
+                        # catch WorkspaceAuthorityDeferredError). Re-raising the
+                        # raw lapse/transient would reach terminal failure handlers.
+                        raise WorkspaceAuthorityDeferredError(error) from error
                     await asyncio.sleep(self.poll_seconds)
                     continue
                 raise
