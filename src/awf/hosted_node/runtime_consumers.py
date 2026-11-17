@@ -382,6 +382,8 @@ class WorkspaceConsumers:
     ) -> None:
         authorized = False
         grace_defer = preserve_on_grace
+        stop_reason: str | None = None
+        stop_message: str | None = None
         try:
             await entry
             association, agent = await self.authority.association(workspace_id)
@@ -396,13 +398,20 @@ class WorkspaceConsumers:
                 # Always classify the latest cleanup failure. An earlier
                 # grace-wait decision must not override a subsequent denial
                 # or grace exhaustion discovered here.
-                grace_defer = self._classify_authority_failure(workspace_id, error) == "defer"
+                action = self._classify_authority_failure(workspace_id, error)
+                grace_defer = action == "defer"
+                if action == "stop_exhausted":
+                    stop_reason = _AUTHORITY_UNAVAILABLE
+                    stop_message = self._authority_unavailable_message()
         finally:
             # Grace-eligible cancel: retract without treating the lapse as an
             # authority-lost stop (preserve_on_grace / classifier agree).
+            authority_lost = not authorized and not grace_defer
             await self._stop(
                 workspace_id,
-                authority_lost=not authorized and not grace_defer,
+                authority_lost=authority_lost,
+                reason_code=stop_reason if authority_lost else None,
+                message=stop_message if authority_lost else None,
             )
 
     async def _stop(

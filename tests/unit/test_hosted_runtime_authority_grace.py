@@ -478,16 +478,22 @@ async def test_scope_entry_cancel_during_grace_wait_is_not_authority_lost(
 
 
 @pytest.mark.parametrize(
-    "cleanup_error",
+    ("cleanup_error", "expected_kwargs"),
     [
-        MaterialDeniedError("GRANT_REVOKED", 403),
-        MaterialDeniedError("WORKSPACE_BINDING_MISMATCH", 403),
-        MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=700)),
+        (MaterialDeniedError("GRANT_REVOKED", 403), {}),
+        (MaterialDeniedError("WORKSPACE_BINDING_MISMATCH", 403), {}),
+        (
+            MaterialLapsedError(expires_at=datetime.now(UTC) - timedelta(seconds=700)),
+            {
+                "reason_code": "HOSTED_AUTHORITY_UNAVAILABLE",
+                "message": ("Hosted authority could not be confirmed for 600 seconds."),
+            },
+        ),
     ],
     ids=["revoked", "binding_mismatch", "grace_exhausted"],
 )
 async def test_scope_entry_cancel_during_grace_reclassifies_cleanup_denial(
-    tmp_path, monkeypatch, cleanup_error
+    tmp_path, monkeypatch, cleanup_error, expected_kwargs
 ) -> None:
     """Cancel during grace wait must not preserve when cleanup finds a hard denial."""
     scope, authority = _mock_consumers(tmp_path, grace=600)
@@ -515,7 +521,7 @@ async def test_scope_entry_cancel_during_grace_reclassifies_cleanup_denial(
     task.cancel("operator cancel during grace wait")
     with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
         await task
-    scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", **expected_kwargs)
 
 
 @pytest.mark.parametrize(
