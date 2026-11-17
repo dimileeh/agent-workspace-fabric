@@ -429,6 +429,14 @@ async def test_sweep_exhausts_grace_and_stops_with_authority_unavailable(
 
 
 async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_path, monkeypatch):
+    """Teardown retry must not re-exhaust grace; clear after the recorded stop.
+
+    Exhaustion is one-shot via ``_classify_authority_failure``. A failed stop
+    keeps the workspace in ``_pending_stops`` / ``_retained_stop_failures``;
+    the next sweep retries teardown with that metadata and skips reconcile, so
+    retry logs clear the exhausted window instead of emitting
+    ``authority_grace_exhausted`` again (PRRT_kwDOSJAM6s64kckL).
+    """
     scope, authority = _mock_consumers(tmp_path, grace=1)
     origin = datetime.now(UTC)
     clock = {"now": origin}
@@ -462,12 +470,15 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     assert "ws_exact" not in scope._retained_stop_failures
     assert "ws_exact" not in scope._authority_grace
     assert not any(log["event"] == "hosted_node.authority_grace_started" for log in retry_logs)
-    assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
+    assert not any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
+    assert any(log["event"] == "hosted_node.authority_grace_cleared" for log in retry_logs)
     assert scope.stop_workspace.await_count == 2
     assert all(
         call.kwargs.get("reason_code") == "HOSTED_AUTHORITY_UNAVAILABLE"
         for call in scope.stop_workspace.await_args_list
     )
+    # Exhaustion + defer only; pending-stop retry must not re-reconcile.
+    assert authority.reconcile_workspace.await_count == 2
 
 
 async def test_retained_stop_retry_preserves_exhaustion_reason_after_authority_recovers(
