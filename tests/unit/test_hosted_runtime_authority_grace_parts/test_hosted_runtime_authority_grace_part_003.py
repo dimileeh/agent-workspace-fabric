@@ -123,7 +123,11 @@ async def test_in_scope_stack_prepare_denial_stops_even_when_workspace_ok(tmp_pa
 
 
 async def test_rule_success_clears_only_that_checker_window(tmp_path, monkeypatch):
-    """Rule 1: success clears only that checker; no cross-clearing."""
+    """Independent checkers: reconcile success does not clear resource_limits.
+
+    Workspace-authority cohort cross-clear is covered by
+    ``test_workspace_authority_success_clears_cohort_after_deferred_finalizer``.
+    """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     origin = datetime.now(UTC)
     clock = {"now": origin}
@@ -273,6 +277,81 @@ async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(
         scope._classify_authority_failure("ws_exact", transient, checker="watcher")
         == "stop_exhausted"
     )
+
+
+async def test_workspace_authority_success_clears_cohort_after_deferred_finalizer(
+    tmp_path, monkeypatch
+):
+    """Successful authority.workspace() clears all four workspace-checker windows.
+
+    Deferred finalizer exit keeps the watcher window (correct). Hours later a
+    new scope enters successfully; that success must clear the leftover watcher
+    clock (and any nested_entry / command_prepare leftovers) so a one-second
+    watcher lapse starts a fresh window and defers instead of exhausting from
+    the old started_at. profile_mounts / resource_limits / reconcile stay
+    independent.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+    transient = TimeoutError("db timeout")
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def workspace_first(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise transient
+
+    authority.workspace.side_effect = workspace_first
+    async with scope.scope("ws_exact"):
+        pass
+
+    scope.stop_workspace.assert_not_awaited()
+    assert set(scope._authority_grace["ws_exact"]) == {"watcher"}
+    assert scope._authority_grace["ws_exact"]["watcher"].started_at == origin
+
+    clock["now"] = origin + timedelta(seconds=601)
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="nested_entry")
+        == "defer"
+    )
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="command_prepare")
+        == "defer"
+    )
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="reconcile")
+        == "defer"
+    )
+    assert (
+        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="resource_limits")
+        == "defer"
+    )
+    reconcile_started = scope._authority_grace["ws_exact"]["reconcile"].started_at
+    limits_started = scope._authority_grace["ws_exact"]["resource_limits"].started_at
+
+    authority.workspace.side_effect = None
+    authority.workspace.return_value = material
+    async with scope.scope("ws_exact"):
+        assert set(scope._authority_grace["ws_exact"]) == {"reconcile", "resource_limits"}
+        assert scope._authority_grace["ws_exact"]["reconcile"].started_at == reconcile_started
+        assert scope._authority_grace["ws_exact"]["resource_limits"].started_at == limits_started
+
+        clock["now"] = origin + timedelta(seconds=602)
+        assert (
+            scope._classify_authority_failure("ws_exact", transient, checker="watcher") == "defer"
+        )
+        assert scope._authority_grace["ws_exact"]["watcher"].started_at == clock["now"]
+        scope.stop_workspace.assert_not_awaited()
 
 
 async def test_rule_denial_or_completed_stop_clears_every_workspace_window(tmp_path):

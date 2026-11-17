@@ -624,9 +624,10 @@ async def test_environment_cancel_during_transient_keeps_shared_workspace_clock(
 ) -> None:
     """Cancel during command_prepare clears only that window, not watcher.
 
-    Independent checkers: cancelling ``environment()`` releases
-    ``command_prepare`` without touching an open watcher deadline
-    (PRRT_kwDOSJAM6s64a22J under per-checker clocks).
+    Non-success wait exit clears only the wait's checker. Seed the watcher
+    window after a successful scope entry (entry success clears the
+    workspace-authority cohort) so cancel of ``environment()`` cannot reset
+    an open watcher deadline (PRRT_kwDOSJAM6s64a22J).
     """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     scope.poll_seconds = 10.0
@@ -641,28 +642,24 @@ async def test_environment_cancel_during_transient_keeps_shared_workspace_clock(
     monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
     waiting = asyncio.Event()
     material = authority.workspace.return_value
-    calls = {"n": 0}
-
-    async def workspace(_workspace_id: str):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return material
-        raise TimeoutError()
 
     async def block_sleep(seconds: float) -> None:
         waiting.set()
         await asyncio.Event().wait()
 
-    authority.workspace.side_effect = workspace
+    authority.workspace.return_value = material
     monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
 
-    # Seed an independent watcher window that must survive command_prepare cancel.
-    assert (
-        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher") == "defer"
-    )
-    watcher_started = scope._authority_grace["ws_exact"]["watcher"].started_at
-
     async with scope.scope("ws_exact"):
+        # Successful entry cleared the cohort; open a watcher window that cancel
+        # of command_prepare must leave alone.
+        assert (
+            scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher")
+            == "defer"
+        )
+        watcher_started = scope._authority_grace["ws_exact"]["watcher"].started_at
+
+        authority.workspace.side_effect = TimeoutError()
         task = asyncio.create_task(scope.environment())
         await asyncio.wait_for(waiting.wait(), 1)
         assert "command_prepare" in scope._authority_grace["ws_exact"]
@@ -693,8 +690,9 @@ async def test_nested_scope_cancel_during_transient_keeps_shared_workspace_clock
 ) -> None:
     """Cancel during nested_entry clears only that window, not watcher.
 
-    Nested same-workspace re-entry uses ``nested_entry``. Clearing it on cancel
-    must not reset an independent watcher deadline (PRRT_kwDOSJAM6s64a22J).
+    Nested same-workspace re-entry uses ``nested_entry``. Seed watcher after
+    successful outer entry so cancel clears only nested_entry and keeps the
+    watcher deadline (PRRT_kwDOSJAM6s64a22J).
     """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     scope.poll_seconds = 10.0
@@ -709,27 +707,22 @@ async def test_nested_scope_cancel_during_transient_keeps_shared_workspace_clock
     monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
     waiting = asyncio.Event()
     material = authority.workspace.return_value
-    calls = {"n": 0}
-
-    async def workspace(_workspace_id: str):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return material
-        raise TimeoutError()
 
     async def block_sleep(seconds: float) -> None:
         waiting.set()
         await asyncio.Event().wait()
 
-    authority.workspace.side_effect = workspace
+    authority.workspace.return_value = material
     monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
 
-    assert (
-        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher") == "defer"
-    )
-    watcher_started = scope._authority_grace["ws_exact"]["watcher"].started_at
-
     async with scope.scope("ws_exact"):
+        assert (
+            scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher")
+            == "defer"
+        )
+        watcher_started = scope._authority_grace["ws_exact"]["watcher"].started_at
+
+        authority.workspace.side_effect = TimeoutError()
         task = asyncio.create_task(scope._scope("ws_exact").__aenter__())
         await asyncio.wait_for(waiting.wait(), 1)
         assert "nested_entry" in scope._authority_grace["ws_exact"]

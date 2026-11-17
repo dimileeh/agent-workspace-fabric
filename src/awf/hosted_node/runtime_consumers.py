@@ -44,8 +44,9 @@ _log = get_logger(__name__)
 _TIMEOUT_REASONS = (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON)
 _GraceAction = Literal["defer", "stop_exhausted", "stop_denied"]
 _AUTHORITY_UNAVAILABLE = "HOSTED_AUTHORITY_UNAVAILABLE"
-# One independent grace window per (workspace, checker). Do not share or
-# cross-clear deadlines across these names.
+# One independent grace window per (workspace, checker). profile_mounts,
+# resource_limits, and reconcile never cross-clear. The four checkers that
+# call authority.workspace() form a cohort: success in any clears all four.
 _CHECKER_SCOPE_ENTRY = "scope_entry"
 _CHECKER_NESTED_ENTRY = "nested_entry"
 _CHECKER_WATCHER = "watcher"
@@ -53,12 +54,17 @@ _CHECKER_COMMAND_PREPARE = "command_prepare"
 _CHECKER_PROFILE_MOUNTS = "profile_mounts"
 _CHECKER_RESOURCE_LIMITS = "resource_limits"
 _CHECKER_RECONCILE = "reconcile"
-_SCOPE_BOUND_CHECKERS = frozenset(
+_WORKSPACE_AUTHORITY_CHECKERS = frozenset(
     {
         _CHECKER_SCOPE_ENTRY,
         _CHECKER_NESTED_ENTRY,
         _CHECKER_WATCHER,
         _CHECKER_COMMAND_PREPARE,
+    }
+)
+_SCOPE_BOUND_CHECKERS = frozenset(
+    {
+        *_WORKSPACE_AUTHORITY_CHECKERS,
         _CHECKER_PROFILE_MOUNTS,
         _CHECKER_RESOURCE_LIMITS,
     }
@@ -134,7 +140,8 @@ class WorkspaceConsumers:
 
         ``checker=None`` drops all windows (denial / authority-lost stop). A
         named checker clears only that window; other checkers keep their own
-        deadlines.
+        deadlines. Prefer ``_clear_authority_check_success`` after a successful
+        poll so workspace-authority cohort clears stay correct.
         """
         windows = self._authority_grace.get(workspace_id)
         if windows is None:
@@ -162,6 +169,21 @@ class WorkspaceConsumers:
                 reason_code=window.reason_code,
                 expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
             )
+
+    def _clear_authority_check_success(self, workspace_id: str, *, checker: str) -> None:
+        """Clear grace after a successful authority poll for ``checker``.
+
+        The four checkers that call ``authority.workspace()`` share one
+        confirmation of workspace authority: success in any clears all four so
+        a leftover deferred-finalizer watcher clock cannot exhaust on the next
+        brief lapse. ``profile_mounts``, ``resource_limits``, and ``reconcile``
+        stay independent.
+        """
+        if checker in _WORKSPACE_AUTHORITY_CHECKERS:
+            for name in _WORKSPACE_AUTHORITY_CHECKERS:
+                self._clear_authority_grace(workspace_id, checker=name)
+            return
+        self._clear_authority_grace(workspace_id, checker=checker)
 
     def _clear_scope_bound_grace(self, workspace_id: str) -> None:
         """Drop checkers that end when an outer scope exits without a stop."""
@@ -248,11 +270,13 @@ class WorkspaceConsumers:
         ``without_authority_grace_wait`` and gets
         ``WorkspaceAuthorityDeferredError`` instead of sleeping.
 
-        ``checker`` names this wait's independent grace window. Success clears
-        only that window. Cancel and opt-out ``WorkspaceAuthorityDeferredError``
-        exit without success and without a stop, so they clear only this
-        checker's window. Classified stops keep the window for exhaustion /
-        teardown (cleared when the authority-lost stop completes).
+        ``checker`` names this wait's grace window. Success clears via
+        ``_clear_authority_check_success`` (workspace-authority cohort or sole
+        independent checker). Cancel and opt-out
+        ``WorkspaceAuthorityDeferredError`` exit without success and without a
+        stop, so they clear only this checker's window. Classified stops keep
+        the window for exhaustion / teardown (cleared when the authority-lost
+        stop completes).
         """
         holding_claim = False
         try:
@@ -300,7 +324,7 @@ class WorkspaceConsumers:
                         ),
                     )
                     raise
-                self._clear_authority_grace(workspace_id, checker=checker)
+                self._clear_authority_check_success(workspace_id, checker=checker)
                 holding_claim = False
                 return result
         finally:
@@ -365,7 +389,7 @@ class WorkspaceConsumers:
                 try:
                     await asyncio.shield(entry)
                     await self.authority.workspace(workspace_id)
-                    self._clear_authority_grace(workspace_id, checker=_CHECKER_SCOPE_ENTRY)
+                    self._clear_authority_check_success(workspace_id, checker=_CHECKER_SCOPE_ENTRY)
                     break
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     soft = isinstance(error, MaterialDeniedError) and error.reason in {
@@ -439,7 +463,7 @@ class WorkspaceConsumers:
                         pass
                     try:
                         await self.authority.workspace(workspace_id)
-                        self._clear_authority_grace(workspace_id, checker=_CHECKER_WATCHER)
+                        self._clear_authority_check_success(workspace_id, checker=_CHECKER_WATCHER)
                     except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                         action = self._classify_authority_failure(
                             workspace_id, error, checker=_CHECKER_WATCHER
@@ -476,7 +500,7 @@ class WorkspaceConsumers:
                     await watcher
                 try:
                     await self.authority.workspace(workspace_id)
-                    self._clear_authority_grace(workspace_id, checker=_CHECKER_WATCHER)
+                    self._clear_authority_check_success(workspace_id, checker=_CHECKER_WATCHER)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     action = self._classify_authority_failure(
                         workspace_id, error, checker=_CHECKER_WATCHER
