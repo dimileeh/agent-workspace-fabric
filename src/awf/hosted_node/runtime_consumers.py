@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -51,6 +51,10 @@ class _AuthorityGrace:
     started_at: datetime
     reason_code: str
     expires_at: datetime | None = None
+    # Operations still failing under this shared deadline. A successful check
+    # for one operation must not clear the window while another remains open
+    # (e.g. watcher workspace() healthy while resource_limits keeps timing out).
+    failing_operations: set[str] = field(default_factory=set)
 
 
 class _StopWorkspace(Protocol):
@@ -108,10 +112,21 @@ class WorkspaceConsumers:
         if os.environ.get("DOCKER_HOST"):
             self.base_environment["DOCKER_HOST"] = os.environ["DOCKER_HOST"]
 
-    def _clear_authority_grace(self, workspace_id: str) -> None:
-        window = self._authority_grace.pop(workspace_id, None)
+    def _clear_authority_grace(self, workspace_id: str, *, operation: str | None = None) -> None:
+        """Clear grace for one recovered operation, or the whole workspace window.
+
+        ``operation=None`` drops the shared deadline (denial / authority-lost
+        stop). A named operation only releases its claim; the window stays
+        while another operation is still failing under the same deadline.
+        """
+        window = self._authority_grace.get(workspace_id)
         if window is None:
             return
+        if operation is not None:
+            window.failing_operations.discard(operation)
+            if window.failing_operations:
+                return
+        self._authority_grace.pop(workspace_id, None)
         _log.info(
             "hosted_node.authority_grace_cleared",
             workspace_id=workspace_id,
@@ -119,7 +134,9 @@ class WorkspaceConsumers:
             expires_at=None if window.expires_at is None else window.expires_at.isoformat(),
         )
 
-    def _classify_authority_failure(self, workspace_id: str, error: BaseException) -> _GraceAction:
+    def _classify_authority_failure(
+        self, workspace_id: str, error: BaseException, *, operation: str = "workspace"
+    ) -> _GraceAction:
         if isinstance(error, MaterialDeniedError) and not isinstance(error, MaterialLapsedError):
             self._authority_grace.pop(workspace_id, None)
             return "stop_denied"
@@ -139,7 +156,7 @@ class WorkspaceConsumers:
             started_at = now
             if material_expires_at is not None and material_expires_at < started_at:
                 started_at = material_expires_at
-            window = _AuthorityGrace(started_at, reason_code, material_expires_at)
+            window = _AuthorityGrace(started_at, reason_code, material_expires_at, {operation})
             self._authority_grace[workspace_id] = window
             _log.info(
                 "hosted_node.authority_grace_started",
@@ -149,13 +166,15 @@ class WorkspaceConsumers:
                     None if material_expires_at is None else material_expires_at.isoformat()
                 ),
             )
-        elif material_expires_at is not None and material_expires_at < window.started_at:
-            # A later lapse must not keep a transient-started clock when the
-            # material already expired earlier; otherwise failure-type switches
-            # extend the permitted lapse interval.
-            window.started_at = material_expires_at
-            window.expires_at = material_expires_at
-            window.reason_code = reason_code
+        else:
+            window.failing_operations.add(operation)
+            if material_expires_at is not None and material_expires_at < window.started_at:
+                # A later lapse must not keep a transient-started clock when the
+                # material already expired earlier; otherwise failure-type switches
+                # extend the permitted lapse interval.
+                window.started_at = material_expires_at
+                window.expires_at = material_expires_at
+                window.reason_code = reason_code
         elapsed = (now - window.started_at).total_seconds()
         if elapsed >= self.authority_grace_seconds:
             # Keep the exhausted window until teardown succeeds or a later
@@ -176,7 +195,11 @@ class WorkspaceConsumers:
         )
 
     async def _await_with_authority_grace[T](
-        self, workspace_id: str, operation: Callable[[], Awaitable[T]]
+        self,
+        workspace_id: str,
+        operation: Callable[[], Awaitable[T]],
+        *,
+        grace_operation: str = "workspace",
     ) -> T:
         """Wait out a grace-eligible lapse/transient, or raise after exhaustion.
 
@@ -185,12 +208,17 @@ class WorkspaceConsumers:
         ``resource_limits``). Poll-inline recovery opts out via
         ``without_authority_grace_wait`` and gets
         ``WorkspaceAuthorityDeferredError`` instead of sleeping.
+
+        ``grace_operation`` names the check whose recovery clears its claim on
+        the shared workspace deadline without resetting unrelated failures.
         """
         while True:
             try:
                 result = await operation()
             except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                action = self._classify_authority_failure(workspace_id, error)
+                action = self._classify_authority_failure(
+                    workspace_id, error, operation=grace_operation
+                )
                 if action == "defer":
                     if skip_authority_grace_wait.get():
                         # Convert to the same defer signal so callers requeue
@@ -224,7 +252,7 @@ class WorkspaceConsumers:
                     ),
                 )
                 raise
-            self._clear_authority_grace(workspace_id)
+            self._clear_authority_grace(workspace_id, operation=grace_operation)
             return result
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:
@@ -282,7 +310,7 @@ class WorkspaceConsumers:
                 try:
                     await asyncio.shield(entry)
                     await self.authority.workspace(workspace_id)
-                    self._clear_authority_grace(workspace_id)
+                    self._clear_authority_grace(workspace_id, operation="workspace")
                     break
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
                     soft = isinstance(error, MaterialDeniedError) and error.reason in {
@@ -291,7 +319,9 @@ class WorkspaceConsumers:
                     }
                     action: _GraceAction | None = None
                     if not soft:
-                        action = self._classify_authority_failure(workspace_id, error)
+                        action = self._classify_authority_failure(
+                            workspace_id, error, operation="workspace"
+                        )
                         if action == "defer":
                             if skip_authority_grace_wait.get():
                                 raise WorkspaceAuthorityDeferredError(error) from error
@@ -354,9 +384,11 @@ class WorkspaceConsumers:
                         pass
                     try:
                         await self.authority.workspace(workspace_id)
-                        self._clear_authority_grace(workspace_id)
+                        self._clear_authority_grace(workspace_id, operation="workspace")
                     except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                        action = self._classify_authority_failure(workspace_id, error)
+                        action = self._classify_authority_failure(
+                            workspace_id, error, operation="workspace"
+                        )
                         if action == "defer":
                             continue
                         failure = error
@@ -388,9 +420,11 @@ class WorkspaceConsumers:
                     await watcher
                 try:
                     await self.authority.workspace(workspace_id)
-                    self._clear_authority_grace(workspace_id)
+                    self._clear_authority_grace(workspace_id, operation="workspace")
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                    action = self._classify_authority_failure(workspace_id, error)
+                    action = self._classify_authority_failure(
+                        workspace_id, error, operation="workspace"
+                    )
                     if action == "defer":
                         return
                     if failure is None or isinstance(failure, MaterialDeniedError):
@@ -462,7 +496,9 @@ class WorkspaceConsumers:
                 # Always classify the latest cleanup failure. An earlier
                 # grace-wait decision must not override a subsequent denial
                 # or grace exhaustion discovered here.
-                action = self._classify_authority_failure(workspace_id, error)
+                action = self._classify_authority_failure(
+                    workspace_id, error, operation="workspace"
+                )
                 grace_defer = action == "defer"
                 if action == "stop_exhausted":
                     stop_reason = _AUTHORITY_UNAVAILABLE
@@ -543,7 +579,9 @@ class WorkspaceConsumers:
         # would fail the workspace). Poll-inline preserved recovery opts out
         # via without_authority_grace_wait and raises DeferredError instead.
         material = await self._await_with_authority_grace(
-            workspace_id, lambda: self.authority.workspace(workspace_id)
+            workspace_id,
+            lambda: self.authority.workspace(workspace_id),
+            grace_operation="workspace",
         )
         return {**self.base_environment, **material.environment}
 
@@ -558,13 +596,17 @@ class WorkspaceConsumers:
         generic failure handler.
         """
         return await self._await_with_authority_grace(
-            workspace_id, lambda: self.authority.profile_mounts(profile, workspace_id)
+            workspace_id,
+            lambda: self.authority.profile_mounts(profile, workspace_id),
+            grace_operation="profile_mounts",
         )
 
     async def resource_limits(self, workspace_id: str) -> tuple[float, float]:
         """Read reservation limits for stack launch with the same grace wait."""
         return await self._await_with_authority_grace(
-            workspace_id, lambda: self.authority.resource_limits(workspace_id)
+            workspace_id,
+            lambda: self.authority.resource_limits(workspace_id),
+            grace_operation="resource_limits",
         )
 
     async def admission_check(self) -> bool:
@@ -615,7 +657,9 @@ class WorkspaceConsumers:
                             OSError,
                             TimeoutError,
                         ) as error:
-                            action = self._classify_authority_failure(workspace_id, error)
+                            action = self._classify_authority_failure(
+                                workspace_id, error, operation="reconcile"
+                            )
                             if action == "defer":
                                 continue
                             await self._stop(
@@ -630,7 +674,7 @@ class WorkspaceConsumers:
                                 ),
                             )
                         else:
-                            self._clear_authority_grace(workspace_id)
+                            self._clear_authority_grace(workspace_id, operation="reconcile")
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.

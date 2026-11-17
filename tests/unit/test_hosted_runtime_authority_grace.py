@@ -1345,6 +1345,48 @@ async def test_stack_resource_limits_waits_out_authority_lapse(tmp_path):
     scope.stop_workspace.assert_not_awaited()
 
 
+async def test_watcher_workspace_success_does_not_reset_resource_limits_grace(
+    tmp_path, monkeypatch
+):
+    """Healthy material polls must not reset a failing reservation grace window.
+
+    Scope watcher clears grace on successful workspace() checks. When
+    resource_limits() keeps timing out during stack prepare, those clears used
+    to reopen a full allowance on every poll so provisioning never exhausted
+    hosted_authority_grace_seconds (PRRT_kwDOSJAM6s64aCNM).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=3)
+    scope.poll_seconds = 1.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+    limits_calls = {"n": 0}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+
+    async def resource_limits(_workspace_id: str):
+        limits_calls["n"] += 1
+        # Simulate wall time advancing across reservation timeouts while the
+        # watcher keeps confirming healthy material on each poll cycle.
+        clock["now"] = origin + timedelta(seconds=limits_calls["n"])
+        # Same clear the watcher performs after a successful workspace() poll.
+        scope._clear_authority_grace("ws_exact", operation="workspace")
+        raise TimeoutError()
+
+    authority.resource_limits = AsyncMock(side_effect=resource_limits)
+
+    with pytest.raises(TimeoutError):
+        await scope.resource_limits("ws_exact")
+
+    assert limits_calls["n"] >= 3
+    scope.stop_workspace.assert_awaited_once()
+    assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
+
+
 async def test_stack_profile_mounts_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
     """Poll-inline opt-out must not sleep in stack-prepare authority callbacks."""
     from awf.profiles.models import WorkspaceProfile
