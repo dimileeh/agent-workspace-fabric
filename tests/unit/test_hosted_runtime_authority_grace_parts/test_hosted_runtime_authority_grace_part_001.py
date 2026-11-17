@@ -460,6 +460,8 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     with structlog.testing.capture_logs() as logs:
         assert not await scope.admission_check()
     assert "ws_exact" in scope._retained_stop_failures
+    assert "ws_exact" in scope._pending_stops
+    assert scope._pending_stops["ws_exact"][0] == "HOSTED_AUTHORITY_UNAVAILABLE"
     assert "ws_exact" in scope._authority_grace
     assert any(log["event"] == "hosted_node.authority_grace_exhausted" for log in logs)
     scope.stop_workspace.assert_awaited_once()
@@ -468,6 +470,7 @@ async def test_failed_stop_after_grace_exhaustion_does_not_restart_grace(tmp_pat
     with structlog.testing.capture_logs() as retry_logs:
         assert await scope.admission_check()
     assert "ws_exact" not in scope._retained_stop_failures
+    assert "ws_exact" not in scope._pending_stops
     assert "ws_exact" not in scope._authority_grace
     assert not any(log["event"] == "hosted_node.authority_grace_started" for log in retry_logs)
     assert not any(log["event"] == "hosted_node.authority_grace_exhausted" for log in retry_logs)
