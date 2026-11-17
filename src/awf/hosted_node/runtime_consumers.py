@@ -213,10 +213,14 @@ class WorkspaceConsumers:
         the shared workspace deadline without resetting unrelated failures.
 
         Cancel and opt-out ``WorkspaceAuthorityDeferredError`` exit without
-        success and without a stop; release only this operation's claim so a
-        leaked ``profile_mounts`` / ``resource_limits`` entry cannot keep the
-        shared deadline alive until a later brief lapse exhausts immediately.
-        Classified stops keep the window for exhaustion / teardown ownership.
+        success and without a stop. Unique ``profile_mounts`` /
+        ``resource_limits`` claims must be released so they cannot leak past a
+        cancelled wait and exhaust on a later brief lapse. The shared
+        ``workspace`` claim (nested ``_scope`` re-entry / ``environment()``,
+        same name as watcher/sweep) must stay: clearing it lets the next
+        TimeoutError/OSError/SQLAlchemyError reopen a full deadline and extend
+        grace past ``hosted_authority_grace_seconds`` while the warm stack
+        remains. Classified stops keep the window for exhaustion / teardown.
         """
         holding_claim = False
         try:
@@ -274,7 +278,7 @@ class WorkspaceConsumers:
                 holding_claim = False
                 return result
         finally:
-            if holding_claim:
+            if holding_claim and grace_operation in {"profile_mounts", "resource_limits"}:
                 self._clear_authority_grace(workspace_id, operation=grace_operation)
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:

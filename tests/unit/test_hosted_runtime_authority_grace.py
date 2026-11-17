@@ -1595,6 +1595,77 @@ async def test_watcher_workspace_success_does_not_reset_resource_limits_grace(
     assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
 
 
+async def test_environment_cancel_during_transient_keeps_shared_workspace_clock(
+    tmp_path, monkeypatch
+) -> None:
+    """Cancel during command-prepare grace must not reset the shared deadline.
+
+    ``environment()`` and nested ``_scope`` re-entry use ``grace_operation=
+    workspace``, the same claim as the watcher/sweep. Releasing that claim on
+    cancel (unlike unique profile_mounts/resource_limits) lets the next
+    TimeoutError/OSError/SQLAlchemyError open a fresh window and extend grace
+    past ``hosted_authority_grace_seconds`` while the warm stack remains
+    (PRRT_kwDOSJAM6s64a22J).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    waiting = asyncio.Event()
+    material = authority.workspace.return_value
+    calls = {"n": 0}
+
+    async def workspace(_workspace_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return material
+        raise TimeoutError()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    authority.workspace.side_effect = workspace
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+
+    async with scope.scope("ws_exact"):
+        # Cancel only the prepare wait so scope cleanup cannot recreate the
+        # window at the same clock instant and hide the reset.
+        task = asyncio.create_task(scope.environment())
+        await asyncio.wait_for(waiting.wait(), 1)
+        assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+        started_at = scope._authority_grace["ws_exact"].started_at
+        clock["now"] = origin + timedelta(seconds=100)
+        task.cancel("operator cancel during grace wait")
+        with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+            await task
+        assert "ws_exact" in scope._authority_grace
+        assert scope._authority_grace["ws_exact"].started_at == started_at
+        assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+
+        # Continuing transient must reuse the clock, not reopen a full allowance.
+        clock["now"] = origin + timedelta(seconds=300)
+        with structlog.testing.capture_logs() as logs:
+            assert (
+                scope._classify_authority_failure("ws_exact", TimeoutError(), operation="workspace")
+                == "defer"
+            )
+        assert scope._authority_grace["ws_exact"].started_at == started_at
+        assert not any(log["event"] == "hosted_node.authority_grace_started" for log in logs)
+        # Healthy finalize so scope exit does not stop on the open transient.
+        authority.workspace.side_effect = None
+        authority.workspace.return_value = material
+    scope.stop_workspace.assert_not_awaited()
+    assert "ws_exact" not in scope._authority_grace
+
+
 async def test_stack_resource_limits_cancel_releases_claim_so_later_lapse_defers(
     tmp_path, monkeypatch
 ):
