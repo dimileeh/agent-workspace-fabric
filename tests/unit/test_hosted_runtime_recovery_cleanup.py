@@ -452,9 +452,17 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
 
 
 async def test_partial_publication_failure_retracts_only_its_own_view(authority, monkeypatch):
+    """Refresh write failure must clear credentials but keep the mounted inode.
+
+    Docker bind-mounts pin the view directory inode. Destroying that directory on
+    a transient publication OSError leaves the container mounted on an empty
+    orphan while a later publish creates a different inode. Preserve the existing
+    directory through failure cleanup so recovery can rewrite the same mount.
+    """
     runtime, value, factory = authority
     path = await retained(runtime, value, factory, "ws_cloud_stable")
     other = await retained(runtime, value, factory, "ws_other", other=True)
+    inode = path.stat().st_ino
     replace_file = os.replace
 
     def fail_second_file(source, destination, **kwargs):
@@ -468,8 +476,39 @@ async def test_partial_publication_failure_retracts_only_its_own_view(authority,
             "ws_cloud_stable",
             {"openai.api-key": b"synthetic-next", "github.api-key": b"synthetic-gh-next"},
         )
-    assert not path.parent.exists()
+    assert path.is_dir()
+    assert path.stat().st_ino == inode
+    assert not list(path.iterdir())
+    assert not (path.parent / "publication").exists()
     assert other.is_dir()
+    monkeypatch.setattr(os, "replace", replace_file)
+    recovered = runtime.views.publish(
+        "ws_cloud_stable",
+        {"openai.api-key": b"synthetic-recovered", "github.api-key": b"synthetic-gh-recovered"},
+    )
+    assert recovered is not None
+    assert recovered.path.stat().st_ino == inode
+    assert (path / "openai.api-key").read_bytes() == b"synthetic-recovered"
+
+
+async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):
+    """A brand-new view is not bind-mounted yet, so failure may remove it entirely."""
+    runtime, _, _ = authority
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic initial publication failure")
+        return replace_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    with pytest.raises(OSError, match="synthetic initial publication failure"):
+        runtime.views.publish(
+            "ws_fresh",
+            {"openai.api-key": b"synthetic-agent", "github.api-key": b"synthetic-github"},
+        )
+    key = runtime.views._key("ws_fresh")
+    assert not (runtime.receiver.store.root / key).exists()
 
 
 async def test_publication_fence_is_shared_by_view_instances_and_workspace_bound(authority):

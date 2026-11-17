@@ -343,7 +343,9 @@ class RuntimeViews:
                     os.fsync(directory)
                 except BaseException as error:
                     # No other publisher can interleave with partial-write cleanup.
-                    self._remove_view(parent)
+                    # Keep an already-mounted view directory so Docker bind mounts
+                    # retain the same inode; a later publish can rewrite in place.
+                    self._remove_view(parent, preserve_directory=not new)
                     self._owners.pop(workspace_id, None)
                     failure = error
             finally:
