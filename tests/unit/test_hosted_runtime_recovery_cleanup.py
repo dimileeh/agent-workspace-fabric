@@ -743,6 +743,61 @@ async def test_retry_marker_enospc_before_create_still_fences_retained_mount(
     assert not marker.exists()
 
 
+async def test_retry_marker_enospc_on_rewrite_reuses_renamed_publication(authority, monkeypatch):
+    """Rename already fences; O_TRUNC+rewrite must not reintroduce an ENOSPC hole.
+
+    publication→publication.retry is space-neutral and leaves a valid 32-hex
+    token. Truncating that inode then failing the generation write empties the
+    marker; the fallback read cannot adopt it, cleanup clears the fence, and a
+    later sweep sees neither a live publication nor a retry generation.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+    real_write = os.write
+    block_retry_rewrite = False
+
+    def fail_second_file(source, destination, **kwargs):
+        nonlocal block_retry_rewrite
+        if destination == "github.api-key":
+            # Refresh already wrote a new publication token; fence conversion
+            # must reuse that inode without another write under ENOSPC.
+            block_retry_rewrite = True
+            raise OSError(errno.ENOSPC, "synthetic retained refresh ENOSPC")
+        return replace_file(source, destination, **kwargs)
+
+    def write_enospc_after_refresh(fd, data, *args, **kwargs):
+        if block_retry_rewrite:
+            raise OSError(errno.ENOSPC, "synthetic retry rewrite ENOSPC")
+        return real_write(fd, data, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_second_file)
+    monkeypatch.setattr(os, "write", write_enospc_after_refresh)
+    with pytest.raises(OSError, match="synthetic retained refresh ENOSPC"):
+        await runtime.workspace("ws_cloud_stable")
+    assert path.is_dir()
+    assert path.stat().st_ino == inode
+    assert not list(path.iterdir())
+    assert not (path.parent / "publication").exists()
+    marker = path.parent / "publication.retry"
+    assert marker.exists(), "renamed publication must remain as the retry fence"
+    generation = marker.read_text(encoding="ascii")
+    assert len(generation) == 32
+    assert all(char in "0123456789abcdef" for char in generation)
+    assert await runtime.publication("ws_cloud_stable") is None
+    assert runtime.views.publication_retry("ws_cloud_stable") == generation
+
+    monkeypatch.setattr(os, "replace", replace_file)
+    monkeypatch.setattr(os, "write", real_write)
+    assert await runtime.reconcile_workspace("ws_cloud_stable")
+    assert path.stat().st_ino == inode
+    assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
+    assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
+    assert (path.parent / "publication").exists()
+    assert not marker.exists()
+
+
 async def test_retained_reconcile_republishes_after_failed_mounted_refresh(authority, monkeypatch):
     """Retained reconcile must restore a warm mount after a fenced refresh failure.
 

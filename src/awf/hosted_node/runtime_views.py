@@ -216,14 +216,39 @@ class RuntimeViews:
 
     def _retry_marker(self, parent: int, *, present: bool | None = None) -> str | None:
         if present is True:
-            generation = uuid4().hex
             # Prefer converting the live publication inode into the retry fence.
             # Retained refresh cleanup may have already deleted credentials; a
             # fresh create can then fail with ENOSPC, leaving neither a live
             # token nor a retry marker. Rename within the same directory is
-            # space-neutral and still yields an exact generation fence.
+            # space-neutral and the former publication token is already a valid
+            # 32-hex generation fence — do not O_TRUNC+rewrite it, or ENOSPC on
+            # the write can empty the mount with no recoverable marker.
             with suppress(FileNotFoundError):
                 os.rename(_PUBLICATION, _RETRY, src_dir_fd=parent, dst_dir_fd=parent)
+            try:
+                existing = os.open(
+                    _RETRY,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=parent,
+                )
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                try:
+                    info = os.fstat(existing)
+                    if (
+                        stat.S_ISREG(info.st_mode)
+                        and info.st_uid == os.geteuid()
+                        and info.st_nlink == 1
+                        and stat.S_IMODE(info.st_mode) == 0o600
+                        and info.st_size == 32
+                    ):
+                        value = os.read(existing, 33)
+                        if len(value) == 32 and all(byte in b"0123456789abcdef" for byte in value):
+                            return value.decode("ascii")
+                finally:
+                    os.close(existing)
+            generation = uuid4().hex
             fd = os.open(
                 _RETRY,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
