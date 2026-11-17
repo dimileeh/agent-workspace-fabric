@@ -213,6 +213,10 @@ async def test_hosted_stop_settles_monitor_operation_and_validation(authority, s
         operation = await session.get(Operation, monitor.id)
         assert operation.status == "failed"
         assert operation.error_code == "HOSTED_RUNTIME_STOPPED"
+        assert (
+            operation.error_message
+            == "Hosted execution was stopped by its consumer authority boundary."
+        )
         assert operation.finished_at is not None
         assert operation.payload["source_head_sha"] == "a" * 40
         assert (await session.get(Operation, unrelated.id)).status == "succeeded"
@@ -235,6 +239,59 @@ async def test_hosted_stop_settles_monitor_operation_and_validation(authority, s
             "validation_run_ids": ["validation-hosted-stop"],
         }
         assert await leftovers(session) == []
+
+
+async def test_hosted_authority_unavailable_settles_operations_with_exhaustion_message(
+    authority, stop_worker
+):
+    """Exhaustion must not look like an explicit consumer-authority denial in ops."""
+    runtime, payload, factory = authority
+    await retained(runtime, payload, factory, "ws_cloud_stable", status="monitoring_pr")
+    async with factory.begin() as session:
+        monitor = await OperationRepository(session).create(
+            workspace_id="ws_cloud_stable",
+            operation_type=OperationType.monitor_state,
+            status=OperationStatus.running,
+            payload={"owner": "pr_monitor", "source_head_sha": "a" * 40},
+        )
+        session.add(
+            ValidationRun(
+                id="validation-hosted-unavailable",
+                workspace_id="ws_cloud_stable",
+                tier=1,
+                command_set_hash="b" * 64,
+                status="running",
+            )
+        )
+    scope, _ = stop_worker
+    exhaustion = "Hosted authority could not be confirmed for 600 seconds."
+    await scope.stop_workspace(
+        "ws_cloud_stable",
+        reason_code="HOSTED_AUTHORITY_UNAVAILABLE",
+        message=exhaustion,
+    )
+    async with factory() as session:
+        row = await session.get(Workspace, "ws_cloud_stable")
+        assert row.status == "failed"
+        assert row.failure_message == exhaustion
+        operation = await session.get(Operation, monitor.id)
+        assert operation.status == "failed"
+        assert operation.error_code == "HOSTED_AUTHORITY_UNAVAILABLE"
+        assert operation.error_message == exhaustion
+        assert "consumer authority boundary" not in (operation.error_message or "")
+        validation = await session.get(ValidationRun, "validation-hosted-unavailable")
+        assert validation.status == "failed"
+        assert validation.reason_code == "HOSTED_AUTHORITY_UNAVAILABLE"
+        events = list(
+            await session.scalars(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == row.id,
+                    WorkspaceEvent.event_type == "workspace.hosted_stop_activity_settled",
+                )
+            )
+        )
+        assert len(events) == 1
+        assert events[0].reason_code == "HOSTED_AUTHORITY_UNAVAILABLE"
 
 
 async def test_hosted_stop_without_activity_writes_no_settlement_event(authority, stop_worker):

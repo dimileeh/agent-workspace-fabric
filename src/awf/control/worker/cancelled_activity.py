@@ -124,12 +124,19 @@ async def reconcile_cancelled_activity(worker: Any, *, limit: int | None) -> Non
                 )
 
 
-async def settle_hosted_stop_activity(session: Any, ws: Workspace, *, reason_code: str) -> None:
+async def settle_hosted_stop_activity(
+    session: Any,
+    ws: Workspace,
+    *,
+    reason_code: str,
+    error_message: str,
+) -> None:
     """Settle a hosted-stopped workspace's monitor bookkeeping in its failing transaction.
 
     The cancelled monitor task cannot finish its own operation once the consumer
     authority is gone. Rows locked by a concurrent writer are skipped and left for
-    the terminal-owned-row reaper.
+    the terminal-owned-row reaper. ``error_message`` must match the workspace row so
+    exhaustion (HOSTED_AUTHORITY_UNAVAILABLE) does not look like an explicit denial.
     """
     operations = list(
         (
@@ -151,14 +158,13 @@ async def settle_hosted_stop_activity(session: Any, ws: Workspace, *, reason_cod
             )
         ).all()
     )
-    message = "Hosted execution was stopped by its consumer authority boundary."
     for operation in operations:
         await OperationRepository(session).finish(
             operation,
             status=OperationStatus.failed,
             result=operation.result,
             error_code=reason_code,
-            error_message=message,
+            error_message=error_message,
         )
     for validation in validations:
         validation.status = "failed"

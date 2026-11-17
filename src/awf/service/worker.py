@@ -1017,7 +1017,12 @@ def build_worker_runtime(
                 else:
                     restore_primary_failure_row_fields(current, primary)
                 await repo.clear_workspace_attention(workspace_id)
-                await settle_hosted_stop_activity(session, current, reason_code=reason)
+                await settle_hosted_stop_activity(
+                    session,
+                    current,
+                    reason_code=reason,
+                    error_message=failure_message,
+                )
 
         hosted.stop_workspace = stop_workspace
     return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)
