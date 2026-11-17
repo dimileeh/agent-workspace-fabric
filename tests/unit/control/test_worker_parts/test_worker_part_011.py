@@ -657,6 +657,27 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
+class _WedgedMonitorExecutor(_BlockingMonitorExecutor):
+    """Monitor resume that keeps running after ``cancel()`` until ``release`` is set.
+
+    ``Task.cancel()`` is cooperative: a plain ``Event.wait()`` exits as soon as
+    the event loop next schedules the task. Drain-bookkeeping tests need the
+    mid-drain window to survive later awaits (for example ``held_leases`` or a
+    second reconcile), matching a resume that has not yet reached a real
+    cancellation point.
+    """
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Keep draining after cooperative cancel until the test releases."""
+        del handoff
+        self.resume_calls.append(workspace_id)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            await self.release.wait()
+
+
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
         """Test helper for __init__."""
@@ -1196,7 +1217,7 @@ class TestRunOnceExecutionPart004:
         # but the cancelled task must stay tracked so a fresh dispatch for the
         # SAME workspace is blocked until it truly stops.
         monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "wedged-monitor")
-        executor = _BlockingMonitorExecutor()
+        executor = _WedgedMonitorExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1250,6 +1271,16 @@ class TestRunOnceExecutionPart004:
             assert worker._dispatchable_execution_ids([monitor_id], limit=1) == []  # noqa: SLF001
             # ... yet it never counts toward work slots (DB leases), so others run.
             assert await held_leases(session_factory) == []
+
+            # Yield so cooperative cancel is delivered (as held_leases may also
+            # do). A wedged resume must still be tracked as draining afterwards;
+            # a plain Event.wait() helper would finish here and clear the kind.
+            await asyncio.sleep(0)
+            assert not monitor_task.done()
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
+            )
 
             # A second reconcile pass leaves the already-draining task alone:
             # no re-cancel and no duplicate warning.
