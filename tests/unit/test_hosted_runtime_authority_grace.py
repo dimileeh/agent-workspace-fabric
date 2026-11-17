@@ -1464,6 +1464,105 @@ async def test_watcher_workspace_success_does_not_reset_resource_limits_grace(
     assert scope.stop_workspace.await_args.kwargs["reason_code"] == "HOSTED_AUTHORITY_UNAVAILABLE"
 
 
+async def test_stack_resource_limits_cancel_releases_claim_so_later_lapse_defers(
+    tmp_path, monkeypatch
+):
+    """Cancel during resource_limits grace wait must not leave a leaked claim.
+
+    ``_await_with_authority_grace`` used to keep the operation claim after
+    CancelledError. Healthy reconcile clears only reconcile/workspace, so a
+    leaked resource_limits claim retained the old started_at; a brief lapse
+    601s later exhausted immediately and stopped the workspace.
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    waiting = asyncio.Event()
+
+    async def block_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", block_sleep)
+    authority.resource_limits = AsyncMock(side_effect=TimeoutError())
+
+    task = asyncio.create_task(scope.resource_limits("ws_exact"))
+    await asyncio.wait_for(waiting.wait(), 1)
+    assert scope._authority_grace["ws_exact"].failing_operations == {"resource_limits"}
+    task.cancel("operator cancel during grace wait")
+    with pytest.raises(asyncio.CancelledError, match="operator cancel during grace wait"):
+        await task
+    assert "ws_exact" not in scope._authority_grace
+    scope.stop_workspace.assert_not_awaited()
+
+    # Healthy reconcile must not find a leftover reservation claim.
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    assert await scope.admission_check()
+    assert "ws_exact" not in scope._authority_grace
+
+    # A brief new lapse long after the cancelled wait must open a fresh window.
+    clock["now"] = origin + timedelta(seconds=601)
+    fresh = MaterialLapsedError(expires_at=clock["now"] - timedelta(seconds=1))
+    authority.reconcile_workspace = AsyncMock(side_effect=fresh)
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"reconcile"}
+    assert window.started_at == fresh.expires_at
+
+
+async def test_stack_resource_limits_opt_out_releases_claim(tmp_path, monkeypatch):
+    """Opt-out DeferredError must release only the resource_limits grace claim."""
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    scope.poll_seconds = 10.0
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    # Unrelated workspace claim must survive releasing the reservation claim.
+    lapse = MaterialLapsedError(expires_at=origin - timedelta(seconds=1))
+    assert scope._classify_authority_failure("ws_exact", lapse, operation="workspace") == "defer"
+    started_at = scope._authority_grace["ws_exact"].started_at
+
+    async def record_sleep(seconds: float) -> None:
+        raise AssertionError("resource_limits must not sleep under grace opt-out")
+
+    authority.resource_limits = AsyncMock(side_effect=TimeoutError())
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.asyncio.sleep", record_sleep)
+    with (
+        without_authority_grace_wait(),
+        pytest.raises(WorkspaceAuthorityDeferredError),
+    ):
+        await scope.resource_limits("ws_exact")
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"workspace"}
+    assert window.started_at == started_at
+    scope.stop_workspace.assert_not_awaited()
+
+    # After the workspace claim is also cleared, a late lapse starts fresh.
+    scope._clear_authority_grace("ws_exact", operation="workspace")
+    assert "ws_exact" not in scope._authority_grace
+    clock["now"] = origin + timedelta(seconds=601)
+    fresh = MaterialLapsedError(expires_at=clock["now"] - timedelta(seconds=1))
+    assert scope._classify_authority_failure("ws_exact", fresh, operation="reconcile") == "defer"
+    assert scope._authority_grace["ws_exact"].started_at == fresh.expires_at
+
+
 async def test_stack_profile_mounts_opt_out_raises_deferred_without_waiting(tmp_path, monkeypatch):
     """Poll-inline opt-out must not sleep in stack-prepare authority callbacks."""
     from awf.profiles.models import WorkspaceProfile
@@ -1485,6 +1584,7 @@ async def test_stack_profile_mounts_opt_out_raises_deferred_without_waiting(tmp_
     ):
         await scope.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_exact")
     assert slept == []
+    assert "ws_exact" not in scope._authority_grace
     scope.stop_workspace.assert_not_awaited()
 
 

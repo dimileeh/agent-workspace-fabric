@@ -211,49 +211,67 @@ class WorkspaceConsumers:
 
         ``grace_operation`` names the check whose recovery clears its claim on
         the shared workspace deadline without resetting unrelated failures.
+
+        Cancel and opt-out ``WorkspaceAuthorityDeferredError`` exit without
+        success and without a stop; release only this operation's claim so a
+        leaked ``profile_mounts`` / ``resource_limits`` entry cannot keep the
+        shared deadline alive until a later brief lapse exhausts immediately.
+        Classified stops keep the window for exhaustion / teardown ownership.
         """
-        while True:
-            try:
-                result = await operation()
-            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                action = self._classify_authority_failure(
-                    workspace_id, error, operation=grace_operation
-                )
-                if action == "defer":
-                    if skip_authority_grace_wait.get():
-                        # Convert to the same defer signal so callers requeue
-                        # instead of sleeping. Re-raising the raw lapse/transient
-                        # would reach terminal failure handlers.
-                        raise WorkspaceAuthorityDeferredError(error) from error
-                    await asyncio.sleep(self.poll_seconds)
-                    continue
-                # Stop with the classified reason before exposing the raw error.
-                # Command/stack-prepare run inside ``@workspace_consumer`` after
-                # scope entry, so "in scope" is the production path — not an
-                # out-of-scope edge. A reservation/mount denial may leave
-                # ``workspace()`` healthy, so the scope finalizer would not
-                # stop on its own check. Generic in-scope handlers can also
-                # mark the row failed first and skip a later finalizer stop as
-                # already-terminal (losing HOSTED_RUNTIME_STOPPED /
-                # HOSTED_AUTHORITY_UNAVAILABLE). ownership.stopped then makes
-                # the finalizer's later _stop a no-op (one stop per failure).
-                # Fence closing first: the watcher may still be polling, and
-                # association() does not treat failed as inactive.
-                ownership = owned_publication(self.authority.views, workspace_id)
-                if ownership is not None:
-                    ownership.closing = True
-                await self._stop(
-                    workspace_id,
-                    reason_code=(_AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None),
-                    message=(
-                        self._authority_unavailable_message()
-                        if action == "stop_exhausted"
-                        else None
-                    ),
-                )
-                raise
-            self._clear_authority_grace(workspace_id, operation=grace_operation)
-            return result
+        holding_claim = False
+        try:
+            while True:
+                try:
+                    result = await operation()
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                    action = self._classify_authority_failure(
+                        workspace_id, error, operation=grace_operation
+                    )
+                    if action == "defer":
+                        holding_claim = True
+                        if skip_authority_grace_wait.get():
+                            # Convert to the same defer signal so callers requeue
+                            # instead of sleeping. Re-raising the raw lapse/transient
+                            # would reach terminal failure handlers.
+                            raise WorkspaceAuthorityDeferredError(error) from error
+                        await asyncio.sleep(self.poll_seconds)
+                        continue
+                    # Stop owns the window (exhausted retain / denied already
+                    # cleared in classify). Do not release in finally.
+                    holding_claim = False
+                    # Stop with the classified reason before exposing the raw error.
+                    # Command/stack-prepare run inside ``@workspace_consumer`` after
+                    # scope entry, so "in scope" is the production path — not an
+                    # out-of-scope edge. A reservation/mount denial may leave
+                    # ``workspace()`` healthy, so the scope finalizer would not
+                    # stop on its own check. Generic in-scope handlers can also
+                    # mark the row failed first and skip a later finalizer stop as
+                    # already-terminal (losing HOSTED_RUNTIME_STOPPED /
+                    # HOSTED_AUTHORITY_UNAVAILABLE). ownership.stopped then makes
+                    # the finalizer's later _stop a no-op (one stop per failure).
+                    # Fence closing first: the watcher may still be polling, and
+                    # association() does not treat failed as inactive.
+                    ownership = owned_publication(self.authority.views, workspace_id)
+                    if ownership is not None:
+                        ownership.closing = True
+                    await self._stop(
+                        workspace_id,
+                        reason_code=(
+                            _AUTHORITY_UNAVAILABLE if action == "stop_exhausted" else None
+                        ),
+                        message=(
+                            self._authority_unavailable_message()
+                            if action == "stop_exhausted"
+                            else None
+                        ),
+                    )
+                    raise
+                self._clear_authority_grace(workspace_id, operation=grace_operation)
+                holding_claim = False
+                return result
+        finally:
+            if holding_claim:
+                self._clear_authority_grace(workspace_id, operation=grace_operation)
 
     async def share_checkout(self, mirror: Path, worktree: Path) -> None:
         await self.environment()
