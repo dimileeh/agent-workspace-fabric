@@ -703,13 +703,21 @@ class WorkspaceConsumers:
                                 ),
                             )
                         else:
-                            # Reconcile and workspace confirm the same
-                            # association/materials. Recovery of either must
-                            # release both claims so a leftover deadline cannot
-                            # exhaust on the next brief timeout. Do not clear
-                            # unrelated claims such as ``resource_limits``.
+                            # Reconcile recovery always releases its own claim.
+                            # Clear the equivalent workspace claim only when a
+                            # live published view exists: reconcile often runs
+                            # with publish_view=False (no token/retry), while
+                            # in-scope workspace() always publishes. Clearing
+                            # on a non-publishing check would reset a concurrent
+                            # first-publish OSError grace window so exhaustion
+                            # never fires. Do not clear unrelated claims such
+                            # as ``resource_limits``.
                             self._clear_authority_grace(workspace_id, operation="reconcile")
-                            self._clear_authority_grace(workspace_id, operation="workspace")
+                            if (
+                                not owned
+                                or await self.authority.publication(workspace_id) is not None
+                            ):
+                                self._clear_authority_grace(workspace_id, operation="workspace")
                             if not owned and workspace_id in retry:
                                 # Finish this identity's failed retraction, without
                                 # stopping or touching a successor identity's view.

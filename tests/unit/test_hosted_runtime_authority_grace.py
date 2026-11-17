@@ -297,6 +297,9 @@ async def test_retained_reconcile_releases_leftover_workspace_claim(tmp_path, mo
     clear only ``reconcile``, so the original deadline survived; a later
     one-second lapse after that deadline exhausted immediately instead of
     opening a fresh grace window (PRRT_kwDOSJAM6s64aTnL).
+
+    Clearing the workspace claim requires a live published view: reconcile
+    with ``publish_view=False`` does not prove first-publish recovery.
     """
     scope, authority = _mock_consumers(tmp_path, grace=600)
     origin = datetime.now(UTC)
@@ -316,6 +319,8 @@ async def test_retained_reconcile_releases_leftover_workspace_claim(tmp_path, mo
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
     authority.reconcile_workspace = AsyncMock(return_value=True)
+    # Live publication means reconcile exercised (or could exercise) publish.
+    authority.publication = AsyncMock(return_value=object())
     assert await scope.admission_check()
     scope.stop_workspace.assert_not_awaited()
     assert "ws_exact" not in scope._authority_grace
@@ -330,6 +335,57 @@ async def test_retained_reconcile_releases_leftover_workspace_claim(tmp_path, mo
     window = scope._authority_grace["ws_exact"]
     assert window.failing_operations == {"reconcile"}
     assert window.started_at == fresh_lapse.expires_at
+
+
+async def test_retained_reconcile_without_publication_preserves_workspace_claim(
+    tmp_path, monkeypatch
+):
+    """Non-publishing reconcile must not reset a concurrent workspace grace claim.
+
+    ``reconcile_workspace`` uses ``publish_view=False`` when no live token or
+    retry marker exists, while in-scope ``workspace()`` always publishes. A
+    successful authority-only sweep must not clear a first-publish OSError
+    grace window and restart the HOSTED_AUTHORITY_UNAVAILABLE clock
+    (PRRT_kwDOSJAM6s64aoW9).
+    """
+    scope, authority = _mock_consumers(tmp_path, grace=600)
+    origin = datetime.now(UTC)
+    clock = {"now": origin}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(clock["now"].timestamp(), tz=tz)
+
+    monkeypatch.setattr("awf.hosted_node.runtime_consumers.datetime", Clock)
+    # Concurrent scope-entry first-publish failure: workspace claim open, no view.
+    assert (
+        scope._classify_authority_failure(
+            "ws_exact", OSError("first publish"), operation="workspace"
+        )
+        == "defer"
+    )
+    assert scope._authority_grace["ws_exact"].failing_operations == {"workspace"}
+    started_at = scope._authority_grace["ws_exact"].started_at
+
+    authority.admission = AsyncMock()
+    authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
+    authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.publication = AsyncMock(return_value=None)
+    assert await scope.admission_check()
+    scope.stop_workspace.assert_not_awaited()
+    window = scope._authority_grace["ws_exact"]
+    assert window.failing_operations == {"workspace"}
+    assert window.started_at == started_at
+
+    # Later first-publish failures must still accumulate against the same window.
+    clock["now"] = origin + timedelta(seconds=601)
+    assert (
+        scope._classify_authority_failure(
+            "ws_exact", OSError("first publish"), operation="workspace"
+        )
+        == "stop_exhausted"
+    )
 
 
 async def test_retained_reconcile_preserves_unrelated_resource_limits_claim(tmp_path, monkeypatch):
@@ -359,6 +415,7 @@ async def test_retained_reconcile_preserves_unrelated_resource_limits_claim(tmp_
     authority.admission = AsyncMock()
     authority.retained_workspaces = AsyncMock(return_value=["ws_exact"])
     authority.reconcile_workspace = AsyncMock(return_value=True)
+    authority.publication = AsyncMock(return_value=object())
     assert await scope.admission_check()
     scope.stop_workspace.assert_not_awaited()
     window = scope._authority_grace["ws_exact"]
