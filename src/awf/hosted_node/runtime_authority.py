@@ -223,6 +223,17 @@ class WorkspaceAuthority:
                 workspace_id,
                 publication,
             )
+        else:
+            # Active-scope cancel after a retained refresh failure holds
+            # ContextVar ownership with publication=None but a fenced retry
+            # generation. Invalidate that exact marker so reconcile cannot
+            # republish; a successor that already consumed it is untouched.
+            ownership = owned_publication(self.views, workspace_id)
+            generation = ownership.retry if ownership is not None else None
+            if ownership is not None and generation is not None:
+                await asyncio.to_thread(self.views.invalidate_retry, workspace_id, generation)
+                if ownership.retry == generation:
+                    ownership.retry = None
         await self._retract_previous(workspace_id)
 
     async def _retract_previous(self, workspace_id: str) -> None:

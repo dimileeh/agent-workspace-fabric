@@ -40,6 +40,10 @@ class PublicationOwnership:
     views: "RuntimeViews"
     workspace_id: str
     publication: PublishedView | None = None
+    # Exact publication.retry generation after a retained refresh failure. Cancel
+    # retract invalidates this fence without requiring a live publication token,
+    # and without removing a successor that already consumed the marker.
+    retry: str | None = None
     closing: bool = False
     # Set after a completed authority-lost/_stop for this ownership so an early
     # stop (grace exhaustion inside an active scope) and the scope finalizer
@@ -301,6 +305,13 @@ class RuntimeViews:
             return self._retry_marker(parent)
         return None
 
+    def invalidate_retry(self, workspace_id: str, generation: str) -> None:
+        """Drop a fenced retry marker only when it still matches ``generation``."""
+        key = self._key(workspace_id)
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            if self._retry_marker(parent) == generation:
+                self._retry_marker(parent, present=False)
+
     def refresh(
         self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
     ) -> PublishedView | None:
@@ -392,6 +403,7 @@ class RuntimeViews:
                     # a later clear cannot make their old token valid again.
                     self._absence_tokens.pop(key, None)
                     ownership.publication = result
+                    ownership.retry = None
                     self._owners[workspace_id] = ownership
                     self._publication(parent, token)
                     for name, value in files.items():
@@ -423,10 +435,14 @@ class RuntimeViews:
                     # and clear grace without repopulating the retained mount.
                     # Retained reconcile keys off the on-disk token, so leave a
                     # fenced retry marker for that workspace only when the mount
-                    # directory is preserved.
+                    # directory is preserved. Keep that generation on ownership
+                    # so cancellation can invalidate it after publication is
+                    # cleared, without touching a successor publish.
                     self._remove_view(parent, preserve_directory=not new)
                     if not new:
-                        self._retry_marker(parent, present=True)
+                        ownership.retry = self._retry_marker(parent, present=True)
+                    else:
+                        ownership.retry = None
                     self._owners.pop(workspace_id, None)
                     if ownership.publication is result:
                         ownership.publication = None

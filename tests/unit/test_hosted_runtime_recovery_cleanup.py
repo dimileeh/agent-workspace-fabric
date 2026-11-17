@@ -20,7 +20,12 @@ from awf.db.models import Workspace
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
-from awf.hosted_node.runtime_views import RuntimeViews, owned_publication, track_publications
+from awf.hosted_node.runtime_views import (
+    RuntimeViews,
+    _publication_ownership,
+    owned_publication,
+    track_publications,
+)
 from awf.hosted_node.schemas import Binding, Refresh
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.service.controls import WorkspaceControlService
@@ -530,6 +535,7 @@ async def test_failed_mounted_refresh_resets_ownership_so_retry_can_repopulate(
         assert not list(path.iterdir())
         assert not (path.parent / "publication").exists()
         assert ownership.publication is None
+        assert ownership.retry is not None
 
         monkeypatch.setattr(os, "replace", replace_file)
         # Re-stick a dead publication to prove materials refresh selection: a
@@ -561,6 +567,7 @@ async def test_failed_mounted_refresh_resets_ownership_so_retry_can_repopulate(
         assert (path / "openai.api-key").read_bytes() == b"synthetic-agent-key"
         assert (path / "github.api-key").read_bytes() == b"synthetic-github-key"
         assert ownership.publication is not None
+        assert ownership.retry is None
         assert (path.parent / "publication").exists()
 
 
@@ -673,6 +680,77 @@ async def test_retained_retry_publish_respects_generation_fence(authority, monke
         assert published is not None and published.token == successor.token
         assert (path / "openai.api-key").read_bytes() == b"synthetic-successor"
         assert (path / "github.api-key").read_bytes() == b"synthetic-successor"
+
+
+@pytest.mark.parametrize("successor", [False, True])
+async def test_cancel_invalidates_failed_publication_retry_without_touching_successor(
+    authority, tmp_path, monkeypatch, successor
+):
+    """Cancel after a retained refresh failure must fence-invalidate publication.retry.
+
+    Failure cleanup clears ownership.publication but leaves a retry generation. Cancel
+    _stop(authority_lost=False) still holds ContextVar ownership and previously called
+    retract_publication(None), which skipped removal and left the marker for reconcile
+    to republish. Keep fenced ownership of the retry generation so cancel invalidates
+    that exact marker without removing a successor live publication.
+    """
+    runtime, value, factory = authority
+    path = await retained(runtime, value, factory, "ws_cloud_stable")
+    inode = path.stat().st_ino
+    replace_file = os.replace
+
+    def fail_second_file(source, destination, **kwargs):
+        if destination == "github.api-key":
+            raise OSError("synthetic cancel retry failure")
+        return replace_file(source, destination, **kwargs)
+
+    consumers = WorkspaceConsumers(runtime, tmp_path)
+    consumers.stop_workspace = AsyncMock()
+    with track_publications(runtime.views, "ws_cloud_stable"):
+        ownership = owned_publication(runtime.views, "ws_cloud_stable")
+        assert ownership is not None
+        await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", fail_second_file)
+        with pytest.raises(OSError, match="synthetic cancel retry failure"):
+            await runtime.workspace("ws_cloud_stable")
+        monkeypatch.setattr(os, "replace", replace_file)
+        assert ownership.publication is None
+        assert ownership.retry is not None
+        generation = ownership.retry
+        assert (path.parent / "publication.retry").read_text(encoding="ascii") == generation
+        published = None
+        if successor:
+            # Sweep/reconcile has no scope ContextVar; clear it briefly so publish
+            # adopts a distinct ownership the way an out-of-band successor would.
+            cleared = _publication_ownership.set(None)
+            try:
+                published = runtime.views.publish(
+                    "ws_cloud_stable",
+                    {
+                        "openai.api-key": b"synthetic-successor",
+                        "github.api-key": b"synthetic-successor",
+                    },
+                    expected_retry=generation,
+                )
+            finally:
+                _publication_ownership.reset(cleared)
+            assert published is not None
+            assert ownership.publication is None
+            assert ownership.retry == generation
+            assert not (path.parent / "publication.retry").exists()
+        await consumers._stop("ws_cloud_stable", authority_lost=False)
+        assert ownership.retry is None
+    assert path.is_dir() and path.stat().st_ino == inode
+    if successor:
+        assert (await runtime.publication("ws_cloud_stable")).token == published.token
+        assert (path / "openai.api-key").read_bytes() == b"synthetic-successor"
+        assert (path / "github.api-key").read_bytes() == b"synthetic-successor"
+    else:
+        assert not (path.parent / "publication.retry").exists()
+        assert await runtime.publication("ws_cloud_stable") is None
+        assert not list(path.iterdir())
+        assert await runtime.reconcile_workspace("ws_cloud_stable")
+        assert not list(path.iterdir()), "cancel must not leave a retry for reconcile republish"
 
 
 async def test_initial_publication_failure_removes_unmounted_view(authority, monkeypatch):
