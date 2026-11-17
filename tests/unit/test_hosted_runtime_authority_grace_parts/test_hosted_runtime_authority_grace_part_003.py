@@ -220,7 +220,13 @@ async def test_rule_scope_end_without_stop_drops_scope_bound_checkers(tmp_path, 
     scope.stop_workspace.assert_not_awaited()
 
 
-async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "transient",
+    [TimeoutError("db timeout"), OSError("offline"), OperationalError("db", {}, None)],
+)
+async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(
+    tmp_path, monkeypatch, transient
+):
     """Deferred finalizer must not let scope exit reset the watcher grace clock.
 
     When the finalizer still sees a TimeoutError/OSError/SQLAlchemyError and
@@ -247,7 +253,7 @@ async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(tmp_
         calls["n"] += 1
         if calls["n"] == 1:
             return material
-        raise TimeoutError()
+        raise transient
 
     authority.workspace.side_effect = workspace
     async with scope.scope("ws_exact"):
@@ -259,14 +265,12 @@ async def test_deferred_finalizer_preserves_watcher_grace_across_clean_exit(tmp_
     assert started_at == origin
 
     clock["now"] = origin + timedelta(seconds=300)
-    assert (
-        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher") == "defer"
-    )
+    assert scope._classify_authority_failure("ws_exact", transient, checker="watcher") == "defer"
     assert scope._authority_grace["ws_exact"]["watcher"].started_at == started_at
 
     clock["now"] = origin + timedelta(seconds=600)
     assert (
-        scope._classify_authority_failure("ws_exact", TimeoutError(), checker="watcher")
+        scope._classify_authority_failure("ws_exact", transient, checker="watcher")
         == "stop_exhausted"
     )
 
