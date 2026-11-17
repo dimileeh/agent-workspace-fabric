@@ -86,6 +86,28 @@ class _DeferThenSucceedProvisioner:
             raise WorkspaceAuthorityDeferredError(MaterialLapsedError(expires_at=None)) from None
 
 
+class _DeferOnceSignalingProvisioner:
+    """Defers once and signals so a test can fence during the defer sleep."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.deferred = asyncio.Event()
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        from awf.hosted_node.identity import (
+            MaterialLapsedError,
+            WorkspaceAuthorityDeferredError,
+        )
+
+        del workspace_id, execution_claim_epoch
+        self.calls += 1
+        if self.calls == 1:
+            self.deferred.set()
+            raise WorkspaceAuthorityDeferredError(MaterialLapsedError(expires_at=None)) from None
+
+
 class _FenceThenBlockProvisioner:
     """Advances the epoch (a later claimant) then blocks until cancelled."""
 

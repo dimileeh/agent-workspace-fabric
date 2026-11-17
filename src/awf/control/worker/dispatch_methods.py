@@ -639,8 +639,17 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
             return
         self._execution_claim_epochs[workspace_id] = epoch
         provision_task: asyncio.Task[None] | None = None
+        # Heartbeat fencing must outlive the current provision task: during an
+        # authority-defer sleep the task is already done, so cancelling it is a
+        # no-op. ``read_execution_claim_epoch`` only checks ownership (not lease
+        # expiry), so without this flag a lost heartbeat would let the retry
+        # restart provisioning with no live refresh loop — racing stale-active
+        # recovery on a long attempt.
+        claim_lost = False
 
         def _cancel_provision() -> None:
+            nonlocal claim_lost
+            claim_lost = True
             if provision_task is not None and not provision_task.done():
                 provision_task.cancel()
 
@@ -671,6 +680,15 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
                         reason_code=deferred.reason,
                     )
                     await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                    if claim_lost:
+                        _log.warning(
+                            "worker.execution_claim_fenced",
+                            workspace_id=workspace_id,
+                            worker_id=self._worker_id,
+                            phase="provision_deferred",
+                            reason_code=EXECUTION_CLAIM_FENCED,
+                        )
+                        return
                     epoch = await self._read_execution_claim_epoch(workspace_id)
                     if epoch is None:
                         _log.warning(
