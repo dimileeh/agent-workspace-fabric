@@ -362,37 +362,41 @@ async def _safely_resume_paused_claimed(
                 rearm_recovering_cooldown=True,
             )
             return
-        while True:
-            try:
-                if reason == "recovering":
-                    # The resume starts lease-less and reacquires a work slot at its
-                    # first agent/validation hook, FIFO ahead of new work (slot-release).
-                    async with self._work_slot_task_scope(workspace_id):
+        # Hold the work slot across authority-defer retries the same way
+        # ``_safely_execute_claimed`` does, so a brief material lapse cannot
+        # drop capacity and strand the post-claim ``running`` resume.
+        async with self._work_slot_task_scope(workspace_id):
+            while True:
+                try:
+                    if reason == "recovering":
+                        # Resume starts lease-less and reacquires a work slot at
+                        # its first agent/validation hook, FIFO ahead of new
+                        # work (slot-release); this outer scope is the claim's
+                        # capacity fence for the retry loop itself.
                         await self._executor.resume_recovering_execution(
                             workspace_id,
                             execution_owner_id=self._worker_id,
                             execution_lease_expires_at=self._execution_claim_expires_at(),
                         )
-                else:
-                    async with self._work_slot_task_scope(workspace_id):
+                    else:
                         await self._executor.resume_blocked_execution(
                             workspace_id,
                             execution_owner_id=self._worker_id,
                             execution_lease_expires_at=self._execution_claim_expires_at(),
                         )
-                break
-            except WorkspaceAuthorityDeferredError as deferred:
-                # Scope entry deferred inside grace: keep the post-claim
-                # ``running`` row and retry instead of restoring the paused
-                # status (and re-arming recovering cooldown) on a brief lapse.
-                _log.info(
-                    f"worker.resume_{reason}_authority_deferred",
-                    workspace_id=workspace_id,
-                    worker_id=self._worker_id,
-                    reason_code=deferred.reason,
-                )
-                await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
-                continue
+                    break
+                except WorkspaceAuthorityDeferredError as deferred:
+                    # Scope entry deferred inside grace: keep the post-claim
+                    # ``running`` row and retry instead of restoring the paused
+                    # status (and re-arming recovering cooldown) on a brief lapse.
+                    _log.info(
+                        f"worker.resume_{reason}_authority_deferred",
+                        workspace_id=workspace_id,
+                        worker_id=self._worker_id,
+                        reason_code=deferred.reason,
+                    )
+                    await asyncio.sleep(_AUTHORITY_DEFER_SECONDS)
+                    continue
         executor_drove_resume = True
     except asyncio.CancelledError:
         # The resume CAS already committed ``<paused> -> running`` before dispatch.

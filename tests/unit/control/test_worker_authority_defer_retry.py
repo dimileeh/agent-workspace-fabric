@@ -83,6 +83,28 @@ class _DeferThenSucceedBlockedExecutor:
             raise _deferred() from None
 
 
+class _DeferThenSucceedRecoveringExecutor:
+    """Raises deferred once from recovering resume, then succeeds."""
+
+    def __init__(self) -> None:
+        self.resume_calls = 0
+
+    async def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("recovering resume defer test must not execute")
+
+    async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("recovering resume defer test must not resume monitors")
+
+    async def resume_blocked_execution(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("recovering resume defer test must not use blocked resume")
+
+    async def resume_recovering_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        del workspace_id
+        self.resume_calls += 1
+        if self.resume_calls == 1:
+            raise _deferred() from None
+
+
 class _DeferThenSucceedMonitorExecutor:
     """Raises deferred once from monitor handoff, then completes handoff + run."""
 
@@ -110,6 +132,26 @@ class _DeferThenSucceedMonitorExecutor:
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
         del workspace_id, handoff
         self.run_calls += 1
+        return True
+
+
+class _DeferOnMonitorRunExecutor(_DeferThenSucceedMonitorExecutor):
+    """Handoff succeeds once; run_resumed_pr_monitor defers once then succeeds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.run_calls = 0
+
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        self.handoff_calls += 1
+        return SimpleNamespace(run_kwargs={})
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
+        del workspace_id, handoff
+        self.run_calls += 1
+        if self.run_calls == 1:
+            raise _deferred() from None
         return True
 
 
@@ -190,6 +232,64 @@ async def test_safely_resume_blocked_claimed_retries_authority_defer(
 
 
 @pytest.mark.unit
+async def test_safely_resume_recovering_claimed_retries_authority_defer(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovering resume must retry defer instead of restoring pause + releasing claim."""
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.0)
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@example.com:org/repo.git",
+            branch_base="development",
+            task_title="recovering defer resume",
+            task_prompt="resume after authority defer",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        workspace.compose_project_name = f"awf_{workspace.id}"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.recovering, reason_code="SEED")
+        workspace.task_policy = {
+            "provider_recovery_state": {
+                "action": "retry",
+                "retry_attempt_number": 1,
+                "not_before": (datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+            }
+        }
+        workspace.execution_claimed_by = "control-worker"
+        workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+        workspace_id = workspace.id
+
+    executor = _DeferThenSucceedRecoveringExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=0, max_concurrent_executions=1),
+    )
+
+    async def _reset_ok(_workspace_id: str) -> bool:
+        return True
+
+    worker._reset_recovering_worktree = _reset_ok  # type: ignore[method-assign]
+    assert await worker._claim_recovering_for_resume(workspace_id)  # noqa: SLF001
+
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(workspace_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.resume_calls == 2
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_retries_authority_defer(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -228,6 +328,49 @@ async def test_safely_resume_pr_monitor_retries_authority_defer(
     assert result is True
     assert executor.handoff_calls == 2
     assert executor.run_calls == 1
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_retries_run_authority_defer(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-handoff monitor run defer must retry instead of failing the worker task."""
+    monkeypatch.setattr(worker_dispatch, "_AUTHORITY_DEFER_SECONDS", 0.0)
+    executor = _DeferOnMonitorRunExecutor()
+    finish_calls: list[dict[str, object]] = []
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await asyncio.wait_for(
+        worker._safely_resume_pr_monitor(  # noqa: SLF001
+            "ws_monitor_run",
+            recovery_operation_id="op_authority_defer_run",
+        ),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert result is True
+    assert executor.handoff_calls == 1
+    assert executor.run_calls == 2
     assert len(finish_calls) == 1
     assert finish_calls[0]["status"] == OperationStatus.succeeded
 
