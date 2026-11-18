@@ -264,6 +264,57 @@ def test_forget_decisions_marker_alone_clears_without_recording() -> None:
 
 
 @pytest.mark.unit
+def test_forget_marker_honored_on_ruling_only_empty_applied_text() -> None:
+    """Ruling-only finalize passes applied_text=""; still honor forget on the guide.
+
+    Park / preserved-attempt disposition consumes the hint with empty acted text
+    so unexecuted instructions are not stored. The guide's AWF-FORGET-DECISIONS
+    line is a catalog withdrawal signal and must still clear stored records and
+    conflict parks when that hint is finalized (PRRT_kwDOSJAM6s64yVR7).
+    """
+    state = MonitorState()
+    append_applied_operator_directive(
+        state,
+        AppliedOperatorDirective(
+            directive="Prior decision.",
+            operation_id="op-prior",
+            applied_at="2026-11-18T00:00:00+00:00",
+            head_sha="sha",
+        ),
+    )
+    failures = (CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="y", run_id="9"),)
+    mark_ci_repair_operator_decision_conflict(
+        state,
+        head_sha="sha",
+        failures=failures,
+        reason="lint conflicts with operator decision op-prior: blocked",
+    )
+    hint = OperatorHint(
+        reason="ruling plus withdraw",
+        directive=(
+            "AWF-RULING PRRT_kwDOSJAM6s64yVR7 FALSE_POSITIVE\n"
+            f"{APPLIED_OPERATOR_FORGET_DECISIONS_MARKER}\n"
+            "Also delete the coverage workflow."
+        ),
+        operation_id="op-ruling-forget",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    record_applied_operator_directive_from_hint(
+        state,
+        hint=hint,
+        head_sha="sha2",
+        applied_text="",
+    )
+
+    assert load_applied_operator_directives(state) == ()
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha="sha", failures=failures)
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_forget_marker_requires_exact_line_not_substring() -> None:
     """Only a line that is exactly the marker triggers withdrawal."""
     state = MonitorState()

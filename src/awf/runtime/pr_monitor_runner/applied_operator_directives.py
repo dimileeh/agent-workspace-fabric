@@ -140,23 +140,28 @@ def record_applied_operator_directive_from_hint(
     not an applied operator decision — record nothing when ``hint.directive``
     is empty.
 
-    When the applied text contains a line that is exactly
-    ``AWF-FORGET-DECISIONS``, clear stored records and all conflict parks
-    first; then record the remainder without that marker only if other text
-    remains.
+    When the consumed guide (``hint.directive``) contains a line that is exactly
+    ``AWF-FORGET-DECISIONS``, clear stored records and all conflict parks first
+    — including when ``applied_text=""`` on a ruling-only finalize, so the
+    withdrawal is not dropped with the consumed hint (PRRT_kwDOSJAM6s64yVR7).
+    Then record the applied remainder without that marker only if other applied
+    text remains.
     """
     hint_directive = (getattr(hint, "directive", None) or "").strip()
     if not hint_directive:
         return
-    directive = applied_text.strip() if applied_text is not None else hint_directive
-    if not directive:
-        return
-    had_forget, directive = _split_forget_decisions_marker(directive)
+    # Catalog withdrawal is a signal on the consumed guide, not on applied text
+    # alone. Scan hint.directive even when applied_text is explicitly empty.
+    had_forget, _ = _split_forget_decisions_marker(hint_directive)
     if had_forget:
         clear_applied_operator_directives(state)
         clear_ci_repair_operator_decision_conflicts(state)
-        if not directive:
-            return
+    directive = applied_text.strip() if applied_text is not None else hint_directive
+    if not directive:
+        return
+    _, directive = _split_forget_decisions_marker(directive)
+    if not directive:
+        return
     operation_id = getattr(hint, "operation_id", None) or ""
     applied_at = datetime.now(UTC).isoformat()
     append_applied_operator_directive(
