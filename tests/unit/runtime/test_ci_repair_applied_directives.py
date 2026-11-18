@@ -456,6 +456,48 @@ async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
 
 
 @pytest.mark.unit
+def test_conflict_park_distinguishes_bitbucket_steps_sharing_pipeline_run_id() -> None:
+    """Same Bitbucket pipeline UUID, different step → do not keep the old park.
+
+    BitbucketClient stamps every failing step with the pipeline UUID as
+    ``run_id``. Retry budgets correctly ignore step names when a run_id exists,
+    but a conflict park must still distinguish which step failed so a later
+    unrelated step failure can enter ReportCiFailure instead of replaying the
+    previous operator-conflict NotifyHuman.
+    """
+    pipeline_uuid = "{shared-pipeline-uuid}"
+    step_a = (
+        CheckFailure(
+            name="lint",
+            conclusion="FAILURE",
+            log_excerpt="ruff check failed",
+            run_id=pipeline_uuid,
+        ),
+    )
+    step_b = (
+        CheckFailure(
+            name="unit",
+            conclusion="FAILURE",
+            log_excerpt="pytest failed",
+            run_id=pipeline_uuid,
+        ),
+    )
+    state = MonitorState()
+    _seed_directive(state)
+    mark_ci_repair_operator_decision_conflict(
+        state,
+        head_sha=_HEAD,
+        failures=step_a,
+        reason="lint conflicts with operator decision op-guide-1: blocked",
+    )
+    assert isinstance(decide(_status(failures=step_a), state, MonitorConfig()), NotifyHuman)
+    assert isinstance(
+        decide(_status(failures=step_b), state, MonitorConfig()),
+        ReportCiFailure,
+    )
+
+
+@pytest.mark.unit
 def test_conflict_clears_for_new_guide_new_head_or_changed_failures() -> None:
     state = MonitorState()
     _seed_directive(state)

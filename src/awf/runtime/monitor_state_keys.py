@@ -184,8 +184,9 @@ def _applied_operator_directives_state_key() -> str:
 
 # Reserved key prefix for a parked CI-repair vs operator-decision conflict on one
 # PR head / failing-check signature (#1256). Value is the agent's NEEDS_HUMAN
-# reason sentence used for NotifyHuman while the park is live. Built like the
-# CI-repair-attempted marker by rewriting the transient-rerun key prefix.
+# reason sentence used for NotifyHuman while the park is live. Digest includes
+# run_id plus check name/conclusion so Bitbucket steps that share a pipeline
+# UUID still park independently; retry-budget keys remain run-level separately.
 _CI_REPAIR_OPERATOR_DECISION_CONFLICT_KEY_PREFIX = "__awf_ci_repair_operator_decision_conflict:"
 
 

@@ -13,6 +13,7 @@ failure set changes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -181,22 +182,34 @@ def log_ci_repair_applied_operator_directives_audit(
     )
 
 
+def _ci_repair_operator_decision_conflict_failure_identity(
+    failure: CheckFailure,
+) -> tuple[str, str, str]:
+    """Conflict-park identity: run id plus the failing check name/conclusion.
+
+    Transient-rerun retry budgets intentionally drop name/conclusion whenever a
+    ``run_id`` is present so poll-time label drift does not reset attempts. Conflict
+    parks must still distinguish which steps failed: Bitbucket stamps every
+    failing step with the same pipeline UUID as ``run_id``, so a run-only key
+    would keep returning the old operator-conflict notification after a different
+    step fails on the same pipeline/head.
+    """
+    return (failure.run_id or "", failure.name, failure.conclusion)
+
+
 def _ci_repair_operator_decision_conflict_state_key(
     head_sha: str,
     failures: tuple[CheckFailure, ...],
 ) -> str:
     """Build the conflict park key for one PR head / failing-check signature."""
-    from awf.runtime.pr_monitor import (
-        _CI_TRANSIENT_RERUN_KEY_PREFIX,
-        _ci_transient_rerun_state_key,
+    signature = json.dumps(
+        sorted(
+            _ci_repair_operator_decision_conflict_failure_identity(failure) for failure in failures
+        ),
+        separators=(",", ":"),
     )
-
-    rerun_key = _ci_transient_rerun_state_key(head_sha, failures)
-    return rerun_key.replace(
-        _CI_TRANSIENT_RERUN_KEY_PREFIX,
-        _ci_repair_operator_decision_conflict_key_prefix(),
-        1,
-    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    return f"{_ci_repair_operator_decision_conflict_key_prefix()}{head_sha}:{digest}"
 
 
 def mark_ci_repair_operator_decision_conflict(
