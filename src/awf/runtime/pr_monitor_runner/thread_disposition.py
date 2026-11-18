@@ -60,8 +60,8 @@ THREAD_DISPOSITION_REASON_MISSING = "THREAD_DISPOSITION_REASON_MISSING"
 THREAD_DISPOSITION_EVIDENCE_MISSING = "THREAD_DISPOSITION_EVIDENCE_MISSING"
 # The forge rejected the in-thread disposition reply; the thread stays open.
 THREAD_DISPOSITION_REPLY_FAILED = "THREAD_DISPOSITION_REPLY_FAILED"
-# Unmarked feedback by AWF's own identity (the operator's account) preceded the
-# reply; the monitor never reads that identity's comments, so a human must.
+# Unmarked feedback by AWF's own identity preceded the reply and was not present
+# when triage recorded the disposition (so it was not in read_own_comment_ids).
 THREAD_DISPOSITION_UNREAD_FEEDBACK = "THREAD_DISPOSITION_UNREAD_FEEDBACK"
 # READY_TO_MERGE / merge refused: AWF-resolved threads carry no disposition marker.
 REVIEW_THREAD_DISPOSITION_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"

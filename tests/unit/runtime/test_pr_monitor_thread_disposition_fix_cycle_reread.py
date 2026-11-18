@@ -25,6 +25,7 @@ from awf.runtime.monitor_state_keys import _disposition_retired_key
 from awf.runtime.pr_monitor import (
     AddressComments,
     MonitorConfig,
+    MonitorState,
     NotifyHuman,
     ReviewThread,
     ReviewThreadComment,
@@ -34,6 +35,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import Verdict
 from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
+    record_item_disposition,
     retire_reopened_dispositions,
     sync_item_disposition,
 )
@@ -420,6 +422,109 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
 
     assert [event[0] for event in gh.events] == ["reply", "resolve"]
     assert state.threads_addressed_ids[tid] == "false_positive"
+
+
+async def test_fix_cycle_resolves_when_operator_comment_was_read_at_triage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity comment present at triage is skipped on the reply re-read (#1272)."""
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_read_own_at_triage"
+    operator_id = "own-0"
+    thread = replace(
+        _commented_thread(tid, _ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1", body=_ASK, author="review-bot", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id=operator_id,
+                body=_OPERATOR_ASK,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply="d" * 64,
+        viewer_bodies=(_OPERATOR_ASK, marker),
+        viewer_ids=(operator_id, "reply-1"),
+        superseded=0,
+    )
+
+    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
+        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
+        record_item_disposition(
+            state,
+            replace(disposition, read_own_comment_ids=(operator_id,)),
+        )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_seed,
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert state.threads_addressed_ids[tid] == "false_positive"
+
+
+async def test_fix_cycle_still_parks_unread_operator_comment_not_in_read_set(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity comment absent from triage still parks as unread (#1272)."""
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_unread_own_after_triage"
+    thread = _commented_thread(tid, _ASK)
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply="d" * 64,
+        viewer_bodies=(_OPERATOR_ASK, marker),
+        viewer_ids=("own-0", "reply-1"),
+        superseded=0,
+    )
+
+    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
+        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
+        # Triage saw no identity comments; an empty read set must still park.
+        record_item_disposition(
+            state,
+            replace(disposition, read_own_comment_ids=()),
+        )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_seed,
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("THREAD_DISPOSITION_UNREAD_FEEDBACK:")
 
 
 @pytest.mark.parametrize(
