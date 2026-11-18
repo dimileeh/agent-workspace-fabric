@@ -14421,6 +14421,12 @@
             ],
             "title": "Branch Name"
           },
+          "claim_active": {
+            "default": false,
+            "description": "True while an execution or monitor claim on the workspace is unexpired.",
+            "title": "Claim Active",
+            "type": "boolean"
+          },
           "compose_file_path": {
             "anyOf": [
               {
