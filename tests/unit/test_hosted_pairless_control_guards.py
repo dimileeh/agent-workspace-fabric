@@ -134,6 +134,81 @@ async def test_pairless_guide_refuses_grants_in_every_state_without_mutation(
 
 
 @pytest.mark.unit
+async def test_pairless_guide_refuses_grants_with_default_allow_grants_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary grant-bearing pair-less guides must get 409, not the grant-capability 403.
+
+    allow_grants defaults to False; without skipping that early check, callers never
+    reach the pair-less HOSTED_REAUTHORIZATION_REQUIRED refusal.
+    """
+    row = _hosted_row(status="monitoring_pr")
+    before = _snapshot(row)
+    authority = _authority(row)
+    session = _session(row)
+    monkeypatch.setattr(operations, "authority_for", lambda *_args: authority)
+    monkeypatch.setattr(operations, "lock_materials", AsyncMock())
+    authorization = HostedControlAuthorization(namespace="tenant", actor="caller")
+
+    with pytest.raises(MaterialDeniedError, match="HOSTED_REAUTHORIZATION_REQUIRED") as denied:
+        await operations.control_authority(
+            session,
+            row.id,
+            authorization,
+            grants=["grant-a"],
+            operator="caller",
+            control="guide",
+        )
+
+    assert denied.value.status == 409
+    assert _snapshot(row) == before
+
+
+@pytest.mark.unit
+async def test_paired_guide_still_requires_grant_capability_before_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requests with a reauthorization pair keep the existing grant-capability 403."""
+    from awf.hosted_node.runtime_schemas import HostedReauthorization
+
+    raw = hosted_create()["hosted"]
+    expected = HostedWorkspace.model_validate(raw)
+    for binding in raw["credentials"].values():
+        for key in ("grant_id", "preparation_id", "idempotency_key"):
+            binding[key] = "fresh-" + binding[key]
+    pair = HostedReauthorization(
+        expected_association=expected,
+        replacement_association=HostedWorkspace.model_validate(raw),
+    )
+    row = _hosted_row(status="monitoring_pr")
+    authority = _authority(row)
+    session = _session(row)
+    monkeypatch.setattr(operations, "authority_for", lambda *_args: authority)
+    rebind = AsyncMock()
+    monkeypatch.setattr(
+        "awf.hosted_node.lifecycle_reauthorization.authorize_rebinding",
+        rebind,
+    )
+    authorization = HostedControlAuthorization(namespace="tenant", actor="caller")
+
+    with pytest.raises(
+        MaterialDeniedError, match="HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED"
+    ) as denied:
+        await operations.control_authority(
+            session,
+            row.id,
+            authorization,
+            reauthorization=pair,
+            grants=["grant-a"],
+            operator="caller",
+            control="guide",
+        )
+
+    assert denied.value.status == 403
+    rebind.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_hosted_reauthorization_required_denial_error_body() -> None:
     response = await denial_error(
         Request({"type": "http", "method": "POST", "path": "/v1/x", "headers": []}),

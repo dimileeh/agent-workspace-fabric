@@ -286,7 +286,15 @@ async def control_authority(
         return
     if authorization is None:
         raise MaterialDeniedError("HOSTED_CONTROL_AUTHORIZATION_REQUIRED", 403)
-    if grants and (not authorization.allow_grants or operator != authorization.actor):
+    # Pair-less guide refuses grants with HOSTED_REAUTHORIZATION_REQUIRED under
+    # the row lock below. Keep grant-capability checks for paired rebinding and
+    # other controls (allow_grants defaults to False).
+    pairless_guide = control == "guide" and reauthorization is None
+    if (
+        grants
+        and not pairless_guide
+        and (not authorization.allow_grants or operator != authorization.actor)
+    ):
         raise MaterialDeniedError("HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED", 403)
     # Ordinary controls take the operation key, workspace, then the admission
     # mutex through their first write. Keep that order before hosted checks.
