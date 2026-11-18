@@ -117,13 +117,10 @@ def _parse_review_thread_comments(
         if viewer_did_author and is_disposition_reply(raw_body, thread_id=thread_id):
             continue
         database_id = node.get("databaseId")
-        listed_body = node.get("bodyText")
-        if listed_body is None or listed_body == "":
-            listed_body = raw_body
         comments.append(
             ReviewThreadComment(
                 comment_id=str(database_id) if database_id is not None else None,
-                body=listed_body or "",
+                body=node.get("bodyText") or "",
                 author=_clean_optional_str(_dig(node, "author", "login")),
                 viewer_did_author=viewer_did_author,
                 created_at=_parse_github_datetime(node.get("createdAt")),

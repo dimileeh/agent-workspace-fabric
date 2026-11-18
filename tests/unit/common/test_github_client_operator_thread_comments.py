@@ -316,6 +316,44 @@ async def test_outdated_unmarked_identity_thread_routes_to_outdated_feed() -> No
 
 
 @pytest.mark.unit
+async def test_html_comment_only_outside_comment_keeps_empty_body_text() -> None:
+    """HTML-only markdown yields empty bodyText; listed body must stay empty.
+
+    Falling back to raw ``body`` would diverge from audit ``external_comment_bodies``
+    (which records ``bodyText or ""``), reject an unchanged conversation, and
+    rewrite previously saved hashes for those comments.
+    """
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        returncode=0,
+        stdout=_sample_pr_payload(
+            threads=[
+                _thread(
+                    "T_html_only",
+                    comments=[
+                        {
+                            "databaseId": 701,
+                            "body": "<!-- greptile-hidden note -->",
+                            "bodyText": "",
+                            "author": {"login": "reviewer-bot"},
+                            "viewerDidAuthor": False,
+                        }
+                    ],
+                )
+            ]
+        ),
+    )
+    status = await GitHubClient(fake).fetch_pr_status(
+        repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+    )
+
+    comment = status.unresolved_inline_threads[0].comments[0]
+    assert comment.comment_id == "701"
+    assert comment.body == ""
+    assert comment.viewer_did_author is False
+
+
+@pytest.mark.unit
 def test_status_feed_queries_select_raw_body_next_to_body_text() -> None:
     for query in (_GQL_PR_STATE, _GQL_PR_REVIEW_THREADS_PAGE, _GQL_REVIEW_THREAD_COMMENTS_PAGE):
         # Review-thread comment selections must see HTML-comment markers.
