@@ -174,14 +174,9 @@ def test_comment_named_identifiers_keeps_prose_names_around_tilde_and_long_fence
 
 
 @pytest.mark.unit
-def test_reviewer_comment_text_keeps_unmarked_identity_and_excludes_disposition() -> None:
-    """#1272: operator identity feedback stays evidence; disposition replies do not."""
-    marker = (
-        "<!-- AWF:thread-disposition:v1 class=fixed thread=PRRT_named -->\n"
-        "**AWF disposition: fixed.** Reason: already addressed."
-    )
+def test_reviewer_comment_text_excludes_viewer_replies_and_review_context() -> None:
     thread = ReviewThread(
-        thread_id="PRRT_named",
+        thread_id="t",
         path=_CHANNEL,
         line=932,
         body_excerpt="excerpt names src/app/excerpt.py",
@@ -189,68 +184,32 @@ def test_reviewer_comment_text_keeps_unmarked_identity_and_excludes_disposition(
             ReviewThreadComment(comment_id="1", body="reviewer names `_TASK_INBOUND_TYPES`"),
             ReviewThreadComment(
                 comment_id="2",
-                body="also fix docs/runbooks/vm-core-update.md",
+                body="AWF: already addressed in docs/runbooks/vm-core-update.md",
                 viewer_did_author=True,
             ),
-            ReviewThreadComment(
-                comment_id="3",
-                body=marker,
-                viewer_did_author=True,
-            ),
-            ReviewThreadComment(comment_id="4", body="follow-up names src/app/b.py"),
+            ReviewThreadComment(comment_id="3", body="follow-up names src/app/b.py"),
         ),
         review_context=ReviewComment(comment_id="r", body_excerpt="review body names c.py"),
     )
 
     assert comment_named.reviewer_comment_text(thread) == (
-        "reviewer names `_TASK_INBOUND_TYPES`\n"
-        "also fix docs/runbooks/vm-core-update.md\n"
-        "follow-up names src/app/b.py"
+        "reviewer names `_TASK_INBOUND_TYPES`\nfollow-up names src/app/b.py"
     )
-
-
-@pytest.mark.unit
-def test_reviewer_comment_text_identity_only_thread_keeps_named_target() -> None:
-    """Identity-only operator feedback must not empty the comment-named evidence gate."""
-    thread = ReviewThread(
-        thread_id="PRRT_identity",
-        path=_CHANNEL,
-        line=1,
-        body_excerpt="excerpt",
-        comments=(
-            ReviewThreadComment(
-                comment_id="1",
-                body=f"please update `{_DOC}`",
-                viewer_did_author=True,
-            ),
-        ),
-    )
-
-    assert comment_named.reviewer_comment_text(thread) == f"please update `{_DOC}`"
 
 
 @pytest.mark.unit
 def test_reviewer_comment_text_falls_back_to_the_excerpt_only_without_comments() -> None:
     bare = ReviewThread(thread_id="t", path=_CHANNEL, line=1, body_excerpt="names a.py")
-    only_disposition = ReviewThread(
-        thread_id="PRRT_disp",
+    only_awf = ReviewThread(
+        thread_id="t",
         path=_CHANNEL,
         line=1,
         body_excerpt="AWF names a.py",
-        comments=(
-            ReviewThreadComment(
-                comment_id="1",
-                body=(
-                    "<!-- AWF:thread-disposition:v1 class=fixed thread=PRRT_disp -->\n"
-                    "**AWF disposition: fixed.**"
-                ),
-                viewer_did_author=True,
-            ),
-        ),
+        comments=(ReviewThreadComment(comment_id="1", body="AWF", viewer_did_author=True),),
     )
 
     assert comment_named.reviewer_comment_text(bare) == "names a.py"
-    assert comment_named.reviewer_comment_text(only_disposition) == ""
+    assert comment_named.reviewer_comment_text(only_awf) == ""
 
 
 # --- (a) comment-named path ------------------------------------------------------

@@ -592,9 +592,8 @@ async def comment_named_target_item_fix_evidence(
     helper's file, the tuple a filter reads — and three genuine fixes of exactly
     those shapes escalated to ``needs_human`` on 2026-11-13. The targets are the
     reviewer's choice, never the agent's: ``comment_text`` is
-    ``reviewer_comment_text`` (disposition replies excluded; unmarked identity
-    feedback included, #1272) and the agent's verdict reason is never passed
-    here. Attempt 0 stays strict, a commit that
+    ``reviewer_comment_text`` (AWF-authored replies excluded) and the agent's
+    verdict reason is never passed here. Attempt 0 stays strict, a commit that
     changes no named target keeps escalating with the commit preserved, and the
     ``item_line <= 0`` unmappable-anchor sentinel stays fail-closed; a
     file-level thread (``item_line is None``) is not that sentinel.
