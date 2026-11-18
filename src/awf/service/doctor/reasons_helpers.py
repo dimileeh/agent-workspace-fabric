@@ -233,21 +233,19 @@ def get_salvage_and_monitor_reasons(
                 "A CI-failure repair reported an operator-decision conflict, but AWF "
                 "could not finish undoing the repair residue (worktree reset/clean or "
                 "hosted remote rewind), so the workspace stayed in monitoring_pr and "
-                "parked for a human while retries continue."
+                "parked for a human."
             ),
             (
                 "Inspect the awaiting-human message for what is left (leftover worktree "
-                "edits, or a remote head not rewound to the pre-repair SHA). Each poll "
-                "retries the same rollback; if retries keep failing, cancel and "
-                "re-adopt for a clean worktree. A new guide or AWF-FORGET-DECISIONS "
-                "does not clear this park. Do not expect AWF to dispatch another "
-                "agent while this park is set."
+                "edits, or a remote head not rewound to the pre-repair SHA). Cancel and "
+                "re-adopt for a clean worktree — nothing clears this park (not a new "
+                "guide, AWF-FORGET-DECISIONS, or re-adoption seed). Do not expect AWF "
+                "to dispatch another agent while this park is set."
             ),
             (
-                "The conflict undo failed closed into a retryable park "
-                "(``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``) instead of failing the "
-                "workspace; each poll retries the same rollback before promoting to "
-                "``CI_REPAIR_OPERATOR_DECISION_CONFLICT``."
+                "The conflict undo failed closed into "
+                "``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` instead of failing the "
+                "workspace; the park holds the leftover message until cancel + re-adopt."
             ),
             "awf workspace cancel <workspace_id>",
             reason_catalog_link("CI_REPAIR_CONFLICT_ROLLBACK_PENDING"),

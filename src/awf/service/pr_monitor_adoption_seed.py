@@ -34,6 +34,8 @@ successor's CI repair would receive no applied decisions and could undo the
 operator's previously applied changes (PRRT_kwDOSJAM6s64ycSl). CI-repair
 conflict parks for a specific failing-check signature stay behind -- they are
 cycle bookkeeping the fresh monitor re-derives once the history is quoted again.
+``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` also stays behind: cancel + re-adopt is
+the intentional exit, so the successor must not inherit that park.
 
 Deliberately never copied: protected-block state, awaiting-required-checks
 timestamps, operator-hint *cycle* bookkeeping (the pending-hint record and its

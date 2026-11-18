@@ -201,42 +201,6 @@ async def _execute(
 
     await _release_work_slot_before_pure_wait(self, action)
 
-    # One gate for unfinished CI-repair conflict rollbacks: while any pending
-    # park remains, every agent-launching arm retries the undo first and skips
-    # the action when leftovers stay (#1256 operator review of 3571d1e42).
-    if isinstance(action, _WORK_SLOT_MONITOR_ACTIONS):
-        from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
-            divert_work_slot_for_conflict_rollback_pending,
-        )
-
-        diverted = await divert_work_slot_for_conflict_rollback_pending(
-            self,
-            action=action,
-            work_slot_action_types=_WORK_SLOT_MONITOR_ACTIONS,
-            workspace_id=workspace_id,
-            worktree_path=self._worktrees_root / workspace_id,
-            state=state,
-            status=status,
-        )
-        if diverted is not None:
-            await _release_work_slot_before_pure_wait(self, diverted)
-            await self._persist_state(workspace_id, state)
-            return await _notify_human_loop.handle_notify_human_action(
-                self,
-                action=diverted,
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
-            )
-
     # Clear awaiting-human attention as soon as the monitor resumes with a
     # non-human action. ``Merge`` owns its own attention handling because branch
     # protection can deterministically re-enter that arm every poll (#659).
@@ -1355,25 +1319,6 @@ async def _execute(
         return merge_result
 
     if isinstance(action, NotifyHuman):
-        from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
-            CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
-            retry_ci_repair_conflict_rollback_pending,
-        )
-
-        if action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING:
-            # Failed conflict undo: retry the same rollback before the human wait;
-            # on success promote to the normal operator-decision conflict park.
-            worktree_path = self._worktrees_root / workspace_id
-            retried = await retry_ci_repair_conflict_rollback_pending(
-                self,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                state=state,
-                status=status,
-            )
-            if retried is not None:
-                action = retried
-                await self._persist_state(workspace_id, state)
         return await _notify_human_loop.handle_notify_human_action(
             self,
             action=action,

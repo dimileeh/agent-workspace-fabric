@@ -587,7 +587,9 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
     assert result.parked_needs_human is True
     assert result.pushed is False
     assert result.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
-    assert f"remote head {_PUBLISHED_HOSTED_HEAD} not rewound to {_HEAD}" in (result.stderr or "")
+    leftover = f"remote head {_PUBLISHED_HOSTED_HEAD} not rewound to {_HEAD}"
+    assert leftover in (result.stderr or "")
+    assert "Cancel and re-adopt" in (result.stderr or "")
     assert commit_calls == []
     assert push_calls == []
     assert rollback_calls
@@ -597,19 +599,9 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
         )
         is None
     )
-    # Pending park is keyed by the unre wound published live head, not the
-    # pre-repair status snapshot from the repair cycle (PRRT_kwDOSJAM6s64yp29).
-    # Lookup by restore_ref / pre-repair head must still resolve it so retries
-    # and decide() cannot miss while the forge status lags (PRRT_kwDOSJAM6s64yqJ9).
-    pending = ci_repair_conflict_rollback_pending(
-        state, head_sha=_PUBLISHED_HOSTED_HEAD, failures=_FAILURES
-    )
+    pending = ci_repair_conflict_rollback_pending(state)
     assert pending is not None
-    assert pending.published_remote_head == _PUBLISHED_HOSTED_HEAD
-    assert (
-        ci_repair_conflict_rollback_pending(state, head_sha=status.head_sha, failures=_FAILURES)
-        == pending
-    )
+    assert pending.leftover_message == leftover
     assert result.details is not None
     assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
     assert state.hosted_terminal_head_advanced is True
@@ -682,6 +674,7 @@ async def test_ci_repair_needs_human_conflict_parks_pending_on_worktree_rollback
     assert result.pushed is False
     assert result.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
     assert "leftover worktree edits" in (result.stderr or "")
+    assert "Cancel and re-adopt" in (result.stderr or "")
     assert commit_calls == []
     assert push_calls == []
     assert rollback_calls
@@ -691,11 +684,9 @@ async def test_ci_repair_needs_human_conflict_parks_pending_on_worktree_rollback
         )
         is None
     )
-    pending = ci_repair_conflict_rollback_pending(
-        state, head_sha=status.head_sha, failures=_FAILURES
-    )
+    pending = ci_repair_conflict_rollback_pending(state)
     assert pending is not None
-    assert pending.cause == rollback_cause
+    assert pending.leftover_message == "leftover worktree edits"
     assert result.details is not None
     assert result.details.get("phase") == "ci_repair_operator_decision_conflict"
     assert result.details.get("rollback_error", {}).get("cause") == rollback_cause

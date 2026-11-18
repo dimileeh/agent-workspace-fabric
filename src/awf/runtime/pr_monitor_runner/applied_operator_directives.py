@@ -98,7 +98,7 @@ def append_applied_operator_directive(
     """Append ``record`` (newest first), keep at most five, clear conflict parks.
 
     Clears ``CI_REPAIR_OPERATOR_DECISION_CONFLICT`` parks only — unfinished
-    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` parks stay until rollback succeeds.
+    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` parks are never cleared here.
     """
     existing = list(load_applied_operator_directives(state))
     existing.insert(0, record)
@@ -149,8 +149,8 @@ def record_applied_operator_directive_from_hint(
     conflict parks first — including when ``applied_text=""`` on a ruling-only
     finalize, so the withdrawal is not dropped with the consumed hint
     (PRRT_kwDOSJAM6s64yVR7). Unfinished ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``
-    parks are not cleared here. Then record the applied remainder without that
-    marker only if other applied text remains.
+    parks are never cleared here (exit is cancel + re-adopt). Then record the
+    applied remainder without that marker only if other applied text remains.
     """
     hint_directive = (getattr(hint, "directive", None) or "").strip()
     if not hint_directive:
@@ -275,9 +275,9 @@ def mark_ci_repair_operator_decision_conflict(
 def clear_ci_repair_operator_decision_conflicts(state: MonitorState) -> None:
     """Drop every CI-repair operator-decision conflict park (new guide arrived).
 
-    Does not clear ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``: only a successful
-    rollback clears an unfinished undo. A new guide or ``AWF-FORGET-DECISIONS``
-    must not drop that park while leftovers remain (#1256 operator review).
+    Does not clear ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``: nothing clears that
+    park; exit is cancel + re-adopt. A new guide or ``AWF-FORGET-DECISIONS``
+    must not drop it while leftovers remain (#1256 operator review).
     """
     prefix = _ci_repair_operator_decision_conflict_key_prefix()
     for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
@@ -310,11 +310,7 @@ def report_ci_failure_or_operator_conflict(
         notify_human_for_conflict_rollback_pending,
     )
 
-    pending_action = notify_human_for_conflict_rollback_pending(
-        state,
-        head_sha=status.head_sha,
-        failures=status.ci_failures,
-    )
+    pending_action = notify_human_for_conflict_rollback_pending(state)
     if pending_action is not None:
         return pending_action
     reason = ci_repair_operator_decision_conflict_reason(
