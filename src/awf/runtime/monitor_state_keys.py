@@ -169,6 +169,43 @@ def _operator_decision_key(thread_id: str) -> str:
     return f"__operator_decision__:{thread_id}"
 
 
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON list of
+# recently applied operator directives (#1256). CI-failure repair prompts quote
+# these so a later ``ReportCiFailure`` cannot undo a guide that already landed.
+# Like the other ``__awf_…`` reserved keys it is inert to ``decide()`` itself —
+# only the CI-repair prompt loader and the conflict-park helper read it.
+_APPLIED_OPERATOR_DIRECTIVES_STATE_KEY = "__awf_applied_operator_directives__"
+
+
+def _applied_operator_directives_state_key() -> str:
+    """Build the reserved key for persisted applied-operator-directive records."""
+    return _APPLIED_OPERATOR_DIRECTIVES_STATE_KEY
+
+
+# Reserved key prefix for a parked CI-repair vs operator-decision conflict on one
+# PR head / failing-check signature (#1256). Value is the agent's NEEDS_HUMAN
+# reason sentence used for NotifyHuman while the park is live. Digest includes
+# run_id plus check name/conclusion so Bitbucket steps that share a pipeline
+# UUID still park independently; retry-budget keys remain run-level separately.
+_CI_REPAIR_OPERATOR_DECISION_CONFLICT_KEY_PREFIX = "__awf_ci_repair_operator_decision_conflict:"
+
+
+def _ci_repair_operator_decision_conflict_key_prefix() -> str:
+    """Return the reserved prefix for CI-repair operator-decision conflict keys."""
+    return _CI_REPAIR_OPERATOR_DECISION_CONFLICT_KEY_PREFIX
+
+
+# Single workspace-level key for a parked CI-repair conflict undo that failed
+# (local reset/clean or hosted remote rewind). Value is the leftover-message
+# string. Nothing clears it; exit is cancel + re-adopt. Not seeded on re-adoption.
+_CI_REPAIR_CONFLICT_ROLLBACK_PENDING_KEY = "__awf_ci_repair_conflict_rollback_pending"
+
+
+def _ci_repair_conflict_rollback_pending_key() -> str:
+    """Return the reserved workspace-level CI-repair conflict rollback-pending key."""
+    return _CI_REPAIR_CONFLICT_ROLLBACK_PENDING_KEY
+
+
 def _operator_decision_issued_at_key(thread_id: str) -> str:
     """Build state key stamping when an *unbindable* operator ruling was issued.
 
