@@ -98,6 +98,7 @@ def _pending(
     cause: str = "reset_failed",
     published_remote_head: str | None = None,
     leftover: str = "leftover worktree edits",
+    park_failures: tuple[CheckFailure, ...] = _FAILURES,
 ) -> CiRepairConflictRollbackPending:
     return CiRepairConflictRollbackPending(
         conflict_reason=_CONFLICT_REASON,
@@ -106,6 +107,7 @@ def _pending(
         operation_start_last_push_sha=_HEAD,
         leftover_message=leftover,
         cause=cause,
+        park_failures=park_failures,
     )
 
 
@@ -638,6 +640,115 @@ async def test_retry_finds_hosted_pending_after_ci_signature_drift(
     assert (
         ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=drifted_failures)
         is None
+    )
+    # Promote must park under the original signature on restore_ref, not the
+    # drifted live CI on the published repair head (PRRT_kwDOSJAM6s64y_gv).
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        == _CONFLICT_REASON
+    )
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=_HEAD, failures=drifted_failures
+        )
+        is None
+    )
+    restored = _status(head_sha=_HEAD)
+    assert isinstance(
+        decide(restored, state, MonitorConfig(auto_merge=True)),
+        NotifyHuman,
+    )
+    assert not isinstance(
+        report_ci_failure_or_operator_conflict(restored, state),
+        ReportCiFailure,
+    )
+
+
+@pytest.mark.unit
+def test_park_failures_round_trip_and_parse_edges() -> None:
+    """Persisted park_failures survive mark/lookup; malformed entries are dropped."""
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        _parse_park_failures,
+        _serialize_park_failures,
+    )
+
+    state = MonitorState()
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=_FAILURES,
+        pending=_pending(
+            cause="hosted_remote_rollback_failed",
+            published_remote_head=_PUBLISHED,
+            leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+        ),
+    )
+    loaded = ci_repair_conflict_rollback_pending(state)
+    assert loaded is not None
+    assert loaded.park_failures == _FAILURES
+    assert _serialize_park_failures(_FAILURES)[0]["run_id"] == "r-bot"
+    assert _parse_park_failures("not-a-list") == ()
+    assert _parse_park_failures(
+        [
+            {"name": "x"},
+            "skip",
+            {"name": "a", "conclusion": "FAILURE", "log_excerpt": 1, "run_id": 2},
+        ]
+    ) == (CheckFailure(name="a", conclusion="FAILURE", log_excerpt="", run_id=None),)
+
+
+@pytest.mark.unit
+async def test_promote_falls_back_to_live_failures_when_park_failures_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy pending payloads without park_failures still promote using live CI."""
+    import json
+
+    from awf.runtime.monitor_state_keys import (
+        _ci_repair_conflict_rollback_pending_key_prefix,
+    )
+
+    state = MonitorState()
+    legacy_payload = {
+        "conflict_reason": _CONFLICT_REASON,
+        "restore_ref": _HEAD,
+        "published_remote_head": None,
+        "operation_start_last_push_sha": _HEAD,
+        "leftover_message": "leftover worktree edits",
+        "cause": "reset_failed",
+    }
+    state.mark_addressed(
+        f"{_ci_repair_conflict_rollback_pending_key_prefix()}{_HEAD}",
+        json.dumps(legacy_payload, separators=(",", ":")),
+    )
+    loaded = ci_repair_conflict_rollback_pending(state)
+    assert loaded is not None
+    assert loaded.park_failures == ()
+
+    async def _ok_rollback(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _ok_rollback,
+    )
+    action = await retry_ci_repair_conflict_rollback_pending(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=_status(head_sha=_HEAD),
+    )
+    assert action is not None
+    assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        == _CONFLICT_REASON
     )
 
 

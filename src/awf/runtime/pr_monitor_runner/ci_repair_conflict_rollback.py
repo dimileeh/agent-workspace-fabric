@@ -44,6 +44,11 @@ class CiRepairConflictRollbackPending:
     operation_start_last_push_sha: str | None
     leftover_message: str
     cause: str | None
+    # Original failing-check signature for the conflict park after promote.
+    # Live ``status.ci_failures`` on a later poll may describe the published
+    # repair head (new run ids / different checks) and must not re-key the park
+    # under restore_ref (PRRT_kwDOSJAM6s64y_gv).
+    park_failures: tuple[CheckFailure, ...] = ()
 
 
 def operator_decision_conflict_reason(stdout: str) -> str | None:
@@ -78,6 +83,48 @@ def conflict_rollback_pending_human_message(*, leftover_message: str) -> str:
 
 def _conflict_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     return (failure.run_id or "", failure.name, failure.conclusion)
+
+
+def _serialize_park_failures(failures: tuple[CheckFailure, ...]) -> list[dict[str, str | None]]:
+    """Persist identity fields needed to re-key the conflict park on promote."""
+    return [
+        {
+            "name": failure.name,
+            "conclusion": failure.conclusion,
+            "log_excerpt": failure.log_excerpt,
+            "run_id": failure.run_id,
+        }
+        for failure in failures
+    ]
+
+
+def _parse_park_failures(raw: object) -> tuple[CheckFailure, ...]:
+    """Reconstruct park failures from a persisted pending payload."""
+    from awf.runtime.pr_monitor import CheckFailure as _CheckFailure
+
+    if not isinstance(raw, list):
+        return ()
+    parsed: list[CheckFailure] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        conclusion = item.get("conclusion")
+        log_excerpt = item.get("log_excerpt")
+        if not isinstance(name, str) or not isinstance(conclusion, str):
+            continue
+        if not isinstance(log_excerpt, str):
+            log_excerpt = ""
+        run_id = item.get("run_id")
+        parsed.append(
+            _CheckFailure(
+                name=name,
+                conclusion=conclusion,
+                log_excerpt=log_excerpt,
+                run_id=run_id if isinstance(run_id, str) else None,
+            )
+        )
+    return tuple(parsed)
 
 
 def conflict_park_lookup_head(
@@ -151,6 +198,7 @@ def _parse_pending_payload(raw: object) -> CiRepairConflictRollbackPending | Non
         operation_start_last_push_sha=(start_push if isinstance(start_push, str) else None),
         leftover_message=leftover_message,
         cause=cause if isinstance(cause, str) else None,
+        park_failures=_parse_park_failures(payload.get("park_failures")),
     )
 
 
@@ -174,6 +222,7 @@ def mark_ci_repair_conflict_rollback_pending(
 ) -> None:
     """Persist a pending conflict undo for this head (CI signature independent)."""
     del failures  # Kept for call-site compatibility; keying ignores CI signature.
+    park_failures = pending.park_failures
     payload = {
         "conflict_reason": pending.conflict_reason,
         "restore_ref": pending.restore_ref,
@@ -181,6 +230,7 @@ def mark_ci_repair_conflict_rollback_pending(
         "operation_start_last_push_sha": pending.operation_start_last_push_sha,
         "leftover_message": pending.leftover_message,
         "cause": pending.cause,
+        "park_failures": _serialize_park_failures(park_failures),
     }
     # Drop any legacy head:digest keys for this head so lookup stays unambiguous.
     for key in _pending_keys_for_head(state, head_sha):
@@ -345,6 +395,7 @@ async def handle_operator_decision_conflict_after_ci_repair(
             operation_start_last_push_sha=operation_start_last_push_sha,
             leftover_message=leftover,
             cause=rollback_result.cause,
+            park_failures=failures,
         )
         park_head = conflict_park_lookup_head(
             status_head_sha=conflict_head,
@@ -495,6 +546,7 @@ async def retry_ci_repair_conflict_rollback_pending(
             operation_start_last_push_sha=pending.operation_start_last_push_sha,
             leftover_message=leftover,
             cause=rollback_result.cause,
+            park_failures=pending.park_failures,
         )
         # Clear every unfinished park, then rewrite under the live head.
         clear_ci_repair_conflict_rollback_pending(state)
@@ -520,10 +572,13 @@ async def retry_ci_repair_conflict_rollback_pending(
     # Remote was rewound to restore_ref; next poll observes that SHA, not the
     # published head still recorded on this poll's status snapshot.
     promote_head = (pending.restore_ref or "").strip() or status.head_sha
+    # Prefer the signature captured when the conflict parked — live
+    # status.ci_failures may describe the published repair head after drift.
+    promote_failures = pending.park_failures or status.ci_failures
     mark_ci_repair_operator_decision_conflict(
         state,
         head_sha=promote_head,
-        failures=status.ci_failures,
+        failures=promote_failures,
         reason=pending.conflict_reason,
     )
     _log.info(
