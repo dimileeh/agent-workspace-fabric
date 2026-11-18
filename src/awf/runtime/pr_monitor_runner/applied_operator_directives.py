@@ -228,17 +228,19 @@ def log_ci_repair_applied_operator_directives_audit(
 
 def _ci_repair_operator_decision_conflict_failure_identity(
     failure: CheckFailure,
-) -> tuple[str, str, str]:
-    """Conflict-park identity: run id plus the failing check name/conclusion.
+) -> tuple[str, str]:
+    """Conflict-park identity: failing check name and conclusion only.
 
-    Transient-rerun retry budgets intentionally drop name/conclusion whenever a
-    ``run_id`` is present so poll-time label drift does not reset attempts. Conflict
-    parks must still distinguish which steps failed: Bitbucket stamps every
-    failing step with the same pipeline UUID as ``run_id``, so a run-only key
-    would keep returning the old operator-conflict notification after a different
-    step fails on the same pipeline/head.
+    Do not hash ``run_id``: a GitHub workflow rerun or Bitbucket pipeline restart
+    mints a new run/pipeline id for the same failing check on the same head, and
+    the contract forbids re-dispatching CI repair until a new guide arrives or the
+    head / failing-check set changes (PRRT_kwDOSJAM6s64zZ_h).
+
+    Name + conclusion still distinguishes Bitbucket steps that share one pipeline
+    UUID as ``run_id`` (unlike transient-rerun budgets, which drop name/conclusion
+    when a ``run_id`` is present so poll-time label drift does not reset attempts).
     """
-    return (failure.run_id or "", failure.name, failure.conclusion)
+    return (failure.name, failure.conclusion)
 
 
 def _ci_repair_operator_decision_conflict_state_key(

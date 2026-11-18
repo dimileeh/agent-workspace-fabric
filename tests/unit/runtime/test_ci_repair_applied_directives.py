@@ -748,6 +748,48 @@ def test_conflict_park_distinguishes_bitbucket_steps_sharing_pipeline_run_id() -
 
 
 @pytest.mark.unit
+def test_conflict_park_survives_same_check_rerun_with_new_run_id() -> None:
+    """Same head + check name/conclusion, new CI run id → keep the conflict park.
+
+    GitHub (and Bitbucket pipeline restarts) mint a fresh run/pipeline id on
+    rerun. The contract parks until a new guide arrives or the head / failing-
+    check set changes — not until the hosted run id changes — so a rerun must
+    not re-dispatch ReportCiFailure (PRRT_kwDOSJAM6s64zZ_h).
+    """
+    first_run = (
+        CheckFailure(
+            name="review-bot",
+            conclusion="FAILURE",
+            log_excerpt="Finding: restore the removed experimental block",
+            run_id="run-111",
+        ),
+    )
+    rerun = (
+        CheckFailure(
+            name="review-bot",
+            conclusion="FAILURE",
+            log_excerpt="Finding: restore the removed experimental block",
+            run_id="run-222",
+        ),
+    )
+    state = MonitorState()
+    _seed_directive(state)
+    mark_ci_repair_operator_decision_conflict(
+        state,
+        head_sha=_HEAD,
+        failures=first_run,
+        reason="review-bot conflicts with operator decision op-guide-1: blocked",
+    )
+    action = decide(_status(failures=rerun), state, MonitorConfig())
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=rerun)
+        is not None
+    )
+
+
+@pytest.mark.unit
 def test_conflict_clears_for_new_guide_new_head_or_changed_failures() -> None:
     state = MonitorState()
     _seed_directive(state)
