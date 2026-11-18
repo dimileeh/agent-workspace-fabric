@@ -72,6 +72,25 @@ def _conflict_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     return (failure.run_id or "", failure.name, failure.conclusion)
 
 
+def conflict_park_lookup_head(
+    *,
+    status_head_sha: str,
+    published_remote_head: str | None,
+) -> str:
+    """Return the head SHA next poll will observe for park lookup.
+
+    When a hosted rewind fails, the remote still carries the published repair
+    SHA while the repair-cycle ``status.head_sha`` remains the pre-repair
+    snapshot. Park under the published SHA so the next poll (and retry) finds
+    the pending entry instead of ReportCiFailure / merging the unre wound
+    conflict (PRRT_kwDOSJAM6s64yp29).
+    """
+    published = (published_remote_head or "").strip()
+    if published:
+        return published
+    return status_head_sha
+
+
 def _pending_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
     signature = json.dumps(
         sorted(_conflict_failure_identity(failure) for failure in failures),
@@ -246,10 +265,14 @@ async def handle_operator_decision_conflict_after_ci_repair(
             leftover_message=leftover,
             cause=rollback_result.cause,
         )
-        if conflict_head:
+        park_head = conflict_park_lookup_head(
+            status_head_sha=conflict_head,
+            published_remote_head=published_hosted_head,
+        )
+        if park_head:
             mark_ci_repair_conflict_rollback_pending(
                 state,
-                head_sha=conflict_head,
+                head_sha=park_head,
                 failures=failures,
                 pending=pending,
             )
@@ -376,9 +399,12 @@ async def retry_ci_repair_conflict_rollback_pending(
         head_sha=status.head_sha,
         failures=status.ci_failures,
     )
+    # Remote was rewound to restore_ref; next poll observes that SHA, not the
+    # published head still recorded on this poll's status snapshot.
+    promote_head = (pending.restore_ref or "").strip() or status.head_sha
     mark_ci_repair_operator_decision_conflict(
         state,
-        head_sha=status.head_sha,
+        head_sha=promote_head,
         failures=status.ci_failures,
         reason=pending.conflict_reason,
     )

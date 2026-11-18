@@ -252,15 +252,102 @@ async def test_retry_keeps_pending_park_when_rollback_still_fails(
 
 
 @pytest.mark.unit
+async def test_hosted_failed_rewind_parks_under_published_live_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Park under the unre wound published SHA so the next poll finds it.
+
+    Repair-cycle ``status.head_sha`` is still the pre-repair snapshot, but the
+    remote carries the published repair SHA. Keying the pending park under the
+    pre-repair head makes the next poll (live head = published) miss and
+    ReportCiFailure / merge the unre wound conflict (PRRT_kwDOSJAM6s64yp29).
+    """
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        handle_operator_decision_conflict_after_ci_repair,
+    )
+
+    state = MonitorState(last_push_sha=_PUBLISHED)
+    state.hosted_terminal_head_advanced = True
+
+    async def _detect_published(
+        _self: object,
+        **_kwargs: object,
+    ) -> str | None:
+        return _PUBLISHED
+
+    async def _ok_local(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    async def _failed_remote(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message="hosted remote head rollback failed",
+        )
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_detect_hosted_ci_repair_conflict_published_head",
+        _detect_published,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _ok_local,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rewind_hosted_ci_repair_conflict_remote",
+        _failed_remote,
+    )
+
+    result = await handle_operator_decision_conflict_after_ci_repair(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=_status(head_sha=_HEAD),
+        failures=_FAILURES,
+        conflict_stdout=_CONFLICT_STDOUT,
+        operation_start_head=_HEAD,
+        operation_start_last_push_sha=_HEAD,
+    )
+
+    assert result is not None
+    assert result.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    # Pre-repair snapshot must not be the only park key.
+    assert ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=_FAILURES) is None
+    pending = ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=_FAILURES)
+    assert pending is not None
+    assert pending.published_remote_head == _PUBLISHED
+    live_status = _status(head_sha=_PUBLISHED)
+    action = decide(live_status, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    assert not isinstance(
+        report_ci_failure_or_operator_conflict(live_status, state),
+        ReportCiFailure,
+    )
+
+
+@pytest.mark.unit
 async def test_retry_hosted_remote_promotes_after_rewind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = MonitorState(last_push_sha=_PUBLISHED)
     state.hosted_terminal_head_advanced = True
+    # Pending park is keyed by the live published head (next-poll status).
     mark_ci_repair_conflict_rollback_pending(
         state,
-        head_sha=_HEAD,
+        head_sha=_PUBLISHED,
         failures=_FAILURES,
         pending=_pending(
             cause="hosted_remote_rollback_failed",
@@ -293,17 +380,30 @@ async def test_retry_hosted_remote_promotes_after_rewind(
         "_rewind_hosted_ci_repair_conflict_remote",
         _ok_remote,
     )
+    # This poll still observes the unre wound published head.
     action = await retry_ci_repair_conflict_rollback_pending(
         SimpleNamespace(),
         workspace_id="ws_ci",
         worktree_path=tmp_path / "ws_ci",
         state=state,
-        status=_status(),
+        status=_status(head_sha=_PUBLISHED),
     )
     assert action is not None
     assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
     assert state.last_push_sha == _HEAD
     assert state.hosted_terminal_head_advanced is False
+    # After rewind, next poll observes restore_ref — conflict park must match.
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=_FAILURES) is None
+    )
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        == _CONFLICT_REASON
+    )
+    assert isinstance(
+        decide(_status(head_sha=_HEAD), state, MonitorConfig(auto_merge=True)),
+        NotifyHuman,
+    )
 
 
 @pytest.mark.unit

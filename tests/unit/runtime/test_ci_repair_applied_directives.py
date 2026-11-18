@@ -596,8 +596,14 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
         )
         is None
     )
+    # Pending park is keyed by the unre wound published live head, not the
+    # pre-repair status snapshot from the repair cycle (PRRT_kwDOSJAM6s64yp29).
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=status.head_sha, failures=_FAILURES)
+        is None
+    )
     pending = ci_repair_conflict_rollback_pending(
-        state, head_sha=status.head_sha, failures=_FAILURES
+        state, head_sha=_PUBLISHED_HOSTED_HEAD, failures=_FAILURES
     )
     assert pending is not None
     assert pending.published_remote_head == _PUBLISHED_HOSTED_HEAD
@@ -605,7 +611,8 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
     assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
     assert state.hosted_terminal_head_advanced is True
     assert state.last_push_sha == _PUBLISHED_HOSTED_HEAD
-    action = decide(status, state, MonitorConfig(auto_merge=True))
+    live_status = _status(head_sha=_PUBLISHED_HOSTED_HEAD)
+    action = decide(live_status, state, MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
     assert action.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
 
