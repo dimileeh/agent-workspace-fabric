@@ -70,6 +70,7 @@ _CONFLICT_STDOUT = (
     "AWF-VERDICT: NEEDS_HUMAN: review-bot conflicts with operator decision "
     "op-guide-1: restoring the block would undo the operator decision\n"
 )
+_NON_CONFLICT_STDOUT = "AWF-VERDICT: FIXED: repaired the failing check\n"
 
 
 class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
@@ -1249,3 +1250,123 @@ async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
     pending = ci_repair_conflict_rollback_pending(state)
     assert pending is not None
     assert _PUBLISHED_HOSTED_HEAD in pending.leftover_message
+
+
+@pytest.mark.unit
+async def test_ci_repair_hosted_sync_failure_without_conflict_leaves_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted sync failure without a conflict verdict must not seed push state.
+
+    Operator decision on PR #1268: last_push_sha / hosted_terminal_head_advanced
+    seeding from terminal_head_sha applies only when preserved agent stdout
+    carries an operator-decision conflict verdict. Otherwise leave monitor
+    state unchanged and follow the normal agent-error path.
+    """
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    provider_error_calls: list[AgentRunError] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_NON_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _agent_raises_preserved_sync_failure(
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+        state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
+    ) -> AgentRunResult:
+        del (
+            workspace_id,
+            compose_project,
+            compose_file,
+            prompt,
+            log_source,
+            operation_start_head,
+            state,
+            timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink,
+            timeout_preservation_sink,
+        )
+        append_command_evidence(
+            command_evidence,
+            stdout=_NON_CONFLICT_STDOUT,
+            stderr="fetch failed",
+        )
+        raise AgentRunError(
+            agent="cursor",
+            result=CommandResult(
+                returncode=1,
+                stdout="git-fetch-out",
+                stderr="fetch failed",
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            details={
+                "terminal_head_sha": _PUBLISHED_HOSTED_HEAD,
+                "hosted_sync_failed": True,
+            },
+            agent_stdout=_NON_CONFLICT_STDOUT,
+        )
+
+    async def _track_provider_agent_run_error(
+        workspace_id: str,
+        exc: AgentRunError,
+        *,
+        state: object | None = None,
+    ) -> str:
+        del workspace_id, state
+        provider_error_calls.append(exc)
+        return "terminal"
+
+    runner._run_monitor_agent_with_service_recovery = _agent_raises_preserved_sync_failure
+    runner._handle_provider_agent_run_error = _track_provider_agent_run_error
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+
+    state = MonitorState(last_push_sha=_HEAD)
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert state.last_push_sha == _HEAD
+    assert state.hosted_terminal_head_advanced is False
+    assert result.parked_needs_human is not True
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=status.head_sha, failures=_FAILURES
+        )
+        is None
+    )
+    assert rollback_calls == []
+    assert len(provider_error_calls) == 1
+    assert provider_error_calls[0].reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"

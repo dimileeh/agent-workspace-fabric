@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.applied_operator_directives import (
 )
 from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
     handle_operator_decision_conflict_after_ci_repair,
+    operator_decision_conflict_reason,
 )
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
@@ -899,22 +900,11 @@ async def _run_ci_fix(
     #
     # Hosted sync failure after the agent published a terminal head keeps Git
     # output on AgentRunError.result.stdout and the agent verdict on
-    # agent_stdout. Seed last_push_sha from terminal_head_sha so conflict
-    # rewind can CAS; failed rewind parks ROLLBACK_PENDING instead of leaving
-    # the rejected repair on the PR (Greptile P1 on PR #1268).
-    if (
-        post_agent_err is None
-        and applied_directives
-        and state is not None
-        and agent_run_err is not None
-        and getattr(self._deps.adapter, "is_hosted", False)
-    ):
-        sync_details = agent_run_err.details or {}
-        if sync_details.get("hosted_sync_failed"):
-            published = str(sync_details.get("terminal_head_sha") or "").strip()
-            if published:
-                state.last_push_sha = published
-                state.hosted_terminal_head_advanced = True
+    # agent_stdout. Seed last_push_sha from terminal_head_sha only when that
+    # preserved stdout carries an operator-decision conflict verdict, so
+    # conflict rewind can CAS; failed rewind parks ROLLBACK_PENDING instead of
+    # leaving the rejected repair on the PR (Greptile P1 on PR #1268). A sync
+    # failure without the conflict verdict must leave monitor state untouched.
     if post_agent_err is None and applied_directives and state is not None:
         conflict_stdout = ""
         if agent_result is not None:
@@ -925,6 +915,17 @@ async def _run_ci_fix(
                 conflict_stdout = preserved
             else:
                 conflict_stdout = agent_run_err.result.stdout or ""
+        if (
+            agent_run_err is not None
+            and getattr(self._deps.adapter, "is_hosted", False)
+            and operator_decision_conflict_reason(conflict_stdout) is not None
+        ):
+            sync_details = agent_run_err.details or {}
+            if sync_details.get("hosted_sync_failed"):
+                published = str(sync_details.get("terminal_head_sha") or "").strip()
+                if published:
+                    state.last_push_sha = published
+                    state.hosted_terminal_head_advanced = True
         conflict_result = await handle_operator_decision_conflict_after_ci_repair(
             self,
             workspace_id=workspace_id,
