@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.hosted_node import lifecycle_operations as operations
@@ -300,12 +302,31 @@ async def test_pairless_remonitor_active_ops_query_filters_status_and_workspace(
                 operation_type=OperationType.validate,
                 status=finished,
             )
-        await ops.create(
+        foreign_running = await ops.create(
             workspace_id=other_id,
             operation_type=OperationType.validate,
             status=OperationStatus.running,
         )
         await session.commit()
+
+        # Status-only match would see the foreign running row; workspace scope must not.
+        assert (
+            await session.scalar(
+                select(Operation.id).where(Operation.status.in_(("pending", "running"))).limit(1)
+            )
+            == foreign_running.id
+        )
+        assert (
+            await session.scalar(
+                select(Operation.id)
+                .where(
+                    Operation.workspace_id == workspace_id,
+                    Operation.status.in_(("pending", "running")),
+                )
+                .limit(1)
+            )
+            is None
+        )
 
         row = await WorkspaceRepository(session).get(workspace_id)
         assert row is not None
