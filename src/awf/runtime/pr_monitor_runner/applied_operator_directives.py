@@ -39,13 +39,17 @@ if TYPE_CHECKING:
 APPLIED_OPERATOR_DIRECTIVES_CAP = 5
 CI_REPAIR_OPERATOR_DECISION_CONFLICT = "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
 CI_REPAIR_APPLIED_OPERATOR_DIRECTIVES_EVENT = "monitor.ci_repair_applied_operator_directives"
+APPLIED_OPERATOR_FORGET_DECISIONS_MARKER = "AWF-FORGET-DECISIONS"
 
 _APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD = (
-    "Applied operator decisions already on this PR (newest first). These "
-    "operator decisions were already applied on this PR; they outrank a "
-    "failing check. Do not undo them, do not re-add code they removed, and do "
-    "not work around them. Where two conflict, the newer wins. If a check can "
-    "only pass by contradicting one, change nothing for that check and end with "
+    "Applied operator decisions already on this PR (newest first). The quoted "
+    "decisions bind only what they decided about the code now on this branch: "
+    "do not re-add what they removed and do not revert what they changed. "
+    "One-off instructions inside them (wait, re-run, reply to or defer a "
+    "comment, which finding to answer) applied to that run only and do not "
+    "restrict this repair. Where two conflict, the newer wins. If a check can "
+    "only pass by undoing such a code decision, change nothing for that check "
+    "and end with "
     "`AWF-VERDICT: NEEDS_HUMAN: <check name> conflicts with operator decision "
     "<operation_id>: <one sentence>`.\n\n"
 )
@@ -82,6 +86,11 @@ def load_applied_operator_directives(
     return tuple(records)
 
 
+def clear_applied_operator_directives(state: MonitorState) -> None:
+    """Drop every stored applied-operator-directive record."""
+    state.threads_addressed_ids.pop(_applied_operator_directives_state_key(), None)
+
+
 def append_applied_operator_directive(
     state: MonitorState,
     record: AppliedOperatorDirective,
@@ -95,6 +104,20 @@ def append_applied_operator_directive(
         json.dumps([_record_to_mapping(item) for item in trimmed], separators=(",", ":")),
     )
     clear_ci_repair_operator_decision_conflicts(state)
+
+
+def _split_forget_decisions_marker(text: str) -> tuple[bool, str]:
+    """Return (had exact marker line, text with those lines removed)."""
+    had_marker = False
+    kept: list[str] = []
+    for line in text.splitlines():
+        if line == APPLIED_OPERATOR_FORGET_DECISIONS_MARKER:
+            had_marker = True
+            continue
+        kept.append(line)
+    if not had_marker:
+        return False, text
+    return True, "\n".join(kept).strip()
 
 
 def record_applied_operator_directive_from_hint(
@@ -116,6 +139,11 @@ def record_applied_operator_directive_from_hint(
     ``applied_text`` (the hint reason, for feedback retirement). That reason is
     not an applied operator decision — record nothing when ``hint.directive``
     is empty.
+
+    When the applied text contains a line that is exactly
+    ``AWF-FORGET-DECISIONS``, clear stored records and all conflict parks
+    first; then record the remainder without that marker only if other text
+    remains.
     """
     hint_directive = (getattr(hint, "directive", None) or "").strip()
     if not hint_directive:
@@ -123,6 +151,12 @@ def record_applied_operator_directive_from_hint(
     directive = applied_text.strip() if applied_text is not None else hint_directive
     if not directive:
         return
+    had_forget, directive = _split_forget_decisions_marker(directive)
+    if had_forget:
+        clear_applied_operator_directives(state)
+        clear_ci_repair_operator_decision_conflicts(state)
+        if not directive:
+            return
     operation_id = getattr(hint, "operation_id", None) or ""
     applied_at = datetime.now(UTC).isoformat()
     append_applied_operator_directive(

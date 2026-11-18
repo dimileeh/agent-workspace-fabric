@@ -803,7 +803,8 @@ def test_incident_regression_ci_prompt_contains_applied_guide_directive() -> Non
         failures=_FAILURES,
         applied_operator_directives=records,
     )
-    assert "operator decisions were already applied on this PR" in prompt
+    assert "Applied operator decisions already on this PR" in prompt
+    assert "bind only what they decided about the code now on this branch" in prompt
     assert "source_kind: operator_decision" in prompt
     assert [
         line for line in prompt.splitlines() if "Remove the experimental block entirely." in line

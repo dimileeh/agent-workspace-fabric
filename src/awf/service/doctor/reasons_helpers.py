@@ -216,8 +216,9 @@ def get_salvage_and_monitor_reasons(
             (
                 "Read the agent's NEEDS_HUMAN sentence on the awaiting-human attention. "
                 "Either guide the monitor with a new directive (which clears the park), "
-                "change the failing checks or PR head, or resolve the conflict manually "
-                "and remonitor."
+                "include a line that is exactly ``AWF-FORGET-DECISIONS`` to withdraw "
+                "stored applied decisions, change the failing checks or PR head, or "
+                "resolve the conflict manually and remonitor."
             ),
             (
                 "The CI repair prompt included applied operator directives (#1256); the "

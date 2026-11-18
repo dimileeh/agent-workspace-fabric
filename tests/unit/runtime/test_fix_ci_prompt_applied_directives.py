@@ -87,19 +87,21 @@ def test_applied_directives_section_is_newest_first_and_enveloped() -> None:
         applied_operator_directives=(newer, older),
     )
 
-    section_marker = "these operator decisions were already applied on this PR"
-    assert section_marker in prompt.lower() or (
-        "operator decisions were already applied on this PR" in prompt
-    )
-    assert "outrank a failing check" in prompt
-    assert "do not undo them" in prompt.lower() or "Do not undo them" in prompt
-    assert "do not re-add" in prompt.lower() or "Do not re-add" in prompt
-    assert "newer wins" in prompt.lower() or "newer one wins" in prompt.lower()
+    lower = prompt.lower()
+    assert "applied operator decisions already on this pr" in lower
+    assert "bind only what they decided about the code now on this branch" in lower
+    assert "do not re-add what they removed" in lower
+    assert "do not revert what they changed" in lower
+    assert "one-off instructions" in lower
+    assert "do not restrict this repair" in lower
+    assert "newer wins" in lower
+    assert "undoing such a code decision" in lower
     assert "AWF-VERDICT: NEEDS_HUMAN:" in prompt
     assert "conflicts with operator decision" in prompt
+    assert "outrank a failing check" not in lower
 
     details_idx = prompt.index("Per-check failure details")
-    section_idx = prompt.lower().index("operator decisions were already applied")
+    section_idx = lower.index("applied operator decisions already on this pr")
     assert section_idx < details_idx
 
     newer_idx = prompt.index("op-newer")
