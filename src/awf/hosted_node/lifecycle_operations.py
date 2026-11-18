@@ -279,7 +279,7 @@ async def control_authority(
     grants: list[str] | None = None,
     operator: str | None = None,
     idempotency_key: str | None = None,
-    control: ControlKind | None = None,
+    control: ControlKind | None = None,  # noqa: ARG001 — named by callers; guards run after replay
 ) -> None:
     authority = authority_for(session, authorization or reauthorization)
     if authority is None:
@@ -293,15 +293,9 @@ async def control_authority(
         return
     if authorization is None:
         raise MaterialDeniedError("HOSTED_CONTROL_AUTHORIZATION_REQUIRED", 403)
-    # Pair-less guide refuses grants with HOSTED_REAUTHORIZATION_REQUIRED after
-    # exact replay is ruled out in guide_workspace. Keep grant-capability checks
-    # for paired rebinding and other controls (allow_grants defaults to False).
-    pairless_guide = control == "guide" and reauthorization is None
-    if (
-        grants
-        and not pairless_guide
-        and (not authorization.allow_grants or operator != authorization.actor)
-    ):
+    # Unauthorized grants keep HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED ahead of
+    # pair-less HOSTED_REAUTHORIZATION_REQUIRED (allow_grants defaults to False).
+    if grants and (not authorization.allow_grants or operator != authorization.actor):
         raise MaterialDeniedError("HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED", 403)
     # Ordinary controls take the operation key, workspace, then the admission
     # mutex through their first write. Keep that order before hosted checks.

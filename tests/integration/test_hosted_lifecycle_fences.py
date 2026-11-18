@@ -9,8 +9,10 @@ from sqlalchemy import select
 
 from awf.db.models import Operation, OperatorGrantAuditRecord, Workspace
 from awf.hosted_node.lifecycle_store import locked
+from awf.hosted_node.runtime_schemas import HostedWorkspace
 from awf.hosted_node.schemas import Binding
 from tests.integration.test_hosted_lifecycle_parity import fresh_association, source_workspace
+from tests.integration.test_hosted_lifecycle_reauthorization import install_pair
 from tests.unit.api.test_pr_monitor_adoption import _metadata
 from tests.unit.test_hosted_runtime_authority import authority as authority
 from tests.unit.test_hosted_runtime_review_create import create_application as create_application
@@ -105,7 +107,8 @@ async def test_guide_grants_require_explicit_authorized_actor(
     authority, create_client, tmp_path, authorization
 ):
     await source_workspace(authority, create_client, tmp_path, status="blocked")
-    async with authority[2].begin() as session:
+    runtime, value, factory = authority
+    async with factory.begin() as session:
         row = await session.get(Workspace, "ws_cloud_stable")
         row.block_type = "protected_quality_gate"
         row.block_reason_code = "QUALITY_GATE_POLICY_CHANGED"
@@ -125,14 +128,30 @@ async def test_guide_grants_require_explicit_authorized_actor(
             "actor": "caller",
             "allow_grants": authorization,
         }
+    # Authorized grants succeed only through a reauthorization pair (production
+    # path). Unauthorized / missing auth keep their 403 ahead of the pair-less
+    # HOSTED_REAUTHORIZATION_REQUIRED refusal.
     client, headers = create_client
+    if authorization is True:
+        expected = HostedWorkspace.model_validate(value["hosted"]).model_dump(mode="json")
+        replacement = await install_pair(
+            client, headers, expected, runtime.receiver.identity, label="grant"
+        )
+        body["hosted_reauthorization"] = {
+            "expected_association": expected,
+            "replacement_association": replacement,
+        }
     response = await client.post(
         "/v1/workspaces/ws_cloud_stable/guide",
         json=body,
         headers={**headers, "Idempotency-Key": "grant"},
     )
     assert response.status_code == (200 if authorization is True else 403), response.text
-    async with authority[2]() as session:
+    if authorization is False:
+        assert response.json()["error_code"] == "HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED", (
+            response.text
+        )
+    async with factory() as session:
         grants = list(await session.scalars(select(OperatorGrantAuditRecord)))
         assert len(grants) == int(authorization is True)
         if grants:

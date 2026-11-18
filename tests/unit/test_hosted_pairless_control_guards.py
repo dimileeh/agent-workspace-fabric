@@ -202,32 +202,36 @@ async def test_pairless_guide_refuses_grants_in_every_state_without_mutation(sta
 
 
 @pytest.mark.unit
-async def test_pairless_guide_skips_grant_capability_so_caller_can_refuse(
+async def test_unauthorized_pairless_guide_grants_refuse_before_reauthorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pair-less guide must not 403 on allow_grants=False; eligibility refuses later.
-
-    allow_grants defaults to False; skipping that early check lets guide_workspace
-    return HOSTED_REAUTHORIZATION_REQUIRED after exact replay is ruled out.
-    """
-    row = _hosted_row(status="monitoring_pr")
+    """Unauthorized grants keep HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED (403) first."""
+    row = _hosted_row(status="blocked")
     before = _snapshot(row)
     authority = _authority(row)
     session = _session(row)
     monkeypatch.setattr(operations, "authority_for", lambda *_args: authority)
     monkeypatch.setattr(operations, "lock_materials", AsyncMock())
-    authorization = HostedControlAuthorization(namespace="tenant", actor="caller")
-
-    # Auth alone must succeed so prepare/exact-replay can run before eligibility.
-    await operations.control_authority(
-        session,
-        row.id,
-        authorization,
-        grants=["grant-a"],
-        operator="caller",
-        control="guide",
+    guard = AsyncMock()
+    monkeypatch.setattr(operations, "enforce_pairless_control_guards", guard)
+    authorization = HostedControlAuthorization(
+        namespace="tenant", actor="caller", allow_grants=False
     )
 
+    with pytest.raises(
+        MaterialDeniedError, match="HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED"
+    ) as denied:
+        await operations.control_authority(
+            session,
+            row.id,
+            authorization,
+            grants=["grant-a"],
+            operator="caller",
+            control="guide",
+        )
+
+    assert denied.value.status == 403
+    guard.assert_not_awaited()
     assert _snapshot(row) == before
 
 
