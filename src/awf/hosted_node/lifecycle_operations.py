@@ -14,7 +14,7 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.config import Settings
 from awf.common.github_client import RepoRef
 from awf.common.redaction import redact_secrets
-from awf.db.models import TaskAttempt, Workspace
+from awf.db.models import Operation, TaskAttempt, Workspace
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Receipt
@@ -26,6 +26,67 @@ from awf.hosted_node.runtime_schemas import (
     HostedWorkspace,
 )
 from awf.hosted_node.schemas import Binding
+
+
+def _pairless_claim_is_live(
+    claimed_by: str | None,
+    expires_at: datetime | None,
+    *,
+    now: datetime,
+) -> bool:
+    """True when a claim has an owner and a future expiry (expired/null alone is not live)."""
+    if claimed_by is None or expires_at is None:
+        return False
+    if expires_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None and now.tzinfo is None:
+        expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
+    return expires_at > now
+
+
+async def enforce_pairless_control_guards(
+    session: AsyncSession,
+    row: Workspace,
+) -> None:
+    """Refuse pair-less hosted remonitor while live claims or active ops exist.
+
+    Invoked only after ``refresh(..., with_for_update=True)`` on the pair-less
+    remonitor path, and only after exact idempotency replay is ruled out, so a
+    same-key retry still returns the stored success when claims change after
+    the first response. Pair reauthorization keeps ``require_rebind_quiet``
+    (claim-by set, expiry-agnostic).
+    """
+    now = datetime.now(UTC)
+    if (
+        _pairless_claim_is_live(row.execution_claimed_by, row.execution_claim_expires_at, now=now)
+        or _pairless_claim_is_live(row.monitor_claimed_by, row.monitor_claim_expires_at, now=now)
+        or await session.scalar(
+            select(Operation.id)
+            .where(
+                Operation.workspace_id == row.id,
+                Operation.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409)
+
+
+async def apply_pairless_remonitor_guard(
+    session: AsyncSession,
+    workspace: Workspace,
+    hosted_reauthorization: HostedReauthorization | None,
+) -> None:
+    """After exact remonitor replay is ruled out, refuse live pair-less hosted work.
+
+    Exact idempotency replays return before this runs so a worker that reclaimed
+    the monitor after the first success cannot break PRD §8.5.
+    """
+    if hosted_reauthorization is not None or authority_for(session) is None:
+        return
+    await session.refresh(workspace, with_for_update=True)
+    await enforce_pairless_control_guards(session, workspace)
 
 
 def authority_for(session: AsyncSession, supplied: object = None) -> WorkspaceAuthority | None:

@@ -24,12 +24,10 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
 )
-from awf.hosted_node.lifecycle_operations import control_authority
+from awf.hosted_node.lifecycle_operations import apply_pairless_remonitor_guard, control_authority
 from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, remonitor_payload
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
-from awf.node.cleanup import (
-    WorkspaceCleanupResult,
-)
+from awf.node.cleanup import WorkspaceCleanupResult
 from awf.runtime.operator_hints import (
     arm_operator_hint_freeze,
     build_pending_operator_hint_payload,
@@ -444,6 +442,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 message="workspace PR monitor recovery requested",
             )
 
+        await apply_pairless_remonitor_guard(self._session, workspace, hosted_reauthorization)
         current = WorkspaceStatus(workspace.status)
         if current not in _REMONITOR_ELIGIBLE_STATUSES:
             raise WorkspaceRemonitorStateError(workspace)
