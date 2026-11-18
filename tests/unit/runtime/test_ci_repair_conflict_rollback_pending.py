@@ -1061,7 +1061,12 @@ async def test_work_slot_actions_divert_while_rollback_pending_no_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Comments / hint / sync-base / CI repair must not launch while pending."""
+    """Comments / hint / sync-base / CI repair must not launch while pending.
+
+    Live head is unrelated to restore_ref / published_remote_head: divert must
+    keep the PENDING gate and must not run a successful local undo that would
+    clear the park (PRRT_kwDOSJAM6s64zKdm).
+    """
     state = MonitorState()
     mark_ci_repair_conflict_rollback_pending(
         state,
@@ -1070,21 +1075,21 @@ async def test_work_slot_actions_divert_while_rollback_pending_no_agent(
         pending=_pending(),
     )
     agent_launches: list[str] = []
+    rollback_calls: list[str] = []
 
-    async def _failed_rollback(
+    async def _ok_rollback(
         _self: object,
+        *,
+        restore_ref: str | None = None,
         **_kwargs: object,
     ) -> ci_ops._CiFixResidueRollbackResult:
-        return ci_ops._CiFixResidueRollbackResult(
-            ok=False,
-            cause="reset_failed",
-            message="reset failed",
-        )
+        rollback_calls.append(restore_ref or "")
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
 
     monkeypatch.setattr(
         ci_ops,
         "_rollback_ci_fix_residue_before_provider_recovery",
-        _failed_rollback,
+        _ok_rollback,
     )
 
     diverted = await divert_work_slot_for_conflict_rollback_pending(
@@ -1100,7 +1105,12 @@ async def test_work_slot_actions_divert_while_rollback_pending_no_agent(
     assert diverted.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
     assert "cancel and re-adopt" in (diverted.message or "")
     assert agent_launches == []
+    assert rollback_calls == []
     assert ci_repair_conflict_rollback_pending(state, head_sha=_OTHER_HEAD) is not None
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        is None
+    )
 
 
 @pytest.mark.unit
