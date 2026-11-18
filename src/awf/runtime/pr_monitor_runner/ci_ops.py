@@ -270,6 +270,45 @@ async def _detect_hosted_ci_repair_conflict_published_head(
     return None
 
 
+async def _read_hosted_remote_branch_head_once(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+) -> str | None:
+    """Return the hosted PR branch tip via one ``ls-remote``, or ``None`` on failure."""
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+
+    identity = hosted_pr_identity or {}
+    repo_url = str(identity.get("head_repo_url") or identity.get("repo_url") or "").strip()
+    head_ref = str(identity.get("head_ref") or "").strip()
+    if not repo_url or not head_ref:
+        return None
+    deps = getattr(self, "_deps", None)
+    cmd_runner = getattr(deps, "runner", None) if deps is not None else None
+    run = getattr(cmd_runner, "run", None)
+    if not callable(run):
+        return None
+
+    worktrees_root = getattr(self, "_worktrees_root", None)
+    if worktrees_root is None:
+        return None
+    ref = f"refs/heads/{head_ref}"
+    result = await run(
+        git_worktree_command(Path(worktrees_root) / workspace_id, "ls-remote", repo_url, ref),
+        env=git_env_without_object_lookup_overrides(),
+        timeout_seconds=60.0,
+    )
+    if not getattr(result, "ok", False):
+        return None
+    stdout = str(getattr(result, "stdout", "") or "")
+    for line in stdout.splitlines():
+        sha, _, line_ref = line.strip().partition("\t")
+        if line_ref == ref and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha):
+            return sha.lower()
+    return None
+
+
 async def _rewind_hosted_ci_repair_conflict_remote(
     self: Any,
     *,
@@ -310,14 +349,36 @@ async def _rewind_hosted_ci_repair_conflict_remote(
         expected_remote_head_sha=published_remote_head,
     )
     if not remote_ok:
-        return _CiFixResidueRollbackResult(
-            ok=False,
-            cause="hosted_remote_rollback_failed",
-            message=(
-                "CI repair operator-decision conflict; hosted remote head "
-                "rollback failed before parking."
-            ),
+        # CAS may fail against a never-published tip while the remote already
+        # sits at restore_ref. One read: if tip == restore_ref, undo is done
+        # (normal conflict park). Differ / read fail → ROLLBACK_PENDING.
+        live_remote_head = await _read_hosted_remote_branch_head_once(
+            self,
+            workspace_id=workspace_id,
+            hosted_pr_identity=hosted_pr_identity,
         )
+        restore_ref_lower = restore_ref.strip().lower()
+        if (
+            live_remote_head is not None
+            and restore_ref_lower
+            and live_remote_head.lower() == restore_ref_lower
+        ):
+            _log.info(
+                "monitor.ci_repair_hosted_conflict_remote_already_restored",
+                workspace_id=workspace_id,
+                restore_ref=restore_ref,
+                published_remote_head=published_remote_head,
+                live_remote_head=live_remote_head,
+            )
+        else:
+            return _CiFixResidueRollbackResult(
+                ok=False,
+                cause="hosted_remote_rollback_failed",
+                message=(
+                    "CI repair operator-decision conflict; hosted remote head "
+                    "rollback failed before parking."
+                ),
+            )
 
     state.hosted_terminal_head_advanced = False
     current_last_push_sha = (state.last_push_sha or "").strip()

@@ -613,6 +613,128 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
 
 
 @pytest.mark.unit
+async def test_ci_repair_hosted_rewind_fail_remote_already_restore_ref_parks_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rewind CAS fail + remote already at restore_ref → normal conflict park.
+
+    Bugbot PRRT_kwDOSJAM6s642T6i: false ROLLBACK_PENDING when lease fails against
+    a never-published tip but the remote tip is already restore_ref. One read
+    before parking; equals restore_ref → CI_REPAIR_OPERATOR_DECISION_CONFLICT.
+    """
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        ci_repair_conflict_rollback_pending,
+    )
+
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    remote_reads: list[dict[str, object]] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _hosted_agent_with_published_head(
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+        state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
+    ) -> AgentRunResult:
+        del (
+            timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink,
+            timeout_preservation_sink,
+            operation_start_head,
+        )
+        result = await runner._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        if isinstance(state, MonitorState):
+            state.last_push_sha = _PUBLISHED_HOSTED_HEAD
+            state.hosted_terminal_head_advanced = True
+        return result
+
+    async def _failed_remote_rollback(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _remote_already_restored(
+        _self: object,
+        *,
+        workspace_id: str,
+        hosted_pr_identity: dict[str, object] | None,
+    ) -> str | None:
+        remote_reads.append(
+            {"workspace_id": workspace_id, "hosted_pr_identity": hosted_pr_identity}
+        )
+        return _HEAD
+
+    runner._run_monitor_agent_with_service_recovery = _hosted_agent_with_published_head
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _failed_remote_rollback,
+    )
+    monkeypatch.setattr(ci_ops, "_read_hosted_remote_branch_head_once", _remote_already_restored)
+
+    state = MonitorState(last_push_sha=_HEAD)
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert result.parked_needs_human is True
+    assert result.pushed is False
+    assert result.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert commit_calls == []
+    assert push_calls == []
+    assert rollback_calls
+    assert len(remote_reads) == 1
+    assert ci_repair_conflict_rollback_pending(state) is None
+    assert state.hosted_terminal_head_advanced is False
+    assert state.last_push_sha == _HEAD
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=status.head_sha, failures=_FAILURES
+        )
+        is not None
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("rollback_cause", "rollback_message"),
     [
