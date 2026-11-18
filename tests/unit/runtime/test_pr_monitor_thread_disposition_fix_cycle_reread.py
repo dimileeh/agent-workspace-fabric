@@ -328,6 +328,72 @@ def test_conversation_moved_compares_empty_listed_external_snapshot() -> None:
     )
 
 
+def test_conversation_moved_rejects_edited_identity_comment_still_in_read_set() -> None:
+    """An identity comment edited after triage must not skip as already-read.
+
+    ``read_own_comment_ids`` alone would skip the unmarked viewer comment while
+    the outside-body comparison ignores identity content, so a post-triage edit
+    could resolve unread. Bind the recorded body and treat a mismatch as
+    feedback after the decision (PRRT_kwDOSJAM6s644g3v).
+    """
+    tid = "PRRT_test_edited_read_own"
+    listed = replace(
+        _thread(tid, _ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1", body=_ASK, author="review-bot", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id="own-0",
+                body=_OPERATOR_ASK,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    edited = _OPERATOR_ASK + " — revised ask"
+    live = AuditedReviewThread(
+        thread_id=tid,
+        is_resolved=False,
+        is_outdated=False,
+        resolved_by=None,
+        viewer_comment_bodies=(edited, "marker"),
+        viewer_comment_ids=("own-0", "reply-1"),
+        external_comment_bodies=(_ASK,),
+    )
+    assert (
+        _conversation_moved(
+            listed,
+            live,
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+            read_own_comment_bodies=(_OPERATOR_ASK,),
+        )
+        == "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
+    )
+    # Unchanged body still skips as read.
+    assert (
+        _conversation_moved(
+            listed,
+            replace(live, viewer_comment_bodies=(_OPERATOR_ASK, "marker")),
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+            read_own_comment_bodies=(_OPERATOR_ASK,),
+        )
+        is None
+    )
+    # Legacy disposition without bodies keeps ID-only skip for in-flight records.
+    assert (
+        _conversation_moved(
+            listed,
+            live,
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+        )
+        is None
+    )
+
+
 def _own_comment_ids(names: tuple[str, ...]) -> tuple[str, ...]:
     """The audit's ids for AWF's identity's comments: ``reply`` is the one just posted."""
     return tuple(
@@ -528,7 +594,11 @@ async def test_fix_cycle_resolves_when_operator_comment_was_read_at_triage(
         disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
         record_item_disposition(
             state,
-            replace(disposition, read_own_comment_ids=(operator_id,)),
+            replace(
+                disposition,
+                read_own_comment_ids=(operator_id,),
+                read_own_comment_bodies=(_OPERATOR_ASK,),
+            ),
         )
 
     _, state, _ = await _run_cycle(
@@ -544,6 +614,78 @@ async def test_fix_cycle_resolves_when_operator_comment_was_read_at_triage(
 
     assert [event[0] for event in gh.events] == ["reply", "resolve"]
     assert state.threads_addressed_ids[tid] == "false_positive"
+
+
+async def test_fix_cycle_retires_reply_when_read_identity_comment_was_edited(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit to a triage-read identity comment is feedback after the decision."""
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_read_own_edited"
+    operator_id = "own-0"
+    thread = replace(
+        _commented_thread(tid, _ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1", body=_ASK, author="review-bot", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id=operator_id,
+                body=_OPERATOR_ASK,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    edited = _OPERATOR_ASK + " — revised ask"
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    followed = "e" * 64
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply=followed,
+        viewer_bodies=(edited, marker),
+        viewer_ids=(operator_id, "reply-1"),
+        superseded=0,
+    )
+
+    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
+        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
+        record_item_disposition(
+            state,
+            replace(
+                disposition,
+                read_own_comment_ids=(operator_id,),
+                read_own_comment_bodies=(_OPERATOR_ASK,),
+            ),
+        )
+
+    workspace_id, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_seed,
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert result.failed is False and result.pushed is True
+    assert state.threads_addressed_ids[tid] == "false_positive"
+    assert not [
+        e
+        for e in await _resolution_events(factory, workspace_id)
+        if e["action"] == "resolve_thread"
+    ]
+    kept = read_item_disposition(state, tid)
+    assert kept is not None and kept.reply_comment_id is None
+    assert _disposition_retired_key(tid, followed) in state.threads_addressed_ids
 
 
 async def test_fix_cycle_still_parks_unread_operator_comment_not_in_read_set(

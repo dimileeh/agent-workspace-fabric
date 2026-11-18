@@ -182,6 +182,7 @@ async def reply_before_resolve(
                 audited_comments=audited_comments,
                 expect_resolved=expect_resolved,
                 read_own_comment_ids=posted.read_own_comment_ids,
+                read_own_comment_bodies=posted.read_own_comment_bodies,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -321,6 +322,7 @@ async def _reread_thread_after_reply(
     audited_comments: tuple[str, ...] = (),
     expect_resolved: bool = False,
     read_own_comment_ids: tuple[str, ...] = (),
+    read_own_comment_bodies: tuple[str, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -352,6 +354,7 @@ async def _reread_thread_after_reply(
         reply_comment_id,
         audited_comments,
         read_own_comment_ids=read_own_comment_ids,
+        read_own_comment_bodies=read_own_comment_bodies,
     )
     if expect_resolved and not live.is_resolved:
         # A reviewer reopened the resolved thread after the audit that cleared it:
@@ -371,6 +374,7 @@ def _conversation_moved(
     audited_comments: tuple[str, ...] = (),
     *,
     read_own_comment_ids: tuple[str, ...] = (),
+    read_own_comment_bodies: tuple[str, ...] = (),
 ) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
@@ -391,9 +395,12 @@ def _conversation_moved(
     ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). An available
     listed snapshot with zero outside comments still compares (identity-only
     threads filter to an empty tuple): new outside feedback before the reply is
-    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION`` (PRRT_kwDOSJAM6s644AF5). Neither
-    copy at all proves no such difference. The unread check needs only ``live``,
-    so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
+    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION`` (PRRT_kwDOSJAM6s644AF5). An
+    unmarked identity comment whose id was read at triage but whose live body
+    differs from the recorded ``read_own_comment_bodies`` is the same class of
+    post-decision change (PRRT_kwDOSJAM6s644g3v); legacy records without bodies
+    keep ID-only skip. Neither copy at all proves no such difference. The unread
+    check needs only ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
     marked = {
@@ -405,12 +412,20 @@ def _conversation_moved(
     # too stale to show it bounds nothing with an older marker: the reply follows
     # every comment it shows (PRRT_kwDOSJAM6s6vc8M9, PRRT_kwDOSJAM6s6veO2F).
     ids = live.viewer_comment_ids
+    read_own_bodies = dict(zip(read_own_comment_ids, read_own_comment_bodies, strict=False))
     read_own = frozenset(read_own_comment_ids)
     reply = ids.index(reply_comment_id) if reply_comment_id in ids else len(bodies)
     for index in range(reply - 1, -1, -1):
         if index not in marked:
             # Guard the index: a missing id cannot prove the triage read it (#1272).
             if index < len(ids) and ids[index] in read_own:
+                recorded_body = read_own_bodies.get(ids[index])
+                # Content-bound skip: an edit after triage is feedback after the
+                # decision. Missing body (legacy payload) keeps ID-only skip.
+                if recorded_body is not None and (
+                    index >= len(bodies) or bodies[index] != recorded_body
+                ):
+                    return _FEEDBACK_AFTER_DECISION
                 continue
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:

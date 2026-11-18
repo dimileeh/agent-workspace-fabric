@@ -151,6 +151,7 @@ async def test_scenario_a_identity_opened_thread_is_addressed_and_resolved_with_
     recorded = read_item_disposition(state, _TID)
     assert recorded is not None
     assert recorded.read_own_comment_ids == ("own-0",)
+    assert recorded.read_own_comment_bodies == (_ASK,)
 
     # Disposition reply + resolve (same forge path Scenario B uses after triage).
     gh = OrderedForge(FakeCommandRunner())
@@ -201,6 +202,7 @@ async def test_scenario_a_identity_opened_thread_is_addressed_and_resolved_with_
     recorded = read_item_disposition(state, _TID)
     assert recorded is not None
     assert recorded.read_own_comment_ids == ("own-0",)
+    assert recorded.read_own_comment_bodies == (_ASK,)
     assert recorded.reply_comment_id == "reply-1"
 
 
@@ -265,6 +267,7 @@ async def test_scenario_b_hand_resolve_reopens_retriages_and_resolves_with_marke
     recorded = read_item_disposition(state, _TID)
     assert recorded is not None
     assert recorded.read_own_comment_ids == ("own-1",)
+    assert recorded.read_own_comment_bodies == (_OPERATOR,)
 
     # Re-read after the fresh marker sees the already-read identity reply.
     async def _audit_after_reply(*, repo, pr_number, retry=True, thread_id=None):  # noqa: ANN001
@@ -386,6 +389,7 @@ async def test_scenario_c_identity_reply_in_bot_thread_at_triage_does_not_park(
     recorded = read_item_disposition(state, _TID)
     assert recorded is not None
     assert recorded.read_own_comment_ids == ("102",)
+    assert recorded.read_own_comment_bodies == (_OPERATOR,)
     assert recorded.reason == _REASON
 
     replied = await reply_before_resolve(

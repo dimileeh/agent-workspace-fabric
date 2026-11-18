@@ -161,6 +161,10 @@ class ThreadDisposition:
     # was recorded. The reply re-read treats those as already read; unmarked
     # identity comments outside this set still park as unread (#1272).
     read_own_comment_ids: tuple[str, ...] = ()
+    # Bodies of those identity comments, same order as ``read_own_comment_ids``.
+    # The reply re-read rejects an edit to a read id as feedback after the
+    # decision; legacy payloads without bodies keep ID-only skip (PRRT_kwDOSJAM6s644g3v).
+    read_own_comment_bodies: tuple[str, ...] = ()
 
     @property
     def is_bound(self) -> bool:
@@ -199,6 +203,7 @@ class ThreadDisposition:
             "reply_conversation_digest": self.reply_conversation_digest,
             "reread_pending": self.reread_pending,
             "read_own_comment_ids": list(self.read_own_comment_ids),
+            "read_own_comment_bodies": list(self.read_own_comment_bodies),
         }
 
     @classmethod
@@ -221,6 +226,7 @@ class ThreadDisposition:
             return None
         commits = raw.get("commits")
         read_own = raw.get("read_own_comment_ids")
+        read_own_bodies = raw.get("read_own_comment_bodies")
         return cls(
             item_id=item_id,
             disposition_class=cast(DispositionClass, disposition_class),
@@ -240,6 +246,9 @@ class ThreadDisposition:
             reread_pending=raw.get("reread_pending") is True,
             read_own_comment_ids=tuple(c for c in read_own if isinstance(c, str) and c.strip())
             if isinstance(read_own, list)
+            else (),
+            read_own_comment_bodies=tuple(c for c in read_own_bodies if isinstance(c, str))
+            if isinstance(read_own_bodies, list)
             else (),
         )
 
@@ -313,12 +322,15 @@ def sync_item_disposition(
         elif state.hosted_terminal_head_advanced and state.last_push_sha:
             commits = (state.last_push_sha,)
     read_own_comment_ids: tuple[str, ...] = ()
+    read_own_comment_bodies: tuple[str, ...] = ()
     if thread is not None:
-        read_own_comment_ids = tuple(
-            comment.comment_id
+        read_own = tuple(
+            (comment.comment_id, comment.body)
             for comment in thread.comments
             if comment.viewer_did_author and comment.comment_id
         )
+        read_own_comment_ids = tuple(comment_id for comment_id, _ in read_own)
+        read_own_comment_bodies = tuple(body for _, body in read_own)
     record_item_disposition(
         state,
         ThreadDisposition(
@@ -330,6 +342,7 @@ def sync_item_disposition(
             commit_base=commit_base,
             thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
             read_own_comment_ids=read_own_comment_ids,
+            read_own_comment_bodies=read_own_comment_bodies,
         ),
     )
 
