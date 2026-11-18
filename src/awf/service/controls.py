@@ -24,7 +24,11 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
 )
-from awf.hosted_node.lifecycle_operations import control_authority
+from awf.hosted_node.lifecycle_operations import (
+    authority_for,
+    control_authority,
+    enforce_pairless_control_guards,
+)
 from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, remonitor_payload
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
 from awf.node.cleanup import WorkspaceCleanupResult
@@ -442,6 +446,13 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 operation=replay,
                 message="workspace PR monitor recovery requested",
             )
+
+        # Pair-less hosted remonitor: refuse live claims / active ops only for
+        # fresh work. Exact idempotency replays return above so a worker that
+        # reclaimed the monitor after the first success cannot break PRD §8.5.
+        if hosted_reauthorization is None and authority_for(self._session) is not None:
+            await self._session.refresh(workspace, with_for_update=True)
+            await enforce_pairless_control_guards(self._session, workspace, control="remonitor")
 
         current = WorkspaceStatus(workspace.status)
         if current not in _REMONITOR_ELIGIBLE_STATUSES:

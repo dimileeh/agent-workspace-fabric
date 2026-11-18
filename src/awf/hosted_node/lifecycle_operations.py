@@ -57,7 +57,9 @@ async def enforce_pairless_control_guards(
     """Refuse unsafe pair-less hosted guide/remonitor under the existing row lock.
 
     Invoked only after ``refresh(..., with_for_update=True)`` on the pair-less
-    path. Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
+    path. Guide runs from ``control_authority`` before prepare; remonitor runs
+    from ``remonitor_workspace`` only after exact idempotency replay is ruled
+    out. Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
     expiry-agnostic). ``control is None`` skips so low-level binding tests stay
     focused; production guide/remonitor always pass the kind.
     """
@@ -305,7 +307,12 @@ async def control_authority(
     await lock_materials(session, authority, association)
     if check_source(authority, row, authorization.namespace) != association:
         raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
-    await enforce_pairless_control_guards(session, row, control=control, grants=grants)
+    # Guide eligibility must run here (before prepare). Remonitor quiescence is
+    # applied by remonitor_workspace only after exact idempotency replay is
+    # ruled out so a successful remonitor retry is not converted into
+    # HOSTED_SOURCE_NOT_QUIESCENT when a worker has already reclaimed the claim.
+    if control == "guide":
+        await enforce_pairless_control_guards(session, row, control=control, grants=grants)
 
 
 def admission_environment(

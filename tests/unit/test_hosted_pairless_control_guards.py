@@ -145,60 +145,195 @@ async def test_hosted_reauthorization_required_denial_error_body() -> None:
 
 
 @pytest.mark.unit
-async def test_pairless_remonitor_refuses_live_execution_claim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_pairless_remonitor_refuses_live_execution_claim() -> None:
     row = _hosted_row()
     row.execution_claimed_by = "execution-worker"
     row.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    session = _session(row)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT") as denied:
-        await _pairless(monkeypatch, row, control="remonitor")
+        await operations.enforce_pairless_control_guards(session, row, control="remonitor")
 
     assert denied.value.status == 409
 
 
 @pytest.mark.unit
-async def test_pairless_remonitor_refuses_live_monitor_claim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_pairless_remonitor_refuses_live_monitor_claim() -> None:
     row = _hosted_row()
     row.monitor_claimed_by = "monitor-worker"
     row.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    session = _session(row)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT") as denied:
-        await _pairless(monkeypatch, row, control="remonitor")
+        await operations.enforce_pairless_control_guards(session, row, control="remonitor")
 
     assert denied.value.status == 409
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("op_id", ["op_running", "op_pending"])
-async def test_pairless_remonitor_refuses_pending_or_running_operation(
-    monkeypatch: pytest.MonkeyPatch, op_id: str
-) -> None:
+async def test_pairless_remonitor_refuses_pending_or_running_operation(op_id: str) -> None:
     row = _hosted_row()
+    session = _session(row, op_id=op_id)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT") as denied:
-        await _pairless(monkeypatch, row, control="remonitor", op_id=op_id)
+        await operations.enforce_pairless_control_guards(session, row, control="remonitor")
 
     assert denied.value.status == 409
 
 
 @pytest.mark.unit
-async def test_pairless_remonitor_accepts_expired_claim_without_active_ops(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_pairless_remonitor_accepts_expired_claim_without_active_ops() -> None:
     row = _hosted_row()
     row.monitor_claimed_by = "stale-monitor"
     row.monitor_claim_expires_at = datetime.now(UTC) - timedelta(minutes=1)
     row.execution_claimed_by = "stale-execution"
     row.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=2)
     before = _snapshot(row)
+    session = _session(row, op_id=None)
 
-    await _pairless(monkeypatch, row, control="remonitor", op_id=None)
+    await operations.enforce_pairless_control_guards(session, row, control="remonitor")
 
     assert _snapshot(row) == before
+
+
+@pytest.mark.unit
+async def test_control_authority_defers_remonitor_quiescence_to_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth stays in control_authority; remonitor quiescence runs after exact replay."""
+    row = _hosted_row()
+    row.monitor_claimed_by = "monitor-worker"
+    row.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    before = _snapshot(row)
+
+    # Live claim would fail the remonitor guard, but control_authority must not
+    # raise here — remonitor_workspace applies the guard only after prepare.
+    await _pairless(monkeypatch, row, control="remonitor")
+
+    assert _snapshot(row) == before
+
+
+@pytest.mark.unit
+async def test_remonitor_exact_replay_skips_quiescence_after_monitor_reclaim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-key remonitor retry must return the stored op even if a worker reclaimed."""
+    from awf.service.controls import WorkspaceControlService
+    from awf.service.controls_types import _PreparedOperation, _PreparedOperationKind
+
+    row = _hosted_row(status="monitoring_pr")
+    row.monitor_claimed_by = "monitor-worker"
+    row.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    row.pr_url = "https://github.com/example/repo/pull/1"
+    row.version = 1
+    stored_op = SimpleNamespace(
+        id="op_remonitor_done",
+        workspace_id=row.id,
+        type="remonitor",
+        status="succeeded",
+        payload={},
+        result=None,
+    )
+    session = SimpleNamespace(refresh=AsyncMock())
+    service = WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=AsyncMock(),
+        cleaner_factory=lambda *_a, **_k: AsyncMock(),
+    )
+    prepared = _PreparedOperation(
+        workspace=row,  # type: ignore[arg-type]
+        replay=stored_op,  # type: ignore[arg-type]
+        kind=_PreparedOperationKind.exact_replay,
+        idempotency_key="remonitor-retry",
+    )
+    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
+
+    monkeypatch.setattr("awf.service.controls.control_authority", AsyncMock())
+    monkeypatch.setattr(
+        "awf.service.controls.WorkspaceRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "awf.service.controls.OperationRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
+    monkeypatch.setattr(
+        "awf.service.controls.remonitor_payload",
+        lambda *_a, **_k: ({"reason": "retry"}, {"reason": "retry"}),
+    )
+    monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("awf.service.controls.authority_for", lambda _s: object())
+    monkeypatch.setattr("awf.service.controls.enforce_pairless_control_guards", guard)
+
+    response = await service.remonitor_workspace(
+        row.id,
+        reason="retry",
+        idempotency_key="remonitor-retry",
+        hosted_authorization=_authorization(),
+    )
+
+    assert response.operation_id == "op_remonitor_done"
+    guard.assert_not_awaited()
+    session.refresh.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_remonitor_fresh_pairless_applies_quiescence_after_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh hosted remonitor still refuses live claims once exact replay is ruled out."""
+    from awf.service.controls import WorkspaceControlService
+    from awf.service.controls_types import _PreparedOperation
+
+    row = _hosted_row(status="monitoring_pr")
+    row.monitor_claimed_by = "monitor-worker"
+    row.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    row.pr_url = "https://github.com/example/repo/pull/1"
+    row.version = 1
+    session = SimpleNamespace(refresh=AsyncMock())
+    service = WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=AsyncMock(),
+        cleaner_factory=lambda *_a, **_k: AsyncMock(),
+    )
+    prepared = _PreparedOperation(
+        workspace=row,  # type: ignore[arg-type]
+        idempotency_key="remonitor-fresh",
+    )
+    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
+
+    monkeypatch.setattr("awf.service.controls.control_authority", AsyncMock())
+    monkeypatch.setattr(
+        "awf.service.controls.WorkspaceRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "awf.service.controls.OperationRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
+    monkeypatch.setattr(
+        "awf.service.controls.remonitor_payload",
+        lambda *_a, **_k: ({"reason": "fresh"}, {"reason": "fresh"}),
+    )
+    monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("awf.service.controls.authority_for", lambda _s: object())
+    monkeypatch.setattr("awf.service.controls.enforce_pairless_control_guards", guard)
+
+    with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT"):
+        await service.remonitor_workspace(
+            row.id,
+            reason="fresh",
+            idempotency_key="remonitor-fresh",
+            hosted_authorization=_authorization(),
+        )
+
+    session.refresh.assert_awaited_once_with(row, with_for_update=True)
+    guard.assert_awaited_once()
+    assert guard.await_args.args[1] is row
+    assert guard.await_args.kwargs["control"] == "remonitor"
 
 
 @pytest.mark.unit
