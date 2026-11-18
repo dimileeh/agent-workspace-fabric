@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import OperationRepository
-from awf.hosted_node.runtime_schemas import HostedControlAuthorization
+from awf.hosted_node import lifecycle_operations as hosted_lifecycle
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedWorkspace
 from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY, operator_hint_from_threads
 from awf.service.controls import IdempotencyConflictError
 from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
@@ -25,6 +27,7 @@ from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers
     _service,
     _workspace,
 )
+from tests.unit.test_hosted_runtime_contract import hosted_create
 
 
 @pytest.fixture
@@ -77,6 +80,31 @@ def _snapshot(workspace: object) -> dict[str, object]:
         "monitor_threads_addressed": dict(workspace.monitor_threads_addressed or {}),
         "pending_operator_hint": workspace.pending_operator_hint,
     }
+
+
+def _attach_hosted_association(workspace: Workspace) -> HostedWorkspace:
+    """Bind a real hosted_node association to ``workspace`` for control_authority."""
+    raw = hosted_create()["hosted"]
+    raw["workspace_id"] = workspace.id
+    for binding in raw["credentials"].values():
+        binding["workspace_id"] = workspace.id
+    stored = HostedWorkspace.model_validate(raw)
+    workspace.task_policy = {"hosted_node": stored.model_dump(mode="json")}
+    workspace.node_id = stored.credentials.agent.identity.owner
+    return stored
+
+
+def _patch_hosted_authority(monkeypatch: pytest.MonkeyPatch, stored: HostedWorkspace) -> AsyncMock:
+    """Keep ``control_authority`` real; stub only materials + material lock."""
+    materials = AsyncMock()
+    lock = AsyncMock()
+    authority = SimpleNamespace(
+        receiver=SimpleNamespace(identity=stored.credentials.agent.identity),
+        materials=materials,
+    )
+    monkeypatch.setattr(hosted_lifecycle, "authority_for", lambda *_args, **_kwargs: authority)
+    monkeypatch.setattr(hosted_lifecycle, "lock_materials", lock)
+    return lock
 
 
 @pytest.mark.unit
@@ -489,15 +517,13 @@ async def test_require_claim_active_hosted_accepts_live_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = await _monitoring_workspace(session)
+    stored = _attach_hosted_association(workspace)
     future = datetime.now(UTC) + timedelta(minutes=10)
     workspace.monitor_claimed_by = "monitor-worker"
     workspace.monitor_claim_expires_at = future
     await session.flush()
     service, _stopper, _cleaner = _service(session)
-    monkeypatch.setattr(
-        "awf.service.controls_guide.control_authority",
-        AsyncMock(),
-    )
+    lock = _patch_hosted_authority(monkeypatch, stored)
 
     response = await service.guide_workspace(
         workspace.id,
@@ -515,6 +541,8 @@ async def test_require_claim_active_hosted_accepts_live_claim(
     persisted = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
     assert response.status == WorkspaceStatus.monitoring_pr
     assert persisted["directive"] == "hosted steer"
+    lock.assert_awaited_once()
+    assert lock.await_args.args[2] == stored
 
 
 @pytest.mark.unit
@@ -523,12 +551,11 @@ async def test_require_claim_active_hosted_refuses_without_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = await _monitoring_workspace(session)
+    stored = _attach_hosted_association(workspace)
+    await session.flush()
     before = _snapshot(workspace)
     service, _stopper, _cleaner = _service(session)
-    monkeypatch.setattr(
-        "awf.service.controls_guide.control_authority",
-        AsyncMock(),
-    )
+    lock = _patch_hosted_authority(monkeypatch, stored)
 
     with pytest.raises(WorkspaceGuideClaimNotActiveError) as exc_info:
         await service.guide_workspace(
@@ -546,3 +573,6 @@ async def test_require_claim_active_hosted_refuses_without_claim(
     assert exc_info.value.error_code == "WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE"
     assert _snapshot(workspace) == before
     assert await _operations(session, workspace.id) == []
+    # Hosted authorization + locked refresh still ran before the claim refusal.
+    lock.assert_awaited_once()
+    assert lock.await_args.args[2] == stored
