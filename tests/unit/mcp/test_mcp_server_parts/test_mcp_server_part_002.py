@@ -1031,7 +1031,7 @@ class TestCreateWorkspace:
         assert result.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         preflight = result.structuredContent["detail"]["provider_readiness_preflight"]
         assert preflight["provider"] == "codex"
-        assert preflight["model"] == "gpt-6.1-sol"
+        assert preflight["model"] == "gpt-6.2-sol"
         assert preflight["blocks_launch"] is True
 
     @pytest.mark.unit
