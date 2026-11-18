@@ -950,14 +950,17 @@ class TestFetchPrStatusPart001:
         assert [c.body for c in status.unresolved_inline_threads[0].comments] == [
             "first page comment",
             "second page comment",
+            "second page self-authored bookkeeping",
         ]
         assert [c.comment_id for c in status.unresolved_inline_threads[0].comments] == [
             "201",
             "202",
+            "203",
         ]
         assert [c.viewer_did_author for c in status.unresolved_inline_threads[0].comments] == [
             False,
             False,
+            True,
         ]
         assert len(fake.calls) == 2
         assert "threadId=T_paginated" in fake.calls[1].args
@@ -1257,10 +1260,19 @@ class TestFetchPrStatusPart001:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
 
-        assert [thread.thread_id for thread in status.unresolved_inline_threads] == ["T1"]
+        # Unmarked identity review-thread comments are listed (#1272); review
+        # bodies and top-level issue comments by the identity stay ignored.
+        assert [thread.thread_id for thread in status.unresolved_inline_threads] == [
+            "T1",
+            "T_self",
+        ]
         thread = status.unresolved_inline_threads[0]
-        assert [comment.comment_id for comment in thread.comments] == ["101"]
+        assert [comment.comment_id for comment in thread.comments] == ["101", "102"]
+        assert [comment.viewer_did_author for comment in thread.comments] == [False, True]
         assert thread.body_excerpt == "Reviewer feedback that still matters."
+        self_thread = status.unresolved_inline_threads[1]
+        assert [comment.comment_id for comment in self_thread.comments] == ["201"]
+        assert self_thread.comments[0].viewer_did_author is True
         assert status.unresolved_review_comments == ()
 
     @pytest.mark.unit

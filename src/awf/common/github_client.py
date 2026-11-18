@@ -402,7 +402,8 @@ class GitHubClient:
                     thread_id=thread_id,
                     first_page=comment_connection,
                     retry_policy=retry_policy,
-                )
+                ),
+                thread_id=thread_id,
             )
             latest_review_activity_at, latest_review_activity_source = (
                 _latest_activity_from_thread_comments(
@@ -418,7 +419,7 @@ class GitHubClient:
             # resolve it if it already addressed the underlying feedback (#473).
             if is_resolved:
                 continue
-            comments = tuple(comment for comment in all_comments if not comment.viewer_did_author)
+            comments = all_comments  # marked disposition replies already dropped (#1272)
             if not comments:
                 continue
             first_comment = comments[0] if comments else None

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from awf.common.forge_thread_audit import is_disposition_reply
 from awf.runtime.pr_monitor import (
     CheckState,
     CheckTiming,
@@ -98,17 +99,33 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
 
 def _parse_review_thread_comments(
     comment_nodes: list[dict[str, Any]],
+    *,
+    thread_id: str,
 ) -> tuple[ReviewThreadComment, ...]:
-    """Parse GraphQL thread-comment nodes and keep timestamps for activity gating."""
+    """Parse GraphQL thread-comment nodes and keep timestamps for activity gating.
+
+    Drop a node only when the token identity authored it AND it carries a valid
+    disposition marker naming ``thread_id``. Unmarked identity comments stay in
+    the status feed for triage (#1272). Raw GraphQL ``body`` is used only for the
+    marker predicate; listed ``ReviewThreadComment.body`` stays on ``bodyText``
+    so hashes and audit ``external_comment_bodies`` remain comparable.
+    """
     comments: list[ReviewThreadComment] = []
     for node in comment_nodes:
+        viewer_did_author = bool(node.get("viewerDidAuthor"))
+        raw_body = node.get("body") or ""
+        if viewer_did_author and is_disposition_reply(raw_body, thread_id=thread_id):
+            continue
         database_id = node.get("databaseId")
+        listed_body = node.get("bodyText")
+        if listed_body is None or listed_body == "":
+            listed_body = raw_body
         comments.append(
             ReviewThreadComment(
                 comment_id=str(database_id) if database_id is not None else None,
-                body=node.get("bodyText") or "",
+                body=listed_body or "",
                 author=_clean_optional_str(_dig(node, "author", "login")),
-                viewer_did_author=bool(node.get("viewerDidAuthor")),
+                viewer_did_author=viewer_did_author,
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 updated_at=_parse_github_datetime(node.get("updatedAt")),
                 url=_clean_optional_str(node.get("url")),
