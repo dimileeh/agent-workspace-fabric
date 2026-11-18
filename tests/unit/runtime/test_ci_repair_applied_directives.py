@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import ci_ops
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     AppliedOperatorDirective,
+    _ci_repair_operator_decision_conflict_state_key,
     append_applied_operator_directive,
     ci_repair_operator_decision_conflict_reason,
     load_applied_operator_directives,
@@ -772,6 +773,10 @@ def test_conflict_park_survives_same_check_rerun_with_new_run_id() -> None:
             run_id="run-222",
         ),
     )
+    # Key must ignore hosted run id so a rerun hashes to the same park.
+    assert _ci_repair_operator_decision_conflict_state_key(
+        _HEAD, first_run
+    ) == _ci_repair_operator_decision_conflict_state_key(_HEAD, rerun)
     state = MonitorState()
     _seed_directive(state)
     mark_ci_repair_operator_decision_conflict(
