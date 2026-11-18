@@ -727,14 +727,19 @@ async def _run_ci_fix(
     # ends NEEDS_HUMAN, push nothing — roll back any residue and park for a
     # human under CI_REPAIR_OPERATOR_DECISION_CONFLICT. With no directives the
     # CI repair path ignores verdict text exactly as before.
-    if (
-        agent_run_err is None
-        and post_agent_err is None
-        and applied_directives
-        and agent_result is not None
-        and state is not None
-    ):
-        conflict_reason = needs_human_verdict_reason(agent_result.stdout or "")
+    #
+    # Parse stdout from a successful AgentRunResult *or* from AgentRunError:
+    # a valid NEEDS_HUMAN conflict with a nonzero CLI exit still raises
+    # AgentRunError (stdout on exc.result). Skipping that case lets the
+    # commit/push path publish edits instead of parking
+    # (PRRT_kwDOSJAM6s64xqaf).
+    if post_agent_err is None and applied_directives and state is not None:
+        conflict_stdout = ""
+        if agent_result is not None:
+            conflict_stdout = agent_result.stdout or ""
+        elif agent_run_err is not None:
+            conflict_stdout = agent_run_err.result.stdout or ""
+        conflict_reason = needs_human_verdict_reason(conflict_stdout)
         if conflict_reason is not None:
             conflict_head = status.head_sha if status is not None else (operation_start_head or "")
             # Check rollback before parking: a failed reset/clean leaves agent

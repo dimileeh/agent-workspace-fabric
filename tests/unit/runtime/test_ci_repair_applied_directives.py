@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 import structlog.testing
 
-from awf.adapters.base import AgentRunResult
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
 from awf.common.prompt_evidence import EVIDENCE_QUOTE_PREFIX
 from awf.runtime.monitor_prompts import fix_ci_prompt
 from awf.runtime.pr_monitor import (
@@ -137,6 +138,7 @@ def _ci_fix_runner(
     *,
     tmp_path: Path,
     stdout: str = "",
+    agent_returncode: int = 0,
     commit_calls: list[dict[str, Any]] | None = None,
     push_calls: list[dict[str, Any]] | None = None,
     rollback_calls: list[dict[str, Any]] | None = None,
@@ -174,7 +176,27 @@ def _ci_fix_runner(
         push_calls.append(dict(kwargs))
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: AgentRunError,
+        *,
+        state: object | None = None,
+    ) -> str:
+        del state
+        # Deterministic/terminal: return without raising so the CI repair path
+        # continues into the validated-push finalizer (PRRT_kwDOSJAM6s64xqaf).
+        return "terminal"
+
     async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        if agent_returncode != 0:
+            raise AgentRunError(
+                agent="cursor",
+                result=CommandResult(
+                    returncode=agent_returncode,
+                    stdout=stdout,
+                    stderr="cli exited nonzero",
+                ),
+            )
         return AgentRunResult(returncode=0, stdout=stdout, stderr="")
 
     async def _rollback(
@@ -211,6 +233,7 @@ def _ci_fix_runner(
         _protected_scope_push_block=_psb,
         _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
         _rollback=_rollback,
     )
@@ -283,16 +306,24 @@ async def test_run_ci_fix_passes_applied_directives_and_audits(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("agent_returncode", [0, 1])
 async def test_ci_repair_needs_human_conflict_parks_without_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    agent_returncode: int,
 ) -> None:
+    """Park conflict for success and nonzero CLI exits (PRRT_kwDOSJAM6s64xqaf).
+
+    A valid AWF-VERDICT: NEEDS_HUMAN conflict with applied directives must roll
+    back and park before commit/push even when the adapter raises AgentRunError.
+    """
     commit_calls: list[dict[str, Any]] = []
     push_calls: list[dict[str, Any]] = []
     rollback_calls: list[dict[str, Any]] = []
     runner = _ci_fix_runner(
         tmp_path=tmp_path,
         stdout=_CONFLICT_STDOUT,
+        agent_returncode=agent_returncode,
         commit_calls=commit_calls,
         push_calls=push_calls,
         rollback_calls=rollback_calls,
