@@ -388,9 +388,12 @@ def _conversation_moved(
     that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
     comments that differ from the listed non-viewer ones are
     ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; without a listed copy the audited
-    ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). A snapshot
-    without comments, or neither copy at all, proves no such difference. The unread check needs only
-    ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
+    ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). An available
+    listed snapshot with zero outside comments still compares (identity-only
+    threads filter to an empty tuple): new outside feedback before the reply is
+    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION`` (PRRT_kwDOSJAM6s644AF5). Neither
+    copy at all proves no such difference. The unread check needs only ``live``,
+    so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
     marked = {
@@ -412,12 +415,16 @@ def _conversation_moved(
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:
             break  # AWF's previous reply, still current
-    listed = (
-        tuple(comment.body for comment in thread.comments if not comment.viewer_did_author)
-        if thread is not None
-        else audited_comments
-    )
-    if listed and live.external_comment_bodies != listed:
+    # ``thread is not None`` is an available snapshot even when every listed
+    # comment is identity-authored (empty outside tuple). ``audited_comments``
+    # stand in only when non-empty: an empty default means no listed copy.
+    if thread is not None:
+        listed: tuple[str, ...] | None = tuple(
+            comment.body for comment in thread.comments if not comment.viewer_did_author
+        )
+    else:
+        listed = audited_comments or None
+    if listed is not None and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION
     return None
 
