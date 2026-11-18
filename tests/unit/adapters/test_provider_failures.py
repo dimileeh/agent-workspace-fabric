@@ -381,3 +381,27 @@ def test_classifies_unsupported_agent_runtime() -> None:
     assert classification.retryable is True
     assert classification.cooldown_seconds == 0
     assert classification.fallback_allowed is True
+
+
+def test_classifies_codex_chatgpt_unsupported_model_as_non_retryable() -> None:
+    """Codex ChatGPT-account unknown-model stderr is a non-retryable config failure."""
+    from awf.adapters.provider_failures import AGENT_MODEL_UNSUPPORTED
+
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr=(
+            "The 'gpt-not-a-real-model' model is not supported when using "
+            "Codex with a ChatGPT account."
+        ),
+        provider=None,
+        model="gpt-not-a-real-model",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_MODEL_UNSUPPORTED
+    assert classification.failure_type == "unsupported_model"
+    assert classification.provider == "openai"
+    assert classification.model == "gpt-not-a-real-model"
+    assert classification.retryable is False
+    assert classification.fallback_allowed is True
