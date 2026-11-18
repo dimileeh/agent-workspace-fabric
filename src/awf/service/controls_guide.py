@@ -171,6 +171,10 @@ async def guide_workspace(
         expected_version=expected_version,
         idempotency_payload_identity=idempotency_payload,
         idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
+        # Pre-upgrade guide ops omit require_claim_active; treat absence as the
+        # historical default False so same-key retries still exact-replay (PRD
+        # §8.5) while an explicit True remains a distinct identity.
+        idempotency_absent_defaults={"require_claim_active": False},
     )
     workspace = prepared.workspace
     if prepared.replay is not None:

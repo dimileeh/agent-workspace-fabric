@@ -1339,6 +1339,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         active_payload_identity: dict[str, object | None] | None = None,
         idempotency_payload_identity: dict[str, object | None] | None = None,
         idempotency_identity_keys: frozenset[str] | None = None,
+        idempotency_absent_defaults: dict[str, object | None] | None = None,
     ) -> _PreparedOperation:
         """Resolve idempotency, version, and active-operation coalescing before creating an operation."""
         if idempotency_key is not None:
@@ -1352,6 +1353,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                         existing.payload,
                         identity=idempotency_payload_identity,
                         identity_keys=idempotency_identity_keys,
+                        absent_defaults=idempotency_absent_defaults,
                     )
                     if idempotency_payload_identity is not None
                     else existing.payload == payload

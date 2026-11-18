@@ -11,10 +11,12 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import OperationRepository
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization
 from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY, operator_hint_from_threads
+from awf.service.controls import IdempotencyConflictError
 from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
 from tests.postgres import postgres_test_session
 from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
@@ -325,6 +327,58 @@ async def test_require_claim_active_refreshes_stale_identity_map_under_lock(
     assert refreshed.monitor_claim_expires_at is None
     assert refreshed.status == before["status"]
     assert refreshed.version == before["version"]
+
+
+@pytest.mark.unit
+async def test_require_claim_active_legacy_payload_replays_default_false(
+    session: AsyncSession,
+) -> None:
+    """Pre-upgrade guide ops omit ``require_claim_active``; default retry must replay.
+
+    PRD §8.5: same idempotency key + unchanged request returns the original
+    result. Legacy payloads lack the new flag; absence must equal the default
+    False so an omitted/False retry still replays, while an explicit True retry
+    still conflicts as a different request.
+    """
+    workspace = await _monitoring_workspace(session)
+    legacy = await OperationRepository(session).create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.guide,
+        status=OperationStatus.succeeded,
+        idempotency_key="guide-rca-legacy-replay",
+        payload={
+            "owner": "operator_api",
+            "source": "operator_api",
+            "reason": None,
+            "reason_code": "OPERATOR_GUIDE",
+            "requested_action": OperationType.guide.value,
+            "directive": "legacy steer",
+            "grants": [],
+            "approve_policy_downgrade": False,
+            # Pre-upgrade shape: require_claim_active absent (not False).
+            "expected_version": workspace.version,
+        },
+    )
+    legacy.result = {"status": workspace.status}
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="legacy steer",
+        idempotency_key="guide-rca-legacy-replay",
+        expected_version=workspace.version,
+    )
+    assert replay.operation_id == legacy.id
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.guide_workspace(
+            workspace.id,
+            directive="legacy steer",
+            require_claim_active=True,
+            idempotency_key="guide-rca-legacy-replay",
+            expected_version=workspace.version,
+        )
 
 
 @pytest.mark.unit

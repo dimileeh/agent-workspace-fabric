@@ -836,6 +836,7 @@ def _payload_matches_idempotency_identity(
     *,
     identity: dict[str, object | None] | None,
     identity_keys: frozenset[str] | None,
+    absent_defaults: Mapping[str, object | None] | None = None,
 ) -> bool:
     if identity is None:
         return True
@@ -845,7 +846,17 @@ def _payload_matches_idempotency_identity(
     for key in keys:
         if key not in identity:
             continue
-        if key not in payload or payload[key] != identity[key]:
+        if key in payload:
+            actual: object | None = payload[key]
+        elif absent_defaults is not None and key in absent_defaults:
+            # Upgrade-safe replay: a newly introduced identity field may be
+            # absent from previously accepted operation payloads. Treat those
+            # missing keys as the declared historical default (e.g. False)
+            # instead of rejecting with IDEMPOTENCY_CONFLICT.
+            actual = absent_defaults[key]
+        else:
+            return False
+        if actual != identity[key]:
             return False
     return True
 
