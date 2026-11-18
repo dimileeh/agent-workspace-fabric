@@ -348,17 +348,11 @@ async def test_retry_skips_undo_when_live_head_is_unrelated(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "live_head",
-    [_HEAD, _PUBLISHED],
-    ids=["restore_ref", "published_remote_head"],
-)
-async def test_retry_still_undoes_when_live_head_matches_pending_refs(
-    live_head: str,
+async def test_retry_still_undoes_when_live_head_is_published_remote_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matching restore_ref or published head must still run the undo path."""
+    """Unrewound published live head must still run local undo + hosted rewind."""
     state = MonitorState()
     mark_ci_repair_conflict_rollback_pending(
         state,
@@ -367,6 +361,7 @@ async def test_retry_still_undoes_when_live_head_matches_pending_refs(
         pending=_pending(published_remote_head=_PUBLISHED),
     )
     rollback_calls: list[str] = []
+    rewind_calls: list[str] = []
 
     async def _ok_rollback(
         _self: object,
@@ -377,7 +372,13 @@ async def test_retry_still_undoes_when_live_head_matches_pending_refs(
         rollback_calls.append(restore_ref or "")
         return ci_ops._CiFixResidueRollbackResult(ok=True)
 
-    async def _ok_rewind(_self: object, **_kwargs: object) -> ci_ops._CiFixResidueRollbackResult:
+    async def _ok_rewind(
+        _self: object,
+        *,
+        published_remote_head: str,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        rewind_calls.append(published_remote_head)
         return ci_ops._CiFixResidueRollbackResult(ok=True)
 
     monkeypatch.setattr(
@@ -397,17 +398,152 @@ async def test_retry_still_undoes_when_live_head_matches_pending_refs(
         workspace_id="ws_ci",
         worktree_path=tmp_path / "ws_ci",
         state=state,
-        status=_status(head_sha=live_head),
+        status=_status(head_sha=_PUBLISHED),
     )
 
     assert action is not None
     assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
     assert rollback_calls == [_HEAD]
+    assert rewind_calls == [_PUBLISHED]
     assert ci_repair_conflict_rollback_pending(state) is None
     assert (
         ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
         == _CONFLICT_REASON
     )
+
+
+@pytest.mark.unit
+async def test_retry_skips_hosted_rewind_when_live_head_already_restore_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live restore_ref means remote is already rewound — do not CAS against published.
+
+    A force-with-lease expected=published fails when the PR head is already
+    restore_ref, re-parks under the stale published SHA, and wedges the
+    workspace in CI_REPAIR_CONFLICT_ROLLBACK_PENDING (PRRT_kwDOSJAM6s64zZ_o).
+    """
+    state = MonitorState(last_push_sha=_PUBLISHED)
+    state.hosted_terminal_head_advanced = True
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=_FAILURES,
+        pending=_pending(
+            cause="hosted_remote_rollback_failed",
+            published_remote_head=_PUBLISHED,
+            leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+        ),
+    )
+    rewind_calls: list[str] = []
+
+    async def _ok_local(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    async def _cas_fail_if_called(
+        _self: object,
+        *,
+        published_remote_head: str,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        rewind_calls.append(published_remote_head)
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message="force-with-lease CAS mismatch against stale published head",
+        )
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _ok_local,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rewind_hosted_ci_repair_conflict_remote",
+        _cas_fail_if_called,
+    )
+
+    action = await retry_ci_repair_conflict_rollback_pending(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=_status(head_sha=_HEAD),
+    )
+
+    assert rewind_calls == []
+    assert action is not None
+    assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert state.hosted_terminal_head_advanced is False
+    assert state.last_push_sha == _HEAD
+    assert ci_repair_conflict_rollback_pending(state) is None
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        == _CONFLICT_REASON
+    )
+
+
+@pytest.mark.unit
+async def test_retry_reparks_under_restore_ref_when_local_undo_fails_after_remote_rewound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If local undo still fails while live head is restore_ref, park under live head."""
+    from awf.runtime.monitor_state_keys import (
+        _ci_repair_conflict_rollback_pending_key_prefix,
+    )
+
+    state = MonitorState()
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=_FAILURES,
+        pending=_pending(
+            cause="hosted_remote_rollback_failed",
+            published_remote_head=_PUBLISHED,
+            leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+        ),
+    )
+
+    async def _failed_local(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="reset_failed",
+            message="reset failed",
+        )
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _failed_local,
+    )
+
+    action = await retry_ci_repair_conflict_rollback_pending(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=_status(head_sha=_HEAD),
+    )
+
+    assert action is not None
+    assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    pending_keys = [
+        key
+        for key in state.threads_addressed_ids
+        if key.startswith(_ci_repair_conflict_rollback_pending_key_prefix())
+    ]
+    assert pending_keys == [f"{_ci_repair_conflict_rollback_pending_key_prefix()}{_HEAD}"]
+    pending = ci_repair_conflict_rollback_pending(state)
+    assert pending is not None
+    assert pending.cause == "reset_failed"
 
 
 @pytest.mark.unit

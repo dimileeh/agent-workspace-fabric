@@ -544,14 +544,25 @@ async def retry_ci_repair_conflict_rollback_pending(
             reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
         )
 
-    # Always re-key under the live head so retries stay reachable if CI drifts.
-    park_head = (
-        conflict_park_lookup_head(
-            status_head_sha=status.head_sha,
-            published_remote_head=pending.published_remote_head,
-        )
-        or status.head_sha
+    live_head = (status.head_sha or "").strip()
+    restore_ref = (pending.restore_ref or "").strip()
+    remote_already_restored = bool(
+        live_head and restore_ref and live_head.lower() == restore_ref.lower()
     )
+    # Prefer published only while the remote still carries that unre wound head.
+    # When live is already restore_ref, re-key under restore_ref so a residual
+    # local-undo failure does not park under the stale published SHA
+    # (PRRT_kwDOSJAM6s64zZ_o).
+    if remote_already_restored:
+        park_head = live_head
+    else:
+        park_head = (
+            conflict_park_lookup_head(
+                status_head_sha=status.head_sha,
+                published_remote_head=pending.published_remote_head,
+            )
+            or status.head_sha
+        )
 
     _log.info(
         "monitor.ci_fix_operator_decision_conflict_rollback_retry",
@@ -569,15 +580,25 @@ async def retry_ci_repair_conflict_rollback_pending(
         worktree_path=worktree_path,
         restore_ref=pending.restore_ref,
     )
-    if rollback_result.ok and pending.published_remote_head and pending.restore_ref:
-        rollback_result = await ci_ops._rewind_hosted_ci_repair_conflict_remote(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            restore_ref=pending.restore_ref,
-            published_remote_head=pending.published_remote_head,
-            operation_start_last_push_sha=pending.operation_start_last_push_sha,
-        )
+    if rollback_result.ok and pending.published_remote_head and restore_ref:
+        if remote_already_restored:
+            # Live PR head is already restore_ref — prior rewind landed. Do not
+            # force-with-lease against the stale published SHA (CAS mismatch
+            # would fail and re-wedge PENDING; PRRT_kwDOSJAM6s64zZ_o).
+            state.hosted_terminal_head_advanced = False
+            current_last_push_sha = (state.last_push_sha or "").strip()
+            saved_last_push_sha = (pending.operation_start_last_push_sha or "").strip()
+            if current_last_push_sha.lower() != saved_last_push_sha.lower():
+                state.last_push_sha = pending.operation_start_last_push_sha
+        else:
+            rollback_result = await ci_ops._rewind_hosted_ci_repair_conflict_remote(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                restore_ref=restore_ref,
+                published_remote_head=pending.published_remote_head,
+                operation_start_last_push_sha=pending.operation_start_last_push_sha,
+            )
 
     if not rollback_result.ok:
         leftover = conflict_rollback_pending_leftover_message(
