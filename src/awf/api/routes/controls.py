@@ -49,6 +49,7 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
 from awf.service.controls_provider_budget import ProviderBudgetControlError
 from awf.service.openrouter_management import management_client_from_settings
 
@@ -179,6 +180,7 @@ async def guide_workspace(
             reason=payload.reason,
             grants=payload.grants,
             approve_policy_downgrade=payload.approve_policy_downgrade,
+            require_claim_active=payload.require_claim_active,
             operator=payload.operator,
             hosted_authorization=payload.hosted_authorization,
             hosted_reauthorization=payload.hosted_reauthorization,
@@ -367,6 +369,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
             ActiveWorkspaceDestroyError,
             IdempotencyConflictError,
             VersionConflictError,
+            WorkspaceGuideClaimNotActiveError,
             WorkspaceGuideStateError,
             WorkspaceRefreshStateError,
             WorkspaceRemonitorMetadataMissingError,

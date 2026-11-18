@@ -94,37 +94,6 @@ from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_REASON_CODE,
 )
 
-_REMONITOR_ELIGIBLE_STATUSES = (
-    WorkspaceStatus.monitoring_pr,
-    WorkspaceStatus.failed,
-)
-_VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
-_VALIDATE_REPLAY_STATUSES = frozenset(
-    {
-        WorkspaceStatus.monitoring_pr,
-        WorkspaceStatus.ready,
-        WorkspaceStatus.running,
-        WorkspaceStatus.validating,
-    }
-)
-_REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
-_DESTROYING_OR_DESTROYED_STATUSES = frozenset(
-    {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
-)
-_REBASE_DESTRUCTIVE_CONFLICT_TYPES = frozenset(
-    {
-        OperationType.cancel.value,
-        OperationType.stop.value,
-        OperationType.destroy.value,
-    }
-)
-_OPERATOR_API_SOURCE = "operator_api"
-_OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
-_OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
-_OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
-_OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
-_OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
-_OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _REMONITOR_PAST_SETTLE_WARNING_CODE = "REMONITOR_PAST_SETTLE"
 _REMONITOR_PAST_SETTLE_HINT_MESSAGE = (
     "Workspace is past reviewer-settle window; auto-merge is frozen "
@@ -134,15 +103,6 @@ _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE = (
     "Workspace is past reviewer-settle window; auto-merge is paused "
     "until reviewer settle is re-evaluated."
 )
-_AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
-_OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
-
-
-def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
-    """Return requested_at or raise if the operator remonitor timestamp was never set."""
-    if requested_at is None:
-        raise RuntimeError("operator remonitor requested_at was not initialized")
-    return requested_at
 
 
 class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin):
@@ -1339,6 +1299,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         active_payload_identity: dict[str, object | None] | None = None,
         idempotency_payload_identity: dict[str, object | None] | None = None,
         idempotency_identity_keys: frozenset[str] | None = None,
+        idempotency_absent_defaults: dict[str, object | None] | None = None,
     ) -> _PreparedOperation:
         """Resolve idempotency, version, and active-operation coalescing before creating an operation."""
         if idempotency_key is not None:
@@ -1352,6 +1313,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                         existing.payload,
                         identity=idempotency_payload_identity,
                         identity_keys=idempotency_identity_keys,
+                        absent_defaults=idempotency_absent_defaults,
                     )
                     if idempotency_payload_identity is not None
                     else existing.payload == payload
@@ -1394,6 +1356,20 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
 
 
 from awf.service.controls_helpers import (  # noqa: E402
+    _DESTROYING_OR_DESTROYED_STATUSES,
+    _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
+    _OPERATOR_API_SOURCE,
+    _OPERATOR_CANCEL_REASON_CODE,
+    _OPERATOR_DESTROY_REASON_CODE,
+    _OPERATOR_REBASE_REASON_CODE,
+    _OPERATOR_REMONITOR_REASON_CODE,
+    _OPERATOR_STOP_REASON_CODE,
+    _OPERATOR_VALIDATE_REASON_CODE,
+    _REBASE_DESTRUCTIVE_CONFLICT_TYPES,
+    _REBASE_ELIGIBLE_STATUSES,
+    _REMONITOR_ELIGIBLE_STATUSES,
+    _VALIDATE_ELIGIBLE_STATUSES,
+    _VALIDATE_REPLAY_STATUSES,
     _add_control_audit_event,
     _bounded_operation_error_message,
     _cancel_stale_pr_monitor_recovery_operations,
@@ -1424,6 +1400,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
     _remonitor_missing_metadata,
+    _require_operator_remonitor_requested_at,
     _reset_failed_workspace_for_remonitor,
     _stack_release_replay_message,
     _with_secret_lease_evidence,
@@ -1496,4 +1473,5 @@ __all__ = [
     "_operation_conflict_detail",
     "_payload_matches_idempotency_identity",
     "_is_active",
+    "_OPERATION_ERROR_MESSAGE_MAX_LENGTH",
 ]

@@ -529,6 +529,60 @@ def test_payload_matches_identity_skips_keys_absent_from_identity() -> None:
 
 
 @pytest.mark.unit
+def test_payload_matches_identity_absent_defaults_treat_missing_as_default() -> None:
+    """Missing stored or identity keys match a declared historical default.
+
+    Omit-when-false identities leave ``require_claim_active`` out of the request
+    identity while still listing it in ``identity_keys``; absence on either side
+    must equal the default False so True↔False still conflicts.
+    """
+    identity = {"require_claim_active": False, "directive": "steer"}
+    keys = frozenset({"require_claim_active", "directive"})
+    defaults = {"require_claim_active": False}
+    omit_false_identity = {"directive": "steer"}
+
+    assert _payload_matches_idempotency_identity(
+        {"directive": "steer"},
+        identity=identity,
+        identity_keys=keys,
+        absent_defaults=defaults,
+    )
+    assert _payload_matches_idempotency_identity(
+        {"directive": "steer"},
+        identity=omit_false_identity,
+        identity_keys=keys,
+        absent_defaults=defaults,
+    )
+    assert (
+        _payload_matches_idempotency_identity(
+            {"directive": "steer"},
+            identity={"require_claim_active": True, "directive": "steer"},
+            identity_keys=keys,
+            absent_defaults=defaults,
+        )
+        is False
+    )
+    assert (
+        _payload_matches_idempotency_identity(
+            {"directive": "steer", "require_claim_active": True},
+            identity=identity,
+            identity_keys=keys,
+            absent_defaults=defaults,
+        )
+        is False
+    )
+    assert (
+        _payload_matches_idempotency_identity(
+            {"directive": "steer", "require_claim_active": True},
+            identity=omit_false_identity,
+            identity_keys=keys,
+            absent_defaults=defaults,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 def test_claim_lease_is_live_false_for_missing_owner_or_expiry() -> None:
     now = datetime.now(UTC)
     assert not _claim_lease_is_live(None, now + timedelta(minutes=5), now=now)

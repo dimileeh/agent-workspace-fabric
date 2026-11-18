@@ -535,6 +535,7 @@ def _guide_workspace_impl(
     action: str,
     grants: list[str] | None = None,
     approve_policy_downgrade: bool = False,
+    require_claim_active: bool = False,
     operator: str | None = None,
 ) -> None:
     headers = _control_headers(
@@ -548,6 +549,8 @@ def _guide_workspace_impl(
         body["grants"] = grants
     if approve_policy_downgrade:
         body["approve_policy_downgrade"] = True
+    if require_claim_active:
+        body["require_claim_active"] = True
     if operator is not None:
         body["operator"] = operator
     response = _call(
@@ -587,6 +590,14 @@ def workspace_guide(
         "--approve-policy-downgrade",
         help="Acknowledge that a granted edit may weaken validation.",
     ),
+    require_claim_active: bool = typer.Option(
+        False,
+        "--require-claim-active",
+        help=(
+            "Accept only while monitoring_pr with an unexpired execution or "
+            "monitor claim; refused with grants."
+        ),
+    ),
     operator: str | None = typer.Option(
         None, "--operator", help="Operator identity recorded on grant audit records."
     ),
@@ -622,6 +633,7 @@ def workspace_guide(
         reason=reason,
         grants=grant,
         approve_policy_downgrade=approve_policy_downgrade,
+        require_claim_active=require_claim_active,
         operator=operator,
         idempotency_key=idempotency_key,
         if_match=if_match,

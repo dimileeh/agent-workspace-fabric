@@ -219,6 +219,7 @@ class _MockService:
         reason: str | None = None,
         grants: list[str] | None = None,
         approve_policy_downgrade: bool = False,
+        require_claim_active: bool = False,
         operator: str | None = None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
@@ -232,6 +233,7 @@ class _MockService:
                     "reason": reason,
                     "grants": grants,
                     "approve_policy_downgrade": approve_policy_downgrade,
+                    "require_claim_active": require_claim_active,
                     "operator": operator,
                     "idempotency_key": idempotency_key,
                     "expected_version": expected_version,
@@ -614,6 +616,7 @@ class TestSuccessPaths:
                         "reason": "operator decision",
                         "grants": [],
                         "approve_policy_downgrade": False,
+                        "require_claim_active": False,
                         "operator": None,
                         "idempotency_key": "ik-g",
                         "expected_version": 11,
@@ -726,6 +729,40 @@ class TestSuccessPaths:
         assert result.structuredContent is not None
         assert result.structuredContent["error_code"] == "INVALID_REQUEST"
         assert service.calls == []
+
+    async def test_guide_require_claim_active_passed_through(self) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        payload = await _call(
+            mcp,
+            "awf_guide_workspace",
+            {
+                "workspace_id": "ws_guide_rca",
+                "directive": "steer live only",
+                "require_claim_active": True,
+                "idempotency_key": "ik-rca",
+                "expected_version": 4,
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert service.calls == [
+            (
+                "guide",
+                {
+                    "workspace_id": "ws_guide_rca",
+                    "directive": "steer live only",
+                    "reason": None,
+                    "grants": [],
+                    "approve_policy_downgrade": False,
+                    "require_claim_active": True,
+                    "operator": None,
+                    "idempotency_key": "ik-rca",
+                    "expected_version": 4,
+                },
+            )
+        ]
 
     async def test_refresh_and_rebase_return_operation_response_shape(self) -> None:
         service = _MockService()

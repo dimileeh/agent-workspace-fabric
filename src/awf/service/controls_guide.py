@@ -46,6 +46,7 @@ from awf.runtime.operator_hints import (
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
     _GUIDE_ELIGIBLE_STATUSES,
+    WorkspaceGuideClaimNotActiveError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -68,6 +69,7 @@ from awf.service.controls_helpers import (
     _workspace_pr_operation_context,
 )
 from awf.service.controls_provider_budget import _ProviderBudgetControlMixin
+from awf.service.workspaces_response import workspace_claim_active
 
 _OPERATOR_GUIDE_REASON_CODE = "OPERATOR_GUIDE"
 
@@ -80,6 +82,7 @@ async def guide_workspace(
     reason: str | None = None,
     grants: list[str] | None = None,
     approve_policy_downgrade: bool = False,
+    require_claim_active: bool = False,
     operator: str | None = None,
     idempotency_key: str | None = None,
     expected_version: int | None = None,
@@ -131,6 +134,10 @@ async def guide_workspace(
             "directive": directive_text,
             "grants": grant_inputs,
             "approve_policy_downgrade": approve_policy_downgrade,
+            # Omit when false so ordinary guides stay byte-for-byte identical to
+            # pre-upgrade payloads (flag absent ≠ False). Include only True so a
+            # claim-gated guide remains a distinct idempotency identity.
+            **({"require_claim_active": True} if require_claim_active else {}),
             # Grant-bearing guides persist the operator on each
             # ``OperatorGrantAuditRecord`` (see ``_guide_blocked_workspace``), so a
             # same-key retry that keeps the directive/grants/reason but swaps the
@@ -166,7 +173,15 @@ async def guide_workspace(
         idempotency_key=idempotency_key,
         expected_version=expected_version,
         idempotency_payload_identity=idempotency_payload,
-        idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
+        # Always list require_claim_active so a True-stored op conflicts with an
+        # omit-when-false retry even though the false identity drops the key.
+        idempotency_identity_keys=frozenset(
+            {*base_payload.keys(), "expected_version", "require_claim_active"}
+        ),
+        # Absence (stored or identity) equals the historical default False so
+        # pre-upgrade / ordinary guides still exact-replay (PRD §8.5) while an
+        # explicit True remains a distinct identity.
+        idempotency_absent_defaults={"require_claim_active": False},
     )
     workspace = prepared.workspace
     if prepared.replay is not None:
@@ -175,6 +190,23 @@ async def guide_workspace(
             operation=prepared.replay,
             message="workspace operator guidance recorded",
         )
+
+    if require_claim_active:
+        # Compare-and-act: after exact replay is ruled out and before any
+        # mutation, re-read under the same FOR UPDATE lock and accept only a
+        # live monitoring_pr claim (no grants / no failed-reset / no blocked-arm).
+        # ``get_for_update`` acquires the row lock but does not populate_existing,
+        # so a prior identity-mapped load (``workspace_for_payload`` /
+        # ``_prepare_operation``) can still expose stale status/claim fields if a
+        # worker released its claim or left ``monitoring_pr`` before the lock.
+        # Refresh attributes under that lock before evaluating the precondition.
+        row = await self._require_workspace_for_update(repo, workspace_id)
+        await self._session.refresh(row)
+        now = utcnow()
+        claim_active = workspace_claim_active(row, now=now)
+        if grant_inputs or row.status != WorkspaceStatus.monitoring_pr.value or not claim_active:
+            raise WorkspaceGuideClaimNotActiveError(row, claim_active=claim_active)
+        workspace = row
 
     current = WorkspaceStatus(workspace.status)
     if current not in _GUIDE_ELIGIBLE_STATUSES:
