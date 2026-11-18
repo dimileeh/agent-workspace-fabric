@@ -241,12 +241,15 @@ async def _detect_hosted_ci_repair_conflict_published_head(
 ) -> str | None:
     """Return the hosted PR head published before a NEEDS_HUMAN conflict park.
 
-    Hosted adapters advance the remote before AWF parks. Detect that published
-    SHA from monitor state (and live HEAD when state was not yet recorded) so
-    the conflict path can rewind the remote before parking against the
-    pre-repair head (PRRT_kwDOSJAM6s64x4K2). Mirrors
-    ``comment_verdict_rollback`` hosted detection.
+    Hosted adapters advance the remote before AWF parks. Require monitor state
+    evidence of that advance (``hosted_terminal_head_advanced`` or
+    ``last_push_sha`` drift, including the hosted-sync-failure seed in
+    ``_run_ci_fix``). Do not treat a local HEAD that merely differs from
+    ``restore_ref`` as published: that SHA may never have reached the remote,
+    and CAS rewind against it wedges a false
+    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` park (Bugbot on PR #1268).
     """
+    _ = worktree_path  # kept for call-site compatibility; detection is state-keyed
     if state is None or restore_ref is None or not getattr(self._deps.adapter, "is_hosted", False):
         return None
     restore_ref_lower = restore_ref.strip().lower()
@@ -258,26 +261,10 @@ async def _detect_hosted_ci_repair_conflict_published_head(
     state_recorded_remote_advance = bool(state.hosted_terminal_head_advanced) or (
         bool(current_last_push_sha) and current_last_push_sha.lower() != saved_last_push_sha.lower()
     )
-
-    current_head = ""
-    rev_parse_head = getattr(self, "_rev_parse_head", None)
-    if callable(rev_parse_head):
-        try:
-            parsed = await rev_parse_head(worktree_path)
-        except (OSError, RuntimeError, TimeoutError):
-            parsed = None
-        current_head = (parsed or "").strip()
-
-    needs_hosted_remote_rollback = state_recorded_remote_advance
-    if not needs_hosted_remote_rollback and current_head:
-        needs_hosted_remote_rollback = current_head.lower() != restore_ref_lower
-    if not needs_hosted_remote_rollback:
+    if not state_recorded_remote_advance:
         return None
 
-    if not state_recorded_remote_advance and current_head.lower() != restore_ref_lower:
-        candidate = current_head
-    else:
-        candidate = current_last_push_sha or current_head
+    candidate = current_last_push_sha
     if candidate and candidate.lower() != restore_ref_lower:
         return candidate
     return None

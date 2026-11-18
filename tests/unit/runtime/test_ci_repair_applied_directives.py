@@ -913,7 +913,7 @@ async def test_ci_repair_without_directives_ignores_needs_human_verdict(
 async def test_detect_hosted_ci_repair_conflict_published_head_edges(
     tmp_path: Path,
 ) -> None:
-    """Detection skips non-hosted/blank restore and uses live HEAD when state lags."""
+    """Detection skips non-hosted/blank restore; local HEAD alone is not published."""
     runner = _ci_fix_runner(tmp_path=tmp_path)
     state = MonitorState(last_push_sha=_HEAD)
 
@@ -950,10 +950,12 @@ async def test_detect_hosted_ci_repair_conflict_published_head_edges(
         is None
     )
 
-    async def _published_head(_worktree_path: Path) -> str | None:
+    async def _local_only_head(_worktree_path: Path) -> str | None:
         return _PUBLISHED_HOSTED_HEAD
 
-    runner._rev_parse_head = _published_head
+    runner._rev_parse_head = _local_only_head
+    # Local HEAD drift without recorded remote advance must not invent a
+    # published tip (false CAS → false ROLLBACK_PENDING; Bugbot PR #1268).
     assert (
         await ci_ops._detect_hosted_ci_repair_conflict_published_head(
             runner,
@@ -962,13 +964,9 @@ async def test_detect_hosted_ci_repair_conflict_published_head_edges(
             restore_ref=_HEAD,
             operation_start_last_push_sha=_HEAD,
         )
-        == _PUBLISHED_HOSTED_HEAD
+        is None
     )
 
-    async def _rev_parse_raises(_worktree_path: Path) -> str | None:
-        raise OSError("gitdir missing")
-
-    runner._rev_parse_head = _rev_parse_raises
     state.last_push_sha = _PUBLISHED_HOSTED_HEAD
     state.hosted_terminal_head_advanced = True
     assert (
