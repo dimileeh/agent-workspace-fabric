@@ -2,6 +2,10 @@
 
 A leaf module (no runtime imports) so ``forge``, both forge clients and the PR
 monitor can share it without an import cycle.
+
+Also owns the single disposition-marker regex and
+:func:`is_disposition_reply` used when the status feed lists unmarked identity
+comments for triage while dropping only AWF's marker-carrying replies (#1272).
 """
 
 from __future__ import annotations
