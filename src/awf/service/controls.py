@@ -94,37 +94,6 @@ from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_REASON_CODE,
 )
 
-_REMONITOR_ELIGIBLE_STATUSES = (
-    WorkspaceStatus.monitoring_pr,
-    WorkspaceStatus.failed,
-)
-_VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
-_VALIDATE_REPLAY_STATUSES = frozenset(
-    {
-        WorkspaceStatus.monitoring_pr,
-        WorkspaceStatus.ready,
-        WorkspaceStatus.running,
-        WorkspaceStatus.validating,
-    }
-)
-_REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
-_DESTROYING_OR_DESTROYED_STATUSES = frozenset(
-    {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
-)
-_REBASE_DESTRUCTIVE_CONFLICT_TYPES = frozenset(
-    {
-        OperationType.cancel.value,
-        OperationType.stop.value,
-        OperationType.destroy.value,
-    }
-)
-_OPERATOR_API_SOURCE = "operator_api"
-_OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
-_OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
-_OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
-_OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
-_OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
-_OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _REMONITOR_PAST_SETTLE_WARNING_CODE = "REMONITOR_PAST_SETTLE"
 _REMONITOR_PAST_SETTLE_HINT_MESSAGE = (
     "Workspace is past reviewer-settle window; auto-merge is frozen "
@@ -134,8 +103,6 @@ _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE = (
     "Workspace is past reviewer-settle window; auto-merge is paused "
     "until reviewer settle is re-evaluated."
 )
-_AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
-_OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
 class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin):
@@ -1389,6 +1356,20 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
 
 
 from awf.service.controls_helpers import (  # noqa: E402
+    _DESTROYING_OR_DESTROYED_STATUSES,
+    _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
+    _OPERATOR_API_SOURCE,
+    _OPERATOR_CANCEL_REASON_CODE,
+    _OPERATOR_DESTROY_REASON_CODE,
+    _OPERATOR_REBASE_REASON_CODE,
+    _OPERATOR_REMONITOR_REASON_CODE,
+    _OPERATOR_STOP_REASON_CODE,
+    _OPERATOR_VALIDATE_REASON_CODE,
+    _REBASE_DESTRUCTIVE_CONFLICT_TYPES,
+    _REBASE_ELIGIBLE_STATUSES,
+    _REMONITOR_ELIGIBLE_STATUSES,
+    _VALIDATE_ELIGIBLE_STATUSES,
+    _VALIDATE_REPLAY_STATUSES,
     _add_control_audit_event,
     _bounded_operation_error_message,
     _cancel_stale_pr_monitor_recovery_operations,
@@ -1492,4 +1473,5 @@ __all__ = [
     "_operation_conflict_detail",
     "_payload_matches_idempotency_identity",
     "_is_active",
+    "_OPERATION_ERROR_MESSAGE_MAX_LENGTH",
 ]
