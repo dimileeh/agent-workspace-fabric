@@ -394,6 +394,73 @@ def test_conversation_moved_rejects_edited_identity_comment_still_in_read_set() 
     )
 
 
+def test_conversation_moved_matches_identity_raw_markdown_not_body_text() -> None:
+    """Recorded identity bodies must use the same raw markdown the audit stores.
+
+    Listing bodyText (backticks stripped) while comparing to viewer_comment_bodies
+    (raw markdown) retires an unchanged reply and refuses resolve; identity-only
+    diffs never re-enter attention hashes (PRRT_kwDOSJAM6s644y23).
+    """
+    tid = "PRRT_test_identity_md_repr"
+    raw = "Please guard `None` payloads"
+    plain = "Please guard None payloads"
+    listed = replace(
+        _thread(tid, _ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1", body=_ASK, author="review-bot", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id="own-0",
+                body=raw,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    live = AuditedReviewThread(
+        thread_id=tid,
+        is_resolved=False,
+        is_outdated=False,
+        resolved_by=None,
+        viewer_comment_bodies=(raw, "marker"),
+        viewer_comment_ids=("own-0", "reply-1"),
+        external_comment_bodies=(_ASK,),
+    )
+    assert (
+        _conversation_moved(
+            listed,
+            live,
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+            read_own_comment_bodies=(raw,),
+        )
+        is None
+    )
+    # bodyText on the recorded side against raw live is a false post-triage edit.
+    assert (
+        _conversation_moved(
+            listed,
+            live,
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+            read_own_comment_bodies=(plain,),
+        )
+        == "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
+    )
+    # sync_item_disposition must persist the listed identity body as-is (raw).
+    state = MonitorState()
+    sync_item_disposition(
+        state,
+        tid,
+        VerdictResult(verdict="false_positive", reason="already guarded"),
+        thread=listed,
+    )
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None
+    assert recorded.read_own_comment_bodies == (raw,)
+
+
 def _own_comment_ids(names: tuple[str, ...]) -> tuple[str, ...]:
     """The audit's ids for AWF's identity's comments: ``reply`` is the one just posted."""
     return tuple(

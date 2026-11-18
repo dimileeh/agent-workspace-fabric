@@ -223,8 +223,49 @@ async def test_keeps_marker_naming_another_thread() -> None:
     assert thread.thread_id == "T_wrong_marker"
     assert thread.comments[0].comment_id == "401"
     assert thread.comments[0].viewer_did_author is True
-    # Listed body stays on bodyText so hashes stay comparable.
-    assert thread.comments[0].body == "pasted from elsewhere"
+    # Identity listed bodies keep raw markdown so read_own matches audit
+    # viewer_comment_bodies (hashes still skip viewer_did_author rows).
+    assert thread.comments[0].body == f"{wrong}\npasted from elsewhere"
+
+
+@pytest.mark.unit
+async def test_identity_comment_keeps_raw_markdown_when_body_text_strips() -> None:
+    """Unmarked identity bodies must match audit viewer_comment_bodies (#1272).
+
+    GraphQL bodyText strips markdown (e.g. backticks). Persisting bodyText while
+    the disposition re-read compares raw body falsely treats unchanged feedback
+    as a post-triage edit (PRRT_kwDOSJAM6s644y23).
+    """
+    raw = "Please guard `None` payloads"
+    plain = "Please guard None payloads"
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        returncode=0,
+        stdout=_sample_pr_payload(
+            threads=[
+                _thread(
+                    "T_md_identity",
+                    comments=[
+                        {
+                            "databaseId": 801,
+                            "body": raw,
+                            "bodyText": plain,
+                            "author": {"login": "token-owner"},
+                            "viewerDidAuthor": True,
+                        }
+                    ],
+                )
+            ]
+        ),
+    )
+    status = await GitHubClient(fake).fetch_pr_status(
+        repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+    )
+
+    comment = status.unresolved_inline_threads[0].comments[0]
+    assert comment.viewer_did_author is True
+    assert comment.body == raw
+    assert comment.body != plain
 
 
 @pytest.mark.unit

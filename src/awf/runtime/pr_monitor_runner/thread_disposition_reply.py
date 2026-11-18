@@ -398,9 +398,11 @@ def _conversation_moved(
     ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION`` (PRRT_kwDOSJAM6s644AF5). An
     unmarked identity comment whose id was read at triage but whose live body
     differs from the recorded ``read_own_comment_bodies`` is the same class of
-    post-decision change (PRRT_kwDOSJAM6s644g3v); legacy records without bodies
-    keep ID-only skip. Neither copy at all proves no such difference. The unread
-    check needs only ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
+    post-decision change (PRRT_kwDOSJAM6s644g3v); both sides are raw markdown so
+    a bodyText-stripped listing cannot false-positive an edit
+    (PRRT_kwDOSJAM6s644y23). Legacy records without bodies keep ID-only skip.
+    Neither copy at all proves no such difference. The unread check needs only
+    ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
     marked = {

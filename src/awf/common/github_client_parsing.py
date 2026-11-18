@@ -106,9 +106,13 @@ def _parse_review_thread_comments(
 
     Drop a node only when the token identity authored it AND it carries a valid
     disposition marker naming ``thread_id``. Unmarked identity comments stay in
-    the status feed for triage (#1272). Raw GraphQL ``body`` is used only for the
-    marker predicate; listed ``ReviewThreadComment.body`` stays on ``bodyText``
-    so hashes and audit ``external_comment_bodies`` remain comparable.
+    the status feed for triage (#1272). Raw GraphQL ``body`` decides the marker
+    predicate. Non-viewer listed ``ReviewThreadComment.body`` stays on
+    ``bodyText`` so hashes and audit ``external_comment_bodies`` remain
+    comparable. Identity listed bodies keep raw ``body`` so
+    ``read_own_comment_bodies`` matches audit ``viewer_comment_bodies`` (also
+    raw markdown); comparing ``bodyText`` to raw treated unchanged markdown as
+    a post-triage edit (PRRT_kwDOSJAM6s644y23).
     """
     comments: list[ReviewThreadComment] = []
     for node in comment_nodes:
@@ -120,7 +124,7 @@ def _parse_review_thread_comments(
         comments.append(
             ReviewThreadComment(
                 comment_id=str(database_id) if database_id is not None else None,
-                body=node.get("bodyText") or "",
+                body=raw_body if viewer_did_author else (node.get("bodyText") or ""),
                 author=_clean_optional_str(_dig(node, "author", "login")),
                 viewer_did_author=viewer_did_author,
                 created_at=_parse_github_datetime(node.get("createdAt")),
