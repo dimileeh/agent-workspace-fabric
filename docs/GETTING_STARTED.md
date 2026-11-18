@@ -417,7 +417,7 @@ Default agent models and effort are centralized in
 | `antigravity` | `gemini-3.1-pro` | `high` emitted as `--effort high` in API-key mode; OAuth uses composite slugs |
 | `opencode` | `ollama/kimi-k3:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
-For Codex, `gpt-6.2-sol` is the default; `gpt-6.2-astra` is the lighter option.
+For Codex, `gpt-6.2-sol` is the default (fast, go-to model); `gpt-6.2-astra` is the flagship for the hardest work, chosen per workspace with `--model gpt-6.2-astra`.
 
 **Antigravity migration:** the `antigravity` agent runtime authenticates exclusively
 using `GEMINI_API_KEY` (AI Studio key). The `gemini` agent runtime and `ANTIGRAVITY_API_KEY`
