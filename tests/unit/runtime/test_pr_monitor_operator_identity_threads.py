@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,10 +36,10 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
     decide,
 )
+from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
-    record_item_disposition,
     retire_reopened_dispositions,
     sync_item_disposition,
 )
@@ -54,13 +55,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 from tests.unit.runtime._thread_disposition_fixtures import (
     OrderedForge,
-    seed_resolvable_disposition,
     settled_baseline_state,
 )
 from tests.unit.runtime.test_pr_monitor_thread_disposition_fix_cycle import (
     _MARKER,
     _REPO,
-    _run_cycle,
 )
 from tests.unit.runtime.test_pr_monitor_thread_disposition_gate import (
     _VIEWER,
@@ -107,11 +106,54 @@ def _identity_opener_thread(tid: str = _TID) -> ReviewThread:
 async def test_scenario_a_identity_opened_thread_is_addressed_and_resolved_with_marker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """(A) Identity opener is listed, read at triage, and resolved with a marker."""
-    gh = OrderedForge(FakeCommandRunner())
+    # Real addressing path: prompt must quote the identity opener, and triage
+    # must persist its id in read_own_comment_ids (not a hand-filled seed).
     thread = _identity_opener_thread()
+    state = MonitorState()
+    prompts: list[str] = []
+
+    async def _invoke(**kwargs: object) -> VerdictResult:
+        prompts.append(cast(str, kwargs["prompt"]))
+        return VerdictResult(verdict="false_positive", reason=_REASON)
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return None
+
+    address_runner = SimpleNamespace(
+        _workspace_runtime_context="",
+        _worktrees_root=tmp_path,
+        _deps=SimpleNamespace(session_factory=None),
+        _resolve_task_tag=_resolve_task_tag,
+        _invoke_cli_for_verdict_result=_invoke,
+        _rev_parse_head=_rev_parse_head,
+    )
+    verdict = await comments._address_thread(
+        cast(Any, address_runner),
+        workspace_id="ws_operator_identity_a",
+        repo=_REPO,
+        pr_number=42,
+        thread=thread,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=["widgets/"],
+        task_tag=None,
+        operation_start_head="a" * 40,
+        operation_id="op_a",
+    )
+    assert verdict == "false_positive"
+    assert prompts and _ASK in prompts[0]
+    recorded = read_item_disposition(state, _TID)
+    assert recorded is not None
+    assert recorded.read_own_comment_ids == ("own-0",)
+
+    # Disposition reply + resolve (same forge path Scenario B uses after triage).
+    gh = OrderedForge(FakeCommandRunner())
     marker = _MARKER.format(cls="false_positive", tid=_TID)
 
     async def _audit(*, repo, pr_number, retry=True, thread_id=None):  # noqa: ANN001
@@ -132,25 +174,24 @@ async def test_scenario_a_identity_opened_thread_is_addressed_and_resolved_with_
             )
         )
 
-    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
-
-    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
-        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
-        record_item_disposition(
-            state,
-            replace(disposition, read_own_comment_ids=("own-0",)),
-        )
-
-    _, state, _ = await _run_cycle(
-        factory=factory,
-        tmp_path=tmp_path,
-        monkeypatch=monkeypatch,
-        gh=gh,
-        verdict="false_positive",
-        on_address=_seed,
+    gh.fetch_review_thread_audit = _audit  # type: ignore[method-assign]
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    state.mark_addressed(_TID, "false_positive")
+    replied = await reply_before_resolve(
+        SimpleNamespace(_monitor_owner_id=None, _deps=runner._deps),
+        workspace_id=workspace_id,
+        pr_number=42,
+        thread_id=_TID,
+        state=state,
+        action="resolve_thread",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
         thread=thread,
-        settle_threads=(thread,),
+        repo=_REPO,
     )
+    assert replied is not None
+    assert replied.reply_comment_id == "reply-1"
+    await gh.resolve_thread(thread_id=_TID)
 
     assert [event[0] for event in gh.events] == ["reply", "resolve"]
     assert state.threads_addressed_ids[_TID] == "false_positive"
