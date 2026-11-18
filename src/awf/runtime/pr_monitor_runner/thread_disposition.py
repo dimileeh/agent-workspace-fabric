@@ -157,6 +157,10 @@ class ThreadDisposition:
     # run, or it faulted), so it is re-read before any resolve reuses it and
     # certifies nothing meanwhile (PRRT_kwDOSJAM6s6vbU2K, PRRT_kwDOSJAM6s6veO2C).
     reread_pending: bool = False
+    # Identity comment ids present on the triaged thread when this disposition
+    # was recorded. The reply re-read treats those as already read; unmarked
+    # identity comments outside this set still park as unread (#1272).
+    read_own_comment_ids: tuple[str, ...] = ()
 
     @property
     def is_bound(self) -> bool:
@@ -194,6 +198,7 @@ class ThreadDisposition:
             "resolved": self.resolved,
             "reply_conversation_digest": self.reply_conversation_digest,
             "reread_pending": self.reread_pending,
+            "read_own_comment_ids": list(self.read_own_comment_ids),
         }
 
     @classmethod
@@ -215,6 +220,7 @@ class ThreadDisposition:
         if item_id is None or disposition_class not in DISPOSITION_CLASSES:
             return None
         commits = raw.get("commits")
+        read_own = raw.get("read_own_comment_ids")
         return cls(
             item_id=item_id,
             disposition_class=cast(DispositionClass, disposition_class),
@@ -232,6 +238,9 @@ class ThreadDisposition:
             resolved=raw.get("resolved") is True,
             reply_conversation_digest=_optional_text(raw.get("reply_conversation_digest")),
             reread_pending=raw.get("reread_pending") is True,
+            read_own_comment_ids=tuple(c for c in read_own if isinstance(c, str) and c.strip())
+            if isinstance(read_own, list)
+            else (),
         )
 
 
@@ -303,6 +312,13 @@ def sync_item_disposition(
             commits, commit_base = (record.head_sha,), record.item_start_head
         elif state.hosted_terminal_head_advanced and state.last_push_sha:
             commits = (state.last_push_sha,)
+    read_own_comment_ids: tuple[str, ...] = ()
+    if thread is not None:
+        read_own_comment_ids = tuple(
+            comment.comment_id
+            for comment in thread.comments
+            if comment.viewer_did_author and comment.comment_id
+        )
     record_item_disposition(
         state,
         ThreadDisposition(
@@ -313,6 +329,7 @@ def sync_item_disposition(
             commits=commits,
             commit_base=commit_base,
             thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
+            read_own_comment_ids=read_own_comment_ids,
         ),
     )
 
