@@ -412,7 +412,6 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             hosted_authorization,
             reauthorization=hosted_reauthorization,
             idempotency_key=idempotency_key,
-            control="remonitor",
         )
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)

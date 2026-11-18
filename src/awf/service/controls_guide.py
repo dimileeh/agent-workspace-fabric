@@ -35,11 +35,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
-from awf.hosted_node.lifecycle_operations import (
-    authority_for,
-    control_authority,
-    enforce_pairless_control_guards,
-)
+from awf.hosted_node.lifecycle_operations import control_authority
 from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, control_identity
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
 from awf.runtime.operator_hints import (
@@ -109,7 +105,6 @@ async def guide_workspace(
         operator=operator,
         reauthorization=hosted_reauthorization,
         idempotency_key=idempotency_key,
-        control="guide",
     )
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)
@@ -179,15 +174,6 @@ async def guide_workspace(
             workspace=workspace,
             operation=prepared.replay,
             message="workspace operator guidance recorded",
-        )
-
-    # Pair-less hosted guide: refuse blocked/failed / grants only for fresh work.
-    # Exact idempotency replays return above so a monitor that transitions the
-    # workspace after the first success cannot break PRD §8.5.
-    if hosted_reauthorization is None and authority_for(self._session) is not None:
-        await self._session.refresh(workspace, with_for_update=True)
-        await enforce_pairless_control_guards(
-            self._session, workspace, control="guide", grants=grants
         )
 
     current = WorkspaceStatus(workspace.status)

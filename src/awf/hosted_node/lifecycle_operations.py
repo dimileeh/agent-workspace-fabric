@@ -5,7 +5,6 @@ import os
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select, text
@@ -28,8 +27,6 @@ from awf.hosted_node.runtime_schemas import (
 )
 from awf.hosted_node.schemas import Binding
 
-ControlKind = Literal["guide", "remonitor"]
-
 
 def _pairless_claim_is_live(
     claimed_by: str | None,
@@ -50,32 +47,15 @@ def _pairless_claim_is_live(
 async def enforce_pairless_control_guards(
     session: AsyncSession,
     row: Workspace,
-    *,
-    control: ControlKind | None,
-    grants: list[str] | None = None,
 ) -> None:
-    """Refuse unsafe pair-less hosted guide/remonitor under the existing row lock.
+    """Refuse pair-less hosted remonitor while live claims or active ops exist.
 
     Invoked only after ``refresh(..., with_for_update=True)`` on the pair-less
-    path. Both guide and remonitor run from their control methods only after
-    exact idempotency replay is ruled out, so a same-key retry still returns
-    the stored success when status/claims change after the first response.
-    Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
-    expiry-agnostic). ``control is None`` skips so low-level binding tests stay
-    focused; production guide/remonitor always pass the kind.
+    remonitor path, and only after exact idempotency replay is ruled out, so a
+    same-key retry still returns the stored success when claims change after
+    the first response. Pair reauthorization keeps ``require_rebind_quiet``
+    (claim-by set, expiry-agnostic).
     """
-    if control is None:
-        return
-    if control == "guide":
-        # Only refuse statuses that would otherwise be guide-eligible via the quiet
-        # rebind path (blocked/failed) or grant-bearing guides. Other statuses pass
-        # through so guide_workspace can return WORKSPACE_STATE_NOT_GUIDABLE.
-        if any(grant.strip() for grant in (grants or []) if grant) or row.status in (
-            "blocked",
-            "failed",
-        ):
-            raise MaterialDeniedError("HOSTED_REAUTHORIZATION_REQUIRED", 409)
-        return
     now = datetime.now(UTC)
     if (
         _pairless_claim_is_live(row.execution_claimed_by, row.execution_claim_expires_at, now=now)
@@ -106,7 +86,7 @@ async def apply_pairless_remonitor_guard(
     if hosted_reauthorization is not None or authority_for(session) is None:
         return
     await session.refresh(workspace, with_for_update=True)
-    await enforce_pairless_control_guards(session, workspace, control="remonitor")
+    await enforce_pairless_control_guards(session, workspace)
 
 
 def authority_for(session: AsyncSession, supplied: object = None) -> WorkspaceAuthority | None:
@@ -295,7 +275,6 @@ async def control_authority(
     grants: list[str] | None = None,
     operator: str | None = None,
     idempotency_key: str | None = None,
-    control: ControlKind | None = None,  # noqa: ARG001 — named by callers; guards run after replay
 ) -> None:
     authority = authority_for(session, authorization or reauthorization)
     if authority is None:
@@ -309,8 +288,6 @@ async def control_authority(
         return
     if authorization is None:
         raise MaterialDeniedError("HOSTED_CONTROL_AUTHORIZATION_REQUIRED", 403)
-    # Unauthorized grants keep HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED ahead of
-    # pair-less HOSTED_REAUTHORIZATION_REQUIRED (allow_grants defaults to False).
     if grants and (not authorization.allow_grants or operator != authorization.actor):
         raise MaterialDeniedError("HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED", 403)
     # Ordinary controls take the operation key, workspace, then the admission
@@ -332,10 +309,6 @@ async def control_authority(
     await lock_materials(session, authority, association)
     if check_source(authority, row, authorization.namespace) != association:
         raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
-    # Guide eligibility and remonitor quiescence are applied by the control
-    # methods only after exact idempotency replay is ruled out, so a successful
-    # same-key retry is not rewritten as HOSTED_REAUTHORIZATION_REQUIRED /
-    # HOSTED_SOURCE_NOT_QUIESCENT when status or claims change after success.
 
 
 def admission_environment(
