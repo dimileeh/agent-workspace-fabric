@@ -10,6 +10,8 @@ import pytest
 import structlog.testing
 
 from awf.runtime.pr_monitor import (
+    AddressComments,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
     MergeableState,
@@ -17,8 +19,10 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
     NotifyHuman,
+    OperatorHint,
     PRStatus,
     ReportCiFailure,
+    SyncBase,
     decide,
 )
 from awf.runtime.pr_monitor_models import ActionsRunsState
@@ -34,11 +38,15 @@ from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
     CiRepairConflictRollbackPending,
     ci_repair_conflict_rollback_pending,
     clear_ci_repair_conflict_rollback_pending,
+    divert_work_slot_for_conflict_rollback_pending,
     mark_ci_repair_conflict_rollback_pending,
     operator_decision_conflict_reason,
     retry_ci_repair_conflict_rollback_pending,
 )
+from awf.runtime.pr_monitor_runner.loop import _WORK_SLOT_MONITOR_ACTIONS
 from awf.service.doctor.reasons import reason_text_for_code
+
+_OTHER_HEAD = "deadbeef0123456789abcdef0123456789abcdef01"
 
 _FAILURES = (
     CheckFailure(
@@ -113,6 +121,7 @@ def test_doctor_text_for_conflict_rollback_pending() -> None:
     text = reason_text_for_code(CI_REPAIR_CONFLICT_ROLLBACK_PENDING)
     assert text is not None
     assert "rollback" in text.message.lower() or "undo" in text.message.lower()
+    assert "cancel" in text.action.lower() and "re-adopt" in text.action.lower()
     assert "CI_REPAIR_CONFLICT_ROLLBACK_PENDING" in text.docs_link or "ci_repair" in text.docs_link
 
 
@@ -130,10 +139,28 @@ def test_decide_dispatches_no_agent_while_rollback_pending() -> None:
     assert isinstance(action, NotifyHuman)
     assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
     assert "leftover worktree edits" in (action.message or "")
+    assert "cancel and re-adopt" in (action.message or "")
     assert not isinstance(
         report_ci_failure_or_operator_conflict(_status(), state),
         ReportCiFailure,
     )
+
+
+@pytest.mark.unit
+def test_pending_park_survives_unrelated_head_change() -> None:
+    """Any pending park of this workspace gates, even when live head drifted."""
+    state = MonitorState()
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_HEAD,
+        failures=_FAILURES,
+        pending=_pending(),
+    )
+    assert ci_repair_conflict_rollback_pending(state, head_sha=_OTHER_HEAD) is not None
+    drifted = _status(head_sha=_OTHER_HEAD)
+    action = decide(drifted, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
 
 
 @pytest.mark.unit
@@ -245,6 +272,7 @@ async def test_retry_keeps_pending_park_when_rollback_still_fails(
     assert action is not None
     assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
     assert "leftover worktree edits" in (action.message or "")
+    assert "cancel and re-adopt" in (action.message or "")
     pending = ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=_FAILURES)
     assert pending is not None
     assert pending.cause == "cleanup_failed"
@@ -745,9 +773,11 @@ async def test_non_conflict_needs_human_with_directives_continues_ci_repair(
 
 
 @pytest.mark.unit
-def test_clear_conflict_parks_also_clears_rollback_pending() -> None:
+def test_clear_conflict_parks_does_not_clear_rollback_pending() -> None:
+    """New guide / AWF-FORGET-DECISIONS must not drop an unfinished undo park."""
     from awf.runtime.pr_monitor_runner.applied_operator_directives import (
         clear_ci_repair_operator_decision_conflicts,
+        mark_ci_repair_operator_decision_conflict,
     )
 
     state = MonitorState()
@@ -757,6 +787,93 @@ def test_clear_conflict_parks_also_clears_rollback_pending() -> None:
         failures=_FAILURES,
         pending=_pending(),
     )
+    mark_ci_repair_operator_decision_conflict(
+        state,
+        head_sha=_HEAD,
+        failures=_FAILURES,
+        reason=_CONFLICT_REASON,
+    )
     clear_ci_repair_operator_decision_conflicts(state)
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha=_HEAD, failures=_FAILURES)
+        is None
+    )
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=_FAILURES) is not None
+    )
+    clear_ci_repair_conflict_rollback_pending(state)  # only explicit clear drops it
     assert ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=_FAILURES) is None
-    clear_ci_repair_conflict_rollback_pending(state)  # idempotent
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "action",
+    [
+        AddressComments(threads=(), review_comments=()),
+        AddressOperatorHint(hint=OperatorHint(reason="guide", directive="do it")),
+        SyncBase(),
+        ReportCiFailure(failures=_FAILURES),
+    ],
+    ids=lambda a: type(a).__name__,
+)
+async def test_work_slot_actions_divert_while_rollback_pending_no_agent(
+    action: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Comments / hint / sync-base / CI repair must not launch while pending."""
+    state = MonitorState()
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_HEAD,
+        failures=_FAILURES,
+        pending=_pending(),
+    )
+    agent_launches: list[str] = []
+
+    async def _failed_rollback(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="reset_failed",
+            message="reset failed",
+        )
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _failed_rollback,
+    )
+
+    diverted = await divert_work_slot_for_conflict_rollback_pending(
+        SimpleNamespace(),
+        action=action,
+        work_slot_action_types=_WORK_SLOT_MONITOR_ACTIONS,
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=_status(head_sha=_OTHER_HEAD),
+    )
+    assert diverted is not None
+    assert diverted.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    assert "cancel and re-adopt" in (diverted.message or "")
+    assert agent_launches == []
+    assert ci_repair_conflict_rollback_pending(state, head_sha=_OTHER_HEAD) is not None
+
+
+@pytest.mark.unit
+async def test_work_slot_divert_skips_when_no_pending_park(
+    tmp_path: Path,
+) -> None:
+    diverted = await divert_work_slot_for_conflict_rollback_pending(
+        SimpleNamespace(),
+        action=SyncBase(),
+        work_slot_action_types=_WORK_SLOT_MONITOR_ACTIONS,
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=MonitorState(),
+        status=_status(),
+    )
+    assert diverted is None

@@ -95,7 +95,11 @@ def append_applied_operator_directive(
     state: MonitorState,
     record: AppliedOperatorDirective,
 ) -> None:
-    """Append ``record`` (newest first), keep at most five, clear conflict parks."""
+    """Append ``record`` (newest first), keep at most five, clear conflict parks.
+
+    Clears ``CI_REPAIR_OPERATOR_DECISION_CONFLICT`` parks only — unfinished
+    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` parks stay until rollback succeeds.
+    """
     existing = list(load_applied_operator_directives(state))
     existing.insert(0, record)
     trimmed = existing[:APPLIED_OPERATOR_DIRECTIVES_CAP]
@@ -141,11 +145,12 @@ def record_applied_operator_directive_from_hint(
     is empty.
 
     When the consumed guide (``hint.directive``) contains a line that is exactly
-    ``AWF-FORGET-DECISIONS``, clear stored records and all conflict parks first
-    — including when ``applied_text=""`` on a ruling-only finalize, so the
-    withdrawal is not dropped with the consumed hint (PRRT_kwDOSJAM6s64yVR7).
-    Then record the applied remainder without that marker only if other applied
-    text remains.
+    ``AWF-FORGET-DECISIONS``, clear stored records and operator-decision
+    conflict parks first — including when ``applied_text=""`` on a ruling-only
+    finalize, so the withdrawal is not dropped with the consumed hint
+    (PRRT_kwDOSJAM6s64yVR7). Unfinished ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``
+    parks are not cleared here. Then record the applied remainder without that
+    marker only if other applied text remains.
     """
     hint_directive = (getattr(hint, "directive", None) or "").strip()
     if not hint_directive:
@@ -266,15 +271,15 @@ def mark_ci_repair_operator_decision_conflict(
 
 
 def clear_ci_repair_operator_decision_conflicts(state: MonitorState) -> None:
-    """Drop every CI-repair operator-decision conflict park (new guide arrived)."""
+    """Drop every CI-repair operator-decision conflict park (new guide arrived).
+
+    Does not clear ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``: only a successful
+    rollback clears an unfinished undo. A new guide or ``AWF-FORGET-DECISIONS``
+    must not drop that park while leftovers remain (#1256 operator review).
+    """
     prefix = _ci_repair_operator_decision_conflict_key_prefix()
     for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
         state.threads_addressed_ids.pop(key, None)
-    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
-        clear_ci_repair_conflict_rollback_pending,
-    )
-
-    clear_ci_repair_conflict_rollback_pending(state)
 
 
 def ci_repair_operator_decision_conflict_reason(

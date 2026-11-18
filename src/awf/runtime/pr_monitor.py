@@ -1124,9 +1124,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return Abort(reason=AbortReason.pr_closed_externally)
 
     # 0a. Unfinished CI-repair conflict rollback outranks every normal action
-    # (including green CI → Merge). The pending park is keyed by head only so a
-    # drifted failing-check signature on the unre wound published repair cannot
-    # resume ReportCiFailure / merge (PRRT_kwDOSJAM6s64yqJ9).
+    # (including green CI → Merge). Lookup is by reserved prefix for any pending
+    # park of this workspace: head and CI signature can both change while
+    # leftovers remain (hosted: the published head is the next head).
     from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
         notify_human_for_conflict_rollback_pending,
     )

@@ -237,10 +237,11 @@ def get_salvage_and_monitor_reasons(
             ),
             (
                 "Inspect the awaiting-human message for what is left (leftover worktree "
-                "edits, or a remote head not rewound to the pre-repair SHA). Fix the "
-                "underlying git/remote problem if retries keep failing, or guide / "
-                "remonitor after the tree and remote match the pre-repair head. Do not "
-                "expect AWF to dispatch another CI-repair agent while this park is set."
+                "edits, or a remote head not rewound to the pre-repair SHA). Each poll "
+                "retries the same rollback; if retries keep failing, cancel and "
+                "re-adopt for a clean worktree. A new guide or AWF-FORGET-DECISIONS "
+                "does not clear this park. Do not expect AWF to dispatch another "
+                "agent while this park is set."
             ),
             (
                 "The conflict undo failed closed into a retryable park "
@@ -248,7 +249,7 @@ def get_salvage_and_monitor_reasons(
                 "workspace; each poll retries the same rollback before promoting to "
                 "``CI_REPAIR_OPERATOR_DECISION_CONFLICT``."
             ),
-            "awf workspace show <workspace_id>",
+            "awf workspace cancel <workspace_id>",
             reason_catalog_link("CI_REPAIR_CONFLICT_ROLLBACK_PENDING"),
         ),
     }

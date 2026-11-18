@@ -68,6 +68,14 @@ def conflict_rollback_pending_leftover_message(
     return "leftover worktree edits"
 
 
+def conflict_rollback_pending_human_message(*, leftover_message: str) -> str:
+    """Human-facing park message, including the cancel/re-adopt recovery path."""
+    return (
+        f"CI repair operator-decision conflict; rollback pending: {leftover_message}. "
+        "If retries keep failing, cancel and re-adopt for a clean worktree."
+    )
+
+
 def _conflict_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     return (failure.run_id or "", failure.name, failure.conclusion)
 
@@ -205,38 +213,23 @@ def clear_ci_repair_conflict_rollback_pending(
 def ci_repair_conflict_rollback_pending(
     state: MonitorState,
     *,
-    head_sha: str,
+    head_sha: str = "",
     failures: tuple[CheckFailure, ...] = (),
 ) -> CiRepairConflictRollbackPending | None:
-    """Return the pending undo for this head, ignoring live CI signature drift.
+    """Return any unfinished conflict-rollback park for this workspace.
 
-    Hosted parks are keyed by the unre wound published SHA, but a stale poll can
-    still observe the pre-repair ``restore_ref``. Match either SHA so retries and
-    ``decide()`` cannot miss an unfinished undo (PRRT_kwDOSJAM6s64yqJ9).
+    Lookup is by reserved prefix only: head SHA and failing-check signature can
+    both change while leftovers remain (hosted: the published head *is* the next
+    head). Matching any pending park keeps retries and agent gates reachable.
+    ``head_sha`` / ``failures`` are kept for call-site compatibility only.
     """
-    for key in _pending_keys_for_head(state, head_sha):
-        pending = _parse_pending_payload(state.threads_addressed_ids.get(key))
-        if pending is not None:
-            return pending
-    if failures:
-        legacy = _parse_pending_payload(
-            state.threads_addressed_ids.get(_legacy_pending_state_key(head_sha, failures))
-        )
-        if legacy is not None:
-            return legacy
-    # Hosted parks may be keyed by published head while a stale snapshot still
-    # carries the pre-repair SHA (or the reverse for in-flight pre-yp29 parks).
-    # Match via payload.published_remote_head or payload.restore_ref.
+    del head_sha, failures
     prefix = _ci_repair_conflict_rollback_pending_key_prefix()
     for key, raw in list(state.threads_addressed_ids.items()):
         if not key.startswith(prefix):
             continue
         pending = _parse_pending_payload(raw)
-        if pending is None:
-            continue
-        published = (pending.published_remote_head or "").strip()
-        restore_ref = (pending.restore_ref or "").strip()
-        if head_sha and head_sha in {published, restore_ref}:
+        if pending is not None:
             return pending
     return None
 
@@ -244,10 +237,10 @@ def ci_repair_conflict_rollback_pending(
 def notify_human_for_conflict_rollback_pending(
     state: MonitorState,
     *,
-    head_sha: str,
+    head_sha: str = "",
     failures: tuple[CheckFailure, ...] = (),
 ) -> NotifyHuman | None:
-    """Return NotifyHuman when an unfinished rollback applies to this head."""
+    """Return NotifyHuman when any unfinished conflict rollback park remains."""
     from awf.runtime.pr_monitor import NotifyHuman
 
     pending = ci_repair_conflict_rollback_pending(
@@ -258,9 +251,7 @@ def notify_human_for_conflict_rollback_pending(
     if pending is None:
         return None
     return NotifyHuman(
-        message=(
-            f"CI repair operator-decision conflict; rollback pending: {pending.leftover_message}"
-        ),
+        message=conflict_rollback_pending_human_message(leftover_message=pending.leftover_message),
         reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
     )
 
@@ -272,7 +263,7 @@ def parked_conflict_rollback_pending_result(
     details: dict[str, Any] | None = None,
 ) -> _GitPushResult:
     """Build the parked_needs_human envelope for a failed conflict undo."""
-    message = f"CI repair operator-decision conflict; rollback pending: {pending.leftover_message}"
+    message = conflict_rollback_pending_human_message(leftover_message=pending.leftover_message)
     result_details: dict[str, Any] = {
         "phase": "ci_repair_operator_decision_conflict",
         "operation_type": "ci_repair",
@@ -401,6 +392,37 @@ async def handle_operator_decision_conflict_after_ci_repair(
     )
 
 
+async def divert_work_slot_for_conflict_rollback_pending(
+    self: Any,
+    *,
+    action: object,
+    work_slot_action_types: tuple[type, ...],
+    workspace_id: str,
+    worktree_path: Path,
+    state: MonitorState,
+    status: PRStatus,
+) -> NotifyHuman | None:
+    """Retry unfinished conflict undo before any agent-launching monitor action.
+
+    While any pending park exists for this workspace, work-slot actions
+    (AddressComments, AddressOperatorHint, ReportCiFailure, SyncBase) must not
+    launch an agent. Retry the rollback first; if it still fails (or promotes to
+    the normal conflict park), return the NotifyHuman the caller should divert
+    to. Returns ``None`` when there is no pending park.
+    """
+    if not isinstance(action, work_slot_action_types):
+        return None
+    if ci_repair_conflict_rollback_pending(state) is None:
+        return None
+    return await retry_ci_repair_conflict_rollback_pending(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        state=state,
+        status=status,
+    )
+
+
 async def retry_ci_repair_conflict_rollback_pending(
     self: Any,
     *,
@@ -412,8 +434,7 @@ async def retry_ci_repair_conflict_rollback_pending(
     """Retry a pending conflict undo; promote to normal conflict park on success.
 
     Returns an updated ``NotifyHuman`` when the park still applies (pending or
-    promoted conflict). Returns ``None`` when there is no pending park for this
-    head/signature.
+    promoted conflict). Returns ``None`` when there is no pending park.
     """
     from awf.runtime.pr_monitor import NotifyHuman
     from awf.runtime.pr_monitor_runner import ci_ops
@@ -491,7 +512,7 @@ async def retry_ci_repair_conflict_rollback_pending(
             leftover_message=leftover,
         )
         return NotifyHuman(
-            message=(f"CI repair operator-decision conflict; rollback pending: {leftover}"),
+            message=conflict_rollback_pending_human_message(leftover_message=leftover),
             reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
         )
 
