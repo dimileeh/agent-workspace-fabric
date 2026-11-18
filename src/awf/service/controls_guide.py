@@ -184,7 +184,13 @@ async def guide_workspace(
         # Compare-and-act: after exact replay is ruled out and before any
         # mutation, re-read under the same FOR UPDATE lock and accept only a
         # live monitoring_pr claim (no grants / no failed-reset / no blocked-arm).
+        # ``get_for_update`` acquires the row lock but does not populate_existing,
+        # so a prior identity-mapped load (``workspace_for_payload`` /
+        # ``_prepare_operation``) can still expose stale status/claim fields if a
+        # worker released its claim or left ``monitoring_pr`` before the lock.
+        # Refresh attributes under that lock before evaluating the precondition.
         row = await self._require_workspace_for_update(repo, workspace_id)
+        await self._session.refresh(row)
         now = utcnow()
         claim_active = workspace_claim_active(row, now=now)
         if grant_inputs or row.status != WorkspaceStatus.monitoring_pr.value or not claim_active:

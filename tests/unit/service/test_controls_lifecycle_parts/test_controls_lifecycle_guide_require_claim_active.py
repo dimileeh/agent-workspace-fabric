@@ -8,9 +8,11 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization
 from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY, operator_hint_from_threads
 from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
@@ -267,6 +269,62 @@ async def test_require_claim_active_refuses_grants(
     }
     assert _snapshot(workspace) == before
     assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_require_claim_active_refreshes_stale_identity_map_under_lock(
+    session: AsyncSession,
+) -> None:
+    """Stale ORM claim fields must not defeat the locked compare-and-act check.
+
+    ``workspace_for_payload`` and ``_prepare_operation`` load the row before the
+    ``require_claim_active`` re-read. ``get_for_update`` acquires FOR UPDATE but
+    does not ``populate_existing``, so a concurrent claim release committed into
+    the same session (identity map still showing a live claim) would otherwise
+    be accepted. Refresh under the lock before evaluating status/claim.
+    """
+    workspace = await _monitoring_workspace(session)
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    workspace.monitor_claimed_by = "monitor-worker"
+    workspace.monitor_claim_expires_at = future
+    await session.flush()
+    # Simulate another transaction releasing the claim without refreshing the
+    # identity-mapped instance already resident in this session.
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(monitor_claimed_by=None, monitor_claim_expires_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    assert workspace.monitor_claimed_by == "monitor-worker"
+    assert workspace.monitor_claim_expires_at == future
+    before = _snapshot(workspace)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceGuideClaimNotActiveError) as exc_info:
+        await service.guide_workspace(
+            workspace.id,
+            directive="should refuse stale claim",
+            require_claim_active=True,
+            idempotency_key="guide-rca-stale-identity",
+            expected_version=workspace.version,
+        )
+
+    assert exc_info.value.error_code == "WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE"
+    assert exc_info.value.detail == {
+        "status": WorkspaceStatus.monitoring_pr.value,
+        "claim_active": False,
+    }
+    assert await _operations(session, workspace.id) == []
+    # Refusal must not mutate the row; re-read under populate_existing to assert
+    # the DB still has the released claim and no guide side effects.
+    refreshed = await session.get(Workspace, workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.monitor_claimed_by is None
+    assert refreshed.monitor_claim_expires_at is None
+    assert refreshed.status == before["status"]
+    assert refreshed.version == before["version"]
 
 
 @pytest.mark.unit
