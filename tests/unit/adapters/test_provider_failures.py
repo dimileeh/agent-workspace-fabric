@@ -404,4 +404,4 @@ def test_classifies_codex_chatgpt_unsupported_model_as_non_retryable() -> None:
     assert classification.provider == "openai"
     assert classification.model == "gpt-not-a-real-model"
     assert classification.retryable is False
-    assert classification.fallback_allowed is False
+    assert classification.fallback_allowed is True

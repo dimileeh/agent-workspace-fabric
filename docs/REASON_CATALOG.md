@@ -25,6 +25,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_fixed_without_evidence](#agent_fixed_without_evidence)
 
+### AGENT_MODEL_UNSUPPORTED
+**Problem:** The selected agent model is not supported for the active provider account.
+**Likely Cause:** Codex rejected the requested model id for a ChatGPT-account login (unsupported-model stderr), so the run cannot retry the same model.
+**Operator Fix:** Choose a model supported for the active ChatGPT/Codex account (for example the workspace default), or dispatch an approved fallback model with `--model` / `task.model`.
+**Related Command:** `awf workspace create`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_model_unsupported](#agent_model_unsupported)
+
 ### AGENT_NON_FIXED_WITH_MUTATION
 **Problem:** The PR monitor agent mutated the worktree then reported a non-FIXED verdict.
 **Likely Cause:** The protocol-correction attempt advanced HEAD, committed dirty changes, or left PR-worthy uncommitted residue, then emitted a syntactically valid FALSE POSITIVE, DEFER, or NEEDS_HUMAN verdict instead of FIXED with evidence.

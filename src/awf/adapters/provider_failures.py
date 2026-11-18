@@ -238,7 +238,7 @@ def classify_provider_failure(
         cooldown_seconds=cooldown_seconds,
         failure_fingerprint=fingerprint,
         recommended_action=_recommended_action(failure_type),
-        fallback_allowed=retryable,
+        fallback_allowed=True,
     )
 
 
