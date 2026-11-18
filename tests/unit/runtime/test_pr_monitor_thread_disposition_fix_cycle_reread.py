@@ -177,7 +177,6 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     assert [event[0] for event in gh.events] == ["reply"]
     assert audited == [42]
     assert result.failed is False and result.pushed is True
-    assert state.threads_addressed_ids[tid] == "false_positive"
     assert not [
         e
         for e in await _resolution_events(factory, workspace_id)
@@ -187,9 +186,10 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     for kept_state in (state, _load_state(None, ws)):
-        kept = read_item_disposition(kept_state, tid)
-        assert kept is not None and kept.reply_comment_id is None
-        assert kept.reason == "the reviewed code already handles this case"
+        # Verdict cleared so decide() re-triages without waiting on a body-hash
+        # change (identity edits never change that hash — PRRT_kwDOSJAM6s6441fe).
+        assert tid not in kept_state.threads_addressed_ids
+        assert read_item_disposition(kept_state, tid) is None
         # The retired reply follows that feedback: its marker never certifies it
         # (PRRT_kwDOSJAM6s6vaq4v), even once the record is gone.
         assert _disposition_retired_key(tid, followed) in kept_state.threads_addressed_ids
@@ -201,6 +201,8 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     sync_item_disposition(
         state, tid, VerdictResult(verdict="false_positive", reason="still handled"), thread=moved
     )
+    # Re-triage marks the verdict the way AddressComments would after clearing.
+    state.mark_addressed(tid, "false_positive")
     runner = SimpleNamespace(
         _monitor_owner_id=None, _deps=SimpleNamespace(gh=gh, session_factory=factory)
     )
@@ -688,7 +690,13 @@ async def test_fix_cycle_retires_reply_when_read_identity_comment_was_edited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An edit to a triage-read identity comment is feedback after the decision."""
+    """An edit to a triage-read identity comment is feedback after the decision.
+
+    Identity comments are omitted from the body hash (#1272), so retiring the
+    reply alone would leave the verdict resolvable and loop: post → mismatch →
+    retire → post. Clear the verdict so the same listed thread re-enters
+    AddressComments (PRRT_kwDOSJAM6s6441fe).
+    """
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_read_own_edited"
     operator_id = "own-0"
@@ -744,15 +752,22 @@ async def test_fix_cycle_retires_reply_when_read_identity_comment_was_edited(
 
     assert [event[0] for event in gh.events] == ["reply"]
     assert result.failed is False and result.pushed is True
-    assert state.threads_addressed_ids[tid] == "false_positive"
     assert not [
         e
         for e in await _resolution_events(factory, workspace_id)
         if e["action"] == "resolve_thread"
     ]
-    kept = read_item_disposition(state, tid)
-    assert kept is not None and kept.reply_comment_id is None
-    assert _disposition_retired_key(tid, followed) in state.threads_addressed_ids
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    for kept_state in (state, _load_state(None, ws)):
+        assert tid not in kept_state.threads_addressed_ids
+        assert read_item_disposition(kept_state, tid) is None
+        assert _disposition_retired_key(tid, followed) in kept_state.threads_addressed_ids
+    # Same listed thread (hash unchanged): clearing the verdict must re-queue.
+    action = decide(_status(_PUSHED, (thread,)), state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
 
 
 async def test_fix_cycle_still_parks_unread_operator_comment_not_in_read_set(

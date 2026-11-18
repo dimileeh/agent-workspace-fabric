@@ -39,7 +39,10 @@ from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_issue_filed_marker,
     _deferred_issue_url,
 )
-from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _redact_and_truncate_forge_error,
+)
 from awf.runtime.pr_monitor_runner.lifecycle import _superseded_monitor_owner
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
@@ -59,8 +62,8 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     retire_item_disposition,
 )
 
-# The conversation a fresh reply follows gained or changed outside feedback since
-# the thread was listed: the reply is retired and the thread re-enters triage.
+# The conversation a fresh reply follows gained or changed feedback since the
+# thread was listed: the reply is retired, the verdict cleared, and triage re-runs.
 _FEEDBACK_AFTER_DECISION = "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
 
 
@@ -245,11 +248,29 @@ async def reply_before_resolve(
             # Feedback added or edited after the listed snapshot sits before the
             # reply, where the gate would read the reply as its answer
             # (PRRT_kwDOSJAM6s6vaQrr). The reply is retired, so no later resolve
-            # reuses it, and the thread is left open: its changed body re-enters
-            # AddressComments, whose re-triage answers that feedback afresh.
+            # reuses it. Clear the verdict too: outside-body edits re-enter via
+            # hash, but identity comments are omitted from that hash (#1272), so
+            # an identity-only edit would otherwise stay resolvable and loop
+            # (post → mismatch → retire → post; PRRT_kwDOSJAM6s6441fe).
             retire_item_disposition(state, posted)
-            await _persist_posted_disposition(
-                self, workspace_id=workspace_id, state=state, item_id=thread_id
+            _clear_addressed_state_by_id(
+                state,
+                thread_id,
+                restore_operator_decision=False,
+                keep_posted_reply=False,
+            )
+            await _persist_item_keys(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=thread_id,
+                keys=(
+                    thread_id,
+                    review_thread_body_state_key(thread_id),
+                    _item_disposition_key(thread_id),
+                    *_retired_disposition_keys(state, thread_id),
+                    *_filed_issue_marker_keys(state, thread_id),
+                ),
             )
             _log.info(
                 "monitor.thread_disposition_feedback_moved",
@@ -400,7 +421,9 @@ def _conversation_moved(
     differs from the recorded ``read_own_comment_bodies`` is the same class of
     post-decision change (PRRT_kwDOSJAM6s644g3v); both sides are raw markdown so
     a bodyText-stripped listing cannot false-positive an edit
-    (PRRT_kwDOSJAM6s644y23). Legacy records without bodies keep ID-only skip.
+    (PRRT_kwDOSJAM6s644y23). The reply path clears the verdict on this reason
+    because identity bodies are omitted from the attention hash (PRRT_kwDOSJAM6s6441fe).
+    Legacy records without bodies keep ID-only skip.
     Neither copy at all proves no such difference. The unread check needs only
     ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
