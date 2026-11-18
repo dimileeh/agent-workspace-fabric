@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from awf.runtime.feedback_policy import mutation_park_is_stale
+from awf.runtime.monitor_state_keys import _applied_operator_directives_state_key
 from awf.runtime.pr_monitor_models import ReviewThread
 from awf.service.pr_monitor_adoption_seed import (
     PR_ADOPTION_OPERATOR_HINT_REASON,
@@ -155,6 +156,29 @@ def test_code_dependent_verdicts_cross_only_with_head_continuity(key: str, value
 @pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
 def test_head_continuity_fails_closed_when_unspecified(verdict: str) -> None:
     assert seedable_monitor_state({"5120013295": verdict}) == {}
+
+
+@pytest.mark.unit
+def test_applied_operator_directives_cross_only_with_head_continuity() -> None:
+    """#1256: re-adoption must keep applied decisions when the PR head is unchanged.
+
+    CI repair quotes ``__awf_applied_operator_directives__`` so a later failure
+    cannot undo an operator guide that already landed. Those records assert what
+    the branch carries at a particular head, so they cross only with continuity;
+    a force-push or revert must drop them rather than bind the successor to
+    decisions that may no longer be on the branch (PRRT_kwDOSJAM6s64ycSl).
+    """
+    key = _applied_operator_directives_state_key()
+    payload = (
+        '[{"directive":"drop the flaky assert","operation_id":"op_1",'
+        '"applied_at":"2026-01-01T00:00:00+00:00","head_sha":"' + ("a" * 40) + '"}]'
+    )
+    previous = {key: payload}
+
+    assert seedable_monitor_state(previous, head_continuity=True) == previous
+    assert seedable_monitor_state(previous, head_continuity=False) == {}
+    assert seedable_monitor_state(previous) == {}
+    assert seedable_monitor_state({key: ""}, head_continuity=True) == {}
 
 
 @pytest.mark.unit
