@@ -22,13 +22,29 @@ a revert before re-adoption can invalidate either, so they cross only when the
 adopted head is the head the predecessor processed. The remaining verdicts judge
 the feedback rather than the code and cross either way.
 
+``__awf_applied_operator_directives__`` (#1256) is the newest-5 history of
+operator guides that already landed on this PR. CI-failure repair quotes it so a
+later check cannot undo those decisions. Each record is a claim about code that
+landed at a particular head, so it crosses only when head continuity is
+established -- the same gate as ``fix_committed`` / ``false_positive``. Without
+continuity a force-push or revert may have removed what the history describes,
+and binding the successor to it would suppress a still-valid CI failure. With
+continuity, dropping it is the regression this feature exists to prevent: the
+successor's CI repair would receive no applied decisions and could undo the
+operator's previously applied changes (PRRT_kwDOSJAM6s64ycSl). CI-repair
+conflict parks for a specific failing-check signature stay behind -- they are
+cycle bookkeeping the fresh monitor re-derives once the history is quoted again.
+``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` also stays behind: cancel + re-adopt is
+the intentional exit, so the successor must not inherit that park.
+
 Deliberately never copied: protected-block state, awaiting-required-checks
 timestamps, operator-hint *cycle* bookkeeping (the pending-hint record and its
 processed markers -- as opposed to the per-thread operator decision below),
 awaiting-workflow-scope / merge-block markers, notify/settle/grace bookkeeping,
-and defer/needs-human reason text (except a preserved correction attempt's, below).
-Those describe the *previous run's* position on a PR that has since moved; the
-fresh monitor must re-derive them from the live PR.
+CI-repair operator-decision conflict parks, and defer/needs-human reason text
+(except a preserved correction attempt's, below). Those describe the *previous
+run's* position on a PR that has since moved; the fresh monitor must re-derive
+them from the live PR.
 """
 
 from __future__ import annotations
@@ -253,6 +269,11 @@ _DISPOSITION_BASELINE_KEY = "__awf_review_thread_disposition_baseline__"
 # ``__awf_review_thread_disposition_baseline_conversations__`` ties each of those
 # exemptions to the conversation it covered, so it crosses verbatim with them.
 _DISPOSITION_BASELINE_CONVERSATIONS_KEY = "__awf_review_thread_disposition_baseline_conversations__"
+# ``__awf_applied_operator_directives__`` (``awf.runtime.monitor_state_keys``) is
+# the newest-5 applied-operator-directive history (#1256). It crosses only with
+# head continuity -- see the module docstring -- and only when non-empty; the
+# loader already treats malformed JSON as absent.
+_APPLIED_OPERATOR_DIRECTIVES_KEY = "__awf_applied_operator_directives__"
 # ``__awf_preserved_attempt_retired__:<thread id>`` (#1189) is the tip of a
 # preserved correction attempt an operator disposition rejected. It records the
 # ruling, not code, so it crosses regardless of head continuity: a successor's
@@ -341,7 +362,8 @@ def seedable_monitor_state(
     fails closed: without it, the head-dependent ``fix_committed`` /
     ``false_positive`` verdicts are dropped and re-triaged -- along with any
     parked operator ruling they answered, which would otherwise be replayed as a
-    live directive and recreate the dropped verdict -- while the head-independent
+    live directive and recreate the dropped verdict -- and the applied-operator-
+    directive history (#1256) is dropped too, while the head-independent
     dispositions still cross. ``adopted_head_sha`` (the successor's starting
     head, a full SHA or ignored) lets a verified ``fixed`` disposition cross a
     moved head live, pending the successor's ancestry check (#1138).
@@ -366,6 +388,7 @@ def seedable_monitor_state(
             or _is_disposition_auto_reopen_count(key, value)
             or _is_disposition_ack_judgment(key, value)
             or (head_continuity and _is_disposition_readopt_pending(key, value))
+            or (head_continuity and _is_applied_operator_directives(key, value))
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
@@ -614,3 +637,8 @@ def _is_copied_marker(key: str, value: str) -> bool:
     return any(
         key.startswith(prefix) and len(key) > len(prefix) for prefix in _COPIED_MARKER_PREFIXES
     )
+
+
+def _is_applied_operator_directives(key: str, value: str) -> bool:
+    """True for a non-empty applied-operator-directive history payload (#1256)."""
+    return key == _APPLIED_OPERATOR_DIRECTIVES_KEY and bool(value)
