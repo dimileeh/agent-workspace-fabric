@@ -146,6 +146,33 @@ def conflict_park_lookup_head(
     return status_head_sha
 
 
+def live_head_matches_pending_rollback(
+    pending: CiRepairConflictRollbackPending,
+    *,
+    live_head_sha: str,
+) -> bool:
+    """True when the live PR head is one of the heads this undo is about.
+
+    Workspace-wide pending lookup still gates agents after unrelated head
+    drift, but a hard reset to ``restore_ref`` is only safe when the live head
+    is ``restore_ref`` or ``published_remote_head``. Resetting on a third SHA
+    can clear the pending gate, park the conflict under ``restore_ref``, and
+    leave the next poll on the drifted head free to launch agents
+    (PRRT_kwDOSJAM6s64zKdm).
+    """
+    live = (live_head_sha or "").strip().lower()
+    if not live:
+        return False
+    allowed: set[str] = set()
+    restore = (pending.restore_ref or "").strip().lower()
+    if restore:
+        allowed.add(restore)
+    published = (pending.published_remote_head or "").strip().lower()
+    if published:
+        allowed.add(published)
+    return live in allowed
+
+
 def _pending_state_key(head_sha: str) -> str:
     """Build the pending-undo key for one PR head (CI signature independent).
 
@@ -497,6 +524,25 @@ async def retry_ci_repair_conflict_rollback_pending(
     )
     if pending is None:
         return None
+
+    # Gate stays up for any pending park, but destructive undo only runs when
+    # the live head is still restore_ref or the unre wound published repair.
+    if not live_head_matches_pending_rollback(pending, live_head_sha=status.head_sha):
+        _log.warning(
+            "monitor.ci_fix_operator_decision_conflict_rollback_deferred_unrelated_head",
+            workspace_id=workspace_id,
+            reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
+            live_head_sha=status.head_sha,
+            restore_ref=pending.restore_ref,
+            published_remote_head=pending.published_remote_head,
+            leftover_message=pending.leftover_message,
+        )
+        return NotifyHuman(
+            message=conflict_rollback_pending_human_message(
+                leftover_message=pending.leftover_message
+            ),
+            reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
+        )
 
     # Always re-key under the live head so retries stay reachable if CI drifts.
     park_head = (
