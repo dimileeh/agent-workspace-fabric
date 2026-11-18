@@ -16,9 +16,14 @@ from awf.common.config import Settings, get_settings
 from awf.control.worker import manager
 from awf.db.models import Workspace
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
-from awf.hosted_node.runtime_schemas import HostedControlAuthorization
+from awf.hosted_node.runtime_schemas import (
+    HostedControlAuthorization,
+    HostedReauthorization,
+    HostedWorkspace,
+)
 from awf.service import provider_readiness, worker
 from tests.conftest import _ok_workspace_admission_disk_check
+from tests.integration.test_hosted_lifecycle_reauthorization import install_pair
 from tests.unit.node.test_provisioner_parts.test_provisioner_part_001 import (
     origin_repo as origin_repo,
 )
@@ -251,7 +256,34 @@ async def test_authorized_paused_resume_retains_warm_stack(
     def save():
         observations["commands"] = commands
 
-    async def guide(key):
+    async def guide(key, *, client, label):
+        # Blocked hosted resume requires a reauthorization pair (same contract
+        # as production / lifecycle_reauthorization helpers), not a pair-less guide.
+        # require_rebind_quiet is claim-set/expiry-agnostic; release the durable
+        # pause lease first while leaving the warm compose stack up.
+        async with factory() as session:
+            row = await session.get(Workspace, "ws_cloud_stable")
+            assert row is not None and row.status == "blocked", {
+                "status": None if row is None else row.status
+            }
+            row.execution_claimed_by = None
+            row.execution_claim_expires_at = None
+            row.monitor_claimed_by = None
+            row.monitor_claim_expires_at = None
+            await session.commit()
+            expected = HostedWorkspace.model_validate(row.task_policy["hosted_node"])
+        expected_dump = expected.model_dump(mode="json")
+        pair_headers = {
+            "Authorization": "Bearer synthetic-controller",
+            **runtime.receiver.identity.headers(),
+        }
+        replacement = await install_pair(
+            client, pair_headers, expected_dump, runtime.receiver.identity, label=label
+        )
+        pair = HostedReauthorization(
+            expected_association=expected,
+            replacement_association=HostedWorkspace.model_validate(replacement),
+        )
         async with factory() as session:
             await _controls(session).guide_workspace(
                 "ws_cloud_stable",
@@ -261,6 +293,7 @@ async def test_authorized_paused_resume_retains_warm_stack(
                     namespace=payload["hosted"]["credentials"]["agent"]["namespace"],
                     actor="caller",
                 ),
+                hosted_reauthorization=pair,
             )
             await session.commit()
 
@@ -322,7 +355,11 @@ async def test_authorized_paused_resume_retains_warm_stack(
                 # Authorize the positive service call without opening the
                 # ordinary operator's hosted HTTP guard.
                 if phase != "initial_pause":
-                    await guide("canonical-service-guide")
+                    await guide(
+                        "canonical-service-guide",
+                        client=client,
+                        label="resume-guide",
+                    )
             elif phase != "initial_pause":
                 Clock.selected_now = datetime.fromisoformat(
                     observations["initial"]["policy"]["provider_recovery_state"]["not_before"]
@@ -393,7 +430,11 @@ async def test_authorized_paused_resume_retains_warm_stack(
                 return
             assert observations["after_cancel"]["status"] == reason, observations
             if reason == "blocked" and phase in {"after_pause", "initial_pause"}:
-                await guide("canonical-service-guide-after-repause")
+                await guide(
+                    "canonical-service-guide-after-repause",
+                    client=client,
+                    label="repause-guide",
+                )
             if reason == "recovering":
                 Clock.selected_now = datetime.fromisoformat(
                     observations["after_cancel"]["policy"]["provider_recovery_state"]["not_before"]
