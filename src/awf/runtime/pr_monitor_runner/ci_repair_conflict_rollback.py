@@ -178,8 +178,13 @@ async def handle_operator_decision_conflict_after_ci_repair(
         worktree_path=worktree_path,
         restore_ref=operation_start_head,
     )
-    if rollback_result.ok and published_hosted_head is not None and operation_start_head:
-        rollback_result = await ci_ops._rewind_hosted_ci_repair_conflict_remote(
+    # Always attempt hosted remote rewind when a published head is known, even if
+    # local reset/clean failed. The ROLLBACK_PENDING park never retries; leaving
+    # operator-rejected CI-repair commits on the PR is worse than a dirty
+    # worktree (review thread PRRT_kwDOSJAM6s643Aiw). Prefer remote-rewind
+    # failure for the park leftover so the human message names the unrewound head.
+    if published_hosted_head is not None and operation_start_head:
+        remote_result = await ci_ops._rewind_hosted_ci_repair_conflict_remote(
             self,
             workspace_id=workspace_id,
             state=state,
@@ -187,6 +192,8 @@ async def handle_operator_decision_conflict_after_ci_repair(
             published_remote_head=published_hosted_head,
             operation_start_last_push_sha=operation_start_last_push_sha,
         )
+        if not remote_result.ok:
+            rollback_result = remote_result
     if not rollback_result.ok:
         restore_ref = (operation_start_head or "").strip() or conflict_head
         leftover = conflict_rollback_pending_leftover_message(

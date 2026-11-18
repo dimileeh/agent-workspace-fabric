@@ -360,6 +360,171 @@ async def test_handle_conflict_parks_pending_when_hosted_rewind_fails(
 
 
 @pytest.mark.unit
+async def test_handle_conflict_rewinds_remote_even_when_local_undo_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local reset/clean failure must not skip hosted remote rewind (PRRT_kwDOSJAM6s643Aiw)."""
+    rewind_calls: list[dict[str, str]] = []
+
+    async def _failed_local(
+        _self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        restore_ref: str | None,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        del workspace_id, worktree_path, restore_ref
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="reset_failed",
+            message="git reset --hard failed",
+        )
+
+    async def _published(*_args: Any, **_kwargs: Any) -> str:
+        return _PUBLISHED
+
+    async def _ok_rewind(
+        _self: object,
+        *,
+        workspace_id: str,
+        state: MonitorState,
+        restore_ref: str,
+        published_remote_head: str,
+        operation_start_last_push_sha: str | None,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        del workspace_id, state, operation_start_last_push_sha
+        rewind_calls.append(
+            {
+                "restore_ref": restore_ref,
+                "published_remote_head": published_remote_head,
+            }
+        )
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _failed_local,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_detect_hosted_ci_repair_conflict_published_head",
+        _published,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rewind_hosted_ci_repair_conflict_remote",
+        _ok_rewind,
+    )
+
+    state = MonitorState()
+    status = _status()
+    result = await handle_operator_decision_conflict_after_ci_repair(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path,
+        state=state,
+        status=status,
+        failures=_FAILURES,
+        conflict_stdout=_CONFLICT_STDOUT,
+        operation_start_head=_HEAD,
+        operation_start_last_push_sha=_HEAD,
+    )
+    assert rewind_calls == [
+        {"restore_ref": _HEAD, "published_remote_head": _PUBLISHED},
+    ]
+    assert result is not None
+    assert result.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    assert "leftover worktree edits" in (result.stderr or "")
+    pending = ci_repair_conflict_rollback_pending(state)
+    assert pending is not None
+    assert pending.leftover_message == "leftover worktree edits"
+
+
+@pytest.mark.unit
+async def test_handle_conflict_prefers_remote_leftover_when_local_and_remote_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both undos fail, park names the unre wound remote head (not only worktree)."""
+    rewind_calls: list[str] = []
+
+    async def _failed_local(
+        _self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        restore_ref: str | None,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        del workspace_id, worktree_path, restore_ref
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="cleanup_failed",
+            message="git clean failed",
+        )
+
+    async def _published(*_args: Any, **_kwargs: Any) -> str:
+        return _PUBLISHED
+
+    async def _failed_rewind(
+        _self: object,
+        *,
+        workspace_id: str,
+        state: MonitorState,
+        restore_ref: str,
+        published_remote_head: str,
+        operation_start_last_push_sha: str | None,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        del workspace_id, state, operation_start_last_push_sha, published_remote_head
+        rewind_calls.append(restore_ref)
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message="hosted remote rewind failed",
+        )
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _failed_local,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_detect_hosted_ci_repair_conflict_published_head",
+        _published,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rewind_hosted_ci_repair_conflict_remote",
+        _failed_rewind,
+    )
+
+    state = MonitorState()
+    result = await handle_operator_decision_conflict_after_ci_repair(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path,
+        state=state,
+        status=_status(),
+        failures=_FAILURES,
+        conflict_stdout=_CONFLICT_STDOUT,
+        operation_start_head=_HEAD,
+        operation_start_last_push_sha=_HEAD,
+    )
+    assert rewind_calls == [_HEAD]
+    assert result is not None
+    assert result.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    leftover = f"remote head {_PUBLISHED} not rewound to {_HEAD}"
+    assert leftover in (result.stderr or "")
+    assert result.details is not None
+    assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
+    pending = ci_repair_conflict_rollback_pending(state)
+    assert pending is not None
+    assert pending.leftover_message == leftover
+
+
+@pytest.mark.unit
 async def test_handle_conflict_marks_normal_park_when_undo_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
