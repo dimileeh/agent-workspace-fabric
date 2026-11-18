@@ -315,6 +315,64 @@ def test_forget_marker_honored_on_ruling_only_empty_applied_text() -> None:
 
 
 @pytest.mark.unit
+def test_ruling_only_empty_applied_text_clears_conflict_parks() -> None:
+    """Ruling-only finalize must re-enable CI repair without recording unapplied text.
+
+    After CI_REPAIR_OPERATOR_DECISION_CONFLICT parks, a new AWF-RULING guide may
+    be consumed with applied_text="" so unexecuted instructions are not stored.
+    That acceptance still clears normal conflict waits so the next poll can
+    ReportCiFailure for the same head/signature (PRRT_kwDOSJAM6s641YCF).
+    CI_REPAIR_CONFLICT_ROLLBACK_PENDING stays until cancel + re-adopt.
+    """
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        ci_repair_conflict_rollback_pending,
+        mark_ci_repair_conflict_rollback_pending,
+    )
+
+    state = MonitorState()
+    append_applied_operator_directive(
+        state,
+        AppliedOperatorDirective(
+            directive="Remove the experimental block.",
+            operation_id="op-prior",
+            applied_at="2026-11-18T00:00:00+00:00",
+            head_sha="sha",
+        ),
+    )
+    failures = (
+        CheckFailure(name="coverage-gate", conclusion="FAILURE", log_excerpt="x", run_id="1"),
+    )
+    mark_ci_repair_operator_decision_conflict(
+        state,
+        head_sha="sha",
+        failures=failures,
+        reason="coverage-gate conflicts with operator decision op-prior: blocked",
+    )
+    mark_ci_repair_conflict_rollback_pending(state, leftover_message="leftover worktree edits")
+    prior = load_applied_operator_directives(state)
+    hint = OperatorHint(
+        reason="ruling only",
+        directive="AWF-RULING PRRT_kwDOSJAM6s641YCF FALSE_POSITIVE\nAlso delete coverage.yml.",
+        operation_id="op-ruling",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    record_applied_operator_directive_from_hint(
+        state,
+        hint=hint,
+        head_sha="sha",
+        applied_text="",
+    )
+
+    assert load_applied_operator_directives(state) == prior
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha="sha", failures=failures)
+        is None
+    )
+    assert ci_repair_conflict_rollback_pending(state) is not None
+
+
+@pytest.mark.unit
 def test_forget_marker_requires_exact_line_not_substring() -> None:
     """Only a line that is exactly the marker triggers withdrawal."""
     state = MonitorState()

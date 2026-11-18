@@ -148,9 +148,13 @@ def record_applied_operator_directive_from_hint(
     ``AWF-FORGET-DECISIONS``, clear stored records and operator-decision
     conflict parks first — including when ``applied_text=""`` on a ruling-only
     finalize, so the withdrawal is not dropped with the consumed hint
-    (PRRT_kwDOSJAM6s64yVR7). Unfinished ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``
-    parks are never cleared here (exit is cancel + re-adopt). Then record the
-    applied remainder without that marker only if other applied text remains.
+    (PRRT_kwDOSJAM6s64yVR7). Any other accepted non-empty guide also clears
+    normal conflict parks even when ``applied_text=""`` (ruling-only), so CI
+    repair can run again for the same head/signature without storing unapplied
+    instructions (PRRT_kwDOSJAM6s641YCF). Unfinished
+    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` parks are never cleared here (exit
+    is cancel + re-adopt). Then record the applied remainder without that
+    marker only if other applied text remains.
     """
     hint_directive = (getattr(hint, "directive", None) or "").strip()
     if not hint_directive:
@@ -160,7 +164,10 @@ def record_applied_operator_directive_from_hint(
     had_forget, _ = _split_forget_decisions_marker(hint_directive)
     if had_forget:
         clear_applied_operator_directives(state)
-        clear_ci_repair_operator_decision_conflicts(state)
+    # A new accepted guide re-enables CI repair for this head/signature even
+    # when ruling-only finalize records nothing (applied_text=""). Clear
+    # normal conflict parks separately from append; rollback-pending stays.
+    clear_ci_repair_operator_decision_conflicts(state)
     directive = applied_text.strip() if applied_text is not None else hint_directive
     if not directive:
         return
