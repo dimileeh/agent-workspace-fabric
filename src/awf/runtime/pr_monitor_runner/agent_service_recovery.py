@@ -93,6 +93,37 @@ _HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON = "HOSTED_REMOTE_HEAD_DELTA_UNAVAIL
 _HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH_REASON = "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH"
 
 
+def _hosted_sync_error_preserving_agent_output(
+    sync_err: AgentRunError,
+    *,
+    agent_stdout: str,
+    agent_stderr: str = "",
+    terminal_head_sha: str | None,
+) -> AgentRunError:
+    """Keep agent stdout when hosted terminal-head sync fails after the agent ran.
+
+    CI repair conflict detection reads ``AgentRunError.result.stdout`` for
+    ``NEEDS_HUMAN`` operator-decision verdicts. A bare sync failure replaces that
+    stdout with Git fetch output and skips the conflict park (Greptile P1 on
+    PR #1268). Carry ``terminal_head_sha`` so callers can still rewind the
+    published remote head when local sync never completed.
+    """
+    details = dict(sync_err.details)
+    if terminal_head_sha:
+        details["terminal_head_sha"] = terminal_head_sha
+    details["hosted_sync_failed"] = True
+    return AgentRunError(
+        agent=sync_err.agent,
+        result=CommandResult(
+            returncode=sync_err.result.returncode,
+            stdout=agent_stdout,
+            stderr=sync_err.result.stderr or agent_stderr,
+        ),
+        reason_code=sync_err.reason_code,
+        details=details,
+    )
+
+
 async def _run_monitor_agent_with_service_recovery(
     self: Any,
     *,
@@ -248,14 +279,22 @@ async def _run_monitor_agent_with_service_recovery_locked(
                         stdout=exc.result.stdout,
                         stderr=exc.result.stderr,
                     )
-                    synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
-                        self,
-                        workspace_id=workspace_id,
-                        hosted_pr_identity=hosted_pr_identity,
-                        terminal_head_sha=terminal_head_sha,
-                        command_evidence=terminal_head_evidence,
-                        operation_start_head=operation_start_head,
-                    )
+                    try:
+                        synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
+                            self,
+                            workspace_id=workspace_id,
+                            hosted_pr_identity=hosted_pr_identity,
+                            terminal_head_sha=terminal_head_sha,
+                            command_evidence=terminal_head_evidence,
+                            operation_start_head=operation_start_head,
+                        )
+                    except AgentRunError as sync_err:
+                        raise _hosted_sync_error_preserving_agent_output(
+                            sync_err,
+                            agent_stdout=exc.result.stdout or "",
+                            agent_stderr=exc.result.stderr or "",
+                            terminal_head_sha=terminal_head_sha,
+                        ) from sync_err
                     if state is not None:
                         await _record_hosted_terminal_head_sync(
                             self,
@@ -414,14 +453,22 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
-            synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
-                self,
-                workspace_id=workspace_id,
-                hosted_pr_identity=hosted_pr_identity,
-                terminal_head_sha=result.terminal_head_sha,
-                command_evidence=command_evidence or (),
-                operation_start_head=operation_start_head,
-            )
+            try:
+                synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
+                    self,
+                    workspace_id=workspace_id,
+                    hosted_pr_identity=hosted_pr_identity,
+                    terminal_head_sha=result.terminal_head_sha,
+                    command_evidence=command_evidence or (),
+                    operation_start_head=operation_start_head,
+                )
+            except AgentRunError as sync_err:
+                raise _hosted_sync_error_preserving_agent_output(
+                    sync_err,
+                    agent_stdout=result.stdout or "",
+                    agent_stderr=result.stderr or "",
+                    terminal_head_sha=_nonblank_str(result.terminal_head_sha),
+                ) from sync_err
             if state is not None:
                 await _record_hosted_terminal_head_sync(
                     self,

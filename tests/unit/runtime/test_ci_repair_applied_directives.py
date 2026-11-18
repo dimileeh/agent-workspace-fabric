@@ -1007,3 +1007,123 @@ async def test_rewind_hosted_ci_repair_conflict_remote_requires_identity_helper(
     assert result.cause == "hosted_remote_rollback_failed"
     assert state.hosted_terminal_head_advanced is True
     assert state.last_push_sha == _PUBLISHED_HOSTED_HEAD
+
+
+@pytest.mark.unit
+async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted sync failure after a conflict verdict must still park, not skip.
+
+    Greptile P1: sync raises AgentRunError with Git stdout, wiping the agent
+    NEEDS_HUMAN verdict so conflict rollback never runs. Preserve stdout +
+    terminal_head_sha; seed state so rewind can CAS; failed rewind parks
+    CI_REPAIR_CONFLICT_ROLLBACK_PENDING.
+    """
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        ci_repair_conflict_rollback_pending,
+    )
+
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    remote_rollbacks: list[dict[str, object]] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _agent_raises_preserved_sync_failure(
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+        state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
+    ) -> AgentRunResult:
+        del (
+            workspace_id,
+            compose_project,
+            compose_file,
+            prompt,
+            log_source,
+            operation_start_head,
+            state,
+            timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink,
+            timeout_preservation_sink,
+        )
+        append_command_evidence(
+            command_evidence,
+            stdout=_CONFLICT_STDOUT,
+            stderr="fetch failed",
+        )
+        raise AgentRunError(
+            agent="cursor",
+            result=CommandResult(
+                returncode=1,
+                stdout=_CONFLICT_STDOUT,
+                stderr="fetch failed",
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            details={
+                "terminal_head_sha": _PUBLISHED_HOSTED_HEAD,
+                "hosted_sync_failed": True,
+            },
+        )
+
+    async def _failed_remote_rollback(*_args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return False
+
+    runner._run_monitor_agent_with_service_recovery = _agent_raises_preserved_sync_failure
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _failed_remote_rollback,
+    )
+
+    state = MonitorState(last_push_sha=_HEAD)
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert result.parked_needs_human is True
+    assert result.pushed is False
+    assert result.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
+    assert commit_calls == []
+    assert push_calls == []
+    assert rollback_calls
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == _PUBLISHED_HOSTED_HEAD
+    assert remote_rollbacks[0]["rollback_target_sha"] == _HEAD
+    pending = ci_repair_conflict_rollback_pending(state)
+    assert pending is not None
+    assert _PUBLISHED_HOSTED_HEAD in pending.leftover_message

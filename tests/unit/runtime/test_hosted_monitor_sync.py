@@ -773,6 +773,124 @@ async def test_hosted_agent_success_includes_result_output_in_terminal_head_gate
 
 
 @pytest.mark.unit
+async def test_hosted_agent_success_preserves_stdout_when_terminal_head_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sync failure must not replace agent stdout (CI conflict verdict lives there)."""
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    conflict_stdout = (
+        "AWF-VERDICT: NEEDS_HUMAN: lint conflicts with operator decision "
+        "op-1: restoring removed code undoes the guide\n"
+    )
+
+    class _Adapter:
+        name = AgentRuntime.codex
+        is_hosted = True
+
+        async def run(self, **_kwargs: object) -> AgentRunResult:
+            return AgentRunResult(
+                returncode=0,
+                stdout=conflict_stdout,
+                stderr="",
+                terminal_head_sha=sha,
+            )
+
+    context = _monitor_context_with_adapter(_Adapter(), worktrees_root=tmp_path)
+
+    async def _fail_sync(*_args: object, **_kwargs: object) -> str:
+        raise AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(returncode=1, stdout="", stderr="fetch failed"),
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        )
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _fail_sync,
+    )
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            context,
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix ci",
+            log_source="recovery",
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
+    assert excinfo.value.result.stdout == conflict_stdout
+    assert excinfo.value.details.get("terminal_head_sha") == sha
+    assert excinfo.value.details.get("hosted_sync_failed") is True
+
+
+@pytest.mark.unit
+async def test_hosted_agent_error_preserves_stdout_when_terminal_head_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AgentRunError + failed sync must keep the original agent stdout for parks."""
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    conflict_stdout = (
+        "AWF-VERDICT: NEEDS_HUMAN: lint conflicts with operator decision "
+        "op-1: restoring removed code undoes the guide\n"
+    )
+    adapter = _HostedAdapterRaisesWithTerminalHead(sha)
+    # Override stdout on the raised error by subclassing run behavior via monkeypatch
+    original_run = adapter.run
+
+    async def _run_with_conflict(**kwargs: object) -> AgentRunResult:
+        try:
+            return await original_run(**kwargs)
+        except AgentRunError as exc:
+            raise AgentRunError(
+                agent=exc.agent,
+                result=CommandResult(
+                    returncode=exc.result.returncode,
+                    stdout=conflict_stdout,
+                    stderr=exc.result.stderr,
+                ),
+                reason_code=exc.reason_code,
+                details=dict(exc.details),
+            ) from exc
+
+    adapter.run = _run_with_conflict  # type: ignore[method-assign]
+    context = _monitor_context_with_adapter(adapter, worktrees_root=tmp_path)
+
+    async def _fail_sync(*_args: object, **_kwargs: object) -> str:
+        raise AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(returncode=1, stdout="git-fetch-out", stderr="fetch failed"),
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        )
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _fail_sync,
+    )
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            context,
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix ci",
+            log_source="recovery",
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
+    assert excinfo.value.result.stdout == conflict_stdout
+    assert "git-fetch-out" not in (excinfo.value.result.stdout or "")
+    assert excinfo.value.details.get("terminal_head_sha") == sha
+    assert excinfo.value.details.get("hosted_sync_failed") is True
+
+
+@pytest.mark.unit
 async def test_hosted_agent_error_syncs_terminal_head_before_reraising(
     tmp_path: Path,
 ) -> None:

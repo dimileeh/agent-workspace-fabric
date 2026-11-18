@@ -848,6 +848,25 @@ async def _run_ci_fix(
     # AgentRunError (stdout on exc.result). Skipping that case lets the
     # commit/push path publish edits instead of parking
     # (PRRT_kwDOSJAM6s64xqaf).
+    #
+    # Hosted sync failure after the agent published a terminal head preserves
+    # agent stdout on AgentRunError but never recorded last_push_sha. Seed the
+    # published SHA so conflict rewind can CAS; failed rewind parks
+    # ROLLBACK_PENDING instead of leaving the rejected repair on the PR
+    # (Greptile P1 on PR #1268).
+    if (
+        post_agent_err is None
+        and applied_directives
+        and state is not None
+        and agent_run_err is not None
+        and getattr(self._deps.adapter, "is_hosted", False)
+    ):
+        sync_details = agent_run_err.details or {}
+        if sync_details.get("hosted_sync_failed"):
+            published = str(sync_details.get("terminal_head_sha") or "").strip()
+            if published:
+                state.last_push_sha = published
+                state.hosted_terminal_head_advanced = True
     if post_agent_err is None and applied_directives and state is not None:
         conflict_stdout = ""
         if agent_result is not None:
