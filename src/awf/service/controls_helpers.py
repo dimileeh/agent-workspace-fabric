@@ -232,6 +232,13 @@ def default_cleaner(*, settings: Settings | None = None) -> WorkspaceCleaner:
     )
 
 
+def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
+    """Return requested_at or raise if the operator remonitor timestamp was never set."""
+    if requested_at is None:
+        raise RuntimeError("operator remonitor requested_at was not initialized")
+    return requested_at
+
+
 def _remonitor_current_head_sha(
     workspace: Workspace,
     candidate: MergeCandidate | None,
@@ -836,6 +843,7 @@ def _payload_matches_idempotency_identity(
     *,
     identity: dict[str, object | None] | None,
     identity_keys: frozenset[str] | None,
+    absent_defaults: Mapping[str, object | None] | None = None,
 ) -> bool:
     if identity is None:
         return True
@@ -843,9 +851,26 @@ def _payload_matches_idempotency_identity(
         return False
     keys = identity_keys if identity_keys is not None else frozenset(identity)
     for key in keys:
-        if key not in identity:
+        if key in identity:
+            expected: object | None = identity[key]
+        elif absent_defaults is not None and key in absent_defaults:
+            # Omit-when-default identities leave the key out of the request
+            # identity while still listing it in ``identity_keys``. Treat that
+            # absence as the declared historical default (e.g. False).
+            expected = absent_defaults[key]
+        else:
             continue
-        if key not in payload or payload[key] != identity[key]:
+        if key in payload:
+            actual: object | None = payload[key]
+        elif absent_defaults is not None and key in absent_defaults:
+            # Upgrade-safe replay: a newly introduced identity field may be
+            # absent from previously accepted operation payloads. Treat those
+            # missing keys as the declared historical default (e.g. False)
+            # instead of rejecting with IDEMPOTENCY_CONFLICT.
+            actual = absent_defaults[key]
+        else:
+            return False
+        if actual != expected:
             return False
     return True
 

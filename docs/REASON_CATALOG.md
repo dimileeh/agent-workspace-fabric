@@ -1726,6 +1726,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)
 
+### WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE
+**Problem:** Workspace guide with require_claim_active requires monitoring_pr with a live execution or monitor claim and no grants.
+**Likely Cause:** `awf workspace guide --require-claim-active` was issued after the PR monitor claim ended, against a non-`monitoring_pr` status, or with `--grant` inputs; the compare-and-act precondition refuses restarting a finished monitor.
+**Operator Fix:** Confirm `claim_active` and status with `awf workspace show <workspace_id>`. Re-issue without `--require-claim-active` only if a failed/blocked restart is intended; otherwise wait for a live monitor claim.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_claim_not_active](#workspace_guide_claim_not_active)
+
 ### WORKSPACE_GUIDE_DIRECTIVE_REQUIRED
 **Problem:** Workspace guide directive must not be empty or whitespace-only.
 **Likely Cause:** `awf workspace guide` was called without a `--directive`, or with a directive that is blank or only whitespace.

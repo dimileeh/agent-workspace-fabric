@@ -23,6 +23,7 @@ from awf.service.controls import (
     WorkspaceRebaseMissingPrUrlError,
     WorkspaceRemonitorMissingPrUrlError,
 )
+from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
 
 
 @pytest.mark.unit
@@ -99,6 +100,13 @@ def test_require_idempotency_key_strips_valid_values() -> None:
             409,
         ),
         (
+            WorkspaceGuideClaimNotActiveError(
+                SimpleNamespace(status="failed"),
+                claim_active=False,
+            ),
+            409,
+        ),
+        (
             WorkspaceRebaseMissingCandidateError(
                 SimpleNamespace(id="ws_1", pr_url="https://github.com/x/y/pull/1")
             ),
@@ -123,6 +131,21 @@ def test_http_error_maps_control_errors_to_structured_responses(
     assert http_error.status_code == status_code
     assert http_error.detail["error_code"]
     assert http_error.detail["message"]
+
+
+@pytest.mark.unit
+def test_http_error_guide_claim_not_active_body_shape() -> None:
+    http_error = controls._http_error(
+        WorkspaceGuideClaimNotActiveError(
+            SimpleNamespace(status="monitoring_pr"),
+            claim_active=False,
+        )
+    )
+
+    assert http_error.status_code == 409
+    assert http_error.detail["error_code"] == "WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE"
+    assert http_error.detail["detail"]["status"] == "monitoring_pr"
+    assert http_error.detail["detail"]["claim_active"] is False
 
 
 @pytest.mark.unit
@@ -197,6 +220,7 @@ def test_guide_request_directive_is_optional_with_grants() -> None:
     assert request.directive == ""
     assert request.grants == []
     assert request.approve_policy_downgrade is False
+    assert request.require_claim_active is False
 
     grant_request = WorkspaceGuideRequest(
         grants=["pyproject.toml"], approve_policy_downgrade=True, reason="ok"
@@ -208,6 +232,12 @@ def test_guide_request_directive_is_optional_with_grants() -> None:
     assert directive_request.directive == "implement, do not defer"
     assert directive_request.reason is None
 
+    rca_request = WorkspaceGuideRequest(
+        directive="steer live monitor only",
+        require_claim_active=True,
+    )
+    assert rca_request.require_claim_active is True
+
 
 @pytest.mark.unit
 def test_guide_request_schema_advertises_grant_fields() -> None:
@@ -215,6 +245,7 @@ def test_guide_request_schema_advertises_grant_fields() -> None:
     assert "grants" in properties
     assert "approve_policy_downgrade" in properties
     assert "operator" in properties
+    assert "require_claim_active" in properties
 
 
 @pytest.mark.unit

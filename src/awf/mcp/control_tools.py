@@ -355,6 +355,13 @@ def register_control_tools(
             default=False,
             description="Acknowledge that a granted edit may weaken validation.",
         ),
+        require_claim_active: bool = Field(
+            default=False,
+            description=(
+                "Accept only while monitoring_pr with an unexpired execution or "
+                "monitor claim; refused with grants."
+            ),
+        ),
         operator: str | None = Field(
             default=None,
             max_length=256,
@@ -382,6 +389,7 @@ def register_control_tools(
                 reason=reason,
                 grants=grants,
                 approve_policy_downgrade=approve_policy_downgrade,
+                require_claim_active=require_claim_active,
                 operator=operator,
                 idempotency_key=idempotency_key_value,
                 expected_version=expected_version,

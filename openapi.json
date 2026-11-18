@@ -11971,6 +11971,12 @@
               }
             ],
             "title": "Reason"
+          },
+          "require_claim_active": {
+            "default": false,
+            "description": "Accept only while monitoring_pr with an unexpired execution or monitor claim; refused with grants.",
+            "title": "Require Claim Active",
+            "type": "boolean"
           }
         },
         "title": "WorkspaceGuideRequest",
