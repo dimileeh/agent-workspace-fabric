@@ -66,7 +66,13 @@ async def enforce_pairless_control_guards(
     if control is None:
         return
     if control == "guide":
-        if any(grant.strip() for grant in (grants or []) if grant) or row.status != "monitoring_pr":
+        # Only refuse statuses that would otherwise be guide-eligible via the quiet
+        # rebind path (blocked/failed) or grant-bearing guides. Other statuses pass
+        # through so guide_workspace can return WORKSPACE_STATE_NOT_GUIDABLE.
+        if any(grant.strip() for grant in (grants or []) if grant) or row.status in (
+            "blocked",
+            "failed",
+        ):
             raise MaterialDeniedError("HOSTED_REAUTHORIZATION_REQUIRED", 409)
         return
     now = datetime.now(UTC)

@@ -128,6 +128,80 @@ async def test_pairless_guide_refuses_blocked_and_failed_without_mutation(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("status", ["running", "completed"])
+async def test_pairless_guide_non_guidable_status_reaches_workspace_state_not_guidable(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Statuses that are not guide-eligible must keep WORKSPACE_STATE_NOT_GUIDABLE.
+
+    The pair-less guard must not rewrite them as HOSTED_REAUTHORIZATION_REQUIRED;
+    guide_workspace's own eligibility check remains the answer for callers.
+    """
+    from awf.service.controls import WorkspaceControlService
+    from awf.service.controls_errors import WorkspaceGuideStateError
+    from awf.service.controls_types import _PreparedOperation
+
+    row = _hosted_row(status=status)
+    row.pr_url = "https://github.com/example/repo/pull/1"
+    row.pr_number = 1
+    row.monitor_last_commit_sha = None
+    row.base_commit = None
+    row.version = 1
+    before = _snapshot(row)
+    session = _session(row)
+    service = WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=AsyncMock(),
+        cleaner_factory=lambda *_a, **_k: AsyncMock(),
+    )
+    prepared = _PreparedOperation(
+        workspace=row,  # type: ignore[arg-type]
+        idempotency_key="guide-nonguidable",
+    )
+
+    async def _authority_with_pairless_guard(
+        _session: object,
+        _workspace_id: str,
+        _authorization: object,
+        **kwargs: object,
+    ) -> None:
+        await operations.enforce_pairless_control_guards(
+            session,
+            row,  # type: ignore[arg-type]
+            control="guide",
+            grants=kwargs.get("grants"),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        "awf.service.controls_guide.control_authority",
+        _authority_with_pairless_guard,
+    )
+    monkeypatch.setattr(
+        "awf.service.controls_guide.WorkspaceRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "awf.service.controls_guide.OperationRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
+    monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+
+    with pytest.raises(WorkspaceGuideStateError) as denied:
+        await service.guide_workspace(
+            row.id,
+            directive="nudge the monitor",
+            idempotency_key="guide-nonguidable",
+            hosted_authorization=_authorization(),
+        )
+
+    assert denied.value.error_code == "WORKSPACE_STATE_NOT_GUIDABLE"
+    assert denied.value.detail is not None
+    assert denied.value.detail["status"] == status
+    assert _snapshot(row) == before
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("status", ["monitoring_pr", "blocked", "failed"])
 async def test_pairless_guide_refuses_grants_in_every_state_without_mutation(
     monkeypatch: pytest.MonkeyPatch, status: str
