@@ -63,6 +63,32 @@ def test_remonitor_without_directive_does_not_record() -> None:
 
 
 @pytest.mark.unit
+def test_directiveless_hint_with_reason_acted_text_does_not_record() -> None:
+    """Remonitor/adoption sets acted text to the reason; do not store it as applied.
+
+    ``operator_hints`` passes ``acted_feedback_text=hint.reason`` when there is
+    no directive so feedback retirement still sees the presented text. That
+    reason must not become an applied operator decision for later CI repair.
+    """
+    hint = OperatorHint(
+        reason="please remonitor after the baseline lands",
+        directive=None,
+        operation_id="op-remonitor-reason",
+        reason_code="OPERATOR_REMONITOR",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text=hint.reason,
+        head_sha="abc123",
+    )
+
+    assert load_applied_operator_directives(state) == ()
+
+
+@pytest.mark.unit
 def test_ruling_only_empty_acted_text_does_not_record_unapplied_instructions() -> None:
     """Ruling-only paths pass empty acted text; do not store the rest of the guide.
 

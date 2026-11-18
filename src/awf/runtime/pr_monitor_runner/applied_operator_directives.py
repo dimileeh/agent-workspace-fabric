@@ -110,11 +110,16 @@ def record_applied_operator_directive_from_hint(
     ruling and passed empty acted feedback must pass ``applied_text=""`` (or
     the ruling-only excerpt) so unexecuted guide instructions are not stored
     as applied decisions for later CI repair (PRRT_kwDOSJAM6s64xWll).
+
+    A directiveless remonitor or adoption may still pass non-empty
+    ``applied_text`` (the hint reason, for feedback retirement). That reason is
+    not an applied operator decision — record nothing when ``hint.directive``
+    is empty.
     """
-    if applied_text is not None:
-        directive = applied_text.strip()
-    else:
-        directive = (getattr(hint, "directive", None) or "").strip()
+    hint_directive = (getattr(hint, "directive", None) or "").strip()
+    if not hint_directive:
+        return
+    directive = applied_text.strip() if applied_text is not None else hint_directive
     if not directive:
         return
     operation_id = getattr(hint, "operation_id", None) or ""
