@@ -232,6 +232,13 @@ def default_cleaner(*, settings: Settings | None = None) -> WorkspaceCleaner:
     )
 
 
+def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
+    """Return requested_at or raise if the operator remonitor timestamp was never set."""
+    if requested_at is None:
+        raise RuntimeError("operator remonitor requested_at was not initialized")
+    return requested_at
+
+
 def _remonitor_current_head_sha(
     workspace: Workspace,
     candidate: MergeCandidate | None,

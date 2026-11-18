@@ -138,13 +138,6 @@ _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
-def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> datetime:
-    """Return requested_at or raise if the operator remonitor timestamp was never set."""
-    if requested_at is None:
-        raise RuntimeError("operator remonitor requested_at was not initialized")
-    return requested_at
-
-
 class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin):
     """Business logic for sensitive workspace lifecycle controls."""
 
@@ -1426,6 +1419,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
     _remonitor_missing_metadata,
+    _require_operator_remonitor_requested_at,
     _reset_failed_workspace_for_remonitor,
     _stack_release_replay_message,
     _with_secret_lease_evidence,
