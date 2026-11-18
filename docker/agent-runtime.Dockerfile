@@ -173,7 +173,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.162.0
+ARG CODEX_VERSION=0.170.0
 # Must stay >= a release that accepts the default model in defaults.py; older
 # CLIs reject newer model ids. 2.1.295 is verified to accept
 # `--model claude-opus-5-5` (issue #1038).
@@ -296,7 +296,7 @@ RUN set -eux; \
     done; \
     npm cache clean --force; \
     codex --version; \
-    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-6.1-sol -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
+    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-6.2-sol -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
     opencode --version || true; \

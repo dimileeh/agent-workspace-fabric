@@ -1198,6 +1198,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace create",
         _reason_catalog_link("UNSUPPORTED_AGENT_RUNTIME"),
     ),
+    "AGENT_MODEL_UNSUPPORTED": _ReasonText(
+        "The selected agent model is not supported for the active provider account.",
+        (
+            "Choose a model supported for the active ChatGPT/Codex account "
+            "(for example the workspace default), or dispatch an approved fallback model "
+            "with `--model` / `task.model`."
+        ),
+        (
+            "Codex rejected the requested model id for a ChatGPT-account login "
+            "(unsupported-model stderr), so the run cannot retry the same model."
+        ),
+        "awf workspace create",
+        _reason_catalog_link("AGENT_MODEL_UNSUPPORTED"),
+    ),
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",
         "No action required.",

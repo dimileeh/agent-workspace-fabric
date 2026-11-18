@@ -1442,7 +1442,7 @@ class AgentAdapter(ABC):
                 details = {
                     "provider": recovery_metadata.get("provider", provider),
                     "model": recovery_metadata.get("model", reported_model),
-                    "retryable": True,
+                    "retryable": provider_failure.retryable,
                     "recommended_action": str(recovery_metadata["recommended_action"]),
                     "provider_recovery": recovery_metadata,
                 }
