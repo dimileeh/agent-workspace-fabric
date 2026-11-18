@@ -134,7 +134,10 @@ async def guide_workspace(
             "directive": directive_text,
             "grants": grant_inputs,
             "approve_policy_downgrade": approve_policy_downgrade,
-            "require_claim_active": require_claim_active,
+            # Omit when false so ordinary guides stay byte-for-byte identical to
+            # pre-upgrade payloads (flag absent ≠ False). Include only True so a
+            # claim-gated guide remains a distinct idempotency identity.
+            **({"require_claim_active": True} if require_claim_active else {}),
             # Grant-bearing guides persist the operator on each
             # ``OperatorGrantAuditRecord`` (see ``_guide_blocked_workspace``), so a
             # same-key retry that keeps the directive/grants/reason but swaps the
@@ -170,10 +173,14 @@ async def guide_workspace(
         idempotency_key=idempotency_key,
         expected_version=expected_version,
         idempotency_payload_identity=idempotency_payload,
-        idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
-        # Pre-upgrade guide ops omit require_claim_active; treat absence as the
-        # historical default False so same-key retries still exact-replay (PRD
-        # §8.5) while an explicit True remains a distinct identity.
+        # Always list require_claim_active so a True-stored op conflicts with an
+        # omit-when-false retry even though the false identity drops the key.
+        idempotency_identity_keys=frozenset(
+            {*base_payload.keys(), "expected_version", "require_claim_active"}
+        ),
+        # Absence (stored or identity) equals the historical default False so
+        # pre-upgrade / ordinary guides still exact-replay (PRD §8.5) while an
+        # explicit True remains a distinct identity.
         idempotency_absent_defaults={"require_claim_active": False},
     )
     workspace = prepared.workspace

@@ -358,6 +358,92 @@ async def test_require_claim_active_refreshes_stale_identity_map_under_lock(
 
 
 @pytest.mark.unit
+async def test_require_claim_active_omitted_payload_matches_hand_built_without_key(
+    session: AsyncSession,
+) -> None:
+    """Ordinary guides omit ``require_claim_active`` so identity stays pre-upgrade shape.
+
+    Flag absent must be byte-for-byte unchanged vs a hand-built payload that never
+    carried the key — not ``False``. Pin the stored operation payload against that
+    hand-built dict (including PR provenance fields).
+    """
+    workspace = await _monitoring_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+    expected_version = workspace.version
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="ordinary steer",
+        idempotency_key="guide-rca-omit-false",
+        expected_version=expected_version,
+    )
+    operations = await _operations(session, workspace.id)
+    assert len(operations) == 1
+    hand_built = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": None,
+        "reason_code": "OPERATOR_GUIDE",
+        "requested_action": OperationType.guide.value,
+        "directive": "ordinary steer",
+        "grants": [],
+        "approve_policy_downgrade": False,
+        "pr_number": 77,
+        "pr_url": "https://github.com/example/control-lifecycle/pull/77",
+        "source_head_sha": "h" * 40,
+        "source_base_sha": "b" * 40,
+        "expected_version": expected_version,
+    }
+    assert "require_claim_active" not in hand_built
+    assert operations[0].payload == hand_built
+
+    # Explicit False must also omit the key (same identity as absent).
+    workspace2 = await _monitoring_workspace(session)
+    await service.guide_workspace(
+        workspace2.id,
+        directive="explicit false steer",
+        require_claim_active=False,
+        idempotency_key="guide-rca-explicit-false",
+        expected_version=workspace2.version,
+    )
+    ops2 = await _operations(session, workspace2.id)
+    assert "require_claim_active" not in ops2[0].payload
+
+
+@pytest.mark.unit
+async def test_require_claim_active_true_payload_conflicts_with_false_replay(
+    session: AsyncSession,
+) -> None:
+    """True stores the key; a same-key retry with False is a different request."""
+    workspace = await _monitoring_workspace(session)
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    workspace.monitor_claimed_by = "monitor-worker"
+    workspace.monitor_claim_expires_at = future
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    first = await service.guide_workspace(
+        workspace.id,
+        directive="claim-gated steer",
+        require_claim_active=True,
+        idempotency_key="guide-rca-true-then-false",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    assert operations[0].payload["require_claim_active"] is True
+    assert first.operation_id == operations[0].id
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.guide_workspace(
+            workspace.id,
+            directive="claim-gated steer",
+            require_claim_active=False,
+            idempotency_key="guide-rca-true-then-false",
+            expected_version=workspace.version - 1,
+        )
+
+
+@pytest.mark.unit
 async def test_require_claim_active_legacy_payload_replays_default_false(
     session: AsyncSession,
 ) -> None:

@@ -844,7 +844,14 @@ def _payload_matches_idempotency_identity(
         return False
     keys = identity_keys if identity_keys is not None else frozenset(identity)
     for key in keys:
-        if key not in identity:
+        if key in identity:
+            expected: object | None = identity[key]
+        elif absent_defaults is not None and key in absent_defaults:
+            # Omit-when-default identities leave the key out of the request
+            # identity while still listing it in ``identity_keys``. Treat that
+            # absence as the declared historical default (e.g. False).
+            expected = absent_defaults[key]
+        else:
             continue
         if key in payload:
             actual: object | None = payload[key]
@@ -856,7 +863,7 @@ def _payload_matches_idempotency_identity(
             actual = absent_defaults[key]
         else:
             return False
-        if actual != identity[key]:
+        if actual != expected:
             return False
     return True
 
