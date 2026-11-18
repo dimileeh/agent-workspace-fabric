@@ -93,6 +93,22 @@ async def enforce_pairless_control_guards(
         raise MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409)
 
 
+async def apply_pairless_remonitor_guard(
+    session: AsyncSession,
+    workspace: Workspace,
+    hosted_reauthorization: HostedReauthorization | None,
+) -> None:
+    """After exact remonitor replay is ruled out, refuse live pair-less hosted work.
+
+    Exact idempotency replays return before this runs so a worker that reclaimed
+    the monitor after the first success cannot break PRD §8.5.
+    """
+    if hosted_reauthorization is not None or authority_for(session) is None:
+        return
+    await session.refresh(workspace, with_for_update=True)
+    await enforce_pairless_control_guards(session, workspace, control="remonitor")
+
+
 def authority_for(session: AsyncSession, supplied: object = None) -> WorkspaceAuthority | None:
     authority = session.info.get(SESSION_KEY)
     if isinstance(authority, WorkspaceAuthority):

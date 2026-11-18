@@ -291,6 +291,59 @@ async def test_hosted_reauthorization_required_denial_error_body() -> None:
 
 
 @pytest.mark.unit
+async def test_apply_pairless_remonitor_guard_skips_paired_and_non_hosted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Helper is a no-op for reauthorization pairs and non-hosted sessions."""
+    from awf.hosted_node.runtime_schemas import HostedReauthorization
+
+    row = _hosted_row()
+    session = _session(row)
+    refresh = AsyncMock()
+    session.refresh = refresh
+    enforce = AsyncMock()
+    monkeypatch.setattr(operations, "enforce_pairless_control_guards", enforce)
+    monkeypatch.setattr(operations, "authority_for", lambda *_a, **_k: None)
+
+    await operations.apply_pairless_remonitor_guard(session, row, None)
+    refresh.assert_not_awaited()
+    enforce.assert_not_awaited()
+
+    raw = hosted_create()["hosted"]
+    expected = HostedWorkspace.model_validate(raw)
+    for binding in raw["credentials"].values():
+        for key in ("grant_id", "preparation_id", "idempotency_key"):
+            binding[key] = "fresh-" + binding[key]
+    pair = HostedReauthorization(
+        expected_association=expected,
+        replacement_association=HostedWorkspace.model_validate(raw),
+    )
+    monkeypatch.setattr(operations, "authority_for", lambda *_a, **_k: object())
+    await operations.apply_pairless_remonitor_guard(session, row, pair)
+    refresh.assert_not_awaited()
+    enforce.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_apply_pairless_remonitor_guard_refreshes_then_enforces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair-less hosted remonitor refreshes under row lock before quiescence."""
+    row = _hosted_row()
+    session = _session(row)
+    refresh = AsyncMock()
+    session.refresh = refresh
+    enforce = AsyncMock()
+    monkeypatch.setattr(operations, "enforce_pairless_control_guards", enforce)
+    monkeypatch.setattr(operations, "authority_for", lambda *_a, **_k: object())
+
+    await operations.apply_pairless_remonitor_guard(session, row, None)
+
+    refresh.assert_awaited_once_with(row, with_for_update=True)
+    enforce.assert_awaited_once_with(session, row, control="remonitor")
+
+
+@pytest.mark.unit
 async def test_pairless_remonitor_refuses_live_execution_claim() -> None:
     row = _hosted_row()
     row.execution_claimed_by = "execution-worker"
@@ -618,7 +671,7 @@ async def test_remonitor_exact_replay_skips_quiescence_after_monitor_reclaim(
         kind=_PreparedOperationKind.exact_replay,
         idempotency_key="remonitor-retry",
     )
-    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
+    remonitor_guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
 
     monkeypatch.setattr("awf.service.controls.control_authority", AsyncMock())
     monkeypatch.setattr(
@@ -635,8 +688,7 @@ async def test_remonitor_exact_replay_skips_quiescence_after_monitor_reclaim(
         lambda *_a, **_k: ({"reason": "retry"}, {"reason": "retry"}),
     )
     monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
-    monkeypatch.setattr("awf.service.controls.authority_for", lambda _s: object())
-    monkeypatch.setattr("awf.service.controls.enforce_pairless_control_guards", guard)
+    monkeypatch.setattr("awf.service.controls.apply_pairless_remonitor_guard", remonitor_guard)
 
     response = await service.remonitor_workspace(
         row.id,
@@ -646,7 +698,7 @@ async def test_remonitor_exact_replay_skips_quiescence_after_monitor_reclaim(
     )
 
     assert response.operation_id == "op_remonitor_done"
-    guard.assert_not_awaited()
+    remonitor_guard.assert_not_awaited()
     session.refresh.assert_not_awaited()
 
 
@@ -673,7 +725,7 @@ async def test_remonitor_fresh_pairless_applies_quiescence_after_prepare(
         workspace=row,  # type: ignore[arg-type]
         idempotency_key="remonitor-fresh",
     )
-    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
+    remonitor_guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409))
 
     monkeypatch.setattr("awf.service.controls.control_authority", AsyncMock())
     monkeypatch.setattr(
@@ -690,8 +742,7 @@ async def test_remonitor_fresh_pairless_applies_quiescence_after_prepare(
         lambda *_a, **_k: ({"reason": "fresh"}, {"reason": "fresh"}),
     )
     monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
-    monkeypatch.setattr("awf.service.controls.authority_for", lambda _s: object())
-    monkeypatch.setattr("awf.service.controls.enforce_pairless_control_guards", guard)
+    monkeypatch.setattr("awf.service.controls.apply_pairless_remonitor_guard", remonitor_guard)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT"):
         await service.remonitor_workspace(
@@ -701,10 +752,7 @@ async def test_remonitor_fresh_pairless_applies_quiescence_after_prepare(
             hosted_authorization=_authorization(),
         )
 
-    session.refresh.assert_awaited_once_with(row, with_for_update=True)
-    guard.assert_awaited_once()
-    assert guard.await_args.args[1] is row
-    assert guard.await_args.kwargs["control"] == "remonitor"
+    remonitor_guard.assert_awaited_once_with(session, row, None)
 
 
 @pytest.mark.unit
