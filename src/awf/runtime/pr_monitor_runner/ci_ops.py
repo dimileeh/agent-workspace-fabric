@@ -231,6 +231,115 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
     return _CiFixResidueRollbackResult(ok=True)
 
 
+async def _detect_hosted_ci_repair_conflict_published_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    state: MonitorState | None,
+    restore_ref: str | None,
+    operation_start_last_push_sha: str | None,
+) -> str | None:
+    """Return the hosted PR head published before a NEEDS_HUMAN conflict park.
+
+    Hosted adapters advance the remote before AWF parks. Detect that published
+    SHA from monitor state (and live HEAD when state was not yet recorded) so
+    the conflict path can rewind the remote before parking against the
+    pre-repair head (PRRT_kwDOSJAM6s64x4K2). Mirrors
+    ``comment_verdict_rollback`` hosted detection.
+    """
+    if state is None or restore_ref is None or not getattr(self._deps.adapter, "is_hosted", False):
+        return None
+    restore_ref_lower = restore_ref.strip().lower()
+    if not restore_ref_lower:
+        return None
+
+    saved_last_push_sha = (operation_start_last_push_sha or "").strip()
+    current_last_push_sha = (state.last_push_sha or "").strip()
+    state_recorded_remote_advance = bool(state.hosted_terminal_head_advanced) or (
+        bool(current_last_push_sha) and current_last_push_sha.lower() != saved_last_push_sha.lower()
+    )
+
+    current_head = ""
+    rev_parse_head = getattr(self, "_rev_parse_head", None)
+    if callable(rev_parse_head):
+        try:
+            parsed = await rev_parse_head(worktree_path)
+        except (OSError, RuntimeError, TimeoutError):
+            parsed = None
+        current_head = (parsed or "").strip()
+
+    needs_hosted_remote_rollback = state_recorded_remote_advance
+    if not needs_hosted_remote_rollback and current_head:
+        needs_hosted_remote_rollback = current_head.lower() != restore_ref_lower
+    if not needs_hosted_remote_rollback:
+        return None
+
+    if not state_recorded_remote_advance and current_head.lower() != restore_ref_lower:
+        candidate = current_head
+    else:
+        candidate = current_last_push_sha or current_head
+    if candidate and candidate.lower() != restore_ref_lower:
+        return candidate
+    return None
+
+
+async def _rewind_hosted_ci_repair_conflict_remote(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    restore_ref: str,
+    published_remote_head: str,
+    operation_start_last_push_sha: str | None,
+) -> _CiFixResidueRollbackResult:
+    """Force-push the conflict restore ref over a hosted published repair head."""
+    hosted_identity_fn = getattr(self, "_hosted_pr_identity_for_workspace", None)
+    if not callable(hosted_identity_fn):
+        _log.warning(
+            "monitor.ci_repair_hosted_conflict_remote_rollback_unavailable",
+            workspace_id=workspace_id,
+            restore_ref=restore_ref,
+            published_remote_head=published_remote_head,
+        )
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message=(
+                "CI repair operator-decision conflict; hosted remote rollback "
+                "unavailable before parking."
+            ),
+        )
+
+    hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+    from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+        _rollback_hosted_terminal_head_on_remote,
+    )
+
+    remote_ok = await _rollback_hosted_terminal_head_on_remote(
+        self,
+        workspace_id=workspace_id,
+        hosted_pr_identity=hosted_pr_identity,
+        rollback_target_sha=restore_ref,
+        expected_remote_head_sha=published_remote_head,
+    )
+    if not remote_ok:
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message=(
+                "CI repair operator-decision conflict; hosted remote head "
+                "rollback failed before parking."
+            ),
+        )
+
+    state.hosted_terminal_head_advanced = False
+    current_last_push_sha = (state.last_push_sha or "").strip()
+    saved_last_push_sha = (operation_start_last_push_sha or "").strip()
+    if current_last_push_sha.lower() != saved_last_push_sha.lower():
+        state.last_push_sha = operation_start_last_push_sha
+    return _CiFixResidueRollbackResult(ok=True)
+
+
 def _salvage_error_blocks_provider_recovery(salvage_details: dict[str, Any]) -> bool:
     """Return True when a salvage failure must abort provider recovery."""
     from awf.service.repair_salvage import REPAIR_SALVAGE_NO_DIFF
@@ -543,6 +652,10 @@ async def _run_ci_fix(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # Snapshot push tracking before the hosted agent can advance the PR head so
+    # a NEEDS_HUMAN conflict park can restore last_push_sha after remote rewind
+    # (PRRT_kwDOSJAM6s64x4K2).
+    operation_start_last_push_sha = state.last_push_sha if state is not None else None
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
     task_tag = await self._resolve_task_tag(workspace_id)
@@ -742,6 +855,16 @@ async def _run_ci_fix(
         conflict_reason = needs_human_verdict_reason(conflict_stdout)
         if conflict_reason is not None:
             conflict_head = status.head_sha if status is not None else (operation_start_head or "")
+            # Detect a hosted published head before local rewind: after reset the
+            # worktree matches operation_start_head while the remote still holds
+            # the repair (PRRT_kwDOSJAM6s64x4K2).
+            published_hosted_head = await _detect_hosted_ci_repair_conflict_published_head(
+                self,
+                worktree_path=worktree_path,
+                state=state,
+                restore_ref=operation_start_head,
+                operation_start_last_push_sha=operation_start_last_push_sha,
+            )
             # Check rollback before parking: a failed reset/clean leaves agent
             # residue that the next guide would trip as PRE_EXISTING_DIRTY_WORKTREE
             # while the park reports only an operator conflict (PRRT_kwDOSJAM6s64xVNL).
@@ -751,6 +874,20 @@ async def _run_ci_fix(
                 worktree_path=worktree_path,
                 restore_ref=operation_start_head,
             )
+            if (
+                rollback_result.ok
+                and published_hosted_head is not None
+                and operation_start_head
+                and state is not None
+            ):
+                rollback_result = await _rewind_hosted_ci_repair_conflict_remote(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    restore_ref=operation_start_head,
+                    published_remote_head=published_hosted_head,
+                    operation_start_last_push_sha=operation_start_last_push_sha,
+                )
             if not rollback_result.ok:
                 rollback_details: dict[str, Any] = {
                     "phase": "ci_repair_operator_decision_conflict",
@@ -767,15 +904,21 @@ async def _run_ci_fix(
                     workspace_id=workspace_id,
                     rollback_cause=rollback_result.cause,
                 )
+                rollback_stderr = (
+                    "CI repair operator-decision conflict; "
+                    "hosted remote head rollback failed before parking."
+                    if rollback_result.cause == "hosted_remote_rollback_failed"
+                    else (
+                        "CI repair operator-decision conflict; "
+                        "worktree rollback failed before parking."
+                    )
+                )
                 return await _moot_or_failure(
                     _GitPushResult(
                         pushed=False,
                         failed=True,
                         returncode=1,
-                        stderr=(
-                            "CI repair operator-decision conflict; "
-                            "worktree rollback failed before parking."
-                        ),
+                        stderr=rollback_stderr,
                         reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
                         details=rollback_details,
                     )

@@ -62,6 +62,7 @@ _OTHER_FAILURES = (
     ),
 )
 _HEAD = "b34a78bf86abcdef0123456789abcdef01234567"
+_PUBLISHED_HOSTED_HEAD = "c5e01942e6abcdef0123456789abcdef01234567"
 _FAKE_REPO = SimpleNamespace(slug=lambda: "dimileeh/awf")
 _CONFLICT_STDOUT = (
     "I will not re-add the removed code.\n"
@@ -205,6 +206,7 @@ def _ci_fix_runner(
         workspace_id: str,
         worktree_path: Path,
         restore_ref: str | None,
+        **_kwargs: object,
     ) -> ci_ops._CiFixResidueRollbackResult:
         rollback_calls.append(
             {
@@ -221,6 +223,17 @@ def _ci_fix_runner(
             message=rollback_message,
         )
 
+    async def _hosted_pr_identity_for_workspace(
+        _workspace_id: str,
+        *,
+        state: object | None = None,
+    ) -> dict[str, object]:
+        del state
+        return {
+            "head_repo_url": "https://github.com/dimileeh/awf.git",
+            "head_ref": "awf/ws_ci",
+        }
+
     return _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
@@ -234,7 +247,8 @@ def _ci_fix_runner(
         _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
-        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+        _hosted_pr_identity_for_workspace=_hosted_pr_identity_for_workspace,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run, is_hosted=False)),
         _rollback=_rollback,
     )
 
@@ -373,6 +387,216 @@ async def test_ci_repair_needs_human_conflict_parks_without_push(
     again = decide(status, state, MonitorConfig(auto_merge=True))
     assert isinstance(again, NotifyHuman)
     assert again.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+
+
+@pytest.mark.unit
+async def test_ci_repair_needs_human_conflict_rewinds_hosted_published_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted NEEDS_HUMAN conflict must rewind the published PR head (PRRT_kwDOSJAM6s64x4K2).
+
+    Local-only residue rollback leaves the hosted repair on the remote while the
+    park anchors the old status.head_sha; the next poll then re-dispatches CI
+    repair. Mirror comment_verdict_rollback hosted remote reconciliation.
+    """
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    remote_rollbacks: list[dict[str, object]] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _hosted_agent_with_published_head(
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+        state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
+    ) -> AgentRunResult:
+        del (
+            timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink,
+            timeout_preservation_sink,
+            operation_start_head,
+        )
+        result = await runner._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        if isinstance(state, MonitorState):
+            state.last_push_sha = _PUBLISHED_HOSTED_HEAD
+            state.hosted_terminal_head_advanced = True
+        return result
+
+    async def _record_remote_rollback(*_args: object, **kwargs: object) -> bool:
+        remote_rollbacks.append(dict(kwargs))
+        return True
+
+    runner._run_monitor_agent_with_service_recovery = _hosted_agent_with_published_head
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _record_remote_rollback,
+    )
+
+    state = MonitorState(last_push_sha=_HEAD)
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert result.parked_needs_human is True
+    assert result.pushed is False
+    assert result.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert commit_calls == []
+    assert push_calls == []
+    assert rollback_calls
+    assert len(remote_rollbacks) == 1
+    assert remote_rollbacks[0]["rollback_target_sha"] == _HEAD
+    assert remote_rollbacks[0]["expected_remote_head_sha"] == _PUBLISHED_HOSTED_HEAD
+    assert state.last_push_sha == _HEAD
+    assert state.hosted_terminal_head_advanced is False
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=status.head_sha, failures=_FAILURES
+        )
+        is not None
+    )
+
+
+@pytest.mark.unit
+async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_blocks_park(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when hosted remote rewind cannot undo a published conflict head."""
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+    )
+    runner._deps.adapter.is_hosted = True
+
+    async def _hosted_agent_with_published_head(
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+        state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
+    ) -> AgentRunResult:
+        del (
+            timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink,
+            timeout_preservation_sink,
+            operation_start_head,
+        )
+        result = await runner._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        if isinstance(state, MonitorState):
+            state.last_push_sha = _PUBLISHED_HOSTED_HEAD
+            state.hosted_terminal_head_advanced = True
+        return result
+
+    async def _failed_remote_rollback(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    runner._run_monitor_agent_with_service_recovery = _hosted_agent_with_published_head
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._rollback_hosted_terminal_head_on_remote",
+        _failed_remote_rollback,
+    )
+
+    state = MonitorState(last_push_sha=_HEAD)
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert result.parked_needs_human is False
+    assert result.pushed is False
+    assert result.failed is True
+    assert result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert "hosted" in (result.stderr or "").lower() or "remote" in (result.stderr or "").lower()
+    assert commit_calls == []
+    assert push_calls == []
+    assert rollback_calls
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=status.head_sha, failures=_FAILURES
+        )
+        is None
+    )
+    assert result.details is not None
+    assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
+    assert state.hosted_terminal_head_advanced is True
+    assert state.last_push_sha == _PUBLISHED_HOSTED_HEAD
 
 
 @pytest.mark.unit
@@ -618,3 +842,103 @@ async def test_ci_repair_without_directives_ignores_needs_human_verdict(
     assert result.reason_code != "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
     assert result.pushed is True
     assert push_calls
+
+
+@pytest.mark.unit
+async def test_detect_hosted_ci_repair_conflict_published_head_edges(
+    tmp_path: Path,
+) -> None:
+    """Detection skips non-hosted/blank restore and uses live HEAD when state lags."""
+    runner = _ci_fix_runner(tmp_path=tmp_path)
+    state = MonitorState(last_push_sha=_HEAD)
+
+    assert (
+        await ci_ops._detect_hosted_ci_repair_conflict_published_head(
+            runner,
+            worktree_path=tmp_path,
+            state=state,
+            restore_ref=_HEAD,
+            operation_start_last_push_sha=_HEAD,
+        )
+        is None
+    )
+
+    runner._deps.adapter.is_hosted = True
+    assert (
+        await ci_ops._detect_hosted_ci_repair_conflict_published_head(
+            runner,
+            worktree_path=tmp_path,
+            state=None,
+            restore_ref=_HEAD,
+            operation_start_last_push_sha=_HEAD,
+        )
+        is None
+    )
+    assert (
+        await ci_ops._detect_hosted_ci_repair_conflict_published_head(
+            runner,
+            worktree_path=tmp_path,
+            state=state,
+            restore_ref="   ",
+            operation_start_last_push_sha=_HEAD,
+        )
+        is None
+    )
+
+    async def _published_head(_worktree_path: Path) -> str | None:
+        return _PUBLISHED_HOSTED_HEAD
+
+    runner._rev_parse_head = _published_head
+    assert (
+        await ci_ops._detect_hosted_ci_repair_conflict_published_head(
+            runner,
+            worktree_path=tmp_path,
+            state=state,
+            restore_ref=_HEAD,
+            operation_start_last_push_sha=_HEAD,
+        )
+        == _PUBLISHED_HOSTED_HEAD
+    )
+
+    async def _rev_parse_raises(_worktree_path: Path) -> str | None:
+        raise OSError("gitdir missing")
+
+    runner._rev_parse_head = _rev_parse_raises
+    state.last_push_sha = _PUBLISHED_HOSTED_HEAD
+    state.hosted_terminal_head_advanced = True
+    assert (
+        await ci_ops._detect_hosted_ci_repair_conflict_published_head(
+            runner,
+            worktree_path=tmp_path,
+            state=state,
+            restore_ref=_HEAD,
+            operation_start_last_push_sha=_HEAD,
+        )
+        == _PUBLISHED_HOSTED_HEAD
+    )
+
+
+@pytest.mark.unit
+async def test_rewind_hosted_ci_repair_conflict_remote_requires_identity_helper(
+    tmp_path: Path,
+) -> None:
+    """Fail closed when the runner cannot resolve hosted PR identity for rewind."""
+    runner = _ci_fix_runner(tmp_path=tmp_path)
+    runner._deps.adapter.is_hosted = True
+    delattr(runner, "_hosted_pr_identity_for_workspace")
+    state = MonitorState(last_push_sha=_PUBLISHED_HOSTED_HEAD)
+    state.hosted_terminal_head_advanced = True
+
+    result = await ci_ops._rewind_hosted_ci_repair_conflict_remote(
+        runner,
+        workspace_id="ws_ci",
+        state=state,
+        restore_ref=_HEAD,
+        published_remote_head=_PUBLISHED_HOSTED_HEAD,
+        operation_start_last_push_sha=_HEAD,
+    )
+
+    assert result.ok is False
+    assert result.cause == "hosted_remote_rollback_failed"
+    assert state.hosted_terminal_head_advanced is True
+    assert state.last_push_sha == _PUBLISHED_HOSTED_HEAD
