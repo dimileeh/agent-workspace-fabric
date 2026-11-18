@@ -732,12 +732,44 @@ async def _run_ci_fix(
         conflict_reason = needs_human_verdict_reason(agent_result.stdout or "")
         if conflict_reason is not None:
             conflict_head = status.head_sha if status is not None else (operation_start_head or "")
-            await _rollback_ci_fix_residue_before_provider_recovery(
+            # Check rollback before parking: a failed reset/clean leaves agent
+            # residue that the next guide would trip as PRE_EXISTING_DIRTY_WORKTREE
+            # while the park reports only an operator conflict (PRRT_kwDOSJAM6s64xVNL).
+            rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 restore_ref=operation_start_head,
             )
+            if not rollback_result.ok:
+                rollback_details: dict[str, Any] = {
+                    "phase": "ci_repair_operator_decision_conflict",
+                    "operation_type": "ci_repair",
+                    "pushed": False,
+                    "conflict_reason": conflict_reason,
+                    "rollback_error": {
+                        "message": rollback_result.message,
+                        "cause": rollback_result.cause,
+                    },
+                }
+                _log.warning(
+                    "monitor.ci_fix_operator_decision_conflict_rollback_failed",
+                    workspace_id=workspace_id,
+                    rollback_cause=rollback_result.cause,
+                )
+                return await _moot_or_failure(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=(
+                            "CI repair operator-decision conflict; "
+                            "worktree rollback failed before parking."
+                        ),
+                        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                        details=rollback_details,
+                    )
+                )
             if conflict_head:
                 mark_ci_repair_operator_decision_conflict(
                     state,

@@ -140,6 +140,7 @@ def _ci_fix_runner(
     commit_calls: list[dict[str, Any]] | None = None,
     push_calls: list[dict[str, Any]] | None = None,
     rollback_calls: list[dict[str, Any]] | None = None,
+    rollback_ok: bool = True,
 ) -> _MonitorAgentServiceRecoveryRunner:
     commit_calls = commit_calls if commit_calls is not None else []
     push_calls = push_calls if push_calls is not None else []
@@ -188,7 +189,13 @@ def _ci_fix_runner(
                 "restore_ref": restore_ref,
             }
         )
-        return ci_ops._CiFixResidueRollbackResult(ok=True)
+        if rollback_ok:
+            return ci_ops._CiFixResidueRollbackResult(ok=True)
+        return ci_ops._CiFixResidueRollbackResult(
+            ok=False,
+            cause="reset_failed",
+            message="CI repair residue rollback failed: git reset --hard failed.",
+        )
 
     return _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
@@ -328,6 +335,64 @@ async def test_ci_repair_needs_human_conflict_parks_without_push(
 
     again = decide(status, state, MonitorConfig(auto_merge=True))
     assert isinstance(again, NotifyHuman)
+
+
+@pytest.mark.unit
+async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback failure must block conflict park (PRRT_kwDOSJAM6s64xVNL)."""
+    commit_calls: list[dict[str, Any]] = []
+    push_calls: list[dict[str, Any]] = []
+    rollback_calls: list[dict[str, Any]] = []
+    runner = _ci_fix_runner(
+        tmp_path=tmp_path,
+        stdout=_CONFLICT_STDOUT,
+        commit_calls=commit_calls,
+        push_calls=push_calls,
+        rollback_calls=rollback_calls,
+        rollback_ok=False,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        runner._rollback,
+    )
+
+    state = MonitorState()
+    _seed_directive(state)
+    status = _status()
+
+    result = await ci_ops._run_ci_fix(
+        runner,
+        repo=_FAKE_REPO,
+        pr_number=1260,
+        failures=_FAILURES,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+        status=status,
+        state=state,
+    )
+
+    assert result.parked_needs_human is False
+    assert result.pushed is False
+    assert result.failed is True
+    assert result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert "rollback failed" in (result.stderr or "").lower()
+    assert commit_calls == []
+    assert push_calls == []
+    assert rollback_calls
+    assert (
+        ci_repair_operator_decision_conflict_reason(
+            state, head_sha=status.head_sha, failures=_FAILURES
+        )
+        is None
+    )
+    assert result.details is not None
+    assert result.details.get("rollback_error", {}).get("cause") == "reset_failed"
 
 
 @pytest.mark.unit
