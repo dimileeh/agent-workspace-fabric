@@ -105,6 +105,7 @@ async def guide_workspace(
         operator=operator,
         reauthorization=hosted_reauthorization,
         idempotency_key=idempotency_key,
+        control="guide",
     )
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)

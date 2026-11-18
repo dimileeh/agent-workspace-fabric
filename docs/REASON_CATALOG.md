@@ -599,6 +599,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#hosted_optional_secret_skipped](#hosted_optional_secret_skipped)
 
+### HOSTED_REAUTHORIZATION_REQUIRED
+**Problem:** A hosted guide without a re-authorization pair tried to resume paused or failed work, or carried grants that require fresh quiet-state materials.
+**Likely Cause:** Pair-less hosted guides are limited to an active monitoring_pr monitor; blocked, failed, and grant-bearing guides need authorize_rebinding.
+**Operator Fix:** Retry the guide with a re-authorization pair once the workspace is quiet, or guide only while status remains monitoring_pr without grants.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_reauthorization_required](#hosted_reauthorization_required)
+
 ### HOSTED_REMOTE_HEAD_FETCH_FAILED
 **Problem:** AWF could not fetch the hosted PR head after a hosted repair completed.
 **Likely Cause:** Git fetch of the PR head repository/ref failed due to credentials, network availability, a deleted branch, or remote rejection.

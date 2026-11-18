@@ -27,9 +27,7 @@ from awf.db.repositories.base import (
 from awf.hosted_node.lifecycle_operations import control_authority
 from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, remonitor_payload
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
-from awf.node.cleanup import (
-    WorkspaceCleanupResult,
-)
+from awf.node.cleanup import WorkspaceCleanupResult
 from awf.runtime.operator_hints import (
     arm_operator_hint_freeze,
     build_pending_operator_hint_payload,
@@ -414,6 +412,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             hosted_authorization,
             reauthorization=hosted_reauthorization,
             idempotency_key=idempotency_key,
+            control="remonitor",
         )
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)

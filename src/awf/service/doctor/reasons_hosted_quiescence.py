@@ -96,4 +96,20 @@ def get_hosted_quiescence_reasons(
             "awf service logs --follow --service worker",
             "docs/REASON_CATALOG.md#terminal_owned_row_reap_failed",
         ),
+        "HOSTED_REAUTHORIZATION_REQUIRED": reason_text_cls(
+            (
+                "A hosted guide without a re-authorization pair tried to resume paused or "
+                "failed work, or carried grants that require fresh quiet-state materials."
+            ),
+            (
+                "Retry the guide with a re-authorization pair once the workspace is quiet, "
+                "or guide only while status remains monitoring_pr without grants."
+            ),
+            (
+                "Pair-less hosted guides are limited to an active monitoring_pr monitor; "
+                "blocked, failed, and grant-bearing guides need authorize_rebinding."
+            ),
+            "awf workspace show <workspace_id>",
+            "docs/REASON_CATALOG.md#hosted_reauthorization_required",
+        ),
     }

@@ -5,6 +5,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select, text
@@ -14,7 +15,7 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.config import Settings
 from awf.common.github_client import RepoRef
 from awf.common.redaction import redact_secrets
-from awf.db.models import TaskAttempt, Workspace
+from awf.db.models import Operation, TaskAttempt, Workspace
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Receipt
@@ -26,6 +27,61 @@ from awf.hosted_node.runtime_schemas import (
     HostedWorkspace,
 )
 from awf.hosted_node.schemas import Binding
+
+ControlKind = Literal["guide", "remonitor"]
+
+
+def _pairless_claim_is_live(
+    claimed_by: str | None,
+    expires_at: datetime | None,
+    *,
+    now: datetime,
+) -> bool:
+    """True when a claim has an owner and a future expiry (expired/null alone is not live)."""
+    if claimed_by is None or expires_at is None:
+        return False
+    if expires_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None and now.tzinfo is None:
+        expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
+    return expires_at > now
+
+
+async def enforce_pairless_control_guards(
+    session: AsyncSession,
+    row: Workspace,
+    *,
+    control: ControlKind | None,
+    grants: list[str] | None = None,
+) -> None:
+    """Refuse unsafe pair-less hosted guide/remonitor under the existing row lock.
+
+    Invoked only after ``refresh(..., with_for_update=True)`` on the pair-less
+    path. Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
+    expiry-agnostic). ``control is None`` skips so low-level binding tests stay
+    focused; production guide/remonitor always pass the kind.
+    """
+    if control is None:
+        return
+    if control == "guide":
+        if any(grant.strip() for grant in (grants or []) if grant) or row.status != "monitoring_pr":
+            raise MaterialDeniedError("HOSTED_REAUTHORIZATION_REQUIRED", 409)
+        return
+    now = datetime.now(UTC)
+    if (
+        _pairless_claim_is_live(row.execution_claimed_by, row.execution_claim_expires_at, now=now)
+        or _pairless_claim_is_live(row.monitor_claimed_by, row.monitor_claim_expires_at, now=now)
+        or await session.scalar(
+            select(Operation.id)
+            .where(
+                Operation.workspace_id == row.id,
+                Operation.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise MaterialDeniedError("HOSTED_SOURCE_NOT_QUIESCENT", 409)
 
 
 def authority_for(session: AsyncSession, supplied: object = None) -> WorkspaceAuthority | None:
@@ -214,6 +270,7 @@ async def control_authority(
     grants: list[str] | None = None,
     operator: str | None = None,
     idempotency_key: str | None = None,
+    control: ControlKind | None = None,
 ) -> None:
     authority = authority_for(session, authorization or reauthorization)
     if authority is None:
@@ -248,6 +305,7 @@ async def control_authority(
     await lock_materials(session, authority, association)
     if check_source(authority, row, authorization.namespace) != association:
         raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
+    await enforce_pairless_control_guards(session, row, control=control, grants=grants)
 
 
 def admission_environment(
