@@ -141,6 +141,8 @@ def _ci_fix_runner(
     push_calls: list[dict[str, Any]] | None = None,
     rollback_calls: list[dict[str, Any]] | None = None,
     rollback_ok: bool = True,
+    rollback_cause: str = "reset_failed",
+    rollback_message: str = ("CI repair residue rollback failed: git reset --hard failed."),
 ) -> _MonitorAgentServiceRecoveryRunner:
     commit_calls = commit_calls if commit_calls is not None else []
     push_calls = push_calls if push_calls is not None else []
@@ -193,8 +195,8 @@ def _ci_fix_runner(
             return ci_ops._CiFixResidueRollbackResult(ok=True)
         return ci_ops._CiFixResidueRollbackResult(
             ok=False,
-            cause="reset_failed",
-            message="CI repair residue rollback failed: git reset --hard failed.",
+            cause=rollback_cause,
+            message=rollback_message,
         )
 
     return _MonitorAgentServiceRecoveryRunner(
@@ -338,11 +340,28 @@ async def test_ci_repair_needs_human_conflict_parks_without_push(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("rollback_cause", "rollback_message"),
+    [
+        ("reset_failed", "CI repair residue rollback failed: git reset --hard failed."),
+        (
+            "cleanup_failed",
+            "Untracked CI repair residue cleanup failed (CLEANUP_FAILED): clean failed.",
+        ),
+    ],
+)
 async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    rollback_cause: str,
+    rollback_message: str,
 ) -> None:
-    """Rollback failure must block conflict park (PRRT_kwDOSJAM6s64xVNL)."""
+    """Rollback failure must block conflict park (PRRT_kwDOSJAM6s64xVNL).
+
+    Both reset and untracked-cleanup failures return ok=False from
+    ``_rollback_ci_fix_residue_before_provider_recovery``; either must
+    surface before the operator-decision conflict park is installed.
+    """
     commit_calls: list[dict[str, Any]] = []
     push_calls: list[dict[str, Any]] = []
     rollback_calls: list[dict[str, Any]] = []
@@ -353,6 +372,8 @@ async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
         push_calls=push_calls,
         rollback_calls=rollback_calls,
         rollback_ok=False,
+        rollback_cause=rollback_cause,
+        rollback_message=rollback_message,
     )
     monkeypatch.setattr(
         ci_ops,
@@ -392,7 +413,10 @@ async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
         is None
     )
     assert result.details is not None
-    assert result.details.get("rollback_error", {}).get("cause") == "reset_failed"
+    assert result.details.get("phase") == "ci_repair_operator_decision_conflict"
+    assert result.details.get("rollback_error", {}).get("cause") == rollback_cause
+    assert result.details.get("rollback_error", {}).get("message") == rollback_message
+    assert "conflicts with operator decision" in str(result.details.get("conflict_reason"))
 
 
 @pytest.mark.unit
