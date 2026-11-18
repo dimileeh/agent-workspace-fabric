@@ -23,12 +23,13 @@ This module adds the fifth gate. Over the item's own commit range it accepts:
   ``.mjs``/``.cjs``, ...) have no parser here, so an identifier-named target in
   them yields no evidence and the item fails closed, as before #1232.
 
-Only the reviewer's text is read (``reviewer_comment_text``): AWF-authored
-replies, which can carry the agent's own reason (#1018), and the agent's
-verdict reason are never evidence. Absolute paths, ``..`` / ``.`` segments,
-``~``, globs and URLs never count, and every unreadable Git read or unparsable
-source fails closed. Kept in its own module because ``..._cross_file`` sits near
-the first-party line budget, and because the rule reads as one unit.
+Only the reviewer's text is read (``reviewer_comment_text``): unmarked
+operator-identity feedback counts (#1272), AWF disposition replies (valid
+marker naming the thread) and the agent's verdict reason are never evidence.
+Absolute paths, ``..`` / ``.`` segments, ``~``, globs and URLs never count, and
+every unreadable Git read or unparsable source fails closed. Kept in its own
+module because ``..._cross_file`` sits near the first-party line budget, and
+because the rule reads as one unit.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from awf.common.forge_thread_audit import is_disposition_reply
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _CALLEE_KEYWORD_BLOCKLIST,
@@ -93,14 +95,21 @@ _PYTHON_FUNCTION_OR_CLASS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef
 def reviewer_comment_text(thread: ReviewThread) -> str:
     """The reviewer-authored text of ``thread`` — the only comment-named evidence source.
 
-    Comments AWF posted (``viewer_did_author``) are excluded because they can
-    carry the agent's own reason; ``review_context`` is a separate review body,
-    not this thread's comment. ``body_excerpt`` is used only when GitHub
-    supplied no comment history.
+    Unmarked comments by the token identity are ordinary operator feedback and
+    stay in evidence (#1272), matching the status-feed listing rule. Only a
+    disposition reply (valid marker naming ``thread.thread_id``) is excluded so
+    AWF's own reason cannot satisfy the comment-named target gate.
+    ``review_context`` is a separate review body, not this thread's comment.
+    ``body_excerpt`` is used only when GitHub supplied no comment history.
     """
     if thread.comments:
         return "\n".join(
-            comment.body for comment in thread.comments if not comment.viewer_did_author
+            comment.body
+            for comment in thread.comments
+            if not (
+                comment.viewer_did_author
+                and is_disposition_reply(comment.body, thread_id=thread.thread_id)
+            )
         )
     return thread.body_excerpt or ""
 
