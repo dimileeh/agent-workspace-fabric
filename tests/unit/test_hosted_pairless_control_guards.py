@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.session import make_session_factory
 from awf.hosted_node import lifecycle_operations as operations
 from awf.hosted_node.api import denial_error
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedWorkspace
+from tests.postgres import postgres_test_engine
+from tests.unit.helpers import create_workspace
 from tests.unit.test_hosted_runtime_contract import hosted_create
 
 
@@ -255,6 +262,78 @@ async def test_pairless_remonitor_refuses_pending_or_running_operation(op_id: st
         await operations.enforce_pairless_control_guards(session, row, control="remonitor")
 
     assert denied.value.status == 409
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+@pytest.mark.unit
+async def test_pairless_remonitor_active_ops_query_filters_status_and_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Refuse only pending/running ops on this workspace; finished and foreign ops pass."""
+    now = datetime.now(UTC)
+    workspace_id = await create_workspace(
+        factory,
+        status=WorkspaceStatus.monitoring_pr,
+        updated_at=now,
+    )
+    other_id = await create_workspace(
+        factory,
+        status=WorkspaceStatus.monitoring_pr,
+        updated_at=now,
+        task_title="foreign workspace",
+    )
+
+    async with factory() as session:
+        ops = OperationRepository(session)
+        for finished in (
+            OperationStatus.succeeded,
+            OperationStatus.failed,
+            OperationStatus.cancelled,
+        ):
+            await ops.create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=finished,
+            )
+        await ops.create(
+            workspace_id=other_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+        )
+        await session.commit()
+
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row is not None
+        await operations.enforce_pairless_control_guards(session, row, control="remonitor")
+
+        pending = await ops.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.pending,
+        )
+        await session.flush()
+        with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT") as denied:
+            await operations.enforce_pairless_control_guards(session, row, control="remonitor")
+        assert denied.value.status == 409
+
+        pending.status = OperationStatus.succeeded.value
+        await session.flush()
+        await operations.enforce_pairless_control_guards(session, row, control="remonitor")
+
+        await ops.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+        )
+        await session.flush()
+        with pytest.raises(MaterialDeniedError, match="HOSTED_SOURCE_NOT_QUIESCENT") as denied:
+            await operations.enforce_pairless_control_guards(session, row, control="remonitor")
+        assert denied.value.status == 409
 
 
 @pytest.mark.unit
