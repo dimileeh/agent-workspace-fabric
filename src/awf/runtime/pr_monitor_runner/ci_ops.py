@@ -557,7 +557,12 @@ async def _run_ci_fix(
         applied_operator_directives=applied_directives,
     )
     if applied_directives:
-        log_ci_repair_applied_operator_directives_audit(applied_directives)
+        log_ci_repair_applied_operator_directives_audit(
+            applied_directives,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            head_sha=(status.head_sha if status is not None else (operation_start_head or "")),
+        )
     agent_run_err = None
     agent_result = None
     post_agent_err: Exception | None = None

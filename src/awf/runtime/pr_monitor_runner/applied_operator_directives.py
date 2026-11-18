@@ -158,12 +158,19 @@ def render_applied_operator_directives_section(
 
 def log_ci_repair_applied_operator_directives_audit(
     records: Sequence[AppliedOperatorDirective],
+    *,
+    workspace_id: str,
+    pr_number: int,
+    head_sha: str,
 ) -> None:
-    """Emit one structured audit event (count + operation ids only)."""
+    """Emit one structured audit event (count + operation ids + PR context)."""
     if not records:
         return
     _log.info(
         CI_REPAIR_APPLIED_OPERATOR_DIRECTIVES_EVENT,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
         count=len(records),
         operation_ids=[record.operation_id for record in records],
     )

@@ -275,6 +275,9 @@ async def test_run_ci_fix_passes_applied_directives_and_audits(
     assert len(audit_events) == 1
     assert audit_events[0]["count"] == 1
     assert audit_events[0]["operation_ids"] == ["op-guide-1"]
+    assert audit_events[0]["workspace_id"] == "ws_ci"
+    assert audit_events[0]["pr_number"] == 1260
+    assert audit_events[0]["head_sha"] == _HEAD
     assert "directive" not in audit_events[0]
     assert "Remove the experimental block" not in str(audit_events[0])
 
