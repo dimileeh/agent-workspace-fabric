@@ -1045,6 +1045,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
+    0a. Unfinished CI-repair conflict rollback pending for this head →
+        NotifyHuman(CI_REPAIR_CONFLICT_ROLLBACK_PENDING). Outranks Merge /
+        ReportCiFailure so a drifted CI signature on an unre wound hosted
+        repair cannot resume normal monitoring (PRRT_kwDOSJAM6s64yqJ9).
     0b. PR retargeted after provisioning (``base_ref_drifted``) → NotifyHuman.
         Every gate below acts on the workspace's persisted ``branch_base``, and
         ``auto_merge`` was resolved from it; a retargeted PR must not be driven
@@ -1118,6 +1122,22 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    # 0a. Unfinished CI-repair conflict rollback outranks every normal action
+    # (including green CI → Merge). The pending park is keyed by head only so a
+    # drifted failing-check signature on the unre wound published repair cannot
+    # resume ReportCiFailure / merge (PRRT_kwDOSJAM6s64yqJ9).
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        notify_human_for_conflict_rollback_pending,
+    )
+
+    pending_rollback = notify_human_for_conflict_rollback_pending(
+        state,
+        head_sha=status.head_sha,
+        failures=status.ci_failures,
+    )
+    if pending_rollback is not None:
+        return pending_rollback
 
     # 0b. The PR was retargeted on the forge after provisioning. Every policy the
     # monitor carries is keyed to the workspace's persisted ``branch_base``:

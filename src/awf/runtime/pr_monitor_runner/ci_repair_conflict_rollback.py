@@ -91,7 +91,19 @@ def conflict_park_lookup_head(
     return status_head_sha
 
 
-def _pending_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+def _pending_state_key(head_sha: str) -> str:
+    """Build the pending-undo key for one PR head (CI signature independent).
+
+    Unfinished rollbacks must stay reachable after the live head's failing-check
+    signature drifts (new run ids on the published repair, empty while checks
+    restart, or green). Key by head only; ``failures`` is ignored on lookup
+    (PRRT_kwDOSJAM6s64yqJ9).
+    """
+    return f"{_ci_repair_conflict_rollback_pending_key_prefix()}{head_sha}"
+
+
+def _legacy_pending_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    """Pre-signature-independent key retained so in-flight parks still resolve."""
     signature = json.dumps(
         sorted(_conflict_failure_identity(failure) for failure in failures),
         separators=(",", ":"),
@@ -100,56 +112,15 @@ def _pending_state_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str
     return f"{_ci_repair_conflict_rollback_pending_key_prefix()}{head_sha}:{digest}"
 
 
-def mark_ci_repair_conflict_rollback_pending(
-    state: MonitorState,
-    *,
-    head_sha: str,
-    failures: tuple[CheckFailure, ...],
-    pending: CiRepairConflictRollbackPending,
-) -> None:
-    """Persist a pending conflict undo for this head / failing-check signature."""
-    payload = {
-        "conflict_reason": pending.conflict_reason,
-        "restore_ref": pending.restore_ref,
-        "published_remote_head": pending.published_remote_head,
-        "operation_start_last_push_sha": pending.operation_start_last_push_sha,
-        "leftover_message": pending.leftover_message,
-        "cause": pending.cause,
-    }
-    state.mark_addressed(
-        _pending_state_key(head_sha, failures),
-        json.dumps(payload, separators=(",", ":")),
-    )
-
-
-def clear_ci_repair_conflict_rollback_pending(
-    state: MonitorState,
-    *,
-    head_sha: str | None = None,
-    failures: tuple[CheckFailure, ...] | None = None,
-) -> None:
-    """Drop one pending park or every pending park when no signature is given."""
-    if head_sha is not None and failures is not None:
-        state.threads_addressed_ids.pop(_pending_state_key(head_sha, failures), None)
-        return
-    prefix = _ci_repair_conflict_rollback_pending_key_prefix()
-    for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
-        state.threads_addressed_ids.pop(key, None)
-
-
-def ci_repair_conflict_rollback_pending(
-    state: MonitorState,
-    *,
-    head_sha: str,
-    failures: tuple[CheckFailure, ...],
-) -> CiRepairConflictRollbackPending | None:
-    """Return the pending undo payload for this head/signature, if any."""
-    raw = state.threads_addressed_ids.get(_pending_state_key(head_sha, failures))
-    if raw is None:
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
+def _parse_pending_payload(raw: object) -> CiRepairConflictRollbackPending | None:
+    if isinstance(raw, dict):
+        payload: object = raw
+    elif isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    else:
         return None
     if not isinstance(payload, dict):
         return None
@@ -172,6 +143,118 @@ def ci_repair_conflict_rollback_pending(
         operation_start_last_push_sha=(start_push if isinstance(start_push, str) else None),
         leftover_message=leftover_message,
         cause=cause if isinstance(cause, str) else None,
+    )
+
+
+def _pending_keys_for_head(state: MonitorState, head_sha: str) -> list[str]:
+    """Return stored pending keys for ``head_sha`` (head-only and legacy digest)."""
+    prefix = _ci_repair_conflict_rollback_pending_key_prefix()
+    head_prefix = f"{prefix}{head_sha}"
+    keys: list[str] = []
+    for key in state.threads_addressed_ids:
+        if key == head_prefix or key.startswith(f"{head_prefix}:"):
+            keys.append(key)
+    return keys
+
+
+def mark_ci_repair_conflict_rollback_pending(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+    pending: CiRepairConflictRollbackPending,
+) -> None:
+    """Persist a pending conflict undo for this head (CI signature independent)."""
+    del failures  # Kept for call-site compatibility; keying ignores CI signature.
+    payload = {
+        "conflict_reason": pending.conflict_reason,
+        "restore_ref": pending.restore_ref,
+        "published_remote_head": pending.published_remote_head,
+        "operation_start_last_push_sha": pending.operation_start_last_push_sha,
+        "leftover_message": pending.leftover_message,
+        "cause": pending.cause,
+    }
+    # Drop any legacy head:digest keys for this head so lookup stays unambiguous.
+    for key in _pending_keys_for_head(state, head_sha):
+        state.threads_addressed_ids.pop(key, None)
+    state.mark_addressed(
+        _pending_state_key(head_sha),
+        json.dumps(payload, separators=(",", ":")),
+    )
+
+
+def clear_ci_repair_conflict_rollback_pending(
+    state: MonitorState,
+    *,
+    head_sha: str | None = None,
+    failures: tuple[CheckFailure, ...] | None = None,
+) -> None:
+    """Drop one pending park (by head) or every pending park when head is omitted."""
+    if head_sha is not None:
+        for key in _pending_keys_for_head(state, head_sha):
+            state.threads_addressed_ids.pop(key, None)
+        if failures is not None:
+            # Also drop the exact legacy key in case head-prefix scan missed it.
+            state.threads_addressed_ids.pop(_legacy_pending_state_key(head_sha, failures), None)
+        return
+    prefix = _ci_repair_conflict_rollback_pending_key_prefix()
+    for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
+        state.threads_addressed_ids.pop(key, None)
+
+
+def ci_repair_conflict_rollback_pending(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...] = (),
+) -> CiRepairConflictRollbackPending | None:
+    """Return the pending undo for this head, ignoring live CI signature drift."""
+    for key in _pending_keys_for_head(state, head_sha):
+        pending = _parse_pending_payload(state.threads_addressed_ids.get(key))
+        if pending is not None:
+            return pending
+    if failures:
+        legacy = _parse_pending_payload(
+            state.threads_addressed_ids.get(_legacy_pending_state_key(head_sha, failures))
+        )
+        if legacy is not None:
+            return legacy
+    # Hosted parks may be keyed by published head while a stale snapshot still
+    # carries the pre-repair SHA; match via payload.published_remote_head too.
+    prefix = _ci_repair_conflict_rollback_pending_key_prefix()
+    for key, raw in list(state.threads_addressed_ids.items()):
+        if not key.startswith(prefix):
+            continue
+        pending = _parse_pending_payload(raw)
+        if pending is None:
+            continue
+        published = (pending.published_remote_head or "").strip()
+        if published and published == head_sha:
+            return pending
+    return None
+
+
+def notify_human_for_conflict_rollback_pending(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...] = (),
+) -> NotifyHuman | None:
+    """Return NotifyHuman when an unfinished rollback applies to this head."""
+    from awf.runtime.pr_monitor import NotifyHuman
+
+    pending = ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=head_sha,
+        failures=failures,
+    )
+    if pending is None:
+        return None
+    return NotifyHuman(
+        message=(
+            f"CI repair operator-decision conflict; rollback pending: {pending.leftover_message}"
+        ),
+        reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
     )
 
 
@@ -336,6 +419,15 @@ async def retry_ci_repair_conflict_rollback_pending(
     if pending is None:
         return None
 
+    # Always re-key under the live head so retries stay reachable if CI drifts.
+    park_head = (
+        conflict_park_lookup_head(
+            status_head_sha=status.head_sha,
+            published_remote_head=pending.published_remote_head,
+        )
+        or status.head_sha
+    )
+
     _log.info(
         "monitor.ci_fix_operator_decision_conflict_rollback_retry",
         workspace_id=workspace_id,
@@ -376,9 +468,11 @@ async def retry_ci_repair_conflict_rollback_pending(
             leftover_message=leftover,
             cause=rollback_result.cause,
         )
+        # Clear every unfinished park, then rewrite under the live head.
+        clear_ci_repair_conflict_rollback_pending(state)
         mark_ci_repair_conflict_rollback_pending(
             state,
-            head_sha=status.head_sha,
+            head_sha=park_head,
             failures=status.ci_failures,
             pending=refreshed,
         )
@@ -394,11 +488,7 @@ async def retry_ci_repair_conflict_rollback_pending(
             reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
         )
 
-    clear_ci_repair_conflict_rollback_pending(
-        state,
-        head_sha=status.head_sha,
-        failures=status.ci_failures,
-    )
+    clear_ci_repair_conflict_rollback_pending(state)
     # Remote was rewound to restore_ref; next poll observes that SHA, not the
     # published head still recorded on this poll's status snapshot.
     promote_head = (pending.restore_ref or "").strip() or status.head_sha

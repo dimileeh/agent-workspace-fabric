@@ -300,23 +300,16 @@ def report_ci_failure_or_operator_conflict(
     """Return NotifyHuman while a conflict/pending park matches; else ReportCiFailure."""
     from awf.runtime.pr_monitor import NotifyHuman, ReportCiFailure
     from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
-        CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
-        ci_repair_conflict_rollback_pending,
+        notify_human_for_conflict_rollback_pending,
     )
 
-    pending = ci_repair_conflict_rollback_pending(
+    pending_action = notify_human_for_conflict_rollback_pending(
         state,
         head_sha=status.head_sha,
         failures=status.ci_failures,
     )
-    if pending is not None:
-        return NotifyHuman(
-            message=(
-                "CI repair operator-decision conflict; rollback pending: "
-                f"{pending.leftover_message}"
-            ),
-            reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
-        )
+    if pending_action is not None:
+        return pending_action
     reason = ci_repair_operator_decision_conflict_reason(
         state,
         head_sha=status.head_sha,

@@ -338,6 +338,267 @@ async def test_hosted_failed_rewind_parks_under_published_live_head(
 
 
 @pytest.mark.unit
+def test_pending_resolves_via_published_remote_head_when_keyed_under_pre_repair() -> None:
+    """Pre-yp29 parks under the pre-repair head still gate the published live head."""
+    import json
+
+    from awf.runtime.monitor_state_keys import (
+        _ci_repair_conflict_rollback_pending_key_prefix,
+    )
+
+    state = MonitorState()
+    pending = _pending(
+        cause="hosted_remote_rollback_failed",
+        published_remote_head=_PUBLISHED,
+        leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+    )
+    state.mark_addressed(
+        f"{_ci_repair_conflict_rollback_pending_key_prefix()}{_HEAD}",
+        json.dumps(
+            {
+                "conflict_reason": pending.conflict_reason,
+                "restore_ref": pending.restore_ref,
+                "published_remote_head": pending.published_remote_head,
+                "operation_start_last_push_sha": pending.operation_start_last_push_sha,
+                "leftover_message": pending.leftover_message,
+                "cause": pending.cause,
+            },
+            separators=(",", ":"),
+        ),
+    )
+    found = ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=())
+    assert found is not None
+    assert found.published_remote_head == _PUBLISHED
+    green = PRStatus(
+        number=1260,
+        head_sha=_PUBLISHED,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        ci_failures=(),
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    action = decide(green, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+
+
+@pytest.mark.unit
+def test_legacy_digest_pending_key_still_resolves_without_matching_failures() -> None:
+    """In-flight parks written under head:digest must resolve after the key change."""
+    import hashlib
+    import json
+
+    from awf.runtime.monitor_state_keys import (
+        _ci_repair_conflict_rollback_pending_key_prefix,
+    )
+
+    state = MonitorState()
+    pending = _pending(
+        cause="hosted_remote_rollback_failed",
+        published_remote_head=_PUBLISHED,
+        leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+    )
+    signature = json.dumps(
+        sorted((f.run_id or "", f.name, f.conclusion) for f in _FAILURES),
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    legacy_key = f"{_ci_repair_conflict_rollback_pending_key_prefix()}{_PUBLISHED}:{digest}"
+    state.mark_addressed(
+        legacy_key,
+        json.dumps(
+            {
+                "conflict_reason": pending.conflict_reason,
+                "restore_ref": pending.restore_ref,
+                "published_remote_head": pending.published_remote_head,
+                "operation_start_last_push_sha": pending.operation_start_last_push_sha,
+                "leftover_message": pending.leftover_message,
+                "cause": pending.cause,
+            },
+            separators=(",", ":"),
+        ),
+    )
+    drifted_failures = (
+        CheckFailure(
+            name="other",
+            conclusion="FAILURE",
+            log_excerpt="other failure",
+            run_id="r-other",
+        ),
+    )
+    found = ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=drifted_failures,
+    )
+    assert found is not None
+    assert found.published_remote_head == _PUBLISHED
+    clear_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=drifted_failures,
+    )
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=drifted_failures)
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_hosted_pending_stays_reachable_when_live_ci_signature_drifts() -> None:
+    """Unfinished hosted rollback must not depend on the original CI signature.
+
+    After a failed rewind the remote stays on the published repair SHA. The next
+    poll observes that head, but CI on the new commit often has a different
+    failing-check signature (new run ids, empty while checks restart, or even
+    green). Lookup keyed by the original failures misses the park, skips retry,
+    and can ReportCiFailure / Merge the unrewound conflict (PRRT_kwDOSJAM6s64yqJ9).
+    """
+    state = MonitorState(last_push_sha=_PUBLISHED)
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=_FAILURES,
+        pending=_pending(
+            cause="hosted_remote_rollback_failed",
+            published_remote_head=_PUBLISHED,
+            leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+        ),
+    )
+    drifted_failures = (
+        CheckFailure(
+            name="review-bot",
+            conclusion="FAILURE",
+            log_excerpt="Finding: restore the removed experimental block",
+            run_id="r-bot-on-published-head",
+        ),
+    )
+    drifted = PRStatus(
+        number=1260,
+        head_sha=_PUBLISHED,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.FAILURE,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        ci_failures=drifted_failures,
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    pending = ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=drifted_failures,
+    )
+    assert pending is not None
+    assert pending.published_remote_head == _PUBLISHED
+    action = decide(drifted, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+    assert not isinstance(
+        report_ci_failure_or_operator_conflict(drifted, state),
+        ReportCiFailure,
+    )
+
+    green = PRStatus(
+        number=1260,
+        head_sha=_PUBLISHED,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        ci_failures=(),
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    green_action = decide(green, state, MonitorConfig(auto_merge=True))
+    assert isinstance(green_action, NotifyHuman)
+    assert green_action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+
+
+@pytest.mark.unit
+async def test_retry_finds_hosted_pending_after_ci_signature_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MonitorState(last_push_sha=_PUBLISHED)
+    state.hosted_terminal_head_advanced = True
+    mark_ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=_PUBLISHED,
+        failures=_FAILURES,
+        pending=_pending(
+            cause="hosted_remote_rollback_failed",
+            published_remote_head=_PUBLISHED,
+            leftover=f"remote head {_PUBLISHED} not rewound to {_HEAD}",
+        ),
+    )
+    drifted_failures = (
+        CheckFailure(
+            name="lint",
+            conclusion="FAILURE",
+            log_excerpt="lint failed on published repair",
+            run_id="r-lint-published",
+        ),
+    )
+
+    async def _ok_local(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    async def _ok_remote(
+        _self: object,
+        **_kwargs: object,
+    ) -> ci_ops._CiFixResidueRollbackResult:
+        state.hosted_terminal_head_advanced = False
+        state.last_push_sha = _HEAD
+        return ci_ops._CiFixResidueRollbackResult(ok=True)
+
+    monkeypatch.setattr(
+        ci_ops,
+        "_rollback_ci_fix_residue_before_provider_recovery",
+        _ok_local,
+    )
+    monkeypatch.setattr(
+        ci_ops,
+        "_rewind_hosted_ci_repair_conflict_remote",
+        _ok_remote,
+    )
+    drifted = PRStatus(
+        number=1260,
+        head_sha=_PUBLISHED,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.FAILURE,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        ci_failures=drifted_failures,
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    action = await retry_ci_repair_conflict_rollback_pending(
+        SimpleNamespace(),
+        workspace_id="ws_ci",
+        worktree_path=tmp_path / "ws_ci",
+        state=state,
+        status=drifted,
+    )
+    assert action is not None
+    assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=drifted_failures)
+        is None
+    )
+
+
+@pytest.mark.unit
 async def test_retry_hosted_remote_promotes_after_rewind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
