@@ -41,6 +41,13 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    CI_REPAIR_OPERATOR_DECISION_CONFLICT,
+    load_applied_operator_directives,
+    log_ci_repair_applied_operator_directives_audit,
+    mark_ci_repair_operator_decision_conflict,
+    needs_human_verdict_reason,
+)
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -539,6 +546,7 @@ async def _run_ci_fix(
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
     task_tag = await self._resolve_task_tag(workspace_id)
+    applied_directives = load_applied_operator_directives(state) if state is not None else ()
     prompt = fix_ci_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -546,8 +554,12 @@ async def _run_ci_fix(
         workspace_runtime_context=self._workspace_runtime_context,
         owned_paths=await _owned_paths_for_prompt(self, workspace_id),
         task_tag=task_tag,
+        applied_operator_directives=applied_directives,
     )
+    if applied_directives:
+        log_ci_repair_applied_operator_directives_audit(applied_directives)
     agent_run_err = None
+    agent_result = None
     post_agent_err: Exception | None = None
     command_evidence: list[str] = []
     if not await repair_agent_runtime_ownership(
@@ -619,7 +631,7 @@ async def _run_ci_fix(
         return moot if moot is not None else failure
 
     try:
-        await self._run_monitor_agent_with_service_recovery(
+        agent_result = await self._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
@@ -705,6 +717,44 @@ async def _run_ci_fix(
                     )
                 )
         post_agent_err = exc
+
+    # #1256: when applied operator directives were in the prompt and the agent
+    # ends NEEDS_HUMAN, push nothing — roll back any residue and park for a
+    # human under CI_REPAIR_OPERATOR_DECISION_CONFLICT. With no directives the
+    # CI repair path ignores verdict text exactly as before.
+    if (
+        agent_run_err is None
+        and post_agent_err is None
+        and applied_directives
+        and agent_result is not None
+        and state is not None
+    ):
+        conflict_reason = needs_human_verdict_reason(agent_result.stdout or "")
+        if conflict_reason is not None:
+            conflict_head = status.head_sha if status is not None else (operation_start_head or "")
+            await _rollback_ci_fix_residue_before_provider_recovery(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                restore_ref=operation_start_head,
+            )
+            if conflict_head:
+                mark_ci_repair_operator_decision_conflict(
+                    state,
+                    head_sha=conflict_head,
+                    failures=failures,
+                    reason=conflict_reason,
+                )
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=conflict_reason,
+                    reason_code=CI_REPAIR_OPERATOR_DECISION_CONFLICT,
+                    parked_needs_human=True,
+                )
+            )
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),

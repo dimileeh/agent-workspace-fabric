@@ -38,6 +38,7 @@ def _finalize_processed_operator_hint(
     *,
     hint: OperatorHint | None = None,
     acted_feedback_text: str | None = None,
+    head_sha: str | None = None,
 ) -> None:
     """Mark the operator hint processed and drop the protected-block preserved-head
     marker.
@@ -49,7 +50,16 @@ def _finalize_processed_operator_hint(
     directive, no grant) whose old preserved commit is still on the remote take the
     restart-recovery shortcut and skip the CLI — silently ignoring the operator's
     new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
+
+    When the applied hint carried a non-empty ``directive``, also append an
+    applied-operator-directive record (#1256) so a later CI-failure repair can
+    see it. ``head_sha`` is the PR/worktree head after the cycle; callers that
+    already stamped ``state.last_push_sha`` may omit it.
     """
+    from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+        record_applied_operator_directive_from_hint,
+    )
+
     pending_hint = getattr(state, "pending_operator_hint", None)
     active_hint = pending_hint or hint
     if active_hint is not None:
@@ -61,6 +71,13 @@ def _finalize_processed_operator_hint(
     state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
     if hasattr(state, "pending_operator_hint") and pending_hint is None and active_hint is not None:
         state.pending_operator_hint = active_hint
+    if active_hint is not None:
+        record_head = head_sha if head_sha is not None else getattr(state, "last_push_sha", None)
+        record_applied_operator_directive_from_hint(
+            state,
+            hint=active_hint,
+            head_sha=record_head,
+        )
     mark_operator_hint_processed(state)
 
 

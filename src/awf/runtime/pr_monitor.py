@@ -944,7 +944,11 @@ def _ci_failure_action(
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     candidate_failures = _ci_candidate_failures(status)
     if _non_candidate_carries_fixable_code_evidence(status):
-        return ReportCiFailure(failures=status.ci_failures)
+        from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+            report_ci_failure_or_operator_conflict,
+        )
+
+        return report_ci_failure_or_operator_conflict(status, state)
     if _should_rerun_transient_ci(status, state, config):
         return RerunTransientCI(failures=candidate_failures)
     if candidate_failures and all(_looks_like_transient_ci_failure(f) for f in candidate_failures):
@@ -981,7 +985,11 @@ def _ci_failure_action(
         _failure_has_actionable_ci_evidence(failure) for failure in status.ci_failures
     ):
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
-    return ReportCiFailure(failures=status.ci_failures)
+    from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+        report_ci_failure_or_operator_conflict,
+    )
+
+    return report_ci_failure_or_operator_conflict(status, state)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:

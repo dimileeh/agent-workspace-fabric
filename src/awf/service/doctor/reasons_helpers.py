@@ -207,6 +207,26 @@ def get_salvage_and_monitor_reasons(
             "awf workspace remonitor <workspace_id>",
             reason_catalog_link("MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"),
         ),
+        "CI_REPAIR_OPERATOR_DECISION_CONFLICT": reason_text_cls(
+            (
+                "A CI-failure repair found that fixing a failing check would undo an "
+                "operator decision already applied on this PR, so AWF pushed nothing "
+                "and parked for a human."
+            ),
+            (
+                "Read the agent's NEEDS_HUMAN sentence on the awaiting-human attention. "
+                "Either guide the monitor with a new directive (which clears the park), "
+                "change the failing checks or PR head, or resolve the conflict manually "
+                "and remonitor."
+            ),
+            (
+                "The CI repair prompt included applied operator directives (#1256); the "
+                "agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check "
+                "could only pass by contradicting one of those decisions."
+            ),
+            "awf workspace guide <workspace_id> --hint '<clarifying directive>'",
+            reason_catalog_link("CI_REPAIR_OPERATOR_DECISION_CONFLICT"),
+        ),
     }
 
 

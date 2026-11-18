@@ -618,7 +618,12 @@ async def apply_park_disposition(
     # No agent acted on the directive, so nothing else it names was answered: an
     # empty acted text keeps the answered-feedback sweep from dismissing a parked
     # comment the guide only mentions.
-    _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text="")
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text="",
+        head_sha=status.head_sha,
+    )
     if all_resolved:
         return PreservedAttemptOutcome(
             outcome="operator_hint_park_disposition_applied",

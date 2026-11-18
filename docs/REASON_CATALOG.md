@@ -228,6 +228,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#callback_target_validation_timeout](#callback_target_validation_timeout)
 
+### CI_REPAIR_OPERATOR_DECISION_CONFLICT
+**Problem:** A CI-failure repair found that fixing a failing check would undo an operator decision already applied on this PR, so AWF pushed nothing and parked for a human.
+**Likely Cause:** The CI repair prompt included applied operator directives (#1256); the agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check could only pass by contradicting one of those decisions.
+**Operator Fix:** Read the agent's NEEDS_HUMAN sentence on the awaiting-human attention. Either guide the monitor with a new directive (which clears the park), change the failing checks or PR head, or resolve the conflict manually and remonitor.
+**Related Command:** `awf workspace guide <workspace_id> --hint '<clarifying directive>'`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_repair_operator_decision_conflict](#ci_repair_operator_decision_conflict)
+
 ### CI_TRANSIENT_RERUN_FAILED
 **Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
 **Likely Cause:** GitHub rejected the rerun request, the workflow run no longer exists, or the token lacks permission to rerun workflow jobs.
