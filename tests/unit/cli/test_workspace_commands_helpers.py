@@ -907,6 +907,18 @@ def test_guide_body_includes_blocked_resume_fields_when_set(
     assert body["operator"] == "op@example.com"
 
 
+@pytest.mark.unit
+def test_guide_body_includes_require_claim_active_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--require-claim-active`` is forwarded only when true (omit-when-false)."""
+    omitted = _guide_body(monkeypatch)
+    assert "require_claim_active" not in omitted
+
+    body = _guide_body(monkeypatch, require_claim_active=True)
+    assert body["require_claim_active"] is True
+
+
 def test_workspace_create_forwards_separate_provider_and_experimental_flag(monkeypatch):
     captured = {}
 

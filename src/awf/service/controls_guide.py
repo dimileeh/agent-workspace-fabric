@@ -46,6 +46,7 @@ from awf.runtime.operator_hints import (
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
     _GUIDE_ELIGIBLE_STATUSES,
+    WorkspaceGuideClaimNotActiveError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -68,6 +69,7 @@ from awf.service.controls_helpers import (
     _workspace_pr_operation_context,
 )
 from awf.service.controls_provider_budget import _ProviderBudgetControlMixin
+from awf.service.workspaces_response import workspace_claim_active
 
 _OPERATOR_GUIDE_REASON_CODE = "OPERATOR_GUIDE"
 
@@ -80,6 +82,7 @@ async def guide_workspace(
     reason: str | None = None,
     grants: list[str] | None = None,
     approve_policy_downgrade: bool = False,
+    require_claim_active: bool = False,
     operator: str | None = None,
     idempotency_key: str | None = None,
     expected_version: int | None = None,
@@ -131,6 +134,7 @@ async def guide_workspace(
             "directive": directive_text,
             "grants": grant_inputs,
             "approve_policy_downgrade": approve_policy_downgrade,
+            "require_claim_active": require_claim_active,
             # Grant-bearing guides persist the operator on each
             # ``OperatorGrantAuditRecord`` (see ``_guide_blocked_workspace``), so a
             # same-key retry that keeps the directive/grants/reason but swaps the
@@ -175,6 +179,17 @@ async def guide_workspace(
             operation=prepared.replay,
             message="workspace operator guidance recorded",
         )
+
+    if require_claim_active:
+        # Compare-and-act: after exact replay is ruled out and before any
+        # mutation, re-read under the same FOR UPDATE lock and accept only a
+        # live monitoring_pr claim (no grants / no failed-reset / no blocked-arm).
+        row = await self._require_workspace_for_update(repo, workspace_id)
+        now = utcnow()
+        claim_active = workspace_claim_active(row, now=now)
+        if grant_inputs or row.status != WorkspaceStatus.monitoring_pr.value or not claim_active:
+            raise WorkspaceGuideClaimNotActiveError(row, claim_active=claim_active)
+        workspace = row
 
     current = WorkspaceStatus(workspace.status)
     if current not in _GUIDE_ELIGIBLE_STATUSES:

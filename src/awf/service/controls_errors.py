@@ -168,6 +168,18 @@ class WorkspaceGuideStateError(WorkspaceControlError):
         )
 
 
+class WorkspaceGuideClaimNotActiveError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace, *, claim_active: bool) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE",
+            message=(
+                "Workspace guide with require_claim_active requires monitoring_pr "
+                "with a live execution or monitor claim and no grants."
+            ),
+            detail={"status": workspace.status, "claim_active": claim_active},
+        )
+
+
 class WorkspaceGuideGrantNotAllowedError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -294,6 +306,7 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceControlError",
+    "WorkspaceGuideClaimNotActiveError",
     "WorkspaceGuideEmptyDirectiveError",
     "WorkspaceGuideGrantNotAllowedError",
     "WorkspaceGuideGrantReasonRequiredError",
