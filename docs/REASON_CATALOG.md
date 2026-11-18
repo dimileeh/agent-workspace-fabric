@@ -1643,8 +1643,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_reply_failed](#thread_disposition_reply_failed)
 
 ### THREAD_DISPOSITION_UNREAD_FEEDBACK
-**Problem:** AWF did not resolve a review thread because a comment by its own forge identity, without an AWF disposition marker, preceded its disposition reply.
-**Likely Cause:** AWF's identity can be the operator's own account. The monitor never reads that identity's comments as feedback, so the triage behind the reply did not see the comment; resolving would have closed it unread. The reply was retired.
+**Problem:** AWF did not resolve a review thread because a comment by its own forge identity, without an AWF disposition marker, preceded its disposition reply and was not present when triage recorded the disposition.
+**Likely Cause:** AWF's identity can be the operator's own account. Unmarked identity comments present at triage are listed and recorded in the disposition's read set; an unmarked one that arrived after triage was not read, so resolving would have closed it unread. The reply was retired.
 **Operator Fix:** Read that comment in the thread, then guide the workspace naming the thread id with what it asks; do not resolve the thread by hand. The pushed commits are kept.
 **Related Command:** `awf workspace guide <workspace_id> --directive '<thread id>: ...'`
 **Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_unread_feedback](#thread_disposition_unread_feedback)
