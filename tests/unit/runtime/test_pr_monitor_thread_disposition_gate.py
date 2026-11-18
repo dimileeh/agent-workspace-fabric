@@ -1103,6 +1103,64 @@ async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_list
     assert await _audit_events(factory, workspace_id) == []
 
 
+async def test_gate_does_not_treat_listed_operator_comment_as_feedback_changed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Listed identity comments must not diverge from audit external bodies (#1272)."""
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread(
+                    "PRRT_test_ok",
+                    bodies=(_marker("fixed", "PRRT_test_ok"),),
+                ),
+                _thread(
+                    _FRESH,
+                    resolved=False,
+                    external=("please fix this",),
+                ),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    status = replace(
+        _green_status(),
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id=_FRESH,
+                path="a.py",
+                line=1,
+                body_excerpt="please fix this",
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="101",
+                        body="please fix this",
+                        author="reviewer",
+                        viewer_did_author=False,
+                    ),
+                    ReviewThreadComment(
+                        comment_id="102",
+                        body="operator follow-up",
+                        author=_VIEWER,
+                        viewer_did_author=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
+
+
 async def test_cert_waits_for_a_poll_that_lists_feedback_opened_after_its_snapshot(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

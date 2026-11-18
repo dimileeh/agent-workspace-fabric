@@ -209,9 +209,13 @@ async def _verify_audit(
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     # The outside comments ``decide()`` saw per listed thread (each listed copy).
+    # Identity comments listed for triage (#1272) are excluded: they are never in
+    # ``external_comment_bodies``, and including them would re-poll forever.
     decided: dict[str, set[tuple[str, ...]]] = {}
     for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
-        decided.setdefault(listed.thread_id, set()).add(tuple(c.body for c in listed.comments))
+        decided.setdefault(listed.thread_id, set()).add(
+            tuple(c.body for c in listed.comments if not c.viewer_did_author)
+        )
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # Each AWF-resolved thread's conversation, as a legacy exemption would bind it.
     digests: dict[str, str] = {}
