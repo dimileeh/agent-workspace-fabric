@@ -322,11 +322,22 @@ async def test_hosted_failed_rewind_parks_under_published_live_head(
 
     assert result is not None
     assert result.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
-    # Pre-repair snapshot must not be the only park key.
-    assert ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=_FAILURES) is None
+    from awf.runtime.monitor_state_keys import (
+        _ci_repair_conflict_rollback_pending_key_prefix,
+    )
+
+    # Park key must be the live published head, not the pre-repair snapshot alone.
+    pending_keys = [
+        key
+        for key in state.threads_addressed_ids
+        if key.startswith(_ci_repair_conflict_rollback_pending_key_prefix())
+    ]
+    assert pending_keys == [f"{_ci_repair_conflict_rollback_pending_key_prefix()}{_PUBLISHED}"]
     pending = ci_repair_conflict_rollback_pending(state, head_sha=_PUBLISHED, failures=_FAILURES)
     assert pending is not None
     assert pending.published_remote_head == _PUBLISHED
+    # Lookup by restore_ref must still find the unfinished park (PRRT_kwDOSJAM6s64yqJ9).
+    assert ci_repair_conflict_rollback_pending(state, head_sha=_HEAD, failures=()) == pending
     live_status = _status(head_sha=_PUBLISHED)
     action = decide(live_status, state, MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
@@ -335,6 +346,10 @@ async def test_hosted_failed_rewind_parks_under_published_live_head(
         report_ci_failure_or_operator_conflict(live_status, state),
         ReportCiFailure,
     )
+    # Stale pre-repair status must also gate until rewind succeeds.
+    stale_action = decide(_status(head_sha=_HEAD), state, MonitorConfig(auto_merge=True))
+    assert isinstance(stale_action, NotifyHuman)
+    assert stale_action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING
 
 
 @pytest.mark.unit

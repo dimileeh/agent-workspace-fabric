@@ -598,15 +598,17 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_par
     )
     # Pending park is keyed by the unre wound published live head, not the
     # pre-repair status snapshot from the repair cycle (PRRT_kwDOSJAM6s64yp29).
-    assert (
-        ci_repair_conflict_rollback_pending(state, head_sha=status.head_sha, failures=_FAILURES)
-        is None
-    )
+    # Lookup by restore_ref / pre-repair head must still resolve it so retries
+    # and decide() cannot miss while the forge status lags (PRRT_kwDOSJAM6s64yqJ9).
     pending = ci_repair_conflict_rollback_pending(
         state, head_sha=_PUBLISHED_HOSTED_HEAD, failures=_FAILURES
     )
     assert pending is not None
     assert pending.published_remote_head == _PUBLISHED_HOSTED_HEAD
+    assert (
+        ci_repair_conflict_rollback_pending(state, head_sha=status.head_sha, failures=_FAILURES)
+        == pending
+    )
     assert result.details is not None
     assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
     assert state.hosted_terminal_head_advanced is True

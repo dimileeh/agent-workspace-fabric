@@ -208,7 +208,12 @@ def ci_repair_conflict_rollback_pending(
     head_sha: str,
     failures: tuple[CheckFailure, ...] = (),
 ) -> CiRepairConflictRollbackPending | None:
-    """Return the pending undo for this head, ignoring live CI signature drift."""
+    """Return the pending undo for this head, ignoring live CI signature drift.
+
+    Hosted parks are keyed by the unre wound published SHA, but a stale poll can
+    still observe the pre-repair ``restore_ref``. Match either SHA so retries and
+    ``decide()`` cannot miss an unfinished undo (PRRT_kwDOSJAM6s64yqJ9).
+    """
     for key in _pending_keys_for_head(state, head_sha):
         pending = _parse_pending_payload(state.threads_addressed_ids.get(key))
         if pending is not None:
@@ -220,7 +225,8 @@ def ci_repair_conflict_rollback_pending(
         if legacy is not None:
             return legacy
     # Hosted parks may be keyed by published head while a stale snapshot still
-    # carries the pre-repair SHA; match via payload.published_remote_head too.
+    # carries the pre-repair SHA (or the reverse for in-flight pre-yp29 parks).
+    # Match via payload.published_remote_head or payload.restore_ref.
     prefix = _ci_repair_conflict_rollback_pending_key_prefix()
     for key, raw in list(state.threads_addressed_ids.items()):
         if not key.startswith(prefix):
@@ -229,7 +235,8 @@ def ci_repair_conflict_rollback_pending(
         if pending is None:
             continue
         published = (pending.published_remote_head or "").strip()
-        if published and published == head_sha:
+        restore_ref = (pending.restore_ref or "").strip()
+        if head_sha and head_sha in {published, restore_ref}:
             return pending
     return None
 
