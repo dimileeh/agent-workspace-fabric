@@ -63,6 +63,62 @@ def test_remonitor_without_directive_does_not_record() -> None:
 
 
 @pytest.mark.unit
+def test_ruling_only_empty_acted_text_does_not_record_unapplied_instructions() -> None:
+    """Ruling-only paths pass empty acted text; do not store the rest of the guide.
+
+    A guide can mix an ``AWF-RULING`` line with other instructions. Park /
+    preserved-attempt disposition skips the agent and passes
+    ``acted_feedback_text=""`` because only the ruling ran. Recording the full
+    ``hint.directive`` would tell later CI repair that unexecuted instructions
+    were already applied and outrank its checks (PRRT_kwDOSJAM6s64xWll).
+    """
+    ruling = "AWF-RULING PRRT_kwDOSJAM6s64xWll FALSE_POSITIVE"
+    extra = "Also delete the coverage workflow and skip the lint gate."
+    hint = OperatorHint(
+        reason="operator guide",
+        directive=f"{ruling}\n{extra}",
+        operation_id="op-ruling-only",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text="",
+        head_sha="b34a78bf86abcdef",
+    )
+
+    assert load_applied_operator_directives(state) == ()
+
+
+@pytest.mark.unit
+def test_ruling_only_records_applied_ruling_excerpt_when_provided() -> None:
+    """When finalize is given only the applied ruling text, store that — not the rest."""
+    ruling = "AWF-RULING PRRT_kwDOSJAM6s64xWll FALSE_POSITIVE"
+    extra = "Also delete the coverage workflow and skip the lint gate."
+    hint = OperatorHint(
+        reason="operator guide",
+        directive=f"{ruling}\n{extra}",
+        operation_id="op-ruling-excerpt",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text=ruling,
+        head_sha="b34a78bf86abcdef",
+    )
+
+    records = load_applied_operator_directives(state)
+    assert len(records) == 1
+    assert records[0].directive == ruling
+    assert extra not in records[0].directive
+
+
+@pytest.mark.unit
 def test_needs_human_hint_does_not_record() -> None:
     hint = OperatorHint(
         reason="operator guide",

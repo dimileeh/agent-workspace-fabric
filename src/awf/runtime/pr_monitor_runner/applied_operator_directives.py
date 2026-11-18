@@ -101,9 +101,20 @@ def record_applied_operator_directive_from_hint(
     *,
     hint: Any,
     head_sha: str | None,
+    applied_text: str | None = None,
 ) -> None:
-    """Record a processed hint's directive when non-empty; otherwise no-op."""
-    directive = (getattr(hint, "directive", None) or "").strip()
+    """Record applied directive text when non-empty; otherwise no-op.
+
+    ``applied_text`` is what this cycle actually applied. When omitted
+    (``None``), falls back to ``hint.directive``. Callers that applied only a
+    ruling and passed empty acted feedback must pass ``applied_text=""`` (or
+    the ruling-only excerpt) so unexecuted guide instructions are not stored
+    as applied decisions for later CI repair (PRRT_kwDOSJAM6s64xWll).
+    """
+    if applied_text is not None:
+        directive = applied_text.strip()
+    else:
+        directive = (getattr(hint, "directive", None) or "").strip()
     if not directive:
         return
     operation_id = getattr(hint, "operation_id", None) or ""

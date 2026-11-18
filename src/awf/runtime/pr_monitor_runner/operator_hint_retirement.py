@@ -51,10 +51,16 @@ def _finalize_processed_operator_hint(
     restart-recovery shortcut and skip the CLI — silently ignoring the operator's
     new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
 
-    When the applied hint carried a non-empty ``directive``, also append an
+    When the cycle actually applied non-empty text, also append an
     applied-operator-directive record (#1256) so a later CI-failure repair can
-    see it. ``head_sha`` is the PR/worktree head after the cycle; callers that
-    already stamped ``state.last_push_sha`` may omit it.
+    see it. Recording keys off ``acted_feedback_text`` when that argument is
+    provided (including empty): ruling-only paths pass ``""`` because the rest
+    of the guide was not executed, and must not store unapplied instructions as
+    applied decisions (PRRT_kwDOSJAM6s64xWll). Pass the applied ruling excerpt
+    alone when that is what ran. When ``acted_feedback_text`` is omitted
+    (``None``), falls back to ``hint.directive``. ``head_sha`` is the PR/worktree
+    head after the cycle; callers that already stamped ``state.last_push_sha``
+    may omit it.
     """
     from awf.runtime.pr_monitor_runner.applied_operator_directives import (
         record_applied_operator_directive_from_hint,
@@ -77,6 +83,7 @@ def _finalize_processed_operator_hint(
             state,
             hint=active_hint,
             head_sha=record_head,
+            applied_text=acted_feedback_text,
         )
     mark_operator_hint_processed(state)
 
