@@ -122,10 +122,19 @@ async def test_controls_share_workspace_before_node_lock_order(
             await wait_until_blocked(factory, pids)
             release_first.set()
             responses = await asyncio.gather(first, second)
+        # Pair-less hosted guide against failed/blocked must refuse with
+        # HOSTED_REAUTHORIZATION_REQUIRED (409) after the same lock wait.
+        # same_key still conflicts at prepare (also 409) before that guard.
+        pairless_guide = second_action == "guide" and not fresh_material
+        expect_second = 409 if same_key or pairless_guide else 200
         assert [response.status_code for response in responses] == [
             200,
-            409 if same_key else 200,
+            expect_second,
         ], [response.text for response in responses]
+        if pairless_guide and not same_key:
+            assert responses[1].json()["error_code"] == "HOSTED_REAUTHORIZATION_REQUIRED", (
+                responses[1].text
+            )
     finally:
         release_first.set()
         pending = [task for task in (first, second) if task is not None]
