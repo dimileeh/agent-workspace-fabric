@@ -1,4 +1,4 @@
-"""Pair-less hosted guide/remonitor guards under the control_authority row lock."""
+"""Pair-less hosted guide/remonitor guards; eligibility runs after exact replay."""
 
 from __future__ import annotations
 
@@ -114,14 +114,13 @@ async def test_pairless_guide_accepts_monitoring_pr_with_live_claim_and_running_
 
 @pytest.mark.unit
 @pytest.mark.parametrize("status", ["blocked", "failed"])
-async def test_pairless_guide_refuses_blocked_and_failed_without_mutation(
-    monkeypatch: pytest.MonkeyPatch, status: str
-) -> None:
+async def test_pairless_guide_refuses_blocked_and_failed_without_mutation(status: str) -> None:
     row = _hosted_row(status=status)
     before = _snapshot(row)
+    session = _session(row)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_REAUTHORIZATION_REQUIRED") as denied:
-        await _pairless(monkeypatch, row, control="guide")
+        await operations.enforce_pairless_control_guards(session, row, control="guide")
 
     assert denied.value.status == 409
     assert _snapshot(row) == before
@@ -159,23 +158,7 @@ async def test_pairless_guide_non_guidable_status_reaches_workspace_state_not_gu
         idempotency_key="guide-nonguidable",
     )
 
-    async def _authority_with_pairless_guard(
-        _session: object,
-        _workspace_id: str,
-        _authorization: object,
-        **kwargs: object,
-    ) -> None:
-        await operations.enforce_pairless_control_guards(
-            session,
-            row,  # type: ignore[arg-type]
-            control="guide",
-            grants=kwargs.get("grants"),  # type: ignore[arg-type]
-        )
-
-    monkeypatch.setattr(
-        "awf.service.controls_guide.control_authority",
-        _authority_with_pairless_guard,
-    )
+    monkeypatch.setattr("awf.service.controls_guide.control_authority", AsyncMock())
     monkeypatch.setattr(
         "awf.service.controls_guide.WorkspaceRepository",
         lambda _s: SimpleNamespace(),
@@ -186,6 +169,7 @@ async def test_pairless_guide_non_guidable_status_reaches_workspace_state_not_gu
     )
     monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
     monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("awf.service.controls_guide.authority_for", lambda _s: object())
 
     with pytest.raises(WorkspaceGuideStateError) as denied:
         await service.guide_workspace(
@@ -203,27 +187,28 @@ async def test_pairless_guide_non_guidable_status_reaches_workspace_state_not_gu
 
 @pytest.mark.unit
 @pytest.mark.parametrize("status", ["monitoring_pr", "blocked", "failed"])
-async def test_pairless_guide_refuses_grants_in_every_state_without_mutation(
-    monkeypatch: pytest.MonkeyPatch, status: str
-) -> None:
+async def test_pairless_guide_refuses_grants_in_every_state_without_mutation(status: str) -> None:
     row = _hosted_row(status=status)
     before = _snapshot(row)
+    session = _session(row)
 
     with pytest.raises(MaterialDeniedError, match="HOSTED_REAUTHORIZATION_REQUIRED") as denied:
-        await _pairless(monkeypatch, row, control="guide", grants=["grant-a"])
+        await operations.enforce_pairless_control_guards(
+            session, row, control="guide", grants=["grant-a"]
+        )
 
     assert denied.value.status == 409
     assert _snapshot(row) == before
 
 
 @pytest.mark.unit
-async def test_pairless_guide_refuses_grants_with_default_allow_grants_false(
+async def test_pairless_guide_skips_grant_capability_so_caller_can_refuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ordinary grant-bearing pair-less guides must get 409, not the grant-capability 403.
+    """Pair-less guide must not 403 on allow_grants=False; eligibility refuses later.
 
-    allow_grants defaults to False; without skipping that early check, callers never
-    reach the pair-less HOSTED_REAUTHORIZATION_REQUIRED refusal.
+    allow_grants defaults to False; skipping that early check lets guide_workspace
+    return HOSTED_REAUTHORIZATION_REQUIRED after exact replay is ruled out.
     """
     row = _hosted_row(status="monitoring_pr")
     before = _snapshot(row)
@@ -233,17 +218,16 @@ async def test_pairless_guide_refuses_grants_with_default_allow_grants_false(
     monkeypatch.setattr(operations, "lock_materials", AsyncMock())
     authorization = HostedControlAuthorization(namespace="tenant", actor="caller")
 
-    with pytest.raises(MaterialDeniedError, match="HOSTED_REAUTHORIZATION_REQUIRED") as denied:
-        await operations.control_authority(
-            session,
-            row.id,
-            authorization,
-            grants=["grant-a"],
-            operator="caller",
-            control="guide",
-        )
+    # Auth alone must succeed so prepare/exact-replay can run before eligibility.
+    await operations.control_authority(
+        session,
+        row.id,
+        authorization,
+        grants=["grant-a"],
+        operator="caller",
+        control="guide",
+    )
 
-    assert denied.value.status == 409
     assert _snapshot(row) == before
 
 
@@ -461,6 +445,140 @@ async def test_control_authority_defers_remonitor_quiescence_to_caller(
     await _pairless(monkeypatch, row, control="remonitor")
 
     assert _snapshot(row) == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["blocked", "failed"])
+async def test_control_authority_defers_guide_eligibility_to_caller(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Auth stays in control_authority; guide eligibility runs after exact replay."""
+    row = _hosted_row(status=status)
+    before = _snapshot(row)
+
+    # blocked/failed would fail the guide guard, but control_authority must not
+    # raise here — guide_workspace applies the guard only after prepare.
+    await _pairless(monkeypatch, row, control="guide")
+
+    assert _snapshot(row) == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["blocked", "failed"])
+async def test_guide_exact_replay_skips_eligibility_after_status_transition(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Same-key guide retry must return the stored op even if status left monitoring_pr."""
+    from awf.service.controls import WorkspaceControlService
+    from awf.service.controls_types import _PreparedOperation, _PreparedOperationKind
+
+    row = _hosted_row(status=status)
+    row.pr_url = "https://github.com/example/repo/pull/1"
+    row.pr_number = 1
+    row.monitor_last_commit_sha = None
+    row.base_commit = None
+    row.version = 1
+    stored_op = SimpleNamespace(
+        id="op_guide_done",
+        workspace_id=row.id,
+        type="guide",
+        status="succeeded",
+        payload={},
+        result=None,
+    )
+    session = SimpleNamespace(refresh=AsyncMock())
+    service = WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=AsyncMock(),
+        cleaner_factory=lambda *_a, **_k: AsyncMock(),
+    )
+    prepared = _PreparedOperation(
+        workspace=row,  # type: ignore[arg-type]
+        replay=stored_op,  # type: ignore[arg-type]
+        kind=_PreparedOperationKind.exact_replay,
+        idempotency_key="guide-retry",
+    )
+    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_REAUTHORIZATION_REQUIRED", 409))
+
+    monkeypatch.setattr("awf.service.controls_guide.control_authority", AsyncMock())
+    monkeypatch.setattr(
+        "awf.service.controls_guide.WorkspaceRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "awf.service.controls_guide.OperationRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
+    monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("awf.service.controls_guide.authority_for", lambda _s: object())
+    monkeypatch.setattr("awf.service.controls_guide.enforce_pairless_control_guards", guard)
+
+    response = await service.guide_workspace(
+        row.id,
+        directive="nudge the monitor",
+        idempotency_key="guide-retry",
+        hosted_authorization=_authorization(),
+    )
+
+    assert response.operation_id == "op_guide_done"
+    guard.assert_not_awaited()
+    session.refresh.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["blocked", "failed"])
+async def test_guide_fresh_pairless_applies_eligibility_after_prepare(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Fresh hosted guide still refuses blocked/failed once exact replay is ruled out."""
+    from awf.service.controls import WorkspaceControlService
+    from awf.service.controls_types import _PreparedOperation
+
+    row = _hosted_row(status=status)
+    row.pr_url = "https://github.com/example/repo/pull/1"
+    row.pr_number = 1
+    row.monitor_last_commit_sha = None
+    row.base_commit = None
+    row.version = 1
+    session = SimpleNamespace(refresh=AsyncMock())
+    service = WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=AsyncMock(),
+        cleaner_factory=lambda *_a, **_k: AsyncMock(),
+    )
+    prepared = _PreparedOperation(
+        workspace=row,  # type: ignore[arg-type]
+        idempotency_key="guide-fresh",
+    )
+    guard = AsyncMock(side_effect=MaterialDeniedError("HOSTED_REAUTHORIZATION_REQUIRED", 409))
+
+    monkeypatch.setattr("awf.service.controls_guide.control_authority", AsyncMock())
+    monkeypatch.setattr(
+        "awf.service.controls_guide.WorkspaceRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "awf.service.controls_guide.OperationRepository",
+        lambda _s: SimpleNamespace(),
+    )
+    monkeypatch.setattr(service, "_require_workspace", AsyncMock(return_value=row))
+    monkeypatch.setattr(service, "_prepare_operation", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("awf.service.controls_guide.authority_for", lambda _s: object())
+    monkeypatch.setattr("awf.service.controls_guide.enforce_pairless_control_guards", guard)
+
+    with pytest.raises(MaterialDeniedError, match="HOSTED_REAUTHORIZATION_REQUIRED"):
+        await service.guide_workspace(
+            row.id,
+            directive="nudge the monitor",
+            idempotency_key="guide-fresh",
+            hosted_authorization=_authorization(),
+        )
+
+    session.refresh.assert_awaited_once_with(row, with_for_update=True)
+    guard.assert_awaited_once()
+    assert guard.await_args.args[1] is row
+    assert guard.await_args.kwargs["control"] == "guide"
 
 
 @pytest.mark.unit

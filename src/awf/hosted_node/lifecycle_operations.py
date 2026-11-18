@@ -57,9 +57,10 @@ async def enforce_pairless_control_guards(
     """Refuse unsafe pair-less hosted guide/remonitor under the existing row lock.
 
     Invoked only after ``refresh(..., with_for_update=True)`` on the pair-less
-    path. Guide runs from ``control_authority`` before prepare; remonitor runs
-    from ``remonitor_workspace`` only after exact idempotency replay is ruled
-    out. Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
+    path. Both guide and remonitor run from their control methods only after
+    exact idempotency replay is ruled out, so a same-key retry still returns
+    the stored success when status/claims change after the first response.
+    Pair reauthorization keeps ``require_rebind_quiet`` (claim-by set,
     expiry-agnostic). ``control is None`` skips so low-level binding tests stay
     focused; production guide/remonitor always pass the kind.
     """
@@ -292,9 +293,9 @@ async def control_authority(
         return
     if authorization is None:
         raise MaterialDeniedError("HOSTED_CONTROL_AUTHORIZATION_REQUIRED", 403)
-    # Pair-less guide refuses grants with HOSTED_REAUTHORIZATION_REQUIRED under
-    # the row lock below. Keep grant-capability checks for paired rebinding and
-    # other controls (allow_grants defaults to False).
+    # Pair-less guide refuses grants with HOSTED_REAUTHORIZATION_REQUIRED after
+    # exact replay is ruled out in guide_workspace. Keep grant-capability checks
+    # for paired rebinding and other controls (allow_grants defaults to False).
     pairless_guide = control == "guide" and reauthorization is None
     if (
         grants
@@ -321,12 +322,10 @@ async def control_authority(
     await lock_materials(session, authority, association)
     if check_source(authority, row, authorization.namespace) != association:
         raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
-    # Guide eligibility must run here (before prepare). Remonitor quiescence is
-    # applied by remonitor_workspace only after exact idempotency replay is
-    # ruled out so a successful remonitor retry is not converted into
-    # HOSTED_SOURCE_NOT_QUIESCENT when a worker has already reclaimed the claim.
-    if control == "guide":
-        await enforce_pairless_control_guards(session, row, control=control, grants=grants)
+    # Guide eligibility and remonitor quiescence are applied by the control
+    # methods only after exact idempotency replay is ruled out, so a successful
+    # same-key retry is not rewritten as HOSTED_REAUTHORIZATION_REQUIRED /
+    # HOSTED_SOURCE_NOT_QUIESCENT when status or claims change after success.
 
 
 def admission_environment(
