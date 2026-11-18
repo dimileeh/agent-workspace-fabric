@@ -22,11 +22,11 @@ marker parser the READY_TO_MERGE gate uses. The I/O lives in
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, cast, get_args
 
+from awf.common.forge_thread_audit import THREAD_DISPOSITION_MARKER_RE
 from awf.common.redaction import redact_secrets
 from awf.runtime.feedback_policy import (
     recorded_review_thread_body_matches,
@@ -108,9 +108,6 @@ _VERDICT_CLASS: dict[str, DispositionClass] = {
     "defer": "deferred",
 }
 _MARKER = "<!-- AWF:thread-disposition:v1 class={cls} thread={thread} -->"
-_MARKER_RE = re.compile(
-    r"<!-- AWF:thread-disposition:v1 class=(?P<cls>[a-z_]+) thread=(?P<thread>\S+) -->"
-)
 _LABELS: dict[str, str] = {
     "fixed": "fixed",
     "fixed_branch_evidence": "fixed (branch evidence)",
@@ -567,7 +564,7 @@ def disposition_marker_class(bodies: Sequence[str], *, thread_id: str) -> Dispos
     Callers pass only comments AWF's own identity authored.
     """
     for body in reversed(bodies):
-        for match in _MARKER_RE.finditer(body):
+        for match in THREAD_DISPOSITION_MARKER_RE.finditer(body):
             if match.group("thread") == thread_id and match.group("cls") in DISPOSITION_CLASSES:
                 return cast(DispositionClass, match.group("cls"))
     return None
