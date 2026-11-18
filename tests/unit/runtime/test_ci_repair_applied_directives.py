@@ -498,11 +498,15 @@ async def test_ci_repair_needs_human_conflict_rewinds_hosted_published_head(
 
 
 @pytest.mark.unit
-async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_blocks_park(
+async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_parks_pending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fail closed when hosted remote rewind cannot undo a published conflict head."""
+    """Hosted remote rewind failure parks pending; never fails the workspace."""
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        ci_repair_conflict_rollback_pending,
+    )
+
     commit_calls: list[dict[str, Any]] = []
     push_calls: list[dict[str, Any]] = []
     rollback_calls: list[dict[str, Any]] = []
@@ -579,11 +583,10 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_blo
         state=state,
     )
 
-    assert result.parked_needs_human is False
+    assert result.parked_needs_human is True
     assert result.pushed is False
-    assert result.failed is True
-    assert result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
-    assert "hosted" in (result.stderr or "").lower() or "remote" in (result.stderr or "").lower()
+    assert result.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
+    assert f"remote head {_PUBLISHED_HOSTED_HEAD} not rewound to {_HEAD}" in (result.stderr or "")
     assert commit_calls == []
     assert push_calls == []
     assert rollback_calls
@@ -593,10 +596,18 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_blo
         )
         is None
     )
+    pending = ci_repair_conflict_rollback_pending(
+        state, head_sha=status.head_sha, failures=_FAILURES
+    )
+    assert pending is not None
+    assert pending.published_remote_head == _PUBLISHED_HOSTED_HEAD
     assert result.details is not None
     assert result.details.get("rollback_error", {}).get("cause") == "hosted_remote_rollback_failed"
     assert state.hosted_terminal_head_advanced is True
     assert state.last_push_sha == _PUBLISHED_HOSTED_HEAD
+    action = decide(status, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
 
 
 @pytest.mark.unit
@@ -610,18 +621,17 @@ async def test_ci_repair_needs_human_conflict_hosted_remote_rollback_failure_blo
         ),
     ],
 )
-async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
+async def test_ci_repair_needs_human_conflict_parks_pending_on_worktree_rollback_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     rollback_cause: str,
     rollback_message: str,
 ) -> None:
-    """Rollback failure must block conflict park (PRRT_kwDOSJAM6s64xVNL).
+    """Worktree rollback failure parks pending; does not fail the workspace."""
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        ci_repair_conflict_rollback_pending,
+    )
 
-    Both reset and untracked-cleanup failures return ok=False from
-    ``_rollback_ci_fix_residue_before_provider_recovery``; either must
-    surface before the operator-decision conflict park is installed.
-    """
     commit_calls: list[dict[str, Any]] = []
     push_calls: list[dict[str, Any]] = []
     rollback_calls: list[dict[str, Any]] = []
@@ -658,11 +668,10 @@ async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
         state=state,
     )
 
-    assert result.parked_needs_human is False
+    assert result.parked_needs_human is True
     assert result.pushed is False
-    assert result.failed is True
-    assert result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
-    assert "rollback failed" in (result.stderr or "").lower()
+    assert result.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
+    assert "leftover worktree edits" in (result.stderr or "")
     assert commit_calls == []
     assert push_calls == []
     assert rollback_calls
@@ -672,11 +681,19 @@ async def test_ci_repair_needs_human_conflict_surfaces_rollback_failure(
         )
         is None
     )
+    pending = ci_repair_conflict_rollback_pending(
+        state, head_sha=status.head_sha, failures=_FAILURES
+    )
+    assert pending is not None
+    assert pending.cause == rollback_cause
     assert result.details is not None
     assert result.details.get("phase") == "ci_repair_operator_decision_conflict"
     assert result.details.get("rollback_error", {}).get("cause") == rollback_cause
     assert result.details.get("rollback_error", {}).get("message") == rollback_message
     assert "conflicts with operator decision" in str(result.details.get("conflict_reason"))
+    action = decide(status, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert action.reason_code == "CI_REPAIR_CONFLICT_ROLLBACK_PENDING"
 
 
 @pytest.mark.unit

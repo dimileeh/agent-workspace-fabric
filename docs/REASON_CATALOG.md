@@ -228,6 +228,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#callback_target_validation_timeout](#callback_target_validation_timeout)
 
+### CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+**Problem:** A CI-failure repair reported an operator-decision conflict, but AWF could not finish undoing the repair residue (worktree reset/clean or hosted remote rewind), so the workspace stayed in monitoring_pr and parked for a human while retries continue.
+**Likely Cause:** The conflict undo failed closed into a retryable park (``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``) instead of failing the workspace; each poll retries the same rollback before promoting to ``CI_REPAIR_OPERATOR_DECISION_CONFLICT``.
+**Operator Fix:** Inspect the awaiting-human message for what is left (leftover worktree edits, or a remote head not rewound to the pre-repair SHA). Fix the underlying git/remote problem if retries keep failing, or guide / remonitor after the tree and remote match the pre-repair head. Do not expect AWF to dispatch another CI-repair agent while this park is set.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_repair_conflict_rollback_pending](#ci_repair_conflict_rollback_pending)
+
 ### CI_REPAIR_OPERATOR_DECISION_CONFLICT
 **Problem:** A CI-failure repair found that fixing a failing check would undo an operator decision already applied on this PR, so AWF pushed nothing and parked for a human.
 **Likely Cause:** The CI repair prompt included applied operator directives (#1256); the agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check could only pass by contradicting one of those decisions.

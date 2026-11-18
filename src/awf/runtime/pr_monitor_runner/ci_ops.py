@@ -42,11 +42,11 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
-    CI_REPAIR_OPERATOR_DECISION_CONFLICT,
     load_applied_operator_directives,
     log_ci_repair_applied_operator_directives_audit,
-    mark_ci_repair_operator_decision_conflict,
-    needs_human_verdict_reason,
+)
+from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+    handle_operator_decision_conflict_after_ci_repair,
 )
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
@@ -837,9 +837,11 @@ async def _run_ci_fix(
         post_agent_err = exc
 
     # #1256: when applied operator directives were in the prompt and the agent
-    # ends NEEDS_HUMAN, push nothing — roll back any residue and park for a
-    # human under CI_REPAIR_OPERATOR_DECISION_CONFLICT. With no directives the
-    # CI repair path ignores verdict text exactly as before.
+    # ends NEEDS_HUMAN with an operator-decision conflict, push nothing — roll
+    # back any residue and park. A failed undo parks under
+    # CI_REPAIR_CONFLICT_ROLLBACK_PENDING (never REPAIR_DIRTY_COMMIT_FAILED).
+    # With no directives, or a NEEDS_HUMAN that is not an operator-decision
+    # conflict, the CI repair path ignores verdict text exactly as before.
     #
     # Parse stdout from a successful AgentRunResult *or* from AgentRunError:
     # a valid NEEDS_HUMAN conflict with a nonzero CLI exit still raises
@@ -852,94 +854,19 @@ async def _run_ci_fix(
             conflict_stdout = agent_result.stdout or ""
         elif agent_run_err is not None:
             conflict_stdout = agent_run_err.result.stdout or ""
-        conflict_reason = needs_human_verdict_reason(conflict_stdout)
-        if conflict_reason is not None:
-            conflict_head = status.head_sha if status is not None else (operation_start_head or "")
-            # Detect a hosted published head before local rewind: after reset the
-            # worktree matches operation_start_head while the remote still holds
-            # the repair (PRRT_kwDOSJAM6s64x4K2).
-            published_hosted_head = await _detect_hosted_ci_repair_conflict_published_head(
-                self,
-                worktree_path=worktree_path,
-                state=state,
-                restore_ref=operation_start_head,
-                operation_start_last_push_sha=operation_start_last_push_sha,
-            )
-            # Check rollback before parking: a failed reset/clean leaves agent
-            # residue that the next guide would trip as PRE_EXISTING_DIRTY_WORKTREE
-            # while the park reports only an operator conflict (PRRT_kwDOSJAM6s64xVNL).
-            rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
-                self,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                restore_ref=operation_start_head,
-            )
-            if (
-                rollback_result.ok
-                and published_hosted_head is not None
-                and operation_start_head
-                and state is not None
-            ):
-                rollback_result = await _rewind_hosted_ci_repair_conflict_remote(
-                    self,
-                    workspace_id=workspace_id,
-                    state=state,
-                    restore_ref=operation_start_head,
-                    published_remote_head=published_hosted_head,
-                    operation_start_last_push_sha=operation_start_last_push_sha,
-                )
-            if not rollback_result.ok:
-                rollback_details: dict[str, Any] = {
-                    "phase": "ci_repair_operator_decision_conflict",
-                    "operation_type": "ci_repair",
-                    "pushed": False,
-                    "conflict_reason": conflict_reason,
-                    "rollback_error": {
-                        "message": rollback_result.message,
-                        "cause": rollback_result.cause,
-                    },
-                }
-                _log.warning(
-                    "monitor.ci_fix_operator_decision_conflict_rollback_failed",
-                    workspace_id=workspace_id,
-                    rollback_cause=rollback_result.cause,
-                )
-                rollback_stderr = (
-                    "CI repair operator-decision conflict; "
-                    "hosted remote head rollback failed before parking."
-                    if rollback_result.cause == "hosted_remote_rollback_failed"
-                    else (
-                        "CI repair operator-decision conflict; "
-                        "worktree rollback failed before parking."
-                    )
-                )
-                return await _moot_or_failure(
-                    _GitPushResult(
-                        pushed=False,
-                        failed=True,
-                        returncode=1,
-                        stderr=rollback_stderr,
-                        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
-                        details=rollback_details,
-                    )
-                )
-            if conflict_head:
-                mark_ci_repair_operator_decision_conflict(
-                    state,
-                    head_sha=conflict_head,
-                    failures=failures,
-                    reason=conflict_reason,
-                )
-            return await _moot_or_failure(
-                _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=conflict_reason,
-                    reason_code=CI_REPAIR_OPERATOR_DECISION_CONFLICT,
-                    parked_needs_human=True,
-                )
-            )
+        conflict_result = await handle_operator_decision_conflict_after_ci_repair(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            state=state,
+            status=status,
+            failures=failures,
+            conflict_stdout=conflict_stdout,
+            operation_start_head=operation_start_head,
+            operation_start_last_push_sha=operation_start_last_push_sha,
+        )
+        if conflict_result is not None:
+            return await _moot_or_failure(conflict_result)
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),

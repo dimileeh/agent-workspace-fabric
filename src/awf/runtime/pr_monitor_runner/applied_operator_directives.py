@@ -270,6 +270,11 @@ def clear_ci_repair_operator_decision_conflicts(state: MonitorState) -> None:
     prefix = _ci_repair_operator_decision_conflict_key_prefix()
     for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
         state.threads_addressed_ids.pop(key, None)
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        clear_ci_repair_conflict_rollback_pending,
+    )
+
+    clear_ci_repair_conflict_rollback_pending(state)
 
 
 def ci_repair_operator_decision_conflict_reason(
@@ -292,9 +297,26 @@ def report_ci_failure_or_operator_conflict(
     status: PRStatus,
     state: MonitorState,
 ) -> MonitorAction:
-    """Return NotifyHuman while a conflict park matches; else ReportCiFailure."""
+    """Return NotifyHuman while a conflict/pending park matches; else ReportCiFailure."""
     from awf.runtime.pr_monitor import NotifyHuman, ReportCiFailure
+    from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+        CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
+        ci_repair_conflict_rollback_pending,
+    )
 
+    pending = ci_repair_conflict_rollback_pending(
+        state,
+        head_sha=status.head_sha,
+        failures=status.ci_failures,
+    )
+    if pending is not None:
+        return NotifyHuman(
+            message=(
+                "CI repair operator-decision conflict; rollback pending: "
+                f"{pending.leftover_message}"
+            ),
+            reason_code=CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
+        )
     reason = ci_repair_operator_decision_conflict_reason(
         state,
         head_sha=status.head_sha,

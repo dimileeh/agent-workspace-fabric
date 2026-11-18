@@ -1319,6 +1319,25 @@ async def _execute(
         return merge_result
 
     if isinstance(action, NotifyHuman):
+        from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+            CI_REPAIR_CONFLICT_ROLLBACK_PENDING,
+            retry_ci_repair_conflict_rollback_pending,
+        )
+
+        if action.reason_code == CI_REPAIR_CONFLICT_ROLLBACK_PENDING:
+            # Failed conflict undo: retry the same rollback before the human wait;
+            # on success promote to the normal operator-decision conflict park.
+            worktree_path = self._worktrees_root / workspace_id
+            retried = await retry_ci_repair_conflict_rollback_pending(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                state=state,
+                status=status,
+            )
+            if retried is not None:
+                action = retried
+                await self._persist_state(workspace_id, state)
         return await _notify_human_loop.handle_notify_human_action(
             self,
             action=action,

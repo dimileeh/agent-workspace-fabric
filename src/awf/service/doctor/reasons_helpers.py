@@ -228,6 +228,29 @@ def get_salvage_and_monitor_reasons(
             "awf workspace guide <workspace_id> --hint '<clarifying directive>'",
             reason_catalog_link("CI_REPAIR_OPERATOR_DECISION_CONFLICT"),
         ),
+        "CI_REPAIR_CONFLICT_ROLLBACK_PENDING": reason_text_cls(
+            (
+                "A CI-failure repair reported an operator-decision conflict, but AWF "
+                "could not finish undoing the repair residue (worktree reset/clean or "
+                "hosted remote rewind), so the workspace stayed in monitoring_pr and "
+                "parked for a human while retries continue."
+            ),
+            (
+                "Inspect the awaiting-human message for what is left (leftover worktree "
+                "edits, or a remote head not rewound to the pre-repair SHA). Fix the "
+                "underlying git/remote problem if retries keep failing, or guide / "
+                "remonitor after the tree and remote match the pre-repair head. Do not "
+                "expect AWF to dispatch another CI-repair agent while this park is set."
+            ),
+            (
+                "The conflict undo failed closed into a retryable park "
+                "(``CI_REPAIR_CONFLICT_ROLLBACK_PENDING``) instead of failing the "
+                "workspace; each poll retries the same rollback before promoting to "
+                "``CI_REPAIR_OPERATOR_DECISION_CONFLICT``."
+            ),
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("CI_REPAIR_CONFLICT_ROLLBACK_PENDING"),
+        ),
     }
 
 

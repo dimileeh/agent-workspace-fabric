@@ -195,6 +195,18 @@ def _ci_repair_operator_decision_conflict_key_prefix() -> str:
     return _CI_REPAIR_OPERATOR_DECISION_CONFLICT_KEY_PREFIX
 
 
+# Reserved key prefix for a parked CI-repair conflict undo that has not finished
+# yet (local reset/clean or hosted remote rewind). Value is a JSON payload with
+# restore refs + the agent's conflict sentence so each poll can retry the same
+# undo and then install the normal operator-decision conflict park.
+_CI_REPAIR_CONFLICT_ROLLBACK_PENDING_KEY_PREFIX = "__awf_ci_repair_conflict_rollback_pending:"
+
+
+def _ci_repair_conflict_rollback_pending_key_prefix() -> str:
+    """Return the reserved prefix for CI-repair conflict rollback-pending keys."""
+    return _CI_REPAIR_CONFLICT_ROLLBACK_PENDING_KEY_PREFIX
+
+
 def _operator_decision_issued_at_key(thread_id: str) -> str:
     """Build state key stamping when an *unbindable* operator ruling was issued.
 
