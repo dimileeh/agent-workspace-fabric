@@ -41,6 +41,14 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+    log_ci_repair_applied_operator_directives_audit,
+)
+from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
+    handle_operator_decision_conflict_after_ci_repair,
+    operator_decision_conflict_reason,
+)
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -221,6 +229,163 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
         workspace_id=workspace_id,
         restore_ref=restore_ref,
     )
+    return _CiFixResidueRollbackResult(ok=True)
+
+
+async def _detect_hosted_ci_repair_conflict_published_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    state: MonitorState | None,
+    restore_ref: str | None,
+    operation_start_last_push_sha: str | None,
+) -> str | None:
+    """Return the hosted PR head published before a NEEDS_HUMAN conflict park.
+
+    Hosted adapters advance the remote before AWF parks. Require monitor state
+    evidence of that advance (``hosted_terminal_head_advanced`` or
+    ``last_push_sha`` drift, including the hosted-sync-failure seed in
+    ``_run_ci_fix``). Do not treat a local HEAD that merely differs from
+    ``restore_ref`` as published: that SHA may never have reached the remote,
+    and CAS rewind against it wedges a false
+    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` park (Bugbot on PR #1268).
+    """
+    _ = worktree_path  # kept for call-site compatibility; detection is state-keyed
+    if state is None or restore_ref is None or not getattr(self._deps.adapter, "is_hosted", False):
+        return None
+    restore_ref_lower = restore_ref.strip().lower()
+    if not restore_ref_lower:
+        return None
+
+    saved_last_push_sha = (operation_start_last_push_sha or "").strip()
+    current_last_push_sha = (state.last_push_sha or "").strip()
+    state_recorded_remote_advance = bool(state.hosted_terminal_head_advanced) or (
+        bool(current_last_push_sha) and current_last_push_sha.lower() != saved_last_push_sha.lower()
+    )
+    if not state_recorded_remote_advance:
+        return None
+
+    candidate = current_last_push_sha
+    if candidate and candidate.lower() != restore_ref_lower:
+        return candidate
+    return None
+
+
+async def _read_hosted_remote_branch_head_once(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+) -> str | None:
+    """Return the hosted PR branch tip via one ``ls-remote``, or ``None`` on failure."""
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+
+    identity = hosted_pr_identity or {}
+    repo_url = str(identity.get("head_repo_url") or identity.get("repo_url") or "").strip()
+    head_ref = str(identity.get("head_ref") or "").strip()
+    if not repo_url or not head_ref:
+        return None
+    deps = getattr(self, "_deps", None)
+    cmd_runner = getattr(deps, "runner", None) if deps is not None else None
+    run = getattr(cmd_runner, "run", None)
+    if not callable(run):
+        return None
+
+    worktrees_root = getattr(self, "_worktrees_root", None)
+    if worktrees_root is None:
+        return None
+    ref = f"refs/heads/{head_ref}"
+    result = await run(
+        git_worktree_command(Path(worktrees_root) / workspace_id, "ls-remote", repo_url, ref),
+        env=git_env_without_object_lookup_overrides(),
+        timeout_seconds=60.0,
+    )
+    if not getattr(result, "ok", False):
+        return None
+    stdout = str(getattr(result, "stdout", "") or "")
+    for line in stdout.splitlines():
+        sha, _, line_ref = line.strip().partition("\t")
+        if line_ref == ref and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha):
+            return sha.lower()
+    return None
+
+
+async def _rewind_hosted_ci_repair_conflict_remote(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    restore_ref: str,
+    published_remote_head: str,
+    operation_start_last_push_sha: str | None,
+) -> _CiFixResidueRollbackResult:
+    """Force-push the conflict restore ref over a hosted published repair head."""
+    hosted_identity_fn = getattr(self, "_hosted_pr_identity_for_workspace", None)
+    if not callable(hosted_identity_fn):
+        _log.warning(
+            "monitor.ci_repair_hosted_conflict_remote_rollback_unavailable",
+            workspace_id=workspace_id,
+            restore_ref=restore_ref,
+            published_remote_head=published_remote_head,
+        )
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="hosted_remote_rollback_failed",
+            message=(
+                "CI repair operator-decision conflict; hosted remote rollback "
+                "unavailable before parking."
+            ),
+        )
+
+    hosted_pr_identity = await hosted_identity_fn(workspace_id, state=state)
+    from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+        _rollback_hosted_terminal_head_on_remote,
+    )
+
+    remote_ok = await _rollback_hosted_terminal_head_on_remote(
+        self,
+        workspace_id=workspace_id,
+        hosted_pr_identity=hosted_pr_identity,
+        rollback_target_sha=restore_ref,
+        expected_remote_head_sha=published_remote_head,
+    )
+    if not remote_ok:
+        # CAS may fail against a never-published tip while the remote already
+        # sits at restore_ref. One read: if tip == restore_ref, undo is done
+        # (normal conflict park). Differ / read fail → ROLLBACK_PENDING.
+        live_remote_head = await _read_hosted_remote_branch_head_once(
+            self,
+            workspace_id=workspace_id,
+            hosted_pr_identity=hosted_pr_identity,
+        )
+        restore_ref_lower = restore_ref.strip().lower()
+        if (
+            live_remote_head is not None
+            and restore_ref_lower
+            and live_remote_head.lower() == restore_ref_lower
+        ):
+            _log.info(
+                "monitor.ci_repair_hosted_conflict_remote_already_restored",
+                workspace_id=workspace_id,
+                restore_ref=restore_ref,
+                published_remote_head=published_remote_head,
+                live_remote_head=live_remote_head,
+            )
+        else:
+            return _CiFixResidueRollbackResult(
+                ok=False,
+                cause="hosted_remote_rollback_failed",
+                message=(
+                    "CI repair operator-decision conflict; hosted remote head "
+                    "rollback failed before parking."
+                ),
+            )
+
+    state.hosted_terminal_head_advanced = False
+    current_last_push_sha = (state.last_push_sha or "").strip()
+    saved_last_push_sha = (operation_start_last_push_sha or "").strip()
+    if current_last_push_sha.lower() != saved_last_push_sha.lower():
+        state.last_push_sha = operation_start_last_push_sha
     return _CiFixResidueRollbackResult(ok=True)
 
 
@@ -536,9 +701,14 @@ async def _run_ci_fix(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # Snapshot push tracking before the hosted agent can advance the PR head so
+    # a NEEDS_HUMAN conflict park can restore last_push_sha after remote rewind
+    # (PRRT_kwDOSJAM6s64x4K2).
+    operation_start_last_push_sha = state.last_push_sha if state is not None else None
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
     task_tag = await self._resolve_task_tag(workspace_id)
+    applied_directives = load_applied_operator_directives(state) if state is not None else ()
     prompt = fix_ci_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -546,8 +716,17 @@ async def _run_ci_fix(
         workspace_runtime_context=self._workspace_runtime_context,
         owned_paths=await _owned_paths_for_prompt(self, workspace_id),
         task_tag=task_tag,
+        applied_operator_directives=applied_directives,
     )
+    if applied_directives:
+        log_ci_repair_applied_operator_directives_audit(
+            applied_directives,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            head_sha=(status.head_sha if status is not None else (operation_start_head or "")),
+        )
     agent_run_err = None
+    agent_result = None
     post_agent_err: Exception | None = None
     command_evidence: list[str] = []
     if not await repair_agent_runtime_ownership(
@@ -619,7 +798,7 @@ async def _run_ci_fix(
         return moot if moot is not None else failure
 
     try:
-        await self._run_monitor_agent_with_service_recovery(
+        agent_result = await self._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
@@ -705,6 +884,61 @@ async def _run_ci_fix(
                     )
                 )
         post_agent_err = exc
+
+    # #1256: when applied operator directives were in the prompt and the agent
+    # ends NEEDS_HUMAN with an operator-decision conflict, push nothing — roll
+    # back any residue and park. A failed undo parks under
+    # CI_REPAIR_CONFLICT_ROLLBACK_PENDING (never REPAIR_DIRTY_COMMIT_FAILED).
+    # With no directives, or a NEEDS_HUMAN that is not an operator-decision
+    # conflict, the CI repair path ignores verdict text exactly as before.
+    #
+    # Parse stdout from a successful AgentRunResult *or* from AgentRunError:
+    # a valid NEEDS_HUMAN conflict with a nonzero CLI exit still raises
+    # AgentRunError (stdout on exc.result). Skipping that case lets the
+    # commit/push path publish edits instead of parking
+    # (PRRT_kwDOSJAM6s64xqaf).
+    #
+    # Hosted sync failure after the agent published a terminal head keeps Git
+    # output on AgentRunError.result.stdout and the agent verdict on
+    # agent_stdout. Seed last_push_sha from terminal_head_sha only when that
+    # preserved stdout carries an operator-decision conflict verdict, so
+    # conflict rewind can CAS; failed rewind parks ROLLBACK_PENDING instead of
+    # leaving the rejected repair on the PR (Greptile P1 on PR #1268). A sync
+    # failure without the conflict verdict must leave monitor state untouched.
+    if post_agent_err is None and applied_directives and state is not None:
+        conflict_stdout = ""
+        if agent_result is not None:
+            conflict_stdout = agent_result.stdout or ""
+        elif agent_run_err is not None:
+            preserved = agent_run_err.agent_stdout
+            if preserved is not None:
+                conflict_stdout = preserved
+            else:
+                conflict_stdout = agent_run_err.result.stdout or ""
+        if (
+            agent_run_err is not None
+            and getattr(self._deps.adapter, "is_hosted", False)
+            and operator_decision_conflict_reason(conflict_stdout) is not None
+        ):
+            sync_details = agent_run_err.details or {}
+            if sync_details.get("hosted_sync_failed"):
+                published = str(sync_details.get("terminal_head_sha") or "").strip()
+                if published:
+                    state.last_push_sha = published
+                    state.hosted_terminal_head_advanced = True
+        conflict_result = await handle_operator_decision_conflict_after_ci_repair(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            state=state,
+            status=status,
+            failures=failures,
+            conflict_stdout=conflict_stdout,
+            operation_start_head=operation_start_head,
+            operation_start_last_push_sha=operation_start_last_push_sha,
+        )
+        if conflict_result is not None:
+            return await _moot_or_failure(conflict_result)
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),

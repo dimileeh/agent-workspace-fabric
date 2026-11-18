@@ -987,7 +987,9 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _rev_parse_head=_rev_parse_head,
     )
 
-    state = SimpleNamespace(last_push_sha=None, threads_addressed_ids={})
+    # Real MonitorState: finalize records applied operator directives via
+    # ``mark_addressed`` (SimpleNamespace lacks that API).
+    state = MonitorState()
     await operator_hints._run_operator_hint_cycle(
         self,
         workspace_id="ws_hint",

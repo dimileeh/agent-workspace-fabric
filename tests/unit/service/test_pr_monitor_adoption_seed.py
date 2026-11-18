@@ -15,6 +15,10 @@ from typing import Any
 import pytest
 
 from awf.runtime.feedback_policy import mutation_park_is_stale
+from awf.runtime.monitor_state_keys import (
+    _applied_operator_directives_state_key,
+    _ci_repair_operator_decision_conflict_key_prefix,
+)
 from awf.runtime.pr_monitor_models import ReviewThread
 from awf.service.pr_monitor_adoption_seed import (
     PR_ADOPTION_OPERATOR_HINT_REASON,
@@ -115,6 +119,12 @@ _DROPPED_CASES: list[tuple[str, str]] = [
     ("__awf_outdated_resolve_requeued__:PRRT_kwDOSJAM6s6fNhZo", "requeued"),
     ("__awf_unpublished_abandon_event_pending__", "pending"),
     ("__awf_protected_history_directive_reblocked__", "reblocked"),
+    # CI-repair conflict parks are cycle bookkeeping: they stay behind even when
+    # applied-operator-directive history crosses with head continuity (#1256).
+    (
+        f"{_ci_repair_operator_decision_conflict_key_prefix()}{'a' * 40}:deadbeef",
+        "do not undo the applied guide",
+    ),
     ("__defer_reason__:PRRT_kwDOSJAM6s6fNhZo", "waiting on reviewer"),
     ("__needs_human_reason__:5120013294", "ambiguous"),
     # Preserved-attempt records only cross under a verdict-key id with a well-formed value.
@@ -155,6 +165,36 @@ def test_code_dependent_verdicts_cross_only_with_head_continuity(key: str, value
 @pytest.mark.parametrize("verdict", ["fix_committed", "false_positive"])
 def test_head_continuity_fails_closed_when_unspecified(verdict: str) -> None:
     assert seedable_monitor_state({"5120013295": verdict}) == {}
+
+
+@pytest.mark.unit
+def test_applied_operator_directives_cross_only_with_head_continuity() -> None:
+    """#1256: re-adoption must keep applied decisions when the PR head is unchanged.
+
+    CI repair quotes ``__awf_applied_operator_directives__`` so a later failure
+    cannot undo an operator guide that already landed. Those records assert what
+    the branch carries at a particular head, so they cross only with continuity;
+    a force-push or revert must drop them rather than bind the successor to
+    decisions that may no longer be on the branch (PRRT_kwDOSJAM6s64ycSl).
+    Conflict parks for a failing-check signature stay behind either way: the
+    fresh monitor re-derives them once the carried history is quoted again.
+    """
+    key = _applied_operator_directives_state_key()
+    head = "a" * 40
+    payload = (
+        '[{"directive":"drop the flaky assert","operation_id":"op_1",'
+        f'"applied_at":"2026-01-01T00:00:00+00:00","head_sha":"{head}"}}]'
+    )
+    conflict_key = f"{_ci_repair_operator_decision_conflict_key_prefix()}{head}:deadbeef"
+    previous = {
+        key: payload,
+        conflict_key: "do not undo the applied guide",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=True) == {key: payload}
+    assert seedable_monitor_state(previous, head_continuity=False) == {}
+    assert seedable_monitor_state(previous) == {}
+    assert seedable_monitor_state({key: ""}, head_continuity=True) == {}
 
 
 @pytest.mark.unit

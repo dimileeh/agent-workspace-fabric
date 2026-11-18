@@ -441,7 +441,12 @@ async def apply_preserved_attempt_disposition(
     # No agent acted on the directive, so nothing else it names was answered: an
     # empty acted text keeps the answered-feedback sweep from dismissing a parked
     # comment the guide only mentions. The ruled-on thread is retired above.
-    _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text="")
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text="",
+        head_sha=status.head_sha,
+    )
     return PreservedAttemptOutcome(
         outcome="operator_hint_preserved_attempt_retired",
         reason_code=OPERATOR_PRESERVED_ATTEMPT_RETIRED,

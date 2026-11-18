@@ -940,11 +940,13 @@ def _ci_failure_action(
     status: PRStatus, state: MonitorState, config: MonitorConfig
 ) -> MonitorAction:
     """Choose rerun, wait, report, or human escalation for observed CI failures."""
+    from awf.runtime.pr_monitor_runner import applied_operator_directives as _aod
+
     if not status.ci_failures:
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     candidate_failures = _ci_candidate_failures(status)
     if _non_candidate_carries_fixable_code_evidence(status):
-        return ReportCiFailure(failures=status.ci_failures)
+        return _aod.report_ci_failure_or_operator_conflict(status, state)
     if _should_rerun_transient_ci(status, state, config):
         return RerunTransientCI(failures=candidate_failures)
     if candidate_failures and all(_looks_like_transient_ci_failure(f) for f in candidate_failures):
@@ -981,7 +983,7 @@ def _ci_failure_action(
         _failure_has_actionable_ci_evidence(failure) for failure in status.ci_failures
     ):
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
-    return ReportCiFailure(failures=status.ci_failures)
+    return _aod.report_ci_failure_or_operator_conflict(status, state)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
@@ -1037,6 +1039,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
+    0a. CI_REPAIR_CONFLICT_ROLLBACK_PENDING → NotifyHuman (outranks Merge).
     0b. PR retargeted after provisioning (``base_ref_drifted``) → NotifyHuman.
         Every gate below acts on the workspace's persisted ``branch_base``, and
         ``auto_merge`` was resolved from it; a retargeted PR must not be driven
@@ -1110,6 +1113,12 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    # 0a. Failed conflict-undo park outranks Merge and every other action.
+    from awf.runtime.pr_monitor_runner import ci_repair_conflict_rollback as _crb
+
+    if (pending_rollback := _crb.notify_human_for_conflict_rollback_pending(state)) is not None:
+        return pending_rollback
 
     # 0b. The PR was retargeted on the forge after provisioning. Every policy the
     # monitor carries is keyed to the workspace's persisted ``branch_base``:
