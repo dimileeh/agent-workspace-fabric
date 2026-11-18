@@ -777,12 +777,13 @@ async def test_hosted_agent_success_preserves_stdout_when_terminal_head_sync_fai
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sync failure must not replace agent stdout (CI conflict verdict lives there)."""
+    """Sync failure keeps Git on result.stdout; agent verdict on agent_stdout."""
     sha = "abcdef0123456789abcdef0123456789abcdef01"
     conflict_stdout = (
         "AWF-VERDICT: NEEDS_HUMAN: lint conflicts with operator decision "
         "op-1: restoring removed code undoes the guide\n"
     )
+    git_stdout = "git-fetch-out"
 
     class _Adapter:
         name = AgentRuntime.codex
@@ -801,7 +802,7 @@ async def test_hosted_agent_success_preserves_stdout_when_terminal_head_sync_fai
     async def _fail_sync(*_args: object, **_kwargs: object) -> str:
         raise AgentRunError(
             agent=AgentRuntime.codex,
-            result=CommandResult(returncode=1, stdout="", stderr="fetch failed"),
+            result=CommandResult(returncode=1, stdout=git_stdout, stderr="fetch failed"),
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
         )
 
@@ -822,7 +823,8 @@ async def test_hosted_agent_success_preserves_stdout_when_terminal_head_sync_fai
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
-    assert excinfo.value.result.stdout == conflict_stdout
+    assert excinfo.value.result.stdout == git_stdout
+    assert excinfo.value.agent_stdout == conflict_stdout
     assert excinfo.value.details.get("terminal_head_sha") == sha
     assert excinfo.value.details.get("hosted_sync_failed") is True
 
@@ -832,12 +834,13 @@ async def test_hosted_agent_error_preserves_stdout_when_terminal_head_sync_fails
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """AgentRunError + failed sync must keep the original agent stdout for parks."""
+    """AgentRunError + failed sync keeps Git result.stdout; agent on agent_stdout."""
     sha = "abcdef0123456789abcdef0123456789abcdef01"
     conflict_stdout = (
         "AWF-VERDICT: NEEDS_HUMAN: lint conflicts with operator decision "
         "op-1: restoring removed code undoes the guide\n"
     )
+    git_stdout = "git-fetch-out"
     adapter = _HostedAdapterRaisesWithTerminalHead(sha)
     # Override stdout on the raised error by subclassing run behavior via monkeypatch
     original_run = adapter.run
@@ -863,7 +866,7 @@ async def test_hosted_agent_error_preserves_stdout_when_terminal_head_sync_fails
     async def _fail_sync(*_args: object, **_kwargs: object) -> str:
         raise AgentRunError(
             agent=AgentRuntime.codex,
-            result=CommandResult(returncode=1, stdout="git-fetch-out", stderr="fetch failed"),
+            result=CommandResult(returncode=1, stdout=git_stdout, stderr="fetch failed"),
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
         )
 
@@ -884,8 +887,9 @@ async def test_hosted_agent_error_preserves_stdout_when_terminal_head_sync_fails
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
-    assert excinfo.value.result.stdout == conflict_stdout
-    assert "git-fetch-out" not in (excinfo.value.result.stdout or "")
+    assert excinfo.value.result.stdout == git_stdout
+    assert excinfo.value.agent_stdout == conflict_stdout
+    assert conflict_stdout not in (excinfo.value.result.stdout or "")
     assert excinfo.value.details.get("terminal_head_sha") == sha
     assert excinfo.value.details.get("hosted_sync_failed") is True
 

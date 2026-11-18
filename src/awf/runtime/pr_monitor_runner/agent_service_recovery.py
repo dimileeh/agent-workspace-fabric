@@ -97,16 +97,15 @@ def _hosted_sync_error_preserving_agent_output(
     sync_err: AgentRunError,
     *,
     agent_stdout: str,
-    agent_stderr: str = "",
     terminal_head_sha: str | None,
 ) -> AgentRunError:
-    """Keep agent stdout when hosted terminal-head sync fails after the agent ran.
+    """Attach agent stdout when hosted terminal-head sync fails after the agent ran.
 
-    CI repair conflict detection reads ``AgentRunError.result.stdout`` for
-    ``NEEDS_HUMAN`` operator-decision verdicts. A bare sync failure replaces that
-    stdout with Git fetch output and skips the conflict park (Greptile P1 on
-    PR #1268). Carry ``terminal_head_sha`` so callers can still rewind the
-    published remote head when local sync never completed.
+    Leave ``result.stdout`` as the sync failure (Git) output — other callers
+    parse it. Put the agent's original stdout on ``AgentRunError.agent_stdout``
+    so CI-repair conflict detection can still park (Greptile P1 on PR #1268).
+    Carry ``terminal_head_sha`` so callers can rewind a published remote head
+    when local sync never completed.
     """
     details = dict(sync_err.details)
     if terminal_head_sha:
@@ -114,13 +113,10 @@ def _hosted_sync_error_preserving_agent_output(
     details["hosted_sync_failed"] = True
     return AgentRunError(
         agent=sync_err.agent,
-        result=CommandResult(
-            returncode=sync_err.result.returncode,
-            stdout=agent_stdout,
-            stderr=sync_err.result.stderr or agent_stderr,
-        ),
+        result=sync_err.result,
         reason_code=sync_err.reason_code,
         details=details,
+        agent_stdout=agent_stdout,
     )
 
 
@@ -292,7 +288,6 @@ async def _run_monitor_agent_with_service_recovery_locked(
                         raise _hosted_sync_error_preserving_agent_output(
                             sync_err,
                             agent_stdout=exc.result.stdout or "",
-                            agent_stderr=exc.result.stderr or "",
                             terminal_head_sha=terminal_head_sha,
                         ) from sync_err
                     if state is not None:
@@ -466,7 +461,6 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 raise _hosted_sync_error_preserving_agent_output(
                     sync_err,
                     agent_stdout=result.stdout or "",
-                    agent_stderr=result.stderr or "",
                     terminal_head_sha=_nonblank_str(result.terminal_head_sha),
                 ) from sync_err
             if state is not None:

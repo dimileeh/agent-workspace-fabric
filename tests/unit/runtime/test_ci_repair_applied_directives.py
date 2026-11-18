@@ -1136,9 +1136,9 @@ async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
 ) -> None:
     """Hosted sync failure after a conflict verdict must still park, not skip.
 
-    Greptile P1: sync raises AgentRunError with Git stdout, wiping the agent
-    NEEDS_HUMAN verdict so conflict rollback never runs. Preserve stdout +
-    terminal_head_sha; seed state so rewind can CAS; failed rewind parks
+    Greptile PRRT_kwDOSJAM6s642TmY: sync raises AgentRunError with Git on
+    result.stdout. Agent verdict stays on agent_stdout (result.stdout
+    unchanged). Conflict check reads agent_stdout; failed undo parks
     CI_REPAIR_CONFLICT_ROLLBACK_PENDING.
     """
     from awf.runtime.pr_monitor_runner.ci_repair_conflict_rollback import (
@@ -1149,6 +1149,7 @@ async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
     push_calls: list[dict[str, Any]] = []
     rollback_calls: list[dict[str, Any]] = []
     remote_rollbacks: list[dict[str, object]] = []
+    git_stdout = "git-fetch-out"
     runner = _ci_fix_runner(
         tmp_path=tmp_path,
         stdout=_CONFLICT_STDOUT,
@@ -1193,7 +1194,7 @@ async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
             agent="cursor",
             result=CommandResult(
                 returncode=1,
-                stdout=_CONFLICT_STDOUT,
+                stdout=git_stdout,
                 stderr="fetch failed",
             ),
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
@@ -1201,6 +1202,7 @@ async def test_ci_repair_hosted_sync_failure_preserves_conflict_park(
                 "terminal_head_sha": _PUBLISHED_HOSTED_HEAD,
                 "hosted_sync_failed": True,
             },
+            agent_stdout=_CONFLICT_STDOUT,
         )
 
     async def _failed_remote_rollback(*_args: object, **kwargs: object) -> bool:

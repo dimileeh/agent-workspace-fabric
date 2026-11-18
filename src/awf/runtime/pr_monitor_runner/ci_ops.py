@@ -897,11 +897,11 @@ async def _run_ci_fix(
     # commit/push path publish edits instead of parking
     # (PRRT_kwDOSJAM6s64xqaf).
     #
-    # Hosted sync failure after the agent published a terminal head preserves
-    # agent stdout on AgentRunError but never recorded last_push_sha. Seed the
-    # published SHA so conflict rewind can CAS; failed rewind parks
-    # ROLLBACK_PENDING instead of leaving the rejected repair on the PR
-    # (Greptile P1 on PR #1268).
+    # Hosted sync failure after the agent published a terminal head keeps Git
+    # output on AgentRunError.result.stdout and the agent verdict on
+    # agent_stdout. Seed last_push_sha from terminal_head_sha so conflict
+    # rewind can CAS; failed rewind parks ROLLBACK_PENDING instead of leaving
+    # the rejected repair on the PR (Greptile P1 on PR #1268).
     if (
         post_agent_err is None
         and applied_directives
@@ -920,7 +920,11 @@ async def _run_ci_fix(
         if agent_result is not None:
             conflict_stdout = agent_result.stdout or ""
         elif agent_run_err is not None:
-            conflict_stdout = agent_run_err.result.stdout or ""
+            preserved = agent_run_err.agent_stdout
+            if preserved is not None:
+                conflict_stdout = preserved
+            else:
+                conflict_stdout = agent_run_err.result.stdout or ""
         conflict_result = await handle_operator_decision_conflict_after_ci_repair(
             self,
             workspace_id=workspace_id,
