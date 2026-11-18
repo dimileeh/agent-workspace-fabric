@@ -472,11 +472,9 @@ def test_read_own_comment_ids_roundtrip_and_old_payload_defaults_empty() -> None
         disposition_class="fixed",
         verdict="fix_committed",
         read_own_comment_ids=("201", "203"),
-        read_own_comment_bodies=("first", "second"),
     )
     payload = d.as_payload()
     assert payload["read_own_comment_ids"] == ["201", "203"]
-    assert payload["read_own_comment_bodies"] == ["first", "second"]
     assert ThreadDisposition.from_payload(payload) == d
 
     legacy = {
@@ -488,7 +486,6 @@ def test_read_own_comment_ids_roundtrip_and_old_payload_defaults_empty() -> None
     decoded = ThreadDisposition.from_payload(legacy)
     assert decoded is not None
     assert decoded.read_own_comment_ids == ()
-    assert decoded.read_own_comment_bodies == ()
 
 
 def test_sync_item_disposition_records_viewer_comment_ids_from_triaged_thread() -> None:
@@ -526,7 +523,6 @@ def test_sync_item_disposition_records_viewer_comment_ids_from_triaged_thread() 
     recorded = read_item_disposition(state, "PRRT_test_a")
     assert recorded is not None
     assert recorded.read_own_comment_ids == ("102",)
-    assert recorded.read_own_comment_bodies == ("operator follow-up",)
 
 
 def test_disposition_count_rows_orders_all_classes_and_others() -> None:
