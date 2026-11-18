@@ -978,6 +978,10 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     attention_required: bool = False
     awaiting_human_since: datetime | None = None
     awaiting_human_reason: str | None = None
+    claim_active: bool = Field(
+        default=False,
+        description=("True while an execution or monitor claim on the workspace is unexpired."),
+    )
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
     provider_recovery_state: ProviderRecoveryStateResponse | None = None

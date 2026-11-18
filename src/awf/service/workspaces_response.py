@@ -37,7 +37,10 @@ from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
 from awf.runtime.pr_monitor import _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
-from awf.service.controls_helpers import remonitor_compose_runtime_available
+from awf.service.controls_helpers import (
+    _claim_lease_is_live,
+    remonitor_compose_runtime_available,
+)
 from awf.service.coordination import (
     coordination_warnings_from_task_policy,
 )
@@ -197,6 +200,23 @@ def _workspace_block_state_response(
     )
 
 
+def workspace_claim_active(workspace: Workspace, *, now: datetime) -> bool:
+    """Return True when an execution or monitor claim lease is currently live.
+
+    Reuses ``_claim_lease_is_live`` so read-time projection never disagrees with
+    guide/control claim checks (owner + future expiry; naive/aware handling).
+    """
+    return _claim_lease_is_live(
+        getattr(workspace, "execution_claimed_by", None),
+        getattr(workspace, "execution_claim_expires_at", None),
+        now=now,
+    ) or _claim_lease_is_live(
+        getattr(workspace, "monitor_claimed_by", None),
+        getattr(workspace, "monitor_claim_expires_at", None),
+        now=now,
+    )
+
+
 def workspace_response(
     workspace: Workspace,
     *,
@@ -210,6 +230,7 @@ def workspace_response(
     # Console reads ``task_key``; Core persists the same identifier as ``task_tag``.
     computed_fields["task_key"] = getattr(workspace, "task_tag", None)
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
+    computed_fields["claim_active"] = workspace_claim_active(workspace, now=datetime.now(UTC))
     computed_fields["remonitor_compose_runtime_available"] = remonitor_compose_runtime_available(
         workspace
     )
