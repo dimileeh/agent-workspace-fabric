@@ -346,7 +346,7 @@ async def _verify_audit(
 
 
 def _unmarked_identity_feedback(thread: AuditedReviewThread) -> bool:
-    """True when the thread holds viewer prose that is not an AWF disposition marker."""
+    """True when any viewer body is unmarked prose (markers alone are not unread feedback)."""
     return any(
         disposition_marker_class((body,), thread_id=thread.thread_id) is None
         for body in thread.viewer_comment_bodies

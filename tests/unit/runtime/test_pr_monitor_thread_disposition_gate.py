@@ -1056,7 +1056,7 @@ async def test_gate_records_one_audit_event_per_newly_flagged_set(
         (("P1", "P2"), "outdated_unresolved_inline_threads", ("P1",), True),  # fix_committed
         (("P1 v2",), "unresolved_inline_threads", ("P1",), True),  # thread stays listed;
         (("P1 v2",), "outdated_unresolved_inline_threads", ("P1",), True),  # edited since
-        ((), None, (), False),  # only AWF's identity commented: no status lists it
+        ((), None, (), False),  # empty unresolved thread: no unmarked identity prose
     ],
 )
 async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_listed(
@@ -1229,6 +1229,33 @@ async def test_gate_does_not_repoll_listed_identity_only_thread(
     )
 
     result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
+
+
+async def test_gate_does_not_repoll_unlisted_marker_only_identity_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unlisted identity comments that are only AWF markers are not unread feedback."""
+    marker = _marker("fixed", _FRESH)
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(_FRESH, resolved=False, bodies=(marker,), external=()),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), _green_status())
 
     assert result.retry is False
     assert result.feedback_changed is False
