@@ -244,7 +244,10 @@ def report_ci_failure_or_operator_conflict(
         failures=status.ci_failures,
     )
     if reason is not None:
-        return NotifyHuman(message=reason)
+        return NotifyHuman(
+            message=reason,
+            reason_code=CI_REPAIR_OPERATOR_DECISION_CONFLICT,
+        )
     return ReportCiFailure(failures=status.ci_failures)
 
 

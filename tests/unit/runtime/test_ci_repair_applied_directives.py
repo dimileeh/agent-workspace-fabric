@@ -337,9 +337,11 @@ async def test_ci_repair_needs_human_conflict_parks_without_push(
     action = decide(status, state, MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
     assert "conflicts with operator decision" in (action.message or "")
+    assert action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
 
     again = decide(status, state, MonitorConfig(auto_merge=True))
     assert isinstance(again, NotifyHuman)
+    assert again.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
 
 
 @pytest.mark.unit
@@ -433,7 +435,9 @@ def test_conflict_clears_for_new_guide_new_head_or_changed_failures() -> None:
         failures=_FAILURES,
         reason="review-bot conflicts with operator decision op-guide-1: blocked",
     )
-    assert isinstance(decide(status, state, MonitorConfig()), NotifyHuman)
+    conflict_action = decide(status, state, MonitorConfig())
+    assert isinstance(conflict_action, NotifyHuman)
+    assert conflict_action.reason_code == "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
 
     new_head_state = MonitorState(
         threads_addressed_ids=dict(state.threads_addressed_ids),
