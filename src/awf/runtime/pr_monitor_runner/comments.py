@@ -13,8 +13,8 @@ from awf.node.git_manager import (
     repair_mirror_hooks_path,
 )
 from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
     review_thread_body_state_key,
-    thread_conversation_freshness_matches,
 )
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
@@ -103,9 +103,7 @@ def _operator_decision_for_thread(
     if decision is None:
         return None
     recorded = state.threads_addressed_ids.get(review_thread_body_state_key(thread.thread_id))
-    if recorded is not None and not thread_conversation_freshness_matches(
-        state.threads_addressed_ids, thread
-    ):
+    if recorded is not None and not recorded_review_thread_body_matches(recorded, thread):
         _drop_stale_operator_decision(state, thread.thread_id)
         return None
     if recorded is None and _operator_ruling_superseded_by_reply(state, thread):

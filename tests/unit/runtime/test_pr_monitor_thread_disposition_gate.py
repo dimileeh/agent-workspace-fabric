@@ -28,12 +28,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.feedback_policy import (
-    review_thread_body_hash,
-    review_thread_body_state_key,
-    review_thread_identity_hash,
-    review_thread_identity_state_key,
-)
+from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
 from awf.runtime.monitor_state_keys import _disposition_retired_key, _disposition_unverified_key
 from awf.runtime.pr_monitor import (
     AddressComments,
@@ -1164,83 +1159,6 @@ async def test_gate_does_not_treat_listed_operator_comment_as_feedback_changed(
     assert result.feedback_changed is False
     assert result.blocker is None
     assert result.count_rows is not None
-
-
-async def test_gate_retries_when_dispositioned_thread_has_fresh_identity_follow_up(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Closed listed threads with unread identity follow-ups must re-poll.
-
-    Compatibility body hashes ignore identity (#1272); without a separate
-    freshness check the gate would certify/merge over a token-identity
-    follow-up after reopen (PRRT_kwDOSJAM6s659f3z).
-    """
-    listed = ReviewThread(
-        thread_id=_FRESH,
-        path="a.py",
-        line=1,
-        body_excerpt="please fix this",
-        comments=(
-            ReviewThreadComment(
-                comment_id="101",
-                body="please fix this",
-                author="reviewer",
-                viewer_did_author=False,
-            ),
-            ReviewThreadComment(
-                comment_id="own-2",
-                body="also guard the None path",
-                author=_VIEWER,
-                viewer_did_author=True,
-            ),
-        ),
-    )
-    gh = _AuditForge(
-        FakeCommandRunner(),
-        audit=ReviewThreadAudit(
-            supported=True,
-            viewer_login=_VIEWER,
-            threads=(
-                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
-                _thread(_FRESH, resolved=False, external=("please fix this",)),
-            ),
-        ),
-    )
-    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = settled_baseline_state()
-    state.mark_addressed(_FRESH, "fix_committed")
-    state.mark_addressed(review_thread_body_state_key(_FRESH), review_thread_body_hash(listed))
-    # Empty identity snapshot: disposition predates the follow-up.
-    state.mark_addressed(
-        review_thread_identity_state_key(_FRESH),
-        review_thread_identity_hash(
-            ReviewThread(
-                thread_id=_FRESH,
-                path="a.py",
-                line=1,
-                body_excerpt="please fix this",
-                comments=(listed.comments[0],),
-            )
-        ),
-    )
-    status = replace(_green_status(), unresolved_inline_threads=(listed,))
-
-    result = await _gate(runner, workspace_id, state, status)
-
-    assert result.retry is True
-    assert result.feedback_changed is True
-    assert result.blocker is None
-    assert result.count_rows is None
-
-    # Matching identity snapshot keeps the listed identity from forever re-polling.
-    state.mark_addressed(
-        review_thread_identity_state_key(_FRESH), review_thread_identity_hash(listed)
-    )
-    settled = await _gate(runner, workspace_id, state, status)
-    assert settled.retry is False
-    assert settled.feedback_changed is False
-    assert settled.count_rows is not None
 
 
 async def test_gate_retries_on_unlisted_unmarked_identity_thread(

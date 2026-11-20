@@ -16,7 +16,6 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
-from awf.common.forge_thread_audit import is_disposition_reply
 from awf.runtime.monitor_state_keys import _mutation_park_key, _needs_human_reason_key
 from awf.runtime.pr_monitor_models import ReviewThread
 
@@ -60,17 +59,6 @@ def review_thread_body_state_key(thread_id: str) -> str:
     return f"__review_thread_body_hash__:{thread_id}"
 
 
-def review_thread_identity_state_key(thread_id: str) -> str:
-    """State key for the unmarked token-identity freshness snapshot.
-
-    Distinct from :func:`review_thread_body_state_key` so compatibility body
-    hashes stay byte-identical when identity comments are listed (#1272) while
-    a new identity follow-up after disposition still re-queues the thread
-    (PRRT_kwDOSJAM6s659f3z).
-    """
-    return f"__review_thread_identity_hash__:{thread_id}"
-
-
 def review_thread_resolution_body(thread: ReviewThread) -> str:
     """Hash only inline conversation for attention tracking.
 
@@ -89,9 +77,8 @@ def review_thread_resolution_body(thread: ReviewThread) -> str:
     # form (and outdated hygiene skipped resolve) — PRRT_kwDOSJAM6s6dcFNZ.
     payload: list[dict[str, str | None]] = []
     if thread.comments:
-        # Skip identity comments so listing them for triage (#1272) keeps
-        # pre-change recorded hashes byte-identical. Fresh unmarked identity
-        # follow-ups use :func:`review_thread_identity_hash` instead.
+        # Skip identity comments so listing them for triage (#1272) never
+        # re-queues a thread and pre-change recorded hashes stay byte-identical.
         payload.extend(
             {
                 "author": comment.author,
@@ -190,34 +177,6 @@ def _legacy_fallback_review_thread_body_hash(thread: ReviewThread) -> str:
     ).hexdigest()
 
 
-def review_thread_identity_resolution_body(thread: ReviewThread) -> str:
-    """Serialize unmarked token-identity comments for the identity freshness signal.
-
-    Marker-carrying AWF disposition replies are excluded (the status feed already
-    drops them; filter here so any caller that still passes them cannot churn the
-    signal). ``comment_id`` is included so a new follow-up is visible even when
-    its body text collides with an earlier note.
-    """
-    payload: list[dict[str, str | None]] = []
-    if thread.comments:
-        payload.extend(
-            {
-                "comment_id": comment.comment_id,
-                "body": comment.body,
-            }
-            for comment in thread.comments
-            if comment.viewer_did_author
-            and not is_disposition_reply(comment.body, thread_id=thread.thread_id)
-        )
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def review_thread_identity_hash(thread: ReviewThread) -> str:
-    return hashlib.sha256(
-        review_thread_identity_resolution_body(thread).encode("utf-8")
-    ).hexdigest()
-
-
 def review_thread_body_hashes(thread: ReviewThread) -> frozenset[str]:
     """Current and pre-normalize hashes that all mean this conversation."""
     return frozenset(
@@ -234,46 +193,18 @@ def recorded_review_thread_body_matches(recorded: str | None, thread: ReviewThre
     return recorded is not None and recorded in review_thread_body_hashes(thread)
 
 
-# ``json.dumps([], ...)`` of an empty unmarked-identity payload.
-_EMPTY_IDENTITY_HASH = hashlib.sha256(b"[]").hexdigest()
-
-
-def recorded_review_thread_identity_matches(recorded: str | None, thread: ReviewThread) -> bool:
-    """True when ``recorded`` is the identity freshness hash of ``thread``.
-
-    A missing snapshot matches only an empty unmarked-identity set: legacy rows
-    that never stored the signal must still re-queue once live identity feedback
-    appears, rather than merging over it (PRRT_kwDOSJAM6s659f3z).
-    """
-    live = review_thread_identity_hash(thread)
-    if recorded is None:
-        return live == _EMPTY_IDENTITY_HASH
-    return recorded == live
-
-
-def thread_conversation_freshness_matches(
-    state_map: Mapping[str, str], thread: ReviewThread
-) -> bool:
-    """True when both outside-body and identity freshness snapshots still match."""
-    body = state_map.get(review_thread_body_state_key(thread.thread_id))
-    identity = state_map.get(review_thread_identity_state_key(thread.thread_id))
-    return recorded_review_thread_body_matches(
-        body, thread
-    ) and recorded_review_thread_identity_matches(identity, thread)
-
-
 def thread_needs_attention(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
     """True when a thread still needs ordinary comment repair.
 
     Missing evidence / ``agent_failed`` always need attention. A recorded
-    disposition whose full-conversation body hash or identity freshness no
-    longer matches also re-enters repair — ``isOutdated`` alone never
-    suppresses this.
+    disposition whose full-conversation body hash no longer matches also
+    re-enters repair — ``isOutdated`` alone never suppresses this.
     """
     verdict = state_map.get(thread.thread_id)
     if needs_comment_attention(verdict):
         return True
-    return not thread_conversation_freshness_matches(state_map, thread)
+    recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
+    return not recorded_review_thread_body_matches(recorded, thread)
 
 
 # The reason code a refused, rolled-back correction attempt parks under, and the
@@ -345,13 +276,12 @@ def thread_enters_address_comments(
 
     Never-addressed / ``agent_failed`` always enter repair. A closed disposition
     (``fix_committed`` / ``false_positive``), ``defer``, or ``needs_human`` with
-    a recorded body hash or identity freshness that no longer matches also
-    re-enters repair so fresh reviewer or token-identity replies are re-triaged.
-    Unchanged ``defer`` and ``needs_human`` stay on the NotifyHuman merge gate; a
-    requeue-eligible verdict without any body snapshot does not re-queue (legacy
-    / incomplete state falls through to existing gates). The exception is a stale
-    mutation park (:func:`mutation_park_is_stale`), re-evaluated against
-    ``head_sha`` (#1213).
+    a recorded body hash that no longer matches also re-enters repair so fresh
+    reviewer replies are re-triaged. Unchanged ``defer`` and ``needs_human`` stay
+    on the NotifyHuman merge gate; a requeue-eligible verdict without any body
+    snapshot does not re-queue (legacy / incomplete state falls through to
+    existing gates). The exception is a stale mutation park
+    (:func:`mutation_park_is_stale`), re-evaluated against ``head_sha`` (#1213).
     """
     verdict = state_map.get(thread.thread_id)
     if needs_comment_attention(verdict):
@@ -363,21 +293,22 @@ def thread_enters_address_comments(
     recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
     if recorded is None:
         return False
-    return not thread_conversation_freshness_matches(state_map, thread)
+    return not recorded_review_thread_body_matches(recorded, thread)
 
 
 def thread_resolution_pending(state_map: Mapping[str, str], thread: ReviewThread) -> bool:
     """True when AWF owes this still-unresolved thread a ``resolve_thread`` call.
 
-    A resolvable verdict plus recorded body and identity freshness that still
-    match the live conversation means the disposition is current: the thread is
-    not waiting on more agent work, it is waiting on resolution. Anything left
-    in that state at the end of a fix cycle is a silent merge blocker (#925), so
-    callers must resolve it, hand it to a demonstrable owner, or escalate.
+    A resolvable verdict plus a recorded body hash that still matches the live
+    conversation means the disposition is current: the thread is not waiting on
+    more agent work, it is waiting on resolution. Anything left in that state at
+    the end of a fix cycle is a silent merge blocker (#925), so callers must
+    resolve it, hand it to a demonstrable owner, or escalate.
     """
     if state_map.get(thread.thread_id) not in RESOLVABLE_THREAD_VERDICTS:
         return False
-    return thread_conversation_freshness_matches(state_map, thread)
+    recorded = state_map.get(review_thread_body_state_key(thread.thread_id))
+    return recorded_review_thread_body_matches(recorded, thread)
 
 
 def outdated_thread_has_fresh_feedback(state_map: Mapping[str, str], thread: ReviewThread) -> bool:

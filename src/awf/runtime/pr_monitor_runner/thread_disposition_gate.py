@@ -34,11 +34,9 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   not, so its marker certifies nothing (:func:`_retire_broken_bindings`).
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
   never listed (opened or reopened since), listed with other outside comments
-  (replied to or edited since), listed with identity freshness that no longer
-  matches the recorded snapshot (PRRT_kwDOSJAM6s659f3z), or unlisted with
-  unmarked identity-only feedback (#1272), re-polls instead of passing. Identity
-  bodies stay out of the compatibility body hash; the separate identity snapshot
-  keeps a matching listed identity-only thread from re-polling forever.
+  (replied to or edited since), or unlisted with unmarked identity-only feedback
+  (#1272), re-polls instead of passing. Identity bodies stay out of the decided
+  / requeue hashes so a listed identity-only thread does not re-poll forever.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -47,18 +45,12 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import RepoRef
-from awf.runtime.feedback_policy import (
-    RESOLVABLE_THREAD_VERDICTS,
-    recorded_review_thread_identity_matches,
-    review_thread_identity_state_key,
-)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
@@ -70,7 +62,6 @@ from awf.runtime.monitor_state_keys import (
     _item_disposition_key,
 )
 from awf.runtime.pr_monitor import MonitorState, PRStatus
-from awf.runtime.pr_monitor_models import ReviewThread
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -220,17 +211,13 @@ async def _verify_audit(
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     # The outside comments ``decide()`` saw per listed thread (each listed copy).
-    # Identity comments listed for triage (#1272) stay out of this set (they are
-    # never in ``external_comment_bodies``); identity freshness is compared to the
-    # recorded snapshot instead so a matching listed identity-only thread does
-    # not re-poll forever (PRRT_kwDOSJAM6s659f3z).
+    # Identity comments listed for triage (#1272) are excluded: they are never in
+    # ``external_comment_bodies``, and including them would re-poll forever.
     decided: dict[str, set[tuple[str, ...]]] = {}
-    listed_by_id: dict[str, list[ReviewThread]] = {}
     for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
         decided.setdefault(listed.thread_id, set()).add(
             tuple(c.body for c in listed.comments if not c.viewer_did_author)
         )
-        listed_by_id.setdefault(listed.thread_id, []).append(listed)
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # Each AWF-resolved thread's conversation, as a legacy exemption would bind it.
     digests: dict[str, str] = {}
@@ -248,12 +235,6 @@ async def _verify_audit(
                 # Opened after ``status`` with only unmarked identity comments:
                 # empty ``external_comment_bodies`` would otherwise skip re-poll
                 # and merge over unread identity feedback (PRRT_kwDOSJAM6s645lS2).
-                undecided.append(thread.thread_id)
-            elif listed_bodies is not None and _listed_identity_freshness_stale(
-                state, listed_by_id.get(thread.thread_id, ())
-            ):
-                # Listed identity follow-up after the recorded snapshot: decide()
-                # must re-triage before merge (PRRT_kwDOSJAM6s659f3z).
                 undecided.append(thread.thread_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
@@ -369,27 +350,6 @@ def _unmarked_identity_feedback(thread: AuditedReviewThread) -> bool:
     return any(
         disposition_marker_class((body,), thread_id=thread.thread_id) is None
         for body in thread.viewer_comment_bodies
-    )
-
-
-def _listed_identity_freshness_stale(
-    state: MonitorState, listed_copies: Sequence[ReviewThread]
-) -> bool:
-    """True when a dispositioned listed thread's identity diverges from its snapshot.
-
-    Never-addressed listed threads stay decide()'s job — checking them here would
-    re-poll forever while they remain open (#1272). Only resolvable closed
-    verdicts can reach Merge still listed, so those are the ones identity
-    freshness must catch (PRRT_kwDOSJAM6s659f3z).
-    """
-    if not listed_copies:
-        return False
-    thread_id = listed_copies[0].thread_id
-    if state.threads_addressed_ids.get(thread_id) not in RESOLVABLE_THREAD_VERDICTS:
-        return False
-    recorded = state.threads_addressed_ids.get(review_thread_identity_state_key(thread_id))
-    return any(
-        not recorded_review_thread_identity_matches(recorded, copy) for copy in listed_copies
     )
 
 

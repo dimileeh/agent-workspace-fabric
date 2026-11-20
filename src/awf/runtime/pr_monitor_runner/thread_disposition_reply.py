@@ -25,10 +25,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedReviewThread
 from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.feedback_policy import (
-    review_thread_body_state_key,
-    review_thread_identity_state_key,
-)
+from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _disposition_retired_key,
@@ -273,7 +270,6 @@ async def reply_before_resolve(
                     keys=(
                         thread_id,
                         review_thread_body_state_key(thread_id),
-                        review_thread_identity_state_key(thread_id),
                         _item_disposition_key(thread_id),
                         *_retired_disposition_keys(state, thread_id),
                         *_filed_issue_marker_keys(state, thread_id),
@@ -652,7 +648,6 @@ async def persist_parked_thread(
             thread_id,
             _needs_human_reason_state_key(thread_id),
             review_thread_body_state_key(thread_id),
-            review_thread_identity_state_key(thread_id),
             _outdated_resolve_requeued_key(thread_id),
             *_filed_issue_marker_keys(state, thread_id),
         ),
