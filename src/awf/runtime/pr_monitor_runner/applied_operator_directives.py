@@ -1,11 +1,13 @@
-"""Applied operator directives for CI-failure repair prompts (#1256).
+"""Applied operator directives for CI-failure repair and feedback triage.
 
 When an ``AddressOperatorHint`` cycle completes with the hint applied and a
 non-empty directive, AWF keeps a short newest-5 history in
 ``MonitorState.threads_addressed_ids``. Later ``ReportCiFailure`` runs quote
 those records so a CI/review-bot failure cannot undo an operator decision that
-already landed. A CI repair that ends ``NEEDS_HUMAN`` while those records were
-in the prompt parks for a human under
+already landed (#1256). Feedback triage prompts
+(``address_thread_prompt`` / ``address_review_comment_prompt``) quote the same
+records with a triage-specific lead (#1283). A CI repair that ends
+``NEEDS_HUMAN`` while those records were in the prompt parks for a human under
 ``CI_REPAIR_OPERATOR_DECISION_CONFLICT`` and is not re-dispatched for the same
 head and failing-check signature until a new guide arrives or the head /
 failure set changes.
@@ -39,6 +41,9 @@ if TYPE_CHECKING:
 APPLIED_OPERATOR_DIRECTIVES_CAP = 5
 CI_REPAIR_OPERATOR_DECISION_CONFLICT = "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
 CI_REPAIR_APPLIED_OPERATOR_DIRECTIVES_EVENT = "monitor.ci_repair_applied_operator_directives"
+FEEDBACK_TRIAGE_APPLIED_OPERATOR_DIRECTIVES_EVENT = (
+    "monitor.feedback_triage_applied_operator_directives"
+)
 APPLIED_OPERATOR_FORGET_DECISIONS_MARKER = "AWF-FORGET-DECISIONS"
 
 _APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD = (
@@ -51,6 +56,22 @@ _APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD = (
     "only pass by undoing such a code decision, change nothing for that check "
     "and end with "
     "`AWF-VERDICT: NEEDS_HUMAN: <check name> conflicts with operator decision "
+    "<operation_id>: <one sentence>`.\n\n"
+)
+_APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD = (
+    "Applied operator decisions already on this PR (newest first). When this "
+    "item's finding is one a quoted decision already ruled on (named by its "
+    "id, or plainly the same finding), give the verdict the decision names "
+    "(for example DEFER with the issue it cites, or FALSE POSITIVE with its "
+    "reason) and make no code change that contradicts it: do not re-add what "
+    "it removed, do not revert what it changed, do not implement what it "
+    "deferred. A decision that does not speak to this finding does not "
+    "restrict the triage. Where two PR-wide decisions conflict, the newer "
+    "wins. A per-thread operator ruling for this item takes precedence over "
+    "any PR-wide decision that speaks to the same finding. If following a "
+    "decision looks unsafe or wrong for this finding, change nothing and end "
+    "with "
+    "`AWF-VERDICT: NEEDS_HUMAN: conflicts with operator decision "
     "<operation_id>: <one sentence>`.\n\n"
 )
 
@@ -189,11 +210,18 @@ def record_applied_operator_directive_from_hint(
 
 def render_applied_operator_directives_section(
     records: Sequence[AppliedOperatorDirective],
+    *,
+    lead: str = _APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD,
 ) -> str:
-    """Render the fixed AWF lead plus enveloped records (newest first)."""
+    """Render the AWF lead plus enveloped records (newest first).
+
+    ``lead`` defaults to the CI-repair wording so existing callers stay
+    byte-identical. Feedback triage passes
+    ``_APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD``.
+    """
     if not records:
         return ""
-    parts = [_APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD]
+    parts = [lead]
     for record in records:
         parts.append(
             render_untrusted_evidence(
@@ -231,6 +259,33 @@ def log_ci_repair_applied_operator_directives_audit(
         count=len(records),
         operation_ids=[record.operation_id for record in records],
     )
+
+
+def log_feedback_triage_applied_operator_directives_audit(
+    records: Sequence[AppliedOperatorDirective],
+    *,
+    workspace_id: str,
+    pr_number: int,
+    thread_id: str | None = None,
+    comment_id: str | None = None,
+) -> None:
+    """Emit one triage audit event (count + operation ids + item id).
+
+    No directive body is logged. No-op when ``records`` is empty.
+    """
+    if not records:
+        return
+    payload: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "pr_number": pr_number,
+        "count": len(records),
+        "operation_ids": [record.operation_id for record in records],
+    }
+    if thread_id is not None:
+        payload["thread_id"] = thread_id
+    if comment_id is not None:
+        payload["comment_id"] = comment_id
+    _log.info(FEEDBACK_TRIAGE_APPLIED_OPERATOR_DIRECTIVES_EVENT, **payload)
 
 
 def _ci_repair_operator_decision_conflict_failure_identity(

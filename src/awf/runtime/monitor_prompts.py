@@ -159,6 +159,7 @@ def address_thread_prompt(
     owned_paths: Sequence[str] = (),
     task_tag: str | None = None,
     operator_decision: str | None = None,
+    applied_operator_directives: Sequence[object] = (),
 ) -> str:
     """Prompt the CLI to address a single inline review thread.
 
@@ -166,6 +167,11 @@ def address_thread_prompt(
     ``needs_human`` verdict on this thread (issue #939). Without it the
     re-addressed thread reads exactly like the first attempt and the agent can
     repeat the fix the operator already rejected, then re-park.
+
+    ``applied_operator_directives`` is newest-first PR-wide applied decisions
+    (#1283). Empty (the default) keeps the prompt byte-identical to today. A
+    per-thread ``operator_decision`` still precedes and keeps precedence over
+    the applied-directives section when both are present.
     """
     line_hint = (
         f"line {thread.line} of {thread.path}"
@@ -192,6 +198,7 @@ def address_thread_prompt(
         if thread.review_context is not None
         else "The full review-thread history is quoted below as external evidence. "
     )
+    applied_section = _applied_operator_directives_triage_section(applied_operator_directives)
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
@@ -201,6 +208,7 @@ def address_thread_prompt(
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
         f"{_operator_decision_section(thread_id=thread.thread_id, decision=operator_decision)}"
+        f"{applied_section}"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy(owned_paths)}\n"
         f"{_COMMENT_VERDICT_GUIDANCE}\n"
@@ -261,6 +269,27 @@ def _operator_decision_section(*, thread_id: str, decision: str | None) -> str:
     )
 
 
+def _applied_operator_directives_triage_section(
+    applied_operator_directives: Sequence[object],
+) -> str:
+    """Render PR-wide applied decisions with the triage lead, or nothing."""
+    from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+        _APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD,
+        AppliedOperatorDirective,
+        render_applied_operator_directives_section,
+    )
+
+    directive_records = tuple(
+        record
+        for record in applied_operator_directives
+        if isinstance(record, AppliedOperatorDirective)
+    )
+    return render_applied_operator_directives_section(
+        directive_records,
+        lead=_APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD,
+    )
+
+
 def address_review_comment_prompt(
     *,
     pr_number: int,
@@ -269,8 +298,13 @@ def address_review_comment_prompt(
     workspace_runtime_context: str = "",
     owned_paths: Sequence[str] = (),
     task_tag: str | None = None,
+    applied_operator_directives: Sequence[object] = (),
 ) -> str:
-    """Prompt for a review-level (outside-diff) comment."""
+    """Prompt for a review-level (outside-diff) comment.
+
+    ``applied_operator_directives`` is newest-first PR-wide applied decisions
+    (#1283). Empty (the default) keeps the prompt byte-identical to today.
+    """
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
             source_kind="github_pr_review_comment",
@@ -289,12 +323,14 @@ def address_review_comment_prompt(
             text=comment.body or comment.body_excerpt,
         )
     )
+    applied_section = _applied_operator_directives_triage_section(applied_operator_directives)
     return (
         f"A review-level (outside-diff) comment on PR #{pr_number} ({repo_slug}) "
         f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks. "
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"Body evidence:\n\n{evidence}\n\n"
+        f"{applied_section}"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy(owned_paths)}\n"
         f"{_COMMENT_VERDICT_GUIDANCE}\n"
