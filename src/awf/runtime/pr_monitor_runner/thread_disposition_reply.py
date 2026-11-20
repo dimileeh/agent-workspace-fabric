@@ -39,7 +39,10 @@ from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_issue_filed_marker,
     _deferred_issue_url,
 )
-from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _redact_and_truncate_forge_error,
+)
 from awf.runtime.pr_monitor_runner.lifecycle import _superseded_monitor_owner
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
@@ -182,6 +185,7 @@ async def reply_before_resolve(
                 audited_comments=audited_comments,
                 expect_resolved=expect_resolved,
                 read_own_comment_ids=posted.read_own_comment_ids,
+                read_own_comment_bodies=posted.read_own_comment_bodies,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -246,10 +250,35 @@ async def reply_before_resolve(
             # (PRRT_kwDOSJAM6s6vaQrr). The reply is retired, so no later resolve
             # reuses it, and the thread is left open: its changed body re-enters
             # AddressComments, whose re-triage answers that feedback afresh.
+            # Identity-authored edits keep the outside body hash (#1272) so the
+            # verdict must be cleared too, or resolve would post the same answer
+            # again (PRRT_kwDOSJAM6s659e4O). Outside edits already diverge that
+            # hash; clearing them is still correct and makes re-triage immediate.
             retire_item_disposition(state, posted)
-            await _persist_posted_disposition(
-                self, workspace_id=workspace_id, state=state, item_id=thread_id
-            )
+            if moved == _FEEDBACK_AFTER_DECISION:
+                _clear_addressed_state_by_id(
+                    state,
+                    thread_id,
+                    restore_operator_decision=False,
+                    keep_posted_reply=False,
+                )
+                await _persist_item_keys(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    item_id=thread_id,
+                    keys=(
+                        thread_id,
+                        review_thread_body_state_key(thread_id),
+                        _item_disposition_key(thread_id),
+                        *_retired_disposition_keys(state, thread_id),
+                        *_filed_issue_marker_keys(state, thread_id),
+                    ),
+                )
+            else:
+                await _persist_posted_disposition(
+                    self, workspace_id=workspace_id, state=state, item_id=thread_id
+                )
             _log.info(
                 "monitor.thread_disposition_feedback_moved",
                 workspace_id=workspace_id,
@@ -321,6 +350,7 @@ async def _reread_thread_after_reply(
     audited_comments: tuple[str, ...] = (),
     expect_resolved: bool = False,
     read_own_comment_ids: tuple[str, ...] = (),
+    read_own_comment_bodies: tuple[str, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -352,6 +382,7 @@ async def _reread_thread_after_reply(
         reply_comment_id,
         audited_comments,
         read_own_comment_ids=read_own_comment_ids,
+        read_own_comment_bodies=read_own_comment_bodies,
     )
     if expect_resolved and not live.is_resolved:
         # A reviewer reopened the resolved thread after the audit that cleared it:
@@ -371,6 +402,7 @@ def _conversation_moved(
     audited_comments: tuple[str, ...] = (),
     *,
     read_own_comment_ids: tuple[str, ...] = (),
+    read_own_comment_bodies: tuple[str, ...] = (),
 ) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
@@ -385,8 +417,11 @@ def _conversation_moved(
     reply passed this check, or parked the thread for a human, over the same
     conversation. A previous reply that newer feedback superseded proves nothing:
     the re-triage behind this reply may answer only that feedback, as after a park
-    that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
-    comments that differ from the listed non-viewer ones are
+    that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). An identity
+    comment whose id the triage recorded but whose plain-text body no longer
+    matches ``read_own_comment_bodies`` is ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``:
+    the id alone would close over the edited text (PRRT_kwDOSJAM6s659e4O).
+    Otherwise outside comments that differ from the listed non-viewer ones are
     ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; without a listed copy the audited
     ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). An available
     listed snapshot with zero outside comments still compares (identity-only
@@ -405,12 +440,24 @@ def _conversation_moved(
     # too stale to show it bounds nothing with an older marker: the reply follows
     # every comment it shows (PRRT_kwDOSJAM6s6vc8M9, PRRT_kwDOSJAM6s6veO2F).
     ids = live.viewer_comment_ids
+    body_texts = live.viewer_comment_body_texts
     read_own = frozenset(read_own_comment_ids)
+    # Id -> bodyText the triage stored; legacy records with ids only omit bodies.
+    read_own_text = dict(zip(read_own_comment_ids, read_own_comment_bodies, strict=False))
     reply = ids.index(reply_comment_id) if reply_comment_id in ids else len(bodies)
     for index in range(reply - 1, -1, -1):
         if index not in marked:
             # Guard the index: a missing id cannot prove the triage read it (#1272).
             if index < len(ids) and ids[index] in read_own:
+                expected = read_own_text.get(ids[index])
+                if (
+                    expected is not None
+                    and index < len(body_texts)
+                    and body_texts[index] != expected
+                ):
+                    # Same id, new text: leave open for re-triage, do not park as
+                    # unread (the triage did read the prior wording).
+                    return _FEEDBACK_AFTER_DECISION
                 continue
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:

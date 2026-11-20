@@ -241,6 +241,7 @@ def _thread_snapshot(
     """The thread as ``comment_nodes`` (oldest first) read: bodies, supersession, digests."""
     viewer_bodies: list[str] = []
     viewer_ids: list[str] = []
+    viewer_body_texts: list[str] = []
     viewer_posted_at: list[datetime | None] = []
     superseded = 0
     latest_edit: datetime | None = None
@@ -255,6 +256,10 @@ def _thread_snapshot(
         elif isinstance(body := comment.get("body"), str):
             viewer_bodies.append(body)
             viewer_ids.append(_comment_id(comment) or "")
+            # bodyText matches listed ReviewThreadComment.body for edit detection
+            # on identity comments the triage already read (PRRT_kwDOSJAM6s659e4O).
+            text = comment.get("bodyText")
+            viewer_body_texts.append(text if isinstance(text, str) else "")
             viewer_posted_at.append(_parse_github_datetime(comment.get("createdAt")))
     if latest_edit is not None:
         # An edit keeps the feedback's place in the list, so a reply posted before
@@ -269,6 +274,7 @@ def _thread_snapshot(
         resolved_by=_clean_optional_str(_dig(node, "resolvedBy", "login")),
         viewer_comment_bodies=tuple(viewer_bodies),
         viewer_comment_ids=tuple(viewer_ids),
+        viewer_comment_body_texts=tuple(viewer_body_texts),
         superseded_viewer_comments=superseded,
         conversation_digest=_conversation_digest(comment_nodes),
         conversation_digest_before_reply=_conversation_digest(comment_nodes[:-1])
