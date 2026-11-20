@@ -53,6 +53,10 @@ _COPIED_CASES: list[tuple[str, str]] = [
     # Without this, the successor's first poll drops the seeded verdict as stale.
     ("__review_thread_body_hash__:PRRT_kwDOSJAM6s6fNhZo", "b" * 64),
     ("__review_thread_body_hash__:bb:acme/widgets#12:99", "c" * 64),
+    # Identity freshness companion (PRRT_kwDOSJAM6s659f3z): travels with the
+    # body hash so a successor does not re-queue solely for a missing snapshot.
+    ("__review_thread_identity_hash__:PRRT_kwDOSJAM6s6fNhZo", "d" * 64),
+    ("__review_thread_identity_hash__:bb:acme/widgets#12:99", "f" * 64),
     # Deferred-issue marker.
     ("__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123", "dimileeh/aira-infra#42"),
     # Operator decision that un-parked a thread whose verdict was cleared
@@ -267,6 +271,7 @@ def test_non_string_values_are_dropped(value: Any) -> None:
     [
         "__review_comment_body_hash__:",
         "__review_thread_body_hash__:",
+        "__review_thread_identity_hash__:",
         "__deferred_issue_filed__:",
         "__operator_decision__:",
         "__operator_decision_retired__:",

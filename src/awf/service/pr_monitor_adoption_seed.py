@@ -285,6 +285,7 @@ _PRESERVED_ATTEMPT_RETIRED_TIP_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
+    "__review_thread_identity_hash__:",
     "__deferred_issue_filed__:",
     _OPERATOR_DECISION_PREFIX,
     _OPERATOR_DECISION_ISSUED_AT_PREFIX,

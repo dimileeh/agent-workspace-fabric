@@ -49,7 +49,10 @@ from awf.runtime.feedback_policy import (
     recorded_review_thread_body_matches,
     review_thread_body_hash,
     review_thread_body_state_key,
+    review_thread_identity_hash,
+    review_thread_identity_state_key,
     review_thread_resolution_body,
+    thread_conversation_freshness_matches,
     thread_enters_address_comments,
     thread_needs_attention,
 )
@@ -655,10 +658,19 @@ def _mark_review_thread_addressed(
     body_superseded = recorded_body is not None and not recorded_review_thread_body_matches(
         recorded_body, thread
     )
+    # Identity drift alone also supersedes a prior ruling (PRRT_kwDOSJAM6s659f3z).
+    if not body_superseded and not thread_conversation_freshness_matches(
+        state.threads_addressed_ids, thread
+    ):
+        body_superseded = True
     state.mark_addressed(thread.thread_id, verdict)
     state.mark_addressed(
         _review_thread_body_state_key(thread.thread_id),
         _review_thread_body_hash(thread),
+    )
+    state.mark_addressed(
+        review_thread_identity_state_key(thread.thread_id),
+        review_thread_identity_hash(thread),
     )
     if body_superseded:
         # This recording answers a body the previously parked ruling never spoke

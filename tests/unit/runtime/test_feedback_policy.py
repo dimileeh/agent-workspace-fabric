@@ -119,8 +119,8 @@ def test_body_hash_ignores_identity_comments_and_matches_pre_change_recorded_has
     Before this change the status feed dropped viewer-authored comments, so
     persisted ``__review_thread_body_hash__`` values covered only external
     rows. After listing identity comments for triage, the three serializers
-    must still skip ``viewer_did_author`` so those hashes stay byte-identical
-    and an identity comment never re-queues a thread by itself.
+    must still skip ``viewer_did_author`` so those hashes stay byte-identical.
+    Identity follow-ups are tracked by a separate freshness signal instead.
     """
     import hashlib
     import json
@@ -129,6 +129,8 @@ def test_body_hash_ignores_identity_comments_and_matches_pre_change_recorded_has
         _legacy_fallback_review_thread_body_hash,
         _legacy_review_thread_body_hash,
         recorded_review_thread_body_matches,
+        review_thread_identity_hash,
+        review_thread_identity_state_key,
         thread_enters_address_comments,
         thread_needs_attention,
     )
@@ -179,12 +181,88 @@ def test_body_hash_ignores_identity_comments_and_matches_pre_change_recorded_has
     ) == _legacy_fallback_review_thread_body_hash(external_only)
     assert recorded_review_thread_body_matches(pre_change_hash, listed_with_identity) is True
 
+    # Compatibility body hash alone must not hide unread identity feedback
+    # (PRRT_kwDOSJAM6s659f3z): a missing identity snapshot with live unmarked
+    # identity comments re-queues until triage records the separate signal.
     state = {
         "T1": "fix_committed",
         review_thread_body_state_key("T1"): pre_change_hash,
     }
+    assert thread_needs_attention(state, listed_with_identity) is True
+    assert thread_enters_address_comments(state, listed_with_identity) is True
+
+    # Once the identity snapshot matches, body-hash compatibility still holds
+    # and the thread does not re-queue on the listed identity alone.
+    state[review_thread_identity_state_key("T1")] = review_thread_identity_hash(
+        listed_with_identity
+    )
     assert thread_needs_attention(state, listed_with_identity) is False
     assert thread_enters_address_comments(state, listed_with_identity) is False
+    # External-only listing against a recorded identity snapshot is drift too.
+    assert thread_enters_address_comments(state, external_only) is True
+
+
+@pytest.mark.unit
+def test_identity_freshness_requeues_closed_thread_on_new_identity_follow_up() -> None:
+    """Unmarked identity follow-ups after disposition re-enter AddressComments.
+
+    ``retire_reopened_dispositions`` keeps ``fix_committed`` / ``false_positive``
+    when comments "did not change"; excluding identity from the body hash made a
+    new token-identity follow-up look unchanged (PRRT_kwDOSJAM6s659f3z).
+    """
+    from awf.runtime.feedback_policy import (
+        review_thread_identity_hash,
+        review_thread_identity_state_key,
+        thread_enters_address_comments,
+        thread_needs_attention,
+        thread_resolution_pending,
+    )
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    external = ReviewThreadComment(
+        comment_id="101",
+        body="please fix this",
+        author="reviewer",
+        viewer_did_author=False,
+    )
+    at_disposition = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(external,),
+    )
+    after_follow_up = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(
+            external,
+            ReviewThreadComment(
+                comment_id="own-2",
+                body="actually also guard the None path",
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    # Body hash is unchanged across the identity follow-up (#1272 compat).
+    assert review_thread_body_hash(at_disposition) == review_thread_body_hash(after_follow_up)
+
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): review_thread_body_hash(at_disposition),
+        review_thread_identity_state_key("T1"): review_thread_identity_hash(at_disposition),
+    }
+    assert thread_enters_address_comments(state, at_disposition) is False
+    assert thread_resolution_pending(state, at_disposition) is True
+
+    assert thread_needs_attention(state, after_follow_up) is True
+    assert thread_enters_address_comments(state, after_follow_up) is True
+    assert thread_resolution_pending(state, after_follow_up) is False
 
 
 @pytest.mark.unit

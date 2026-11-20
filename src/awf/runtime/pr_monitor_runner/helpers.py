@@ -40,7 +40,6 @@ from awf.db.enums import (
 )
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import WorkspaceRepository, pr_feedback_body_hash
-from awf.runtime.feedback_policy import recorded_review_thread_body_matches
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_done_key as _initial_review_grace_done_key,
 )
@@ -395,12 +394,16 @@ def _clear_addressed_state_by_id(
     (#1189): its tombstone is dropped so a repeated ruling is never consumed as
     already applied while the thread stays open for the new conversation.
     """
+    from awf.runtime.feedback_policy import review_thread_identity_state_key
     from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 
     posted = read_item_disposition(state, item_id) if keep_posted_reply else None
     body_snapshot = state.threads_addressed_ids.get(_review_thread_body_state_key(item_id))
+    identity_key = review_thread_identity_state_key(item_id)
+    identity_snapshot = state.threads_addressed_ids.get(identity_key)
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
+    state.threads_addressed_ids.pop(identity_key, None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
@@ -431,22 +434,26 @@ def _clear_addressed_state_by_id(
         # replay stale guidance while telling the agent not to re-escalate. The
         # verdict stays cleared, so the thread still re-enters ``AddressComments``.
         state.mark_addressed(_review_thread_body_state_key(item_id), body_snapshot)
+        if identity_snapshot is not None:
+            state.mark_addressed(identity_key, identity_snapshot)
 
 
 def _drop_stale_review_thread_addressed_state(
     status: PRStatus,
     state: MonitorState,
 ) -> bool:
+    from awf.runtime.feedback_policy import thread_conversation_freshness_matches
+
     changed = False
     for thread in status.unresolved_inline_threads:
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if _needs_comment_attention(verdict):
             continue
-        recorded = state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
-        if recorded_review_thread_body_matches(recorded, thread):
+        if thread_conversation_freshness_matches(state.threads_addressed_ids, thread):
             continue
-        # Fresh reviewer feedback supersedes the answered operator ruling rather
-        # than rolling its verdict back, so the parked ruling retires for good,
+        # Fresh reviewer or identity feedback supersedes the answered operator
+        # ruling rather than rolling its verdict back, so the parked ruling
+        # retires for good,
         # and the new feedback gets its own disposition reply (#1018).
         _clear_addressed_state_by_id(
             state,
