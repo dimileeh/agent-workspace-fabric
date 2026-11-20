@@ -15,14 +15,13 @@ from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
 )
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_models import ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comments
-from awf.runtime.pr_monitor_runner.applied_operator_directives import (
-    AppliedOperatorDirective,
-    append_applied_operator_directive,
-)
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
+    _finalize_processed_operator_hint,
+)
 
 _REPO = RepoRef(owner="dimileeh", name="awf")
 _THREAD = ReviewThread(
@@ -39,17 +38,25 @@ _COMMENT = ReviewComment(
 )
 _DIRECTIVE_TEXT = "Defer thread PRRT_kwDOSJAM6s6ftriage to #999; add no code."
 _OPERATION_ID = "op-guide-1283"
+_HEAD_SHA = "b34a78bf86abcdef0123456789abcdef01234567"
 
 
-def _seed_directive(state: MonitorState, *, operation_id: str = _OPERATION_ID) -> None:
-    append_applied_operator_directive(
+def _seed_directive_via_guide_finalize(
+    state: MonitorState, *, operation_id: str = _OPERATION_ID
+) -> None:
+    """Record the decision the way AddressOperatorHint completion does (#1268)."""
+    hint = OperatorHint(
+        reason="operator guide",
+        directive=_DIRECTIVE_TEXT,
+        operation_id=operation_id,
+        reason_code="OPERATOR_GUIDE",
+    )
+    state.pending_operator_hint = hint
+    _finalize_processed_operator_hint(
         state,
-        AppliedOperatorDirective(
-            directive=_DIRECTIVE_TEXT,
-            operation_id=operation_id,
-            applied_at="2026-11-20T12:00:00+00:00",
-            head_sha="b34a78bf86abcdef0123456789abcdef01234567",
-        ),
+        hint=hint,
+        acted_feedback_text=hint.directive,
+        head_sha=_HEAD_SHA,
     )
 
 
@@ -77,7 +84,7 @@ async def test_address_thread_prompt_contains_applied_directive_and_audits(
 
     monkeypatch.setattr(comments, "address_thread_prompt", _capture)
     state = MonitorState()
-    _seed_directive(state)
+    _seed_directive_via_guide_finalize(state)
 
     with structlog.testing.capture_logs() as captured:
         await comments._address_thread(
@@ -131,7 +138,7 @@ async def test_address_review_comment_prompt_contains_applied_directive_and_audi
 
     monkeypatch.setattr(comments, "address_review_comment_prompt", _capture)
     state = MonitorState()
-    _seed_directive(state)
+    _seed_directive_via_guide_finalize(state)
 
     with structlog.testing.capture_logs() as captured:
         await comments._address_review_comment_result(
