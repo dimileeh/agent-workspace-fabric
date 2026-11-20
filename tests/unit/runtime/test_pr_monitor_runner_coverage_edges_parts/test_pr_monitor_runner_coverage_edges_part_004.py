@@ -773,7 +773,11 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     )
 
     assert len(adapter.calls) == 1
-    assert state.threads_addressed_ids["T_same"] == "fix_committed"
+    # Agent's unmarked reply (102) was not present on the triaged thread, so the
+    # disposition reply re-read parks it as unread identity feedback (#1272).
+    assert state.threads_addressed_ids["T_same"] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:T_same"]
+    assert reason.startswith("THREAD_DISPOSITION_UNREAD_FEEDBACK:")
     assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
     assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
     worktree = tmp_path / "worktrees" / "ws_thread_resolution_reply"
@@ -781,7 +785,6 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]  # #910 post-action re-check
     assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
     assert cmd.calls[2].args[5] == "push"
-    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
 
 
 @pytest.mark.unit

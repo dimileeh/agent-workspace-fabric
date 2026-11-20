@@ -181,6 +181,7 @@ async def reply_before_resolve(
                 retry=retry,
                 audited_comments=audited_comments,
                 expect_resolved=expect_resolved,
+                read_own_comment_ids=posted.read_own_comment_ids,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -222,15 +223,17 @@ async def reply_before_resolve(
                     self, workspace_id=workspace_id, state=state, item_id=thread_id
                 )
         if moved == THREAD_DISPOSITION_UNREAD_FEEDBACK:
-            # The operator, under AWF's own account, left feedback the triage behind
-            # this reply never read, yet the gate would take the reply as its answer
-            # (PRRT_kwDOSJAM6s6vbU2H). A human reads it: the thread is parked open and
-            # the reply retired, so neither a later resolve nor its marker reuses it.
+            # Unmarked identity feedback the triage behind this reply did not read
+            # still precedes the reply, and the gate would take the reply as its
+            # answer (PRRT_kwDOSJAM6s6vbU2H). Identity comments present at triage
+            # are recorded in ``read_own_comment_ids`` and skipped; anything else
+            # parks for a human and retires the reply (#1272).
             await _park(
                 THREAD_DISPOSITION_UNREAD_FEEDBACK,
                 "AWF did not resolve this review thread: a comment by its own forge "
                 "identity without an AWF disposition marker precedes its disposition "
-                "reply, and AWF never reads that identity's comments as feedback",
+                "reply, and that comment was not present when triage recorded the "
+                "disposition (so AWF did not read it as feedback)",
             )
             retire_item_disposition(state, posted)
             await _persist_posted_disposition(
@@ -317,6 +320,7 @@ async def _reread_thread_after_reply(
     retry: bool,
     audited_comments: tuple[str, ...] = (),
     expect_resolved: bool = False,
+    read_own_comment_ids: tuple[str, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -342,7 +346,13 @@ async def _reread_thread_after_reply(
     live = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if live is None:
         raise _StaleRereadError(f"the re-read does not show thread {thread_id} yet")
-    moved = _conversation_moved(thread, live, reply_comment_id, audited_comments)
+    moved = _conversation_moved(
+        thread,
+        live,
+        reply_comment_id,
+        audited_comments,
+        read_own_comment_ids=read_own_comment_ids,
+    )
     if expect_resolved and not live.is_resolved:
         # A reviewer reopened the resolved thread after the audit that cleared it:
         # the reopen is feedback after the decision, so resolving would close it.
@@ -359,26 +369,31 @@ def _conversation_moved(
     live: AuditedReviewThread,
     reply_comment_id: str | None,
     audited_comments: tuple[str, ...] = (),
+    *,
+    read_own_comment_ids: tuple[str, ...] = (),
 ) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
-    The triage behind the reply read ``thread``'s outside comments, as
-    ``fetch_pr_status`` lists them, and none by AWF's own identity: that identity
-    can be the operator's own account, and ``fetch_pr_status`` lists none of its
-    comments. AWF only posts marker-carrying replies, so an unmarked one is the
-    operator's feedback, which the gate would read the reply as answering. Such a
-    comment is ``THREAD_DISPOSITION_UNREAD_FEEDBACK`` whatever outside feedback
-    followed it (PRRT_kwDOSJAM6s6vbU2H), unless AWF's previous reply in the thread
-    sits between them and is still current (no newer outside comment or edit): that
+    The triage behind the reply read ``thread``'s non-viewer comments (as
+    ``fetch_pr_status`` lists them for hash/gate comparison) and any unmarked
+    identity comments whose ids are in ``read_own_comment_ids``. AWF's own
+    posts into threads carry a disposition marker; an unmarked identity comment
+    is operator (or agent) prose. One the triage did not record is
+    ``THREAD_DISPOSITION_UNREAD_FEEDBACK`` whatever outside feedback followed it
+    (PRRT_kwDOSJAM6s6vbU2H), unless AWF's previous reply in the thread sits
+    between them and is still current (no newer outside comment or edit): that
     reply passed this check, or parked the thread for a human, over the same
     conversation. A previous reply that newer feedback superseded proves nothing:
     the re-triage behind this reply may answer only that feedback, as after a park
     that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
-    comments that differ from the listed ones are
+    comments that differ from the listed non-viewer ones are
     ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; without a listed copy the audited
-    ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). A snapshot
-    without comments, or neither copy at all, proves no such difference. The unread check needs only
-    ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
+    ``audited_comments`` stand in for them (PRRT_kwDOSJAM6s63XfSQ). An available
+    listed snapshot with zero outside comments still compares (identity-only
+    threads filter to an empty tuple): new outside feedback before the reply is
+    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION`` (PRRT_kwDOSJAM6s644AF5). Neither
+    copy at all proves no such difference. The unread check needs only ``live``,
+    so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
     marked = {
@@ -390,18 +405,26 @@ def _conversation_moved(
     # too stale to show it bounds nothing with an older marker: the reply follows
     # every comment it shows (PRRT_kwDOSJAM6s6vc8M9, PRRT_kwDOSJAM6s6veO2F).
     ids = live.viewer_comment_ids
+    read_own = frozenset(read_own_comment_ids)
     reply = ids.index(reply_comment_id) if reply_comment_id in ids else len(bodies)
     for index in range(reply - 1, -1, -1):
         if index not in marked:
+            # Guard the index: a missing id cannot prove the triage read it (#1272).
+            if index < len(ids) and ids[index] in read_own:
+                continue
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:
             break  # AWF's previous reply, still current
-    listed = (
-        tuple(comment.body for comment in thread.comments)
-        if thread is not None
-        else audited_comments
-    )
-    if listed and live.external_comment_bodies != listed:
+    # ``thread is not None`` is an available snapshot even when every listed
+    # comment is identity-authored (empty outside tuple). ``audited_comments``
+    # stand in only when non-empty: an empty default means no listed copy.
+    if thread is not None:
+        listed: tuple[str, ...] | None = tuple(
+            comment.body for comment in thread.comments if not comment.viewer_did_author
+        )
+    else:
+        listed = audited_comments or None
+    if listed is not None and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION
     return None
 

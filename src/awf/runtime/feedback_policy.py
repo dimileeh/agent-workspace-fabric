@@ -77,12 +77,15 @@ def review_thread_resolution_body(thread: ReviewThread) -> str:
     # form (and outdated hygiene skipped resolve) — PRRT_kwDOSJAM6s6dcFNZ.
     payload: list[dict[str, str | None]] = []
     if thread.comments:
+        # Skip identity comments so listing them for triage (#1272) never
+        # re-queues a thread and pre-change recorded hashes stay byte-identical.
         payload.extend(
             {
                 "author": comment.author,
                 "body": comment.body,
             }
             for comment in thread.comments
+            if not comment.viewer_did_author
         )
     else:
         payload.append(
@@ -113,6 +116,7 @@ def _legacy_review_thread_resolution_body(thread: ReviewThread) -> str:
                 ),
             }
             for comment in thread.comments
+            if not comment.viewer_did_author
         )
     else:
         payload.append(
@@ -145,6 +149,7 @@ def _legacy_fallback_review_thread_resolution_body(thread: ReviewThread) -> str:
                 "created_at": None,
             }
             for comment in thread.comments
+            if not comment.viewer_did_author
         )
     else:
         payload.append(

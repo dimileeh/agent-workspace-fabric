@@ -25,6 +25,7 @@ from awf.runtime.monitor_state_keys import _disposition_retired_key
 from awf.runtime.pr_monitor import (
     AddressComments,
     MonitorConfig,
+    MonitorState,
     NotifyHuman,
     ReviewThread,
     ReviewThreadComment,
@@ -34,10 +35,14 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import Verdict
 from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
+    record_item_disposition,
     retire_reopened_dispositions,
     sync_item_disposition,
 )
-from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
+    _conversation_moved,
+    reply_before_resolve,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._thread_disposition_fixtures import (
     OrderedForge,
@@ -261,6 +266,68 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
 _OPERATOR_ASK = "also cover empty payloads"
 
 
+def test_conversation_moved_compares_empty_listed_external_snapshot() -> None:
+    """An available listed snapshot with zero outside comments still compares (#1272).
+
+    Identity-only listed threads filter to an empty external tuple. That empty
+    snapshot must still detect outside feedback that arrived after the list and
+    before the disposition reply; skipping on falsy ``listed`` would resolve over
+    feedback the agent never read (PRRT_kwDOSJAM6s644AF5).
+    """
+    tid = "PRRT_test_empty_listed_external"
+    listed = replace(
+        _thread(tid, _OPERATOR_ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="own-0",
+                body=_OPERATOR_ASK,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    live = AuditedReviewThread(
+        thread_id=tid,
+        is_resolved=False,
+        is_outdated=False,
+        resolved_by=None,
+        viewer_comment_bodies=(_OPERATOR_ASK, "marker"),
+        viewer_comment_ids=("own-0", "reply-1"),
+        external_comment_bodies=(_ASK,),
+    )
+
+    assert (
+        _conversation_moved(
+            listed,
+            live,
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+        )
+        == "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
+    )
+    # Unavailable listed copy (no thread, empty audited stand-in) still skips.
+    assert (
+        _conversation_moved(
+            None,
+            live,
+            "reply-1",
+            (),
+            read_own_comment_ids=("own-0",),
+        )
+        is None
+    )
+    # Available empty listed snapshot matches live empty externals.
+    assert (
+        _conversation_moved(
+            listed,
+            replace(live, external_comment_bodies=()),
+            "reply-1",
+            read_own_comment_ids=("own-0",),
+        )
+        is None
+    )
+
+
 def _own_comment_ids(names: tuple[str, ...]) -> tuple[str, ...]:
     """The audit's ids for AWF's identity's comments: ``reply`` is the one just posted."""
     return tuple(
@@ -420,6 +487,109 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
 
     assert [event[0] for event in gh.events] == ["reply", "resolve"]
     assert state.threads_addressed_ids[tid] == "false_positive"
+
+
+async def test_fix_cycle_resolves_when_operator_comment_was_read_at_triage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity comment present at triage is skipped on the reply re-read (#1272)."""
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_read_own_at_triage"
+    operator_id = "own-0"
+    thread = replace(
+        _commented_thread(tid, _ASK),
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1", body=_ASK, author="review-bot", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id=operator_id,
+                body=_OPERATOR_ASK,
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply="d" * 64,
+        viewer_bodies=(_OPERATOR_ASK, marker),
+        viewer_ids=(operator_id, "reply-1"),
+        superseded=0,
+    )
+
+    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
+        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
+        record_item_disposition(
+            state,
+            replace(disposition, read_own_comment_ids=(operator_id,)),
+        )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_seed,
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert state.threads_addressed_ids[tid] == "false_positive"
+
+
+async def test_fix_cycle_still_parks_unread_operator_comment_not_in_read_set(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity comment absent from triage still parks as unread (#1272)."""
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_unread_own_after_triage"
+    thread = _commented_thread(tid, _ASK)
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply="d" * 64,
+        viewer_bodies=(_OPERATOR_ASK, marker),
+        viewer_ids=("own-0", "reply-1"),
+        superseded=0,
+    )
+
+    def _seed(state: MonitorState, addressed: ReviewThread) -> None:
+        disposition = seed_resolvable_disposition(state, addressed.thread_id, "false_positive")
+        # Triage saw no identity comments; an empty read set must still park.
+        record_item_disposition(
+            state,
+            replace(disposition, read_own_comment_ids=()),
+        )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_seed,
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("THREAD_DISPOSITION_UNREAD_FEEDBACK:")
 
 
 @pytest.mark.parametrize(

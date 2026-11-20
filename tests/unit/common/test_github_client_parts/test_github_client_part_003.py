@@ -912,12 +912,19 @@ class TestFetchPrStatusPart002:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
-        assert [t.thread_id for t in status.outdated_unresolved_inline_threads] == ["T_outdated"]
+        # Unmarked identity-only outdated threads surface for resolution (#1272).
+        assert [t.thread_id for t in status.outdated_unresolved_inline_threads] == [
+            "T_outdated",
+            "T_outdated_only_viewer",
+        ]
         outdated = status.outdated_unresolved_inline_threads[0]
         assert outdated.is_outdated is True
         assert outdated.is_resolved is False
         assert outdated.body_excerpt == "fixed elsewhere"
         assert outdated.url == "https://github.example/review/9"
+        viewer_only = status.outdated_unresolved_inline_threads[1]
+        assert viewer_only.comments[0].viewer_did_author is True
+        assert viewer_only.body_excerpt == "self note"
 
     @pytest.mark.unit
     async def test_paginates_comment_history_for_resolved_and_outdated_threads(self) -> None:

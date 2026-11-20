@@ -409,11 +409,14 @@ When meaningful bot or human feedback appears, AWF:
    be posted stays open and is parked `needs_human`. A fresh reply is checked
    against the full live conversation before it first: feedback added or edited
    since the thread was listed retires the reply and leaves the thread open for
-   re-triage. An unmarked comment by AWF's own account parks the thread
-   `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead: it is the operator's, and the
-   monitor never reads it. The exception is a comment that comes before AWF's
-   previous reply in the thread while that reply is still current, meaning no
-   newer outside comment or edit has superseded it.
+   re-triage. An unmarked comment by AWF's own account that was **not** present
+   when triage recorded the disposition parks the thread
+   `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead. Unmarked identity comments that
+   *were* present at triage are listed and read (they never re-queue work by
+   themselves); only a valid `AWF:thread-disposition:v1` marker naming the thread
+   is treated as AWF's own reply. The exception is a comment that comes before
+   AWF's previous reply in the thread while that reply is still current, meaning
+   no newer outside comment or edit has superseded it.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -521,10 +524,12 @@ resolved only after the reply succeeded; otherwise it stays open and is parked
 - `THREAD_DISPOSITION_REPLY_FAILED` — the forge rejected the reply (never retried
   blindly, since a retry could post twice);
 - `THREAD_DISPOSITION_UNREAD_FEEDBACK` — an unmarked comment by AWF's own account
-  precedes the reply. That account can be the operator's, and
-  `fetch_pr_status` never lists its comments, so the triage never read it. This
-  holds even when newer outside feedback followed it, and even when an earlier AWF
-  reply that such feedback superseded sits in between. The reply is retired.
+  precedes the reply and was not present when triage recorded the disposition
+  (so it is not in `read_own_comment_ids`). That account can be the operator's;
+  unmarked identity comments present at triage are listed and read, but an
+  unmarked one that arrives after triage still parks. This holds even when newer
+  outside feedback followed it, and even when an earlier AWF reply that such
+  feedback superseded sits in between. The reply is retired.
 
 DEFER no longer posts a separate top-level PR comment: the in-thread reply is
 the explanation. A newly posted reply id is saved durably right after the reply

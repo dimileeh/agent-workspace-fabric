@@ -98,6 +98,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           comments(first: 50) {
             nodes {
               databaseId
+              body
               bodyText
               author { login }
               viewerDidAuthor
@@ -177,6 +178,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           comments(first: 50) {
             nodes {
               databaseId
+              body
               bodyText
               author { login }
               viewerDidAuthor
@@ -203,6 +205,7 @@ query($threadId: ID!, $cursor: String!) {
       comments(first: 50, after: $cursor) {
         nodes {
           databaseId
+          body
           bodyText
           author { login }
           viewerDidAuthor
