@@ -60,7 +60,9 @@ def _assert_triage_lead(prompt: str) -> None:
     assert "do not revert what it changed" in lower
     assert "do not implement what it deferred" in lower
     assert "does not restrict the triage" in lower
+    assert "where two pr-wide decisions conflict" in lower
     assert "newer wins" in lower
+    assert "per-thread operator ruling for this item takes precedence" in lower
     assert "AWF-VERDICT: NEEDS_HUMAN:" in prompt
     assert "conflicts with operator decision" in prompt
     # CI-only wording must not appear on triage prompts.
@@ -154,17 +156,23 @@ def test_review_comment_prompt_empty_applied_directives_byte_identical() -> None
 
 @pytest.mark.unit
 def test_thread_prompt_per_thread_ruling_precedes_applied_directives() -> None:
+    """Conflicting verdicts: per-thread FALSE POSITIVE beats PR-wide DEFER."""
     prompt = address_thread_prompt(
         pr_number=1283,
         repo_slug="dimileeh/awf",
         thread=_THREAD,
-        operator_decision="For this thread: record DEFER; do not re-escalate.",
+        operator_decision=(
+            "For this thread: record FALSE POSITIVE; the finding is wrong for this path."
+        ),
         applied_operator_directives=(_NEWER,),
     )
     ruling_idx = prompt.index("Operator decision for this thread:")
     applied_idx = prompt.lower().index("applied operator decisions already on this pr")
     assert ruling_idx < applied_idx
-    assert "For this thread: record DEFER; do not re-escalate." in prompt
+    assert "For this thread: record FALSE POSITIVE; the finding is wrong for this path." in prompt
+    # PR-wide record still quotes DEFER; lead must say the per-thread ruling wins.
+    assert "Defer thread PRRT_kwDOSJAM6s6ftriage to #999" in prompt
+    assert "per-thread operator ruling for this item takes precedence" in prompt.lower()
     _assert_triage_lead(prompt)
 
 
