@@ -115,6 +115,19 @@ def test_unsupported_agent_runtime_has_doctor_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_agent_model_unsupported_has_doctor_guidance() -> None:
+    """Verify unsupported agent model error code maps to operator guidance."""
+    code = "AGENT_MODEL_UNSUPPORTED"
+    reason = _REASON_TEXT[code]
+
+    assert "model" in reason.message.lower()
+    assert reason.action
+    assert reason.likely_cause
+    assert reason.related_command == "awf workspace create"
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
 def test_first_run_failure_reasons_have_operator_guidance() -> None:
     """Verify first-run failure reason codes map to operator guidance."""
     missing_codes = set(FIRST_RUN_FAILURE_REASON_CODES) - set(_REASON_TEXT)
@@ -375,6 +388,21 @@ def test_provider_foundation_contract_rejections_have_rollout_guidance():
         assert reason is not None
         assert "compatible" in reason.action.lower()
         assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+def test_ci_repair_operator_decision_conflict_related_command_uses_directive() -> None:
+    """Recovery advice must use ``guide --directive`` (CLI has no ``--hint``)."""
+    code = "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    reason = _REASON_TEXT[code]
+    catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
+
+    assert reason.related_command == (
+        "awf workspace guide <workspace_id> --directive '<clarifying directive>'"
+    )
+    assert "--hint" not in (reason.related_command or "")
+    assert f"### {code}\n" in catalog
+    assert reason.related_command in catalog
 
 
 @pytest.mark.unit

@@ -2,11 +2,37 @@
 
 A leaf module (no runtime imports) so ``forge``, both forge clients and the PR
 monitor can share it without an import cycle.
+
+Also owns the single disposition-marker regex and
+:func:`is_disposition_reply` used when the status feed lists unmarked identity
+comments for triage while dropping only AWF's marker-carrying replies (#1272).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# Single compiled marker pattern: posting keeps a format string elsewhere;
+# parsers and the disposition gate reuse this regex (#1272).
+THREAD_DISPOSITION_MARKER_RE = re.compile(
+    r"<!-- AWF:thread-disposition:v1 class=(?P<cls>[a-z_]+) thread=(?P<thread>\S+) -->"
+)
+_DISPOSITION_CLASSES = frozenset({"fixed", "fixed_branch_evidence", "false_positive", "deferred"})
+
+
+def is_disposition_reply(body: str, *, thread_id: str) -> bool:
+    """True only for a valid v1 marker naming ``thread_id``.
+
+    Unmarked comments by the token identity are ordinary feedback for triage;
+    only a marker-carrying reply is AWF's own disposition post (#1272).
+    """
+    if not body or not thread_id:
+        return False
+    for match in THREAD_DISPOSITION_MARKER_RE.finditer(body):
+        if match.group("thread") == thread_id and match.group("cls") in _DISPOSITION_CLASSES:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -41,8 +67,10 @@ class AuditedReviewThread:
     comment when the token's identity authored it (``""`` otherwise): the
     conversation that reply followed, as the thread reads now.
     ``external_comment_bodies`` holds the plain-text bodies of the comments by anyone but
-    the token's identity, oldest first: the ones ``fetch_pr_status`` lists, as it lists
-    them (it lists only an unresolved thread with any), so an edit shows up there too.
+    the token's identity, oldest first: the ones ``fetch_pr_status`` lists for non-viewer
+    comments (it lists only an unresolved thread with remaining feedback), so an edit
+    shows up there too. Unmarked viewer comments may also appear in the status feed for
+    triage (#1272); they are not part of this audit field.
 
     For the bot-acknowledgement check (#1138), ``opener`` is the thread's first
     comment and ``trailing_comments`` are the comments posted after the newest

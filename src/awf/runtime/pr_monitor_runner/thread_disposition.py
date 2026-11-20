@@ -22,11 +22,11 @@ marker parser the READY_TO_MERGE gate uses. The I/O lives in
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, cast, get_args
 
+from awf.common.forge_thread_audit import THREAD_DISPOSITION_MARKER_RE
 from awf.common.redaction import redact_secrets
 from awf.runtime.feedback_policy import (
     recorded_review_thread_body_matches,
@@ -60,8 +60,8 @@ THREAD_DISPOSITION_REASON_MISSING = "THREAD_DISPOSITION_REASON_MISSING"
 THREAD_DISPOSITION_EVIDENCE_MISSING = "THREAD_DISPOSITION_EVIDENCE_MISSING"
 # The forge rejected the in-thread disposition reply; the thread stays open.
 THREAD_DISPOSITION_REPLY_FAILED = "THREAD_DISPOSITION_REPLY_FAILED"
-# Unmarked feedback by AWF's own identity (the operator's account) preceded the
-# reply; the monitor never reads that identity's comments, so a human must.
+# Unmarked feedback by AWF's own identity preceded the reply and was not present
+# when triage recorded the disposition (so it was not in read_own_comment_ids).
 THREAD_DISPOSITION_UNREAD_FEEDBACK = "THREAD_DISPOSITION_UNREAD_FEEDBACK"
 # READY_TO_MERGE / merge refused: AWF-resolved threads carry no disposition marker.
 REVIEW_THREAD_DISPOSITION_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
@@ -108,9 +108,6 @@ _VERDICT_CLASS: dict[str, DispositionClass] = {
     "defer": "deferred",
 }
 _MARKER = "<!-- AWF:thread-disposition:v1 class={cls} thread={thread} -->"
-_MARKER_RE = re.compile(
-    r"<!-- AWF:thread-disposition:v1 class=(?P<cls>[a-z_]+) thread=(?P<thread>\S+) -->"
-)
 _LABELS: dict[str, str] = {
     "fixed": "fixed",
     "fixed_branch_evidence": "fixed (branch evidence)",
@@ -160,6 +157,10 @@ class ThreadDisposition:
     # run, or it faulted), so it is re-read before any resolve reuses it and
     # certifies nothing meanwhile (PRRT_kwDOSJAM6s6vbU2K, PRRT_kwDOSJAM6s6veO2C).
     reread_pending: bool = False
+    # Identity comment ids present on the triaged thread when this disposition
+    # was recorded. The reply re-read treats those as already read; unmarked
+    # identity comments outside this set still park as unread (#1272).
+    read_own_comment_ids: tuple[str, ...] = ()
 
     @property
     def is_bound(self) -> bool:
@@ -197,6 +198,7 @@ class ThreadDisposition:
             "resolved": self.resolved,
             "reply_conversation_digest": self.reply_conversation_digest,
             "reread_pending": self.reread_pending,
+            "read_own_comment_ids": list(self.read_own_comment_ids),
         }
 
     @classmethod
@@ -218,6 +220,7 @@ class ThreadDisposition:
         if item_id is None or disposition_class not in DISPOSITION_CLASSES:
             return None
         commits = raw.get("commits")
+        read_own = raw.get("read_own_comment_ids")
         return cls(
             item_id=item_id,
             disposition_class=cast(DispositionClass, disposition_class),
@@ -235,6 +238,9 @@ class ThreadDisposition:
             resolved=raw.get("resolved") is True,
             reply_conversation_digest=_optional_text(raw.get("reply_conversation_digest")),
             reread_pending=raw.get("reread_pending") is True,
+            read_own_comment_ids=tuple(c for c in read_own if isinstance(c, str) and c.strip())
+            if isinstance(read_own, list)
+            else (),
         )
 
 
@@ -306,6 +312,13 @@ def sync_item_disposition(
             commits, commit_base = (record.head_sha,), record.item_start_head
         elif state.hosted_terminal_head_advanced and state.last_push_sha:
             commits = (state.last_push_sha,)
+    read_own_comment_ids: tuple[str, ...] = ()
+    if thread is not None:
+        read_own_comment_ids = tuple(
+            comment.comment_id
+            for comment in thread.comments
+            if comment.viewer_did_author and comment.comment_id
+        )
     record_item_disposition(
         state,
         ThreadDisposition(
@@ -316,6 +329,7 @@ def sync_item_disposition(
             commits=commits,
             commit_base=commit_base,
             thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
+            read_own_comment_ids=read_own_comment_ids,
         ),
     )
 
@@ -567,7 +581,7 @@ def disposition_marker_class(bodies: Sequence[str], *, thread_id: str) -> Dispos
     Callers pass only comments AWF's own identity authored.
     """
     for body in reversed(bodies):
-        for match in _MARKER_RE.finditer(body):
+        for match in THREAD_DISPOSITION_MARKER_RE.finditer(body):
             if match.group("thread") == thread_id and match.group("cls") in DISPOSITION_CLASSES:
                 return cast(DispositionClass, match.group("cls"))
     return None

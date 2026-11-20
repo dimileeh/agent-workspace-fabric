@@ -34,12 +34,20 @@ class AgentRunError(Exception):
         result: CommandResult,
         reason_code: str = "AGENT_CLI_FAILED",
         details: dict[str, Any] | None = None,
+        agent_stdout: str | None = None,
     ) -> None:
-        """Initialize adapter error metadata from a failed CLI execution."""
+        """Initialize adapter error metadata from a failed CLI execution.
+
+        ``agent_stdout`` is optional preserved agent CLI stdout when a later
+        failure (e.g. hosted terminal-head sync) replaces ``result.stdout`` with
+        non-agent output. Callers that parse ``result.stdout`` keep doing so;
+        only the CI-repair conflict check reads ``agent_stdout``.
+        """
         self.agent = agent
         self.result = result
         self.reason_code = reason_code
         self.details = details or {}
+        self.agent_stdout = agent_stdout
         agent_str = agent.value if isinstance(agent, AgentRuntime) else str(agent)
         super().__init__(
             f"{agent_str} exited {result.returncode} ({reason_code}): "

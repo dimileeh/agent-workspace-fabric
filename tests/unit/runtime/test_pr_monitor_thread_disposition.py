@@ -465,6 +465,66 @@ def test_payload_roundtrip_and_malformed_payload_fails_closed() -> None:
         assert decoded is not None and decoded.resolved is False
 
 
+def test_read_own_comment_ids_roundtrip_and_old_payload_defaults_empty() -> None:
+    """Persisted read-set of identity comments the triage saw (#1272)."""
+    d = ThreadDisposition(
+        item_id="PRRT_test_a",
+        disposition_class="fixed",
+        verdict="fix_committed",
+        read_own_comment_ids=("201", "203"),
+    )
+    payload = d.as_payload()
+    assert payload["read_own_comment_ids"] == ["201", "203"]
+    assert ThreadDisposition.from_payload(payload) == d
+
+    legacy = {
+        "v": 1,
+        "item_id": "PRRT_test_a",
+        "class": "fixed",
+        "verdict": "fix_committed",
+    }
+    decoded = ThreadDisposition.from_payload(legacy)
+    assert decoded is not None
+    assert decoded.read_own_comment_ids == ()
+
+
+def test_sync_item_disposition_records_viewer_comment_ids_from_triaged_thread() -> None:
+    state = MonitorState()
+    thread = ReviewThread(
+        thread_id="PRRT_test_a",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix",
+        author="reviewer",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101", body="please fix", author="reviewer", viewer_did_author=False
+            ),
+            ReviewThreadComment(
+                comment_id="102",
+                body="operator follow-up",
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+            ReviewThreadComment(
+                comment_id=None,
+                body="viewer without id",
+                author="token-owner",
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    sync_item_disposition(
+        state,
+        "PRRT_test_a",
+        VerdictResult(verdict="fix_committed", reason="done"),
+        thread=thread,
+    )
+    recorded = read_item_disposition(state, "PRRT_test_a")
+    assert recorded is not None
+    assert recorded.read_own_comment_ids == ("102",)
+
+
 def test_disposition_count_rows_orders_all_classes_and_others() -> None:
     rows = disposition_count_rows({"fixed": 2, "resolved_by_others": 3, "deferred": 1})
     assert rows == (

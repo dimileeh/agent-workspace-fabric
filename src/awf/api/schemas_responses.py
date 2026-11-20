@@ -207,6 +207,13 @@ class WorkspaceGuideRequest(BaseModel):
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
     grants: Annotated[list[str], Field(default_factory=list, max_length=64)]
     approve_policy_downgrade: bool = False
+    require_claim_active: bool = Field(
+        default=False,
+        description=(
+            "Accept only while monitoring_pr with an unexpired execution or "
+            "monitor claim; refused with grants."
+        ),
+    )
     operator: Annotated[str | None, Field(default=None, max_length=256)]
     hosted_authorization: HostedControlAuthorization | None = None
     hosted_reauthorization: OptionalReauthorization = None

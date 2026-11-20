@@ -33,8 +33,10 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   conversation resolved by AWF's identity: a reopen or edit retires it, posted or
   not, so its marker certifies nothing (:func:`_retire_broken_bindings`).
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
-  never listed (opened or reopened since), or listed with other outside comments
-  (replied to or edited since), re-polls instead of passing.
+  never listed (opened or reopened since), listed with other outside comments
+  (replied to or edited since), or unlisted with unmarked identity-only feedback
+  (#1272), re-polls instead of passing. Identity bodies stay out of the decided
+  / requeue hashes so a listed identity-only thread does not re-poll forever.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -209,20 +211,30 @@ async def _verify_audit(
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     # The outside comments ``decide()`` saw per listed thread (each listed copy).
+    # Identity comments listed for triage (#1272) are excluded: they are never in
+    # ``external_comment_bodies``, and including them would re-poll forever.
     decided: dict[str, set[tuple[str, ...]]] = {}
     for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
-        decided.setdefault(listed.thread_id, set()).add(tuple(c.body for c in listed.comments))
+        decided.setdefault(listed.thread_id, set()).add(
+            tuple(c.body for c in listed.comments if not c.viewer_did_author)
+        )
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # Each AWF-resolved thread's conversation, as a legacy exemption would bind it.
     digests: dict[str, str] = {}
     for thread in audit.threads:
         if not thread.is_resolved:
+            listed_bodies = decided.get(thread.thread_id)
             if thread.external_comment_bodies and (
-                thread.external_comment_bodies not in decided.get(thread.thread_id, ())
+                thread.external_comment_bodies not in (listed_bodies or ())
             ):
                 # A fix_committed / false_positive thread stays listed unresolved
                 # and still merges, so a reply to it (or an edit, which ``decide()``
                 # re-triages by body) is unseen feedback too.
+                undecided.append(thread.thread_id)
+            elif listed_bodies is None and _unmarked_identity_feedback(thread):
+                # Opened after ``status`` with only unmarked identity comments:
+                # empty ``external_comment_bodies`` would otherwise skip re-poll
+                # and merge over unread identity feedback (PRRT_kwDOSJAM6s645lS2).
                 undecided.append(thread.thread_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
@@ -330,6 +342,14 @@ async def _verify_audit(
         )
     return DispositionGateResult(
         blocker=unverified_blocker_message(unverified), unverified=tuple(unverified)
+    )
+
+
+def _unmarked_identity_feedback(thread: AuditedReviewThread) -> bool:
+    """True when any viewer body is unmarked prose (markers alone are not unread feedback)."""
+    return any(
+        disposition_marker_class((body,), thread_id=thread.thread_id) is None
+        for body in thread.viewer_comment_bodies
     )
 
 

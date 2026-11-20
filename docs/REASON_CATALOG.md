@@ -25,6 +25,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_fixed_without_evidence](#agent_fixed_without_evidence)
 
+### AGENT_MODEL_UNSUPPORTED
+**Problem:** The selected agent model is not supported for the active provider account.
+**Likely Cause:** Codex rejected the requested model id for a ChatGPT-account login (unsupported-model stderr), so the run cannot retry the same model.
+**Operator Fix:** Choose a model supported for the active ChatGPT/Codex account (for example the workspace default), or dispatch an approved fallback model with `--model` / `task.model`.
+**Related Command:** `awf workspace create`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_model_unsupported](#agent_model_unsupported)
+
 ### AGENT_NON_FIXED_WITH_MUTATION
 **Problem:** The PR monitor agent mutated the worktree then reported a non-FIXED verdict.
 **Likely Cause:** The protocol-correction attempt advanced HEAD, committed dirty changes, or left PR-worthy uncommitted residue, then emitted a syntactically valid FALSE POSITIVE, DEFER, or NEEDS_HUMAN verdict instead of FIXED with evidence.
@@ -227,6 +234,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Verify DNS and network reachability for the callback host, increase the subscription timeout if appropriate, then let AWF retry pending deliveries.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#callback_target_validation_timeout](#callback_target_validation_timeout)
+
+### CI_REPAIR_CONFLICT_ROLLBACK_PENDING
+**Problem:** A CI-failure repair reported an operator-decision conflict, but AWF could not finish undoing the repair residue (worktree reset/clean or hosted remote rewind), so the workspace stayed in monitoring_pr and parked for a human.
+**Likely Cause:** The conflict undo failed closed into ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` instead of failing the workspace; the park holds the leftover message until cancel + re-adopt.
+**Operator Fix:** Inspect the awaiting-human message for what is left (leftover worktree edits, or a remote head not rewound to the pre-repair SHA). Cancel and re-adopt for a clean worktree — nothing clears this park (not a new guide, AWF-FORGET-DECISIONS, or re-adoption seed). Do not expect AWF to dispatch another agent while this park is set.
+**Related Command:** `awf workspace cancel <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_repair_conflict_rollback_pending](#ci_repair_conflict_rollback_pending)
+
+### CI_REPAIR_OPERATOR_DECISION_CONFLICT
+**Problem:** A CI-failure repair found that fixing a failing check would undo an operator decision already applied on this PR, so AWF pushed nothing and parked for a human.
+**Likely Cause:** The CI repair prompt included applied operator directives (#1256); the agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check could only pass by contradicting one of those decisions.
+**Operator Fix:** Read the agent's NEEDS_HUMAN sentence on the awaiting-human attention. Either guide the monitor with a new directive (which clears the park), include a line that is exactly ``AWF-FORGET-DECISIONS`` to withdraw stored applied decisions, change the failing checks or PR head, or resolve the conflict manually and remonitor.
+**Related Command:** `awf workspace guide <workspace_id> --directive '<clarifying directive>'`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_repair_operator_decision_conflict](#ci_repair_operator_decision_conflict)
 
 ### CI_TRANSIENT_RERUN_FAILED
 **Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
@@ -1636,8 +1657,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_reply_failed](#thread_disposition_reply_failed)
 
 ### THREAD_DISPOSITION_UNREAD_FEEDBACK
-**Problem:** AWF did not resolve a review thread because a comment by its own forge identity, without an AWF disposition marker, preceded its disposition reply.
-**Likely Cause:** AWF's identity can be the operator's own account. The monitor never reads that identity's comments as feedback, so the triage behind the reply did not see the comment; resolving would have closed it unread. The reply was retired.
+**Problem:** AWF did not resolve a review thread because a comment by its own forge identity, without an AWF disposition marker, preceded its disposition reply and was not present when triage recorded the disposition.
+**Likely Cause:** AWF's identity can be the operator's own account. Unmarked identity comments present at triage are listed and recorded in the disposition's read set; an unmarked one that arrived after triage was not read, so resolving would have closed it unread. The reply was retired.
 **Operator Fix:** Read that comment in the thread, then guide the workspace naming the thread id with what it asks; do not resolve the thread by hand. The pushed commits are kept.
 **Related Command:** `awf workspace guide <workspace_id> --directive '<thread id>: ...'`
 **Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_unread_feedback](#thread_disposition_unread_feedback)
@@ -1704,6 +1725,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)
+
+### WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE
+**Problem:** Workspace guide with require_claim_active requires monitoring_pr with a live execution or monitor claim and no grants.
+**Likely Cause:** `awf workspace guide --require-claim-active` was issued after the PR monitor claim ended, against a non-`monitoring_pr` status, or with `--grant` inputs; the compare-and-act precondition refuses restarting a finished monitor.
+**Operator Fix:** Confirm `claim_active` and status with `awf workspace show <workspace_id>`. Re-issue without `--require-claim-active` only if a failed/blocked restart is intended; otherwise wait for a live monitor claim.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_claim_not_active](#workspace_guide_claim_not_active)
 
 ### WORKSPACE_GUIDE_DIRECTIVE_REQUIRED
 **Problem:** Workspace guide directive must not be empty or whitespace-only.

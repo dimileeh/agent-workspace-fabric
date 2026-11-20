@@ -1056,7 +1056,7 @@ async def test_gate_records_one_audit_event_per_newly_flagged_set(
         (("P1", "P2"), "outdated_unresolved_inline_threads", ("P1",), True),  # fix_committed
         (("P1 v2",), "unresolved_inline_threads", ("P1",), True),  # thread stays listed;
         (("P1 v2",), "outdated_unresolved_inline_threads", ("P1",), True),  # edited since
-        ((), None, (), False),  # only AWF's identity commented: no status lists it
+        ((), None, (), False),  # empty unresolved thread: no unmarked identity prose
     ],
 )
 async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_listed(
@@ -1101,6 +1101,166 @@ async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_list
     assert result.blocker is None
     assert (result.count_rows is None) is retry
     assert await _audit_events(factory, workspace_id) == []
+
+
+async def test_gate_does_not_treat_listed_operator_comment_as_feedback_changed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Listed identity comments must not diverge from audit external bodies (#1272)."""
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread(
+                    "PRRT_test_ok",
+                    bodies=(_marker("fixed", "PRRT_test_ok"),),
+                ),
+                _thread(
+                    _FRESH,
+                    resolved=False,
+                    external=("please fix this",),
+                ),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    status = replace(
+        _green_status(),
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id=_FRESH,
+                path="a.py",
+                line=1,
+                body_excerpt="please fix this",
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="101",
+                        body="please fix this",
+                        author="reviewer",
+                        viewer_did_author=False,
+                    ),
+                    ReviewThreadComment(
+                        comment_id="102",
+                        body="operator follow-up",
+                        author=_VIEWER,
+                        viewer_did_author=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
+
+
+async def test_gate_retries_on_unlisted_unmarked_identity_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Identity-only thread opened after status must re-poll (PRRT_kwDOSJAM6s645lS2)."""
+    ask = "please guard None payloads"
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(_FRESH, resolved=False, bodies=(ask,), external=()),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), _green_status())
+
+    assert result.retry is True
+    assert result.feedback_changed is True
+    assert result.blocker is None
+    assert result.count_rows is None
+    assert await _audit_events(factory, workspace_id) == []
+
+
+async def test_gate_does_not_repoll_listed_identity_only_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Listed identity-only threads stay out of undecided to avoid forever re-poll."""
+    ask = "please guard None payloads"
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(_FRESH, resolved=False, bodies=(ask,), external=()),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    status = replace(
+        _green_status(),
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id=_FRESH,
+                path="a.py",
+                line=1,
+                body_excerpt=ask,
+                author=_VIEWER,
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="own-0",
+                        body=ask,
+                        author=_VIEWER,
+                        viewer_did_author=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
+
+
+async def test_gate_does_not_repoll_unlisted_marker_only_identity_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unlisted identity comments that are only AWF markers are not unread feedback."""
+    marker = _marker("fixed", _FRESH)
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(_FRESH, resolved=False, bodies=(marker,), external=()),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), _green_status())
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
 
 
 async def test_cert_waits_for_a_poll_that_lists_feedback_opened_after_its_snapshot(

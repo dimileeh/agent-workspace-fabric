@@ -107,6 +107,12 @@ class ReviewThreadComment:
     updated_at: datetime | None = None
     url: str | None = None
     viewer_did_author: bool = False
+    """True when the monitor token's identity authored this comment.
+
+    Unmarked identity comments in a review thread are listed for triage (#1272);
+    they never re-queue work by themselves. Only a valid disposition marker
+    naming the thread is dropped from the status feed as AWF's own reply.
+    """
     review_id: str | None = None
     """Forge review id that owns this inline comment, when available.
 

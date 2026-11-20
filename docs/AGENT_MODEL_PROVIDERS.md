@@ -517,6 +517,8 @@ that experimental opt-in does not imply general catalog support.
 | Claude native | CLI 2.1.295 observed | **Passed** — Claude Code 2.1.295 / `claude-opus-5-5`, `PROVIDER_DIAGNOSTIC_PASSED`, fixture `coding-cycle-v1`, no upstream revision pinned, evidence workspace `ws_c45f6f1c738e4cb59fb1349c`, legacy scope |
 | Monitor repair/restart identity | Live supervisor dogfood | **Passed** — worker restarted while monitor idled on `WaitForCI` (iter 0, head `1922c8634dcbf2fb05ac9761dd25a725e60f91dc`), no active CLI confirmed (`True`); workspace `ws_b8779b060a6d4e2da857074b` identity unchanged (`True`) and connection scope `c24e8d23…7fa3` preserved. Repair invocation at `2026-11-10T03:07:44.986923+00:00` re-selected Codex/OpenRouter/`moonshotai/kimi-k2.7-code` with `effort=null`, endpoint `https://openrouter.ai/api`, credential ref `env/OPENROUTER_API_KEY`, runtime `sha256:8e0f082a466be412010ec9f17f7ee5622903b229760b68507076aef844d4b04d` |
 
+2026-11-18: codex-cli 0.170.0 accepts gpt-6.2-sol and gpt-6.2-astra in a CLI probe outside AWF; AWF provider diagnostic pending.
+
 ### Re-verification after the PR #1204 runner change (2026-11-10)
 
 - **Why the old evidence no longer counts.** PR #1204 changed the third-party runner

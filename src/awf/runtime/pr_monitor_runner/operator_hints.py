@@ -1206,6 +1206,7 @@ async def _finalize_operator_hint_resume(
     state: MonitorState,
     hint: OperatorHint | None = None,
     acted_feedback_text: str | None = None,
+    head_sha: str | None = None,
 ) -> None:
     """Close out a settled protected-block resume so the next cycle starts clean.
 
@@ -1232,7 +1233,13 @@ async def _finalize_operator_hint_resume(
     hint processed for the remainder of this cycle."""
     await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
-    _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text=acted_feedback_text)
+    record_head = head_sha if head_sha is not None else getattr(state, "last_push_sha", None)
+    _finalize_processed_operator_hint(
+        state,
+        hint=hint,
+        acted_feedback_text=acted_feedback_text,
+        head_sha=record_head,
+    )
 
 
 def _operator_hint_block_reason(

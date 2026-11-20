@@ -113,6 +113,81 @@ def test_body_hash_stable_across_fallback_and_populated_one_comment() -> None:
 
 
 @pytest.mark.unit
+def test_body_hash_ignores_identity_comments_and_matches_pre_change_recorded_hash() -> None:
+    """Listing unmarked viewer comments must not change recorded body hashes (#1272).
+
+    Before this change the status feed dropped viewer-authored comments, so
+    persisted ``__review_thread_body_hash__`` values covered only external
+    rows. After listing identity comments for triage, the three serializers
+    must still skip ``viewer_did_author`` so those hashes stay byte-identical
+    and an identity comment never re-queues a thread by itself.
+    """
+    import hashlib
+    import json
+
+    from awf.runtime.feedback_policy import (
+        _legacy_fallback_review_thread_body_hash,
+        _legacy_review_thread_body_hash,
+        recorded_review_thread_body_matches,
+        thread_enters_address_comments,
+        thread_needs_attention,
+    )
+    from awf.runtime.pr_monitor_models import ReviewThreadComment
+
+    external = ReviewThreadComment(
+        comment_id="101",
+        body="please fix this",
+        author="reviewer",
+        viewer_did_author=False,
+    )
+    identity = ReviewThreadComment(
+        comment_id="102",
+        body="operator note inside the thread",
+        author="token-owner",
+        viewer_did_author=True,
+    )
+    # Pre-change recorded hash: only the external conversation was listed.
+    pre_change_payload = [{"author": "reviewer", "body": "please fix this"}]
+    pre_change_hash = hashlib.sha256(
+        json.dumps(pre_change_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    listed_with_identity = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(external, identity),
+    )
+    external_only = ReviewThread(
+        thread_id="T1",
+        path="src/x.py",
+        line=10,
+        body_excerpt="please fix this",
+        author="reviewer",
+        comments=(external,),
+    )
+
+    assert review_thread_body_hash(listed_with_identity) == pre_change_hash
+    assert review_thread_body_hash(listed_with_identity) == review_thread_body_hash(external_only)
+    assert _legacy_review_thread_body_hash(listed_with_identity) == _legacy_review_thread_body_hash(
+        external_only
+    )
+    assert _legacy_fallback_review_thread_body_hash(
+        listed_with_identity
+    ) == _legacy_fallback_review_thread_body_hash(external_only)
+    assert recorded_review_thread_body_matches(pre_change_hash, listed_with_identity) is True
+
+    state = {
+        "T1": "fix_committed",
+        review_thread_body_state_key("T1"): pre_change_hash,
+    }
+    assert thread_needs_attention(state, listed_with_identity) is False
+    assert thread_enters_address_comments(state, listed_with_identity) is False
+
+
+@pytest.mark.unit
 def test_recorded_body_hash_accepts_pre_normalize_legacy_hash() -> None:
     """Persisted pre-normalize hashes must still match an unchanged conversation.
 

@@ -19,6 +19,7 @@ AGENT_PROVIDER_CAPACITY_EXHAUSTED = "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
 AGENT_TIMEOUT = "AGENT_TIMEOUT"
 AGENT_IDLE_TIMEOUT = "AGENT_IDLE_TIMEOUT"
 AGENT_SERVICE_UNHEALTHY = "AGENT_SERVICE_UNHEALTHY"
+AGENT_MODEL_UNSUPPORTED = "AGENT_MODEL_UNSUPPORTED"
 UNSUPPORTED_AGENT_RUNTIME = "UNSUPPORTED_AGENT_RUNTIME"
 
 ProviderFailureType = Literal[
@@ -30,6 +31,7 @@ ProviderFailureType = Literal[
     "idle_timeout",
     "runtime_unhealthy",
     "unsupported_runtime",
+    "unsupported_model",
 ]
 FailureScope = Literal["provider", "infra"]
 
@@ -88,6 +90,9 @@ _USAGE_LIMIT_MARKERS = (
     "you've hit your usage limit",
     "switch to another model",
 )
+
+# Codex ChatGPT-account login rejects unknown model ids with this exact phrase.
+_UNSUPPORTED_MODEL_MARKERS = ("model is not supported when using codex with a chatgpt account",)
 
 _GOOGLE_MARKERS = (
     "gemini",
@@ -178,6 +183,10 @@ def classify_provider_failure(
         failure_type = "idle_timeout"
     elif normalized_reason == UNSUPPORTED_AGENT_RUNTIME:
         failure_type = "unsupported_runtime"
+    elif normalized_reason == AGENT_MODEL_UNSUPPORTED or any(
+        marker in normalized for marker in _UNSUPPORTED_MODEL_MARKERS
+    ):
+        failure_type = "unsupported_model"
     elif any(marker in normalized for marker in _AUTH_FAILURE_MARKERS):
         failure_type = "auth"
     elif any(marker in normalized for marker in _USAGE_LIMIT_MARKERS):
@@ -218,12 +227,13 @@ def classify_provider_failure(
         model=normalized_model,
         output=output,
     )
+    retryable = failure_type != "unsupported_model"
     return ProviderFailureClassification(
         reason_code=final_reason_code,
         failure_type=failure_type,
         provider=inferred_provider,
         model=normalized_model,
-        retryable=True,
+        retryable=retryable,
         retry_after_seconds=retry_after_seconds,
         cooldown_seconds=cooldown_seconds,
         failure_fingerprint=fingerprint,
@@ -289,6 +299,8 @@ def _reason_code_for_type(failure_type: ProviderFailureType) -> str:
         return AGENT_IDLE_TIMEOUT
     if failure_type == "unsupported_runtime":
         return UNSUPPORTED_AGENT_RUNTIME
+    if failure_type == "unsupported_model":
+        return AGENT_MODEL_UNSUPPORTED
     return AGENT_PROVIDER_CAPACITY_EXHAUSTED
 
 
@@ -307,7 +319,7 @@ def _default_cooldown_seconds(failure_type: ProviderFailureType) -> int:
         return 900
     if failure_type in {"timeout", "idle_timeout"}:
         return 120
-    if failure_type == "unsupported_runtime":
+    if failure_type in {"unsupported_runtime", "unsupported_model"}:
         return 0
     return 300
 
@@ -317,6 +329,8 @@ def _recommended_action(failure_type: ProviderFailureType) -> str:
         return "Refresh provider credentials or dispatch an approved fallback provider."
     if failure_type == "unsupported_runtime":
         return "Dispatch an approved fallback agent runtime."
+    if failure_type == "unsupported_model":
+        return "Choose a Codex model supported for the active ChatGPT account."
     return "Retry after provider cooldown or dispatch an approved fallback model."
 
 

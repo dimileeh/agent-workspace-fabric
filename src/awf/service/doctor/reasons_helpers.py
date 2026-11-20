@@ -207,6 +207,49 @@ def get_salvage_and_monitor_reasons(
             "awf workspace remonitor <workspace_id>",
             reason_catalog_link("MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED"),
         ),
+        "CI_REPAIR_OPERATOR_DECISION_CONFLICT": reason_text_cls(
+            (
+                "A CI-failure repair found that fixing a failing check would undo an "
+                "operator decision already applied on this PR, so AWF pushed nothing "
+                "and parked for a human."
+            ),
+            (
+                "Read the agent's NEEDS_HUMAN sentence on the awaiting-human attention. "
+                "Either guide the monitor with a new directive (which clears the park), "
+                "include a line that is exactly ``AWF-FORGET-DECISIONS`` to withdraw "
+                "stored applied decisions, change the failing checks or PR head, or "
+                "resolve the conflict manually and remonitor."
+            ),
+            (
+                "The CI repair prompt included applied operator directives (#1256); the "
+                "agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check "
+                "could only pass by contradicting one of those decisions."
+            ),
+            "awf workspace guide <workspace_id> --directive '<clarifying directive>'",
+            reason_catalog_link("CI_REPAIR_OPERATOR_DECISION_CONFLICT"),
+        ),
+        "CI_REPAIR_CONFLICT_ROLLBACK_PENDING": reason_text_cls(
+            (
+                "A CI-failure repair reported an operator-decision conflict, but AWF "
+                "could not finish undoing the repair residue (worktree reset/clean or "
+                "hosted remote rewind), so the workspace stayed in monitoring_pr and "
+                "parked for a human."
+            ),
+            (
+                "Inspect the awaiting-human message for what is left (leftover worktree "
+                "edits, or a remote head not rewound to the pre-repair SHA). Cancel and "
+                "re-adopt for a clean worktree — nothing clears this park (not a new "
+                "guide, AWF-FORGET-DECISIONS, or re-adoption seed). Do not expect AWF "
+                "to dispatch another agent while this park is set."
+            ),
+            (
+                "The conflict undo failed closed into "
+                "``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` instead of failing the "
+                "workspace; the park holds the leftover message until cancel + re-adopt."
+            ),
+            "awf workspace cancel <workspace_id>",
+            reason_catalog_link("CI_REPAIR_CONFLICT_ROLLBACK_PENDING"),
+        ),
     }
 
 
