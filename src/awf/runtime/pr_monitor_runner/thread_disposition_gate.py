@@ -373,13 +373,21 @@ def _unmarked_identity_feedback(thread: AuditedReviewThread) -> bool:
 
 
 def _unmarked_identity_snapshot(thread: AuditedReviewThread) -> tuple[tuple[str, str], ...]:
-    """Unmarked token-identity (id, plain-text body) pairs from a live audit thread."""
+    """Unmarked token-identity (id, plain-text body) pairs from a live audit thread.
+
+    Marker detection stays on raw Markdown (``viewer_comment_bodies``); the paired
+    body for freshness is ``bodyText`` when the audit captured it, matching listed
+    ``ReviewThreadComment.body`` so unchanged Markdown does not re-poll forever
+    (PRRT_kwDOSJAM6s65-eVq). Fixtures without body texts keep the raw body.
+    """
     ids = thread.viewer_comment_ids
+    texts = thread.viewer_comment_body_texts
     snapshot: list[tuple[str, str]] = []
     for index, body in enumerate(thread.viewer_comment_bodies):
         if disposition_marker_class((body,), thread_id=thread.thread_id) is not None:
             continue
-        snapshot.append((ids[index] if index < len(ids) else "", body))
+        plain = texts[index] if index < len(texts) else body
+        snapshot.append((ids[index] if index < len(ids) else "", plain))
     return tuple(snapshot)
 
 

@@ -151,6 +151,7 @@ def _thread(
     resolved_by: str | None = _VIEWER,
     bodies: tuple[str, ...] = (),
     body_ids: tuple[str, ...] = (),
+    body_texts: tuple[str, ...] = (),
     resolved: bool = True,
     superseded: int = 0,
     external: tuple[str, ...] = (),
@@ -162,6 +163,7 @@ def _thread(
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
         viewer_comment_ids=body_ids,
+        viewer_comment_body_texts=body_texts,
         superseded_viewer_comments=superseded,
         external_comment_bodies=external,
     )
@@ -1225,6 +1227,61 @@ async def test_gate_does_not_repoll_listed_identity_only_thread(
                     ReviewThreadComment(
                         comment_id="own-0",
                         body=ask,
+                        author=_VIEWER,
+                        viewer_did_author=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is False
+    assert result.feedback_changed is False
+    assert result.blocker is None
+    assert result.count_rows is not None
+
+
+async def test_gate_does_not_repoll_when_identity_markdown_matches_listed_body_text(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Raw Markdown vs listed bodyText must not look like fresh feedback (PRRT_kwDOSJAM6s65-eVq)."""
+    markdown = "please guard `None` payloads"
+    plain = "please guard None payloads"
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(
+                    _FRESH,
+                    resolved=False,
+                    bodies=(markdown,),
+                    body_ids=("own-0",),
+                    body_texts=(plain,),
+                    external=(),
+                ),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    status = replace(
+        _green_status(),
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id=_FRESH,
+                path="a.py",
+                line=1,
+                body_excerpt=plain,
+                author=_VIEWER,
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="own-0",
+                        body=plain,
                         author=_VIEWER,
                         viewer_did_author=True,
                     ),

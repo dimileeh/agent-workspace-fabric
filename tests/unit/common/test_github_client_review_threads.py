@@ -273,7 +273,12 @@ async def test_audit_lists_comments_from_outside_awfs_identity_as_status_does() 
     """``fetch_pr_status`` lists exactly these comments, by ``bodyText`` (and only a thread
     with any), so an edit keeping the count still differs (PRRT_kwDOSJAM6s6vWLkv)."""
     fake = FakeCommandRunner()
-    own = _audit_thread("PRRT_test_own", comments=[{"body": "note", "viewerDidAuthor": True}])
+    own = _audit_thread(
+        "PRRT_test_own",
+        comments=[
+            {"body": "note with `code`", "bodyText": "note with code", "viewerDidAuthor": True}
+        ],
+    )
     outside = _audit_thread(
         "PRRT_test_outside",
         comments=[
@@ -287,6 +292,11 @@ async def test_audit_lists_comments_from_outside_awfs_identity_as_status_does() 
     audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
 
     assert [thread.external_comment_bodies for thread in audited] == [(), ("P1: crash", "")]
+    # Raw Markdown stays for markers; bodyText is parallel for identity freshness.
+    assert audited[0].viewer_comment_bodies == ("note with `code`",)
+    assert audited[0].viewer_comment_body_texts == ("note with code",)
+    assert audited[1].viewer_comment_bodies == ("note",)
+    assert audited[1].viewer_comment_body_texts == ("note",)
     query = next(a for a in fake.calls[0].args if a.startswith("query="))
     assert "bodyText" in query
 

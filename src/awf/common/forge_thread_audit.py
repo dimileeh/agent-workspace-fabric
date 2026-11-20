@@ -58,6 +58,10 @@ class AuditedReviewThread:
     ``viewer_comment_ids`` holds their ids, in the same order, as ``reply_to_thread``
     returns them (``""`` when the forge gave none), so a re-read can tell the reply
     AWF just posted from an older one.
+    ``viewer_comment_body_texts`` holds their plain-text bodies in that same order:
+    comparable to listed ``ReviewThreadComment.body`` (also ``bodyText``) so identity
+    freshness does not treat unchanged Markdown as new feedback
+    (PRRT_kwDOSJAM6s65-eVq).
     The first ``superseded_viewer_comments`` of them predate the thread's newest
     comment by anyone else (or the newest edit to any comment), so they answered earlier
     feedback, not the current one.
@@ -86,6 +90,7 @@ class AuditedReviewThread:
     resolved_by: str | None
     viewer_comment_bodies: tuple[str, ...] = ()
     viewer_comment_ids: tuple[str, ...] = ()
+    viewer_comment_body_texts: tuple[str, ...] = ()
     superseded_viewer_comments: int = 0
     conversation_digest: str = ""
     conversation_digest_before_reply: str = ""
