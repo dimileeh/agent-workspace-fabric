@@ -318,6 +318,40 @@ class TestCodexAdapter:
         assert 'model_reasoning_effort="xhigh"' in args
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("default_model", "default_effort"),
+        [("gpt-5", "xhigh"), (None, None)],
+    )
+    async def test_cli_invocation_turns_off_host_access_program_toggle(
+        self, default_model: str | None, default_effort: str | None
+    ) -> None:
+        """#1285: a host ``daybreak = true`` must not reach an unattended run.
+
+        The workspace carries a copy of the operator's interactive Codex config;
+        codex-cli 0.170.0 honours that toggle and rejects AWF's model. The CLI
+        override must be present on every invocation, with or without a model or
+        effort, as an adjacent ``-c daybreak=false`` pair before the stdin marker.
+        """
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(
+            runner=runner, default_model=default_model, default_effort=default_effort
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        assert result.ok
+        args = runner.calls[0].args
+        override = args.index("daybreak=false")
+        assert args[override - 1] == "-c"
+        assert args.count("daybreak=false") == 1
+        assert args.index("codex") < override < len(args) - 1
+        assert args[-1] == "-"
+
+    @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")

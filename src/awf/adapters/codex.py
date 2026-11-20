@@ -31,6 +31,15 @@ _CODEX_OPENAI_ENV_NAMES = frozenset(
     if name in AGENT_AUTH_ENV_VARS
 )
 
+# A local workspace gets a copy of the operator's interactive ``~/.codex/config.toml``.
+# An unattended run must not inherit an experimental access-program toggle from it:
+# codex-cli 0.170.0 honours ``daybreak = true`` there and then refuses every model that
+# is not part of that program ("Daybreak is unavailable for model ...; turn it off or
+# choose a compatible model"), so the run dies before the first turn. A ``-c`` override
+# wins over the copied file; verified against the real CLI. Older CLIs ignore the key,
+# and a node without an operator config is unaffected (#1285).
+_STANDARD_ACCESS_PROGRAM_OVERRIDE: tuple[str, str] = ("-c", "daybreak=false")
+
 
 @register_adapter
 class CodexAdapter(AgentAdapter):
@@ -77,5 +86,6 @@ class CodexAdapter(AgentAdapter):
             args += ["--model", selected_model]
         if self._default_effort:
             args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
+        args += _STANDARD_ACCESS_PROGRAM_OVERRIDE
         args.append("-")
         return args
