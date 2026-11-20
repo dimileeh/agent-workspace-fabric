@@ -34,11 +34,9 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   not, so its marker certifies nothing (:func:`_retire_broken_bindings`).
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
   never listed (opened or reopened since), listed with other outside comments
-  (replied to or edited since), listed with unmarked identity ids/bodies that
-  no longer match the live audit (PRRT_kwDOSJAM6s65-M6t), or unlisted with
-  unmarked identity-only feedback (#1272), re-polls instead of passing. Matching
-  listed identity stays out of the undecided set so a listed identity-only
-  thread does not re-poll forever.
+  (replied to or edited since), or unlisted with unmarked identity-only feedback
+  (#1272), re-polls instead of passing. Identity bodies stay out of the decided
+  / requeue hashes so a listed identity-only thread does not re-poll forever.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -213,23 +211,12 @@ async def _verify_audit(
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     # The outside comments ``decide()`` saw per listed thread (each listed copy).
-    # Unmarked identity comments listed for triage (#1272) are tracked separately
-    # so a matching listed identity-only thread does not re-poll forever, while a
-    # live audit that adds or edits identity after ``status`` still re-polls
-    # (PRRT_kwDOSJAM6s65-M6t).
+    # Identity comments listed for triage (#1272) are excluded: they are never in
+    # ``external_comment_bodies``, and including them would re-poll forever.
     decided: dict[str, set[tuple[str, ...]]] = {}
-    decided_identity: dict[str, set[tuple[tuple[str, str], ...]]] = {}
     for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
         decided.setdefault(listed.thread_id, set()).add(
             tuple(c.body for c in listed.comments if not c.viewer_did_author)
-        )
-        decided_identity.setdefault(listed.thread_id, set()).add(
-            tuple(
-                (c.comment_id or "", c.body)
-                for c in listed.comments
-                if c.viewer_did_author
-                and disposition_marker_class((c.body,), thread_id=listed.thread_id) is None
-            )
         )
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # Each AWF-resolved thread's conversation, as a legacy exemption would bind it.
@@ -248,12 +235,6 @@ async def _verify_audit(
                 # Opened after ``status`` with only unmarked identity comments:
                 # empty ``external_comment_bodies`` would otherwise skip re-poll
                 # and merge over unread identity feedback (PRRT_kwDOSJAM6s645lS2).
-                undecided.append(thread.thread_id)
-            elif listed_bodies is not None and _identity_feedback_after_decision(
-                thread, decided_identity.get(thread.thread_id)
-            ):
-                # Already listed, outside comments unchanged, but the live audit
-                # shows an unmarked identity add/edit ``status`` never saw.
                 undecided.append(thread.thread_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
@@ -370,41 +351,6 @@ def _unmarked_identity_feedback(thread: AuditedReviewThread) -> bool:
         disposition_marker_class((body,), thread_id=thread.thread_id) is None
         for body in thread.viewer_comment_bodies
     )
-
-
-def _unmarked_identity_snapshot(thread: AuditedReviewThread) -> tuple[tuple[str, str], ...]:
-    """Unmarked token-identity (id, plain-text body) pairs from a live audit thread.
-
-    Marker detection stays on raw Markdown (``viewer_comment_bodies``); the paired
-    body for freshness is ``bodyText`` when the audit captured it, matching listed
-    ``ReviewThreadComment.body`` so unchanged Markdown does not re-poll forever
-    (PRRT_kwDOSJAM6s65-eVq). Fixtures without body texts keep the raw body.
-    """
-    ids = thread.viewer_comment_ids
-    texts = thread.viewer_comment_body_texts
-    snapshot: list[tuple[str, str]] = []
-    for index, body in enumerate(thread.viewer_comment_bodies):
-        if disposition_marker_class((body,), thread_id=thread.thread_id) is not None:
-            continue
-        plain = texts[index] if index < len(texts) else body
-        snapshot.append((ids[index] if index < len(ids) else "", plain))
-    return tuple(snapshot)
-
-
-def _identity_feedback_after_decision(
-    thread: AuditedReviewThread,
-    listed_snapshots: set[tuple[tuple[str, str], ...]] | None,
-) -> bool:
-    """True when live unmarked identity differs from every decided listed copy.
-
-    Comparing the audit — not a recorded status snapshot — catches identity
-    comments added or edited after ``status`` was fetched while outside bodies
-    stayed the same (PRRT_kwDOSJAM6s65-M6t). A matching listed identity-only
-    thread keeps ``()`` / the same pairs in both sides and does not re-poll.
-    """
-    if listed_snapshots is None:
-        return False
-    return _unmarked_identity_snapshot(thread) not in listed_snapshots
 
 
 def _current_disposition_bodies(thread: AuditedReviewThread) -> tuple[str, ...]:
