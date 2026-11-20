@@ -29,6 +29,10 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+    log_feedback_triage_applied_operator_directives_audit,
+)
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _record_accepted_item_commit_provenance,
 )
@@ -202,6 +206,8 @@ async def _address_thread(
     # directive here (issue #939). Replay it so the re-addressed thread carries
     # the operator's ruling instead of reading like the first attempt.
     operator_decision = _operator_decision_for_thread(state, thread)
+    # PR-wide applied decisions (#1283): same store as CI repair, triage lead.
+    applied = load_applied_operator_directives(state) if state is not None else ()
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -210,7 +216,15 @@ async def _address_thread(
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
         operator_decision=operator_decision,
+        applied_operator_directives=applied,
     )
+    if applied:
+        log_feedback_triage_applied_operator_directives_audit(
+            applied,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=thread.thread_id,
+        )
     try:
         result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
@@ -358,6 +372,8 @@ async def _address_review_comment_result(
         if isinstance(task_tag, _TaskTagUnset)
         else task_tag
     )
+    # PR-wide applied decisions (#1283): same store as CI repair, triage lead.
+    applied = load_applied_operator_directives(state) if state is not None else ()
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -365,7 +381,15 @@ async def _address_review_comment_result(
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
+        applied_operator_directives=applied,
     )
+    if applied:
+        log_feedback_triage_applied_operator_directives_audit(
+            applied,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            comment_id=comment.comment_id,
+        )
     try:
         result: VerdictResult | MonitorVerdictResult = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
