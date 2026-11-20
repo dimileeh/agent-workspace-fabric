@@ -225,7 +225,7 @@ def get_salvage_and_monitor_reasons(
                 "agent ended with ``AWF-VERDICT: NEEDS_HUMAN`` because a failing check "
                 "could only pass by contradicting one of those decisions."
             ),
-            "awf workspace guide <workspace_id> --hint '<clarifying directive>'",
+            "awf workspace guide <workspace_id> --directive '<clarifying directive>'",
             reason_catalog_link("CI_REPAIR_OPERATOR_DECISION_CONFLICT"),
         ),
         "CI_REPAIR_CONFLICT_ROLLBACK_PENDING": reason_text_cls(

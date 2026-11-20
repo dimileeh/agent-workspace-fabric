@@ -391,6 +391,21 @@ def test_provider_foundation_contract_rejections_have_rollout_guidance():
 
 
 @pytest.mark.unit
+def test_ci_repair_operator_decision_conflict_related_command_uses_directive() -> None:
+    """Recovery advice must use ``guide --directive`` (CLI has no ``--hint``)."""
+    code = "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
+    reason = _REASON_TEXT[code]
+    catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
+
+    assert reason.related_command == (
+        "awf workspace guide <workspace_id> --directive '<clarifying directive>'"
+    )
+    assert "--hint" not in (reason.related_command or "")
+    assert f"### {code}\n" in catalog
+    assert reason.related_command in catalog
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "code",
     ["HOSTED_RUNTIME_STOPPED", "TERMINAL_OWNED_ROW_REAPED", "TERMINAL_OWNED_ROW_REAP_FAILED"],
