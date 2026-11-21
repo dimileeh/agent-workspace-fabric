@@ -169,7 +169,9 @@ async def test_human_wait_goes_dormant_at_threshold_without_reposting(factory, w
         (
             await WorkspaceRepository(session).get(workspace_id)
         ).human_wait_dormant_after_seconds = threshold
-    await monitor.run(monitor.build(threshold, sleep=advance))
+    runner = monitor.build(threshold, sleep=advance)
+    runner._runner_config = replace(runner._runner_config, max_outer_iterations=1)
+    await monitor.run(runner)
 
     assert len(sleep_fn.calls) == 2
     forge.post_comment.assert_awaited_once()

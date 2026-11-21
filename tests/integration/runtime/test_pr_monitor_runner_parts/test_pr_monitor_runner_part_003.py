@@ -470,14 +470,10 @@ class TestCompleteWorkspaceTearsDownComposeStack:
 
 
 class TestMaxOuterIterationsSafetyNet:
-    """If ``max_outer_iterations`` is exhausted without the decision
-    core reaching a terminal action, the runner terminates the
-    workspace instead of silently returning — a decision-loop bug
-    would otherwise leave the workspace wedged in ``monitoring_pr``
-    forever."""
+    """Passive polls can outlast the safety net before a terminal decision."""
 
     @pytest.mark.unit
-    async def test_iter_exhaustion_terminates_failed(
+    async def test_waits_past_outer_iterations_until_external_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -486,18 +482,17 @@ class TestMaxOuterIterationsSafetyNet:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
-        # Queue results for one passive iteration (WaitForCI). Since the
-        # fake WaitForCI just sleeps and returns without transitioning,
-        # we'll spin until max_outer_iterations exhausts.
-        for _ in range(3):
+        for _ in range(4):
             cmd.queue_result(returncode=0)  # fetch base
             cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
             cmd.queue_result(
                 returncode=0,
-                # PENDING status so decide() returns WaitForCI forever.
                 stdout=_pr_payload(check_state="PENDING"),
             )
             cmd.queue_result(returncode=0, stdout="[]")  # gh run list (#1230)
+        cmd.queue_result(returncode=0)  # fetch base after the external merge
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
 
         runner = PullRequestMonitorRunner(
             session_factory=factory,
@@ -511,22 +506,25 @@ class TestMaxOuterIterationsSafetyNet:
                 pre_merge_settle_seconds=0,
             ),
             runner_config=MonitorRunnerConfig(
-                max_outer_iterations=3,  # tight cap so the safety net fires
+                max_outer_iterations=3,
                 max_fix_cycle_passes=3,
             ),
             sleep=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+        compose_patch, _ = mock_completed_compose_manager()
+        with compose_patch:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+        assert sleep_fn.calls == [60] * 4
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert "max_outer_iterations" in (ws.failure_message or "")
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.failure_message is None
 
 
 class TestReviewCommentAddressing:
