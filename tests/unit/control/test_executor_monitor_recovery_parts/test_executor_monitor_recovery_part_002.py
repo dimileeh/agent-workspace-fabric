@@ -45,6 +45,10 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+)
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
@@ -1076,6 +1080,57 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
     # conformance, and not fix-cycle prompts.
     adapter_invocations = _all_adapter_args(fake)
     assert adapter_invocations == []
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_publishes_carried_conformance_gaps(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_no_recovery(factory)
+    gap = {"kind": "test_work", "detail": "Add a regression test"}
+    head = "d" * 40
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.block_planning_conformance_handoff = {"carried_gaps": [gap]}
+        await OperationRepository(s).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            payload={
+                "source": "worker_restart",
+                "recovery_mode": "validate_only",
+                "source_head_sha": head,
+            },
+            idempotency_key=f"worker_restart:validate_only:{ws_id}",
+        )
+        await s.commit()
+
+    _queue_validation_head(fake, head=head)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    _queue_push_and_pr(fake)
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    (create_call,) = (
+        call for call in _all_push_and_pr_create_calls(fake) if call[:3] == ["gh", "pr", "create"]
+    )
+    body = create_call[create_call.index("--body") + 1]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.pr_url == "https://github.com/x/y/pull/1"
+        directives = load_applied_operator_directives(
+            MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
+        )
+
+    assert "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test" in body
+    (directive,) = directives
+    assert directive.source == "plan_conformance"
+    assert directive.directive == "test_work: Add a regression test"
 
 
 @pytest.mark.unit

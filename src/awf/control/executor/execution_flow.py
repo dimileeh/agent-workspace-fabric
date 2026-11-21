@@ -752,6 +752,9 @@ async def execute(
                 profile=profile,
                 recovery_payload=recovery,
             )
+            carried_gaps = _planning_carried_gaps_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
         elif resume_skip_agent:
             # Reconstruct the blocked run's persisted conformance handoff.
             planning_validation_handoff = _planning_validation_handoff_from_metadata(
