@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.common import github_transport as _github_transport
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -27,6 +28,7 @@ from awf.control.executor import (
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import planning_conformance as _planning_conformance
+from awf.control.executor import pr_open_step as _pr_open_step
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -1072,6 +1074,11 @@ class TestHappyPathPart002:
             "reconciled-transient",
             "reconciled-comment-error",
             "reconciled-tip-mismatch",
+            "reconciled-snapshot-error-recovers",
+            "reconciled-snapshot-error-persists",
+            "reconciled-body-error-recovers",
+            "reconciled-body-error-already-disclosed",
+            "reconciled-body-error-persists",
         ],
     )
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
@@ -1096,6 +1103,10 @@ class TestHappyPathPart002:
 
         exhausted = outcome != "satisfied"
         reconciled = outcome.startswith("reconciled-")
+        failed_read = next(
+            (read for read in ("snapshot", "body") if f"-{read}-error-" in outcome), None
+        )
+        read_failure_persists = outcome.endswith("-persists")
         section = (
             "### Unresolved plan-conformance gaps\n\n"
             "- **test_work**: Add a regression test\n"
@@ -1141,6 +1152,10 @@ class TestHappyPathPart002:
             return result
 
         monkeypatch.setattr(fake, "run", run_and_write_final_report)
+        monkeypatch.setattr(_pr_open_step, "_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS", 0)
+        if failed_read:
+            # Surface a failed transport read so this exercises the executor retry.
+            monkeypatch.setattr(_github_transport, "GITHUB_TRANSPORT_MAX_ATTEMPTS", 1)
         monitor = SimpleNamespace(run=AsyncMock())
         monkeypatch.setattr(executor, "_pr_monitor", monitor)
         _queue_pre_agent_symlink_baseline(fake)
@@ -1229,11 +1244,26 @@ class TestHappyPathPart002:
                     }
                 }
             )
-            fake.queue_result(stdout=snapshot)
+            if failed_read:
+                for attempt in range(2):
+                    fail = attempt == 0 or read_failure_persists
+                    if failed_read == "snapshot" and fail:
+                        fake.queue_result(returncode=1, stderr=f"Snapshot lookup failed: {token}")
+                        continue
+                    fake.queue_result(stdout=snapshot)
+                    if fail:
+                        fake.queue_result(returncode=1, stderr=f"Body lookup failed: {token}")
+                    elif outcome.endswith("-already-disclosed"):
+                        fake.queue_result(stdout=f"Existing body\n\n{section}\n")
+                    else:
+                        fake.queue_result(stdout="Existing body\n")
+                        fake.queue_result()  # fallback comment
+            else:
+                fake.queue_result(stdout=snapshot)
             if outcome == "reconciled-tip-mismatch":
                 fake.queue_result()  # cat-file finds the reconciled head locally
                 fake.queue_result(returncode=1)  # merge-base rejects containment
-            else:
+            elif not failed_read:
                 fake.queue_result(
                     stdout=(
                         f"Original body\n\n{section}\n".replace("\n", "\r\n")
@@ -1267,6 +1297,53 @@ class TestHappyPathPart002:
             assert monitor.run.await_count == 0
             assert not any(any("pytest -q" in arg for arg in call.args) for call in fake.calls)
             assert not any("push" in call.args for call in fake.calls)
+            return
+        if failed_read:
+            commands = [call.args for call in fake.calls]
+            pr_calls = {
+                ("gh", "api", "graphql"): "snapshot",
+                ("gh", "pr", "view"): "body",
+                ("gh", "pr", "comment"): "comment",
+            }
+            reads = (
+                ["snapshot", "snapshot"]
+                if failed_read == "snapshot"
+                else ["snapshot", "body", "snapshot", "body"]
+            )
+            if failed_read == "snapshot" and not read_failure_persists:
+                reads.append("body")
+            posts_comment = not read_failure_persists and not outcome.endswith("-already-disclosed")
+            assert [
+                pr_calls[tuple(args[:3])] for args in commands if tuple(args[:3]) in pr_calls
+            ] == (reads + (["comment"] if posts_comment else []))
+            if posts_comment:
+                comment = next(args for args in commands if args[:3] == ["gh", "pr", "comment"])
+                assert comment[3] == "55"
+                assert comment[-1] == section
+            assert sum("push" in args for args in commands) == 1
+            assert ws.pr_url == pr_url
+            assert ws.pr_number == 55
+            assert ws.monitor_last_commit_sha == pushed_tip
+            pending = next(
+                e for e in ws.events if e.event_type == "workspace.audit.pr_conformance_comment"
+            )
+            assert pending.reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert pending.payload["outcome"] == "pending"
+            assert pending.payload["source_head_sha"] == pushed_tip
+            error = f"{failed_read.capitalize()} lookup failed: [redacted]"
+            assert pending.payload["evidence"]["error_message"].endswith(error)
+            created = next(e for e in ws.events if e.event_type == "workspace.audit.pr_created")
+            evidence = created.payload["evidence"]
+            if read_failure_persists:
+                assert ws.status == WorkspaceStatus.failed.value, ws.failure_message
+                assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+                assert evidence["conformance_comment_pending"] is True
+                assert evidence["conformance_comment_error"].endswith(error)
+                monitor.run.assert_not_awaited()
+            else:
+                assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
+                assert evidence["conformance_comment_retried"] is True
+                monitor.run.assert_awaited_once()
             return
         if outcome == "reconciled-comment-error":
             assert ws.status == WorkspaceStatus.failed.value, ws.failure_message

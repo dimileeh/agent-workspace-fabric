@@ -337,31 +337,19 @@ async def _publish_pr_conformance_comment(
     metadata = pr.open_metadata or {}
     pr_number = reused_pr_number
     pushed_head_sha = pr.head_sha
+    reconcile_client = (
+        forge_client
+        if isinstance(forge_client, GitHubClient)
+        and str(metadata.get("strategy")).startswith("reconciled_")
+        else None
+    )
     try:
-        if isinstance(forge_client, GitHubClient) and str(metadata.get("strategy")).startswith(
-            "reconciled_"
-        ):
+        if reconcile_client is not None:
             pr_number = _extract_pr_number(pr.url)
             if pr_number is None:  # pragma: no cover - reconciled GitHub PR URLs include the number
                 raise ValueError("Could not determine the reconciled PR number")
-            repo = RepoRef.from_url(repo_url)
-            snapshot = await forge_client.fetch_pull_request_snapshot(
-                repo=repo, pr_number=pr_number
-            )
             recorded_tip = metadata.get("pushed_head_sha")
             pushed_head_sha = recorded_tip if isinstance(recorded_tip, str) else None
-            if not await _pr_snapshot_contains_pushed_tip(
-                snapshot=snapshot,
-                pushed_head_sha=pushed_head_sha,
-                runner=runner,
-                worktree_path=worktree_path,
-                fetch_remote=fetch_remote,
-            ):
-                raise ValueError("Could not verify that the reconciled PR contains the pushed tip")
-            body = await forge_client.fetch_pull_request_body(repo=repo, pr_number=pr_number)
-            normalized_body = f"\n{body}\n".replace("\r\n", "\n")
-            if f"\n{gap_section}\n" in normalized_body:
-                return pr
         elif pr_number is None:
             return pr
         elif not pr.head_sha:
@@ -373,9 +361,8 @@ async def _publish_pr_conformance_comment(
                     "conformance_comment_skipped": "pushed_head_sha_unavailable",
                 },
             )
-        else:
-            repo = RepoRef.from_url(repo_url)
-    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+        repo = RepoRef.from_url(repo_url)
+    except ValueError as exc:
         error = redact_audit_text(str(exc), limit=500)
         _log.warning(
             "executor.pr_conformance_comment_failed",
@@ -389,7 +376,7 @@ async def _publish_pr_conformance_comment(
     retried = False
     while True:
         try:
-            if retried:
+            if reconcile_client is not None or retried:
                 snapshot = await forge_client.fetch_pull_request_snapshot(
                     repo=repo, pr_number=pr_number
                 )
@@ -400,7 +387,27 @@ async def _publish_pr_conformance_comment(
                     worktree_path=worktree_path,
                     fetch_remote=fetch_remote,
                 ):
-                    raise ValueError("The pull request no longer contains the pushed tip")
+                    if retried:
+                        raise ValueError("The pull request no longer contains the pushed tip")
+                    error = "Could not verify that the reconciled PR contains the pushed tip"
+                    _log.warning(
+                        "executor.pr_conformance_comment_failed",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        error=error,
+                    )
+                    return replace(
+                        pr, open_metadata={**metadata, "conformance_comment_error": error}
+                    )
+            if reconcile_client is not None:
+                body = await reconcile_client.fetch_pull_request_body(
+                    repo=repo, pr_number=pr_number
+                )
+                normalized_body = f"\n{body}\n".replace("\r\n", "\n")
+                if f"\n{gap_section}\n" in normalized_body:
+                    break
+                # After this read, a comment retry only needs to revalidate the tip.
+                reconcile_client = None
             await forge_client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
         except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
             error = redact_audit_text(str(exc), limit=500)
@@ -436,9 +443,10 @@ async def _publish_pr_conformance_comment(
             retried = True
             await asyncio.sleep(_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS)
         else:
-            if retried:
-                return replace(pr, open_metadata={**metadata, "conformance_comment_retried": True})
-            return pr
+            break
+    if retried:
+        return replace(pr, open_metadata={**metadata, "conformance_comment_retried": True})
+    return pr
 
 
 async def push_and_open_pr(
