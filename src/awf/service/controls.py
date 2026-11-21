@@ -41,6 +41,7 @@ from awf.service.controls_errors import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceDormantError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -509,9 +510,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # Explicit remonitor supersedes HUMAN_WAIT, as in-process resume does.
         # Clear its persisted attention fields so the row no longer needs a human.
         # The repository's awaiting_human_since guard avoids writes when absent.
+        woke_dormant = await _wake_dormant_monitor(repo, workspace, operation)
         await repo.clear_workspace_attention(workspace_id)
         if state_reset is None and (
-            claims_will_reset
+            woke_dormant
+            or claims_will_reset
             or monitor_state_changed
             or remote_push_branch_recovered
             or hosted_reauthorization is not None
@@ -1281,7 +1284,8 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         workspace_id: str,
     ) -> Workspace:
         """Fetch a workspace with a row-level lock or raise WorkspaceNotFoundError."""
-        workspace = await repo.get_for_update(workspace_id)
+        # Controls can load operation context before they take this lock.
+        workspace = await repo.get_for_update(workspace_id, populate_existing=True)
         if workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
         return workspace
@@ -1334,6 +1338,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
         reject_diagnostic_control(workspace.task_policy, operation_type.value)
+        if workspace.dormant_at is not None and operation_type in {
+            OperationType.validate,
+            OperationType.rebase,
+        }:
+            raise WorkspaceDormantError()
         if expected_version is not None and workspace.version != expected_version:
             raise VersionConflictError(
                 expected_version=expected_version,
@@ -1403,6 +1412,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _require_operator_remonitor_requested_at,
     _reset_failed_workspace_for_remonitor,
     _stack_release_replay_message,
+    _wake_dormant_monitor,
     _with_secret_lease_evidence,
     _with_secret_lease_result,
     _workspace_pr_operation_context,

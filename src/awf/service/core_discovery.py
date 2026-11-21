@@ -15,6 +15,7 @@ from awf.profiles.capabilities import ProfileCapabilities
 from awf.runtime.driver import WORKSPACE_EXECUTION_V1
 
 WORKSPACE_CREATE_EXPECTED_BASE_SHA_V1 = "workspace.create.expected_base_sha.v1"
+DORMANT_HUMAN_WAIT = "dormant_human_wait"
 
 PACKAGE_NAME = "agent-workspace-fabric"
 UNKNOWN_GIT_COMMIT = "unknown"
@@ -85,6 +86,7 @@ class CoreDiscoveryPayload:
     capabilities: tuple[str, ...] = (
         WORKSPACE_EXECUTION_V1,
         WORKSPACE_CREATE_EXPECTED_BASE_SHA_V1,
+        DORMANT_HUMAN_WAIT,
     )
     profile_capability_schema: ProfileCapabilitySchema = field(
         default_factory=profile_capability_schema

@@ -252,6 +252,7 @@ async def test_rebinding_rechecks_locked_preimage_before_history_or_operation(mo
     row = SimpleNamespace(
         id=stored.workspace_id,
         agent="codex",
+        status="failed",
         node_id=stored.credentials.agent.identity.owner,
         task_policy={"hosted_node": stored.model_dump(mode="json")},
     )
