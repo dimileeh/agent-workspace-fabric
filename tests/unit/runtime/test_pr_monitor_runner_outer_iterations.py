@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -123,6 +124,45 @@ async def test_passive_waits_outlast_outer_iterations_cap(
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         assert ws.failure_message is None
         assert ws.monitor_iter_count == iter_count
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("poll_interval_seconds", [0, -1])
+@pytest.mark.parametrize("auto_merge", [True, False], ids=["ci-wait", "human-wait"])
+async def test_immediate_waits_exhaust_outer_iterations_cap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poll_interval_seconds: float,
+    auto_merge: bool,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=auto_merge)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=auto_merge,
+        max_outer_iterations=_CAP,
+    )
+    runner._config = replace(runner._config, poll_interval_seconds=poll_interval_seconds)
+    status = _status(CheckState.PENDING if auto_merge else CheckState.SUCCESS)
+    fetch = AsyncMock(
+        side_effect=[status] * _CAP + [AssertionError("monitor exceeded the iteration cap")]
+    )
+    monkeypatch.setattr(runner, "_fetch_status_for_decision", fetch)
+
+    await runner.run(workspace_id=ws_id, compose_project="proj", compose_file=tmp_path / "c.yml")
+
+    assert fetch.await_count == _CAP
+    assert sleep_fn.calls == [poll_interval_seconds] * _CAP
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "max_outer_iterations" in (ws.failure_message or "")
 
 
 @pytest.mark.unit
