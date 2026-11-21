@@ -374,6 +374,8 @@ async def _publish_pr_conformance_comment(
 
     # Retry publication in place so the already successful push is preserved.
     retried = False
+    # Reused PRs already passed the post-push containment check.
+    pushed_tip_verified = reconcile_client is None
     while True:
         try:
             if reconcile_client is not None or retried:
@@ -387,7 +389,7 @@ async def _publish_pr_conformance_comment(
                     worktree_path=worktree_path,
                     fetch_remote=fetch_remote,
                 ):
-                    if retried:
+                    if pushed_tip_verified:
                         raise ValueError("The pull request no longer contains the pushed tip")
                     error = "Could not verify that the reconciled PR contains the pushed tip"
                     _log.warning(
@@ -399,6 +401,7 @@ async def _publish_pr_conformance_comment(
                     return replace(
                         pr, open_metadata={**metadata, "conformance_comment_error": error}
                     )
+                pushed_tip_verified = True
             if reconcile_client is not None:
                 body = await reconcile_client.fetch_pull_request_body(
                     repo=repo, pr_number=pr_number

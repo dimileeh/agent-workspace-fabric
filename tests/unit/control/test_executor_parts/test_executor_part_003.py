@@ -1076,9 +1076,11 @@ class TestHappyPathPart002:
             "reconciled-tip-mismatch",
             "reconciled-snapshot-error-recovers",
             "reconciled-snapshot-error-persists",
+            "reconciled-snapshot-error-tip-mismatch",
             "reconciled-body-error-recovers",
             "reconciled-body-error-already-disclosed",
             "reconciled-body-error-persists",
+            "reconciled-body-error-tip-mismatch",
         ],
     )
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
@@ -1107,6 +1109,7 @@ class TestHappyPathPart002:
             (read for read in ("snapshot", "body") if f"-{read}-error-" in outcome), None
         )
         read_failure_persists = outcome.endswith("-persists")
+        retry_tip_mismatch = failed_read is not None and outcome.endswith("-tip-mismatch")
         section = (
             "### Unresolved plan-conformance gaps\n\n"
             "- **test_work**: Add a regression test\n"
@@ -1250,6 +1253,11 @@ class TestHappyPathPart002:
                     if failed_read == "snapshot" and fail:
                         fake.queue_result(returncode=1, stderr=f"Snapshot lookup failed: {token}")
                         continue
+                    if attempt == 1 and retry_tip_mismatch:
+                        fake.queue_result(stdout=snapshot.replace(pushed_tip, "c" * 40))
+                        fake.queue_result()  # cat-file finds the reconciled head locally
+                        fake.queue_result(returncode=1)  # merge-base rejects containment
+                        break
                     fake.queue_result(stdout=snapshot)
                     if fail:
                         fake.queue_result(returncode=1, stderr=f"Body lookup failed: {token}")
@@ -1310,9 +1318,15 @@ class TestHappyPathPart002:
                 if failed_read == "snapshot"
                 else ["snapshot", "body", "snapshot", "body"]
             )
-            if failed_read == "snapshot" and not read_failure_persists:
+            if retry_tip_mismatch and failed_read == "body":
+                reads.pop()
+            if failed_read == "snapshot" and not (read_failure_persists or retry_tip_mismatch):
                 reads.append("body")
-            posts_comment = not read_failure_persists and not outcome.endswith("-already-disclosed")
+            posts_comment = not (
+                read_failure_persists
+                or retry_tip_mismatch
+                or outcome.endswith("-already-disclosed")
+            )
             assert [
                 pr_calls[tuple(args[:3])] for args in commands if tuple(args[:3]) in pr_calls
             ] == (reads + (["comment"] if posts_comment else []))
@@ -1334,10 +1348,19 @@ class TestHappyPathPart002:
             assert pending.payload["evidence"]["error_message"].endswith(error)
             created = next(e for e in ws.events if e.event_type == "workspace.audit.pr_created")
             evidence = created.payload["evidence"]
-            if read_failure_persists:
+            if retry_tip_mismatch and failed_read == "snapshot":
+                assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
+                assert "conformance_comment_pending" not in evidence
+                assert evidence["conformance_comment_error"] == (
+                    "Could not verify that the reconciled PR contains the pushed tip"
+                )
+                monitor.run.assert_awaited_once()
+            elif read_failure_persists or retry_tip_mismatch:
                 assert ws.status == WorkspaceStatus.failed.value, ws.failure_message
                 assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
                 assert evidence["conformance_comment_pending"] is True
+                if retry_tip_mismatch:
+                    error = "The pull request no longer contains the pushed tip"
                 assert evidence["conformance_comment_error"].endswith(error)
                 monitor.run.assert_not_awaited()
             else:
