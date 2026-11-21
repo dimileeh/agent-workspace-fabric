@@ -5,7 +5,7 @@ Mechanically extracted from recovery_preserved.py; behavior is unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import (
     replace,
@@ -18,7 +18,17 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.audit import redact_audit_text
+from awf.common.commands import AsyncCommandRunner
+from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
+from awf.common.forge_errors import ForgeClientError
+from awf.common.github_client import parse_forge_pull_request_url
 from awf.common.workspace_scope import without_authority_grace_wait
+from awf.control.executor.constants import (
+    _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+    _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+)
+from awf.control.executor.helpers import _render_pr_conformance_gaps
 from awf.control.executor.recovery_payloads import _planning_carried_gaps_from_metadata
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_SUBPHASE,
@@ -60,6 +70,7 @@ from awf.control.worker.types import (
     _PreservedWorktreeClassification,
 )
 from awf.db.enums import (
+    FailureReason,
     OperationStatus,
     OperationType,
     WorkspaceStatus,
@@ -76,6 +87,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.hosted_node.identity import (
+    MaterialDeniedError,
     WorkspaceAuthorityDeferredError,
     WorkspaceScopeDeniedError,
 )
@@ -292,9 +304,11 @@ async def _recover_preserved_active_execution(
             _extract_pr_number(ws.pr_url) if ws.pr_url and ws.pr_number is None else ws.pr_number
         )
         attach_existing_pr_monitor = bool(ws.pr_url and extracted_pr_number is not None)
+        needs_workspace_scope = not attach_existing_pr_monitor or bool(
+            _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+        )
         branch_recovery_context: (
             tuple[
-                str,
                 str,
                 str | None,
                 str | None,
@@ -307,7 +321,6 @@ async def _recover_preserved_active_execution(
         if not attach_existing_pr_monitor:
             branch_recovery_context = (
                 ws.repo_url,
-                ws.id,
                 ws.branch_name,
                 ws.remote_push_branch,
                 ws.base_commit,
@@ -316,27 +329,8 @@ async def _recover_preserved_active_execution(
             )
         await session.commit()
 
-    if attach_existing_pr_monitor:
-        await self._attach_preserved_active_pr_monitor(
-            candidate,
-            preserved_event=preserved_event,
-            attempt_id=attempt_id,
-            task_id=task_id,
-        )
-        return True
-
-    assert branch_recovery_context is not None
-    (
-        repo_url,
-        workspace_id,
-        branch_name,
-        remote_push_branch,
-        base_commit,
-        expected_head_repo_slug,
-        resolved_forge,
-    ) = branch_recovery_context
-    lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
-    scope = getattr(self, "_workspace_scope", None)
+    workspace_id = candidate.workspace_id
+    scope = getattr(self, "_workspace_scope", None) if needs_workspace_scope else None
     # Recovery runs in the worker poll, outside provisioner/executor scopes.
     # Resolve with this candidate's authority after releasing the row lock.
     # Opt out of hosted scope-entry grace waits: blocking the poll on a full
@@ -345,6 +339,25 @@ async def _recover_preserved_active_execution(
     try:
         with without_authority_grace_wait():
             async with scope(workspace_id) if scope is not None else nullcontext():
+                if attach_existing_pr_monitor:
+                    await self._attach_preserved_active_pr_monitor(
+                        candidate,
+                        preserved_event=preserved_event,
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                    )
+                    return True
+
+                assert branch_recovery_context is not None
+                (
+                    repo_url,
+                    branch_name,
+                    remote_push_branch,
+                    base_commit,
+                    expected_head_repo_slug,
+                    resolved_forge,
+                ) = branch_recovery_context
+                lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
                 branch_lookup = await self._resolve_preserved_active_branch_open_pr(
                     repo_url=repo_url,
                     branch_name=lookup_branch_name,
@@ -356,6 +369,16 @@ async def _recover_preserved_active_execution(
                     # Recover by head branch and let match/ambiguity checks below guard safety.
                     base_branch=None,
                 )
+                if branch_lookup is not None and branch_lookup.state == "matched":
+                    await self._attach_preserved_active_pr_monitor(
+                        candidate,
+                        preserved_event=preserved_event,
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        open_pr=branch_lookup.match,
+                        branch_pr_lookup=branch_lookup.payload,
+                    )
+                    return True
     except WorkspaceAuthorityDeferredError as deferred:
         # Scope entry deferred inside grace: keep the preserved candidate for a
         # later stale scan. Returning True stops this cycle from falling through
@@ -376,16 +399,6 @@ async def _recover_preserved_active_execution(
             attempt_id=attempt_id,
             task_id=task_id,
             preservation_expired=preservation_expired,
-        )
-        return True
-    if branch_lookup is not None and branch_lookup.state == "matched":
-        await self._attach_preserved_active_pr_monitor(
-            candidate,
-            preserved_event=preserved_event,
-            attempt_id=attempt_id,
-            task_id=task_id,
-            open_pr=branch_lookup.match,
-            branch_pr_lookup=branch_lookup.payload,
         )
         return True
     if branch_lookup is not None and branch_lookup.state == "ambiguous":
@@ -638,6 +651,39 @@ async def _record_preserved_active_execution_after_restart(
     )
 
 
+async def _ensure_carried_gaps_published(
+    runner: AsyncCommandRunner,
+    *,
+    pr_url: str,
+    pr_number: int,
+    resolved_forge: object,
+    carried_gaps: Sequence[dict[str, str]],
+) -> str | None:
+    """Confirm the notice or publish it on the PR before attaching its monitor."""
+    gap_section = _render_pr_conformance_gaps(carried_gaps)
+    try:
+        forge = concrete_forge_for_repo(resolved_forge, pr_url)
+        repo, number_from_url = parse_forge_pull_request_url(pr_url, forge=forge)
+        if number_from_url != pr_number:
+            raise ValueError("Stored pull request number does not match its URL")
+        async with make_forge_client(forge, runner) as client:
+            body = await client.fetch_pull_request_body(repo=repo, pr_number=pr_number)
+            if f"\n{gap_section}\n" in f"\n{body}\n".replace("\r\n", "\n"):
+                return None
+            comments = await client.fetch_pull_request_comment_bodies(
+                repo=repo, pr_number=pr_number
+            )
+            if not any(
+                comment.replace("\r\n", "\n").strip() == gap_section for comment in comments
+            ):
+                await client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
+    except MaterialDeniedError:
+        raise
+    except (ForgeClientError, ForgeNotSupportedError, OSError, TimeoutError, ValueError) as exc:
+        return redact_audit_text(str(exc), limit=500)
+    return None
+
+
 async def _attach_preserved_active_pr_monitor(
     self: Any,
     candidate: _ActiveExecutionCandidate,
@@ -675,6 +721,62 @@ async def _attach_preserved_active_pr_monitor(
             workspace_status=candidate.status,
         ):
             return
+
+        # Persist a recovered PR identity first. Forge calls can recheck hosted
+        # authority and stop the workspace, so they must run outside the row lock.
+        carried_gaps = _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+        if carried_gaps:
+            version, pr_url, pr_number = ws.version, ws.pr_url, ws.pr_number
+            resolved_forge = (ws.resolved_profile or {}).get("forge")
+            await session.commit()
+            session.expunge(ws)
+            error = await _ensure_carried_gaps_published(
+                self._pr_publication_runner,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                resolved_forge=resolved_forge,
+                carried_gaps=carried_gaps,
+            )
+            ws = await repo.get_for_update(candidate.workspace_id)
+            claim_cutoff = datetime.now(UTC)
+            if (
+                ws is None
+                or ws.status != candidate.status.value
+                or (ws.version, ws.pr_url, ws.pr_number) != (version, pr_url, pr_number)
+                or not _execution_claim_is_stale(ws, claim_cutoff)
+                or _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+                != carried_gaps
+            ):
+                return
+            reason = (
+                _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE
+                if error is not None
+                else "PR_CONFORMANCE_COMMENT_PUBLISHED"
+            )
+            await repo.add_audit_event(
+                ws,
+                event_type=_AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+                actor="worker",
+                action="pr_conformance_comment",
+                outcome="failed" if error is not None else "succeeded",
+                reason_code=reason,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                source_head_sha=ws.monitor_last_commit_sha,
+                evidence={"error_message": error} if error is not None else None,
+            )
+            if error is not None:
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+                ws.subphase = None
+                ws.failure_reason = FailureReason.infrastructure_failure.value
+                ws.failure_message = (
+                    "Could not publish unresolved plan-conformance gaps on the pull request: "
+                    f"{error}"
+                )
+                await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=reason)
+                await session.commit()
+                return
 
         previous_claim = _workspace_claim_snapshot(ws)
         claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
@@ -720,8 +822,6 @@ async def _attach_preserved_active_pr_monitor(
             )
             if cancelled_active_operations:
                 payload["cancelled_active_operations"] = cancelled_active_operations
-        # PR creation can succeed before the executor commits its monitor handoff.
-        carried_gaps = _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
         if carried_gaps:
             monitor_state = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed))
             if not any(

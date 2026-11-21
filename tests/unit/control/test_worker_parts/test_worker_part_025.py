@@ -21,6 +21,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.commands import FakeCommandRunner
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
@@ -1266,6 +1267,17 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
         )
         state = MonitorState()
         append_applied_operator_directive(state, decision)
+        section = (
+            "### Unresolved plan-conformance gaps\n\n- **verification**: Add a regression test"
+        )
+        forge_runner = FakeCommandRunner()
+        if advisory_state != "no_gaps":
+            forge_runner.queue_result(stdout=section if advisory_state == "existing" else "")
+        if advisory_state == "missing":
+            forge_runner.queue_result(
+                stdout='{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}'
+            )
+            forge_runner.queue_result()
         if advisory_state == "existing":
             append_applied_operator_directive(state, existing_advisory)
         async with session_factory() as s:
@@ -1301,6 +1313,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
             ),
             runtime_cleaner=cleaner,
             open_pr_resolver=resolver,
+            pr_publication_runner=forge_runner,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_executions=1,
@@ -1345,6 +1358,12 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
             assert ws.pr_number == 270
             assert ws.remote_push_branch == branch_name
             assert ws.monitor_last_commit_sha == resolved_head_sha
+            assert (
+                len(forge_runner.calls)
+                == {"no_gaps": 0, "existing": 1, "missing": 3}[advisory_state]
+            )
+            if advisory_state == "missing":
+                assert forge_runner.calls[-1].args[-2:] == ["--body", section]
             directives = load_applied_operator_directives(
                 MonitorState(threads_addressed_ids=ws.monitor_threads_addressed)
             )

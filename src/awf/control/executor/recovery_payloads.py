@@ -187,8 +187,11 @@ def _pr_conformance_publication_pending(workspace: Workspace) -> bool:
         if payload.get("pr_url") != workspace.pr_url:
             continue
         outcome = payload.get("outcome")
-        if event.event_type == _AUDIT_PR_CONFORMANCE_COMMENT_EVENT and outcome == "succeeded":
-            return False
+        if event.event_type == _AUDIT_PR_CONFORMANCE_COMMENT_EVENT and outcome in (
+            "succeeded",
+            "failed",
+        ):
+            return bool(outcome == "failed")
         if event.event_type == _AUDIT_PR_CREATED_EVENT and outcome in ("succeeded", "reused"):
             evidence = payload.get("evidence")
             return (

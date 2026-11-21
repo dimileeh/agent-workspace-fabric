@@ -10,19 +10,24 @@ because each path under test is a small control-flow guard.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from awf.common.audit import build_audit_payload
+from awf.common.commands import FakeCommandRunner
+from awf.control.executor.recovery_payloads import _pr_conformance_publication_pending
 from awf.control.worker import recovery_preserved_flow as recovery
 from awf.control.worker.types import (
     _ActiveExecutionCandidate,
     _OpenPullRequestSummary,
     _PreservedWorktreeClassification,
 )
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.hosted_node.identity import WorkspaceScopeDeniedError
 
 
 def _candidate(
@@ -52,6 +57,9 @@ class _Session:
 
     async def commit(self) -> None:  # pragma: no cover - guard tests return early
         self.operations.append("commit")
+
+    def expunge(self, _workspace: object) -> None:
+        self.operations.append("expunge")
 
 
 def _none_repo_factory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,6 +333,7 @@ def _stale_workspace(**overrides: Any) -> SimpleNamespace:
     """A workspace whose execution claim is already stale (claim fields None)."""
     base: dict[str, Any] = {
         "id": "ws_recover",
+        "version": 1,
         "status": WorkspaceStatus.running.value,
         "execution_claimed_by": None,
         "execution_claim_expires_at": None,
@@ -357,17 +366,25 @@ class _RecordingRepo:
     def __init__(self, ws: SimpleNamespace) -> None:
         self._ws = ws
         self.events: list[tuple[str, str]] = []
+        self.event_payloads: list[dict[str, Any]] = []
         self.transitions: list[str] = []
+        self.transition_reasons: list[str] = []
         self.versions = 0
 
     async def get_for_update(self, _workspace_id: str) -> SimpleNamespace:
         return self._ws
 
     async def transition(
-        self, _ws: object, *, to: WorkspaceStatus, reason_code: str, payload: dict[str, Any]
+        self,
+        _ws: object,
+        *,
+        to: WorkspaceStatus,
+        reason_code: str,
+        payload: dict[str, Any] | None = None,
     ) -> None:
-        del reason_code, payload
+        del payload
         self.transitions.append(to.value)
+        self.transition_reasons.append(reason_code)
 
     async def advance_workspace_version(self, _ws: object) -> None:
         self.versions += 1
@@ -375,8 +392,18 @@ class _RecordingRepo:
     async def add_event(
         self, _ws: object, *, event_type: str, reason_code: str, payload: dict[str, Any]
     ) -> None:
-        del payload
         self.events.append((event_type, reason_code))
+        self.event_payloads.append(payload)
+
+    async def add_audit_event(
+        self, ws: object, *, event_type: str, reason_code: str, **fields: Any
+    ) -> None:
+        await self.add_event(
+            ws,
+            event_type=event_type,
+            reason_code=reason_code,
+            payload=build_audit_payload(reason_code=reason_code, **fields),
+        )
 
 
 @pytest.mark.unit
@@ -423,6 +450,115 @@ async def test_attach_pr_monitor_open_pr_without_head_sha_skips_commit_sha(
             recovery._ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,  # noqa: SLF001
         )
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("publication", "expected_error", "call_count"),
+    [
+        ("published_comment", None, 3),
+        ("write_failed", "not authorized to publish notice", 4),
+        ("read_failed", "HTTP 403", 2),
+        ("malformed_comments", "returned no comment connection", 2),
+        ("wrong_number", "does not match its URL", 0),
+        ("superseded", None, 3),
+        ("authority_denied", None, 0),
+    ],
+)
+async def test_restart_requires_carried_gaps_visible_on_persisted_pr(
+    monkeypatch: pytest.MonkeyPatch, publication: str, expected_error: str | None, call_count: int
+) -> None:
+    section = "### Unresolved plan-conformance gaps\n\n- **verification**: Add a regression test"
+    ws = _stale_workspace(
+        repo_url="https://github.com/example/repo",
+        resolved_profile=None,
+        pr_url="https://github.com/example/repo/pull/7",
+        pr_number=8 if publication == "wrong_number" else 7,
+        monitor_last_commit_sha="a" * 40,
+        monitor_threads_addressed={},
+        block_planning_conformance_handoff={
+            "carried_gaps": [{"kind": "verification", "detail": "Add a regression test"}],
+        },
+    )
+    repo = _RecordingRepo(ws)
+    session = _Session()
+    monkeypatch.setattr(recovery, "WorkspaceRepository", lambda _session: repo)
+    runner = FakeCommandRunner()
+    runner.queue_result()  # Gap section missing from the description.
+    if publication == "read_failed":
+        runner.queue_result(returncode=1, stderr="HTTP 403 Forbidden")
+    elif publication == "malformed_comments":
+        runner.queue_result(stdout='{"data":{"repository":{"pullRequest":null}}}')
+    elif publication not in ("wrong_number", "authority_denied"):
+
+        def queue_comments(nodes: list[dict[str, Any]], cursor: str | None = None) -> None:
+            page = {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
+            }
+            runner.queue_result(
+                stdout=json.dumps(
+                    {
+                        "data": {"repository": {"pullRequest": {"comments": page}}},
+                    }
+                )
+            )
+
+        queue_comments([{"body": section, "isMinimized": True}, {"body": None}], cursor="next")
+        if publication in ("published_comment", "superseded"):
+            queue_comments([{"body": section, "viewerDidAuthor": True}])
+        else:
+            queue_comments([{"body": "Unrelated feedback"}])
+            runner.queue_result(returncode=1, stderr="not authorized to publish notice")
+
+    async def _no_existing_salvage(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def run_with_concurrent_update(*args: Any, **kwargs: Any) -> Any:
+        assert session.operations == ["commit", "expunge"]
+        if publication == "authority_denied":
+            raise WorkspaceScopeDeniedError("PROTECTED_MATERIAL_REVOKED", 403)
+        if publication == "superseded":
+            ws.version = 2
+        return await runner.run(*args, **kwargs)
+
+    worker = SimpleNamespace(
+        _session_factory=lambda: session,
+        _worker_id="worker-1",
+        _has_current_salvage_event=_no_existing_salvage,
+        _pr_publication_runner=SimpleNamespace(run=run_with_concurrent_update),
+    )
+    attach = recovery._attach_preserved_active_pr_monitor(  # noqa: SLF001
+        worker, _candidate(), preserved_event=_full_preserved_event(), attempt_id=None, task_id=None
+    )
+    if publication == "authority_denied":
+        with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_REVOKED"):
+            await attach
+    else:
+        await attach
+
+    assert ws.pr_url == "https://github.com/example/repo/pull/7"
+    assert ws.pr_number == (8 if publication == "wrong_number" else 7)
+    assert len(runner.calls) == call_count
+    ws.events = [
+        SimpleNamespace(event_type=event_type, payload=payload)
+        for (event_type, _), payload in zip(repo.events, repo.event_payloads, strict=True)
+    ]
+    if publication in ("superseded", "authority_denied"):
+        assert repo.transitions == []
+        assert ws.events == []
+    elif expected_error is None:
+        assert repo.transitions == [WorkspaceStatus.monitoring_pr.value]
+        assert "cursor=next" in runner.calls[-1].args
+        assert ws.events[0].payload["outcome"] == "succeeded"
+        assert not _pr_conformance_publication_pending(ws)
+    else:
+        assert repo.transitions == [WorkspaceStatus.failed.value]
+        assert repo.transition_reasons == ["PR_CONFORMANCE_COMMENT_FAILED"]
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert expected_error in ws.failure_message
+        assert len(ws.events) == 1
+        assert _pr_conformance_publication_pending(ws)
 
 
 @pytest.mark.unit
