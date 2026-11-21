@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.repositories import (
+    OperationRepository,
     WorkspaceRepository,
 )
 from awf.node.compose_manager import ComposeTeardownResult
@@ -174,6 +175,78 @@ async def test_notify_human_finishes_wait_when_attention_write_is_rejected(
             assert workspace.awaiting_human_reason == "Replacement episode"
             assert sleep_fn.calls == [60]
             post_notification.assert_awaited_once()
+
+
+@pytest.mark.parametrize("wait_already_finished", [False, True], ids=["open-wait", "finished-wait"])
+async def test_notify_human_finishes_wait_when_post_persist_is_superseded(
+    factory, cmd, adapter, sleep_fn, tmp_path, monkeypatch, wait_already_finished
+):
+    repo_url = "https://github.com/example/repo.git"
+    workspace_id = await _seed_monitoring_workspace(factory, repo_url=repo_url)
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+    runner = _make_runner(
+        factory=factory, cmd=cmd, adapter=adapter, sleep_fn=sleep_fn, worktrees_root=tmp_path
+    )
+    runner._config = replace(runner._config, human_wait_dormant_after_seconds=30)
+    replacement_threads = {"replacement-thread": "addressed"}
+
+    async def take_over_during_post(**_kwargs):
+        async with factory.begin() as session:
+            repo = WorkspaceRepository(session)
+            assert await repo.claim_monitoring_pr(
+                workspace_id,
+                owner_id="replacement",
+                lease_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+            workspace = await repo.get(workspace_id)
+            (operation,) = workspace.operations
+            assert operation.type == "human_wait" and operation.status == "running"
+            workspace.monitor_threads_addressed = replacement_threads
+            if wait_already_finished:
+                await OperationRepository(session).finish(
+                    operation,
+                    status=OperationStatus.succeeded,
+                    result={"outcome": "human_notification_posted"},
+                )
+
+    post_comment = AsyncMock(side_effect=take_over_during_post)
+    monkeypatch.setattr(runner._deps.gh, "post_comment", post_comment)
+    state = MonitorState()
+    outcome = await notify_human_loop.handle_notify_human_action(
+        runner,
+        action=NotifyHuman(message="Approval required"),
+        workspace_id=workspace_id,
+        repo_url=repo_url,
+        repo=RepoRef.from_url(repo_url),
+        pr_number=42,
+        status=PRStatus(42, "abc123", MergeableState.MERGEABLE, CheckState.SUCCESS, (), (), 0),
+        state=state,
+        base_branch="development",
+        remote_branch="feature",
+        compose_project="awf_test",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+        allow_dormancy=True,
+    )
+
+    post_comment.assert_awaited_once()
+    assert outcome is DormancyExit.SUPERSEDED
+    assert state.monitor_writes_suppressed
+    assert sleep_fn.calls == []
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.monitor_claimed_by == "replacement"
+        assert workspace.monitor_threads_addressed == replacement_threads
+        assert workspace.dormant_at is None
+        (operation,) = workspace.operations
+        if wait_already_finished:
+            assert operation.status == "succeeded"
+            assert operation.result == {"outcome": "human_notification_posted"}
+        else:
+            assert operation.status == "cancelled"
+            assert operation.result == {"outcome": "superseded"}
 
 
 class TestCompleteWorkspaceTearsDownComposeStack:

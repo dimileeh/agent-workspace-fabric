@@ -411,6 +411,15 @@ async def handle_notify_human_action(
         # A restart while sleeping must retain the notice posted for this head.
         await self._persist_state(workspace_id, state)
         if state.monitor_writes_suppressed:
+            # Use the suspension lock so a committed dormancy result is preserved.
+            async with self._deps.session_factory.begin() as session:
+                await WorkspaceRepository(session).get_for_update(workspace_id)
+                await finish_monitor_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status=OperationStatus.cancelled,
+                    result={"outcome": "superseded"},
+                )
             return DormancyExit.SUPERSEDED
     await self._deps.sleep(self._config.poll_interval_seconds)
     await self._finish_monitor_operation(
