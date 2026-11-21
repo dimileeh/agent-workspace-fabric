@@ -522,6 +522,7 @@ async def push_and_open_pr(
     workspace_id: str,
     worktree_path: Path,
     carried_gaps: Sequence[dict[str, str]] = (),
+    publish_gaps_on_reused_pr: bool = True,
     retry_gap_publication: bool = False,
 ) -> Any | None:
     """Push the validated branch and open (or reuse) its PR.
@@ -867,7 +868,9 @@ async def push_and_open_pr(
                     self,
                     forge_client=forge_client,
                     pr=pr,
-                    gap_section=gap_section,
+                    gap_section=(
+                        gap_section if reused_pr_number is None or publish_gaps_on_reused_pr else ""
+                    ),
                     workspace_id=workspace_id,
                     repo_url=ws.repo_url,
                     runner=self._runner,

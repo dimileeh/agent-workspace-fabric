@@ -497,11 +497,17 @@ async def _seed_ready_workspace_no_recovery(
 
 
 def _queue_push_and_pr(
-    fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
+    fake: FakeCommandRunner,
+    *,
+    pr_url: str = "https://github.com/x/y/pull/1",
+    head: str = "deadbeef01",
+    retained_pr_state: str | None = None,
 ) -> None:
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
-    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
+    if retained_pr_state:
+        _queue_open_pr_lifecycle_snapshot(fake, closed=True, merged=retained_pr_state == "merged")
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
@@ -515,6 +521,7 @@ def _queue_open_pr_lifecycle_snapshot(
     head_ref: str | None = None,
     base_sha: str = "a" * 40,
     closed: bool = False,
+    merged: bool = False,
 ) -> None:
     """Queue one ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
     fake.queue_result(
@@ -525,7 +532,7 @@ def _queue_open_pr_lifecycle_snapshot(
                     "repository": {
                         "pullRequest": {
                             "closed": closed,
-                            "merged": False,
+                            "merged": merged,
                             "headRefName": head_ref,
                             "headRefOid": head_sha,
                             "baseRefOid": base_sha,
@@ -844,19 +851,22 @@ async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("source", "recovery_mode", "operation_type"),
+    ("source", "recovery_mode", "operation_type", "retained_pr_state"),
     [
-        ("pr_monitor", "validate_only", OperationType.validate),
-        ("operator_api", "rebase_only", OperationType.rebase),
+        ("pr_monitor", "validate_only", OperationType.validate, "open"),
+        ("operator_api", "rebase_only", OperationType.rebase, "open"),
+        ("pr_monitor", "validate_only", OperationType.validate, "closed"),
+        ("pr_monitor", "validate_only", OperationType.validate, "merged"),
     ],
 )
-async def test_existing_pr_recovery_does_not_republish_carried_gaps(
+async def test_carried_gap_publication_during_existing_pr_recovery(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     source: str,
     recovery_mode: str,
     operation_type: OperationType,
+    retained_pr_state: str,
 ) -> None:
     monitor_calls: list[str] = []
 
@@ -905,7 +915,13 @@ async def test_existing_pr_recovery_does_not_republish_carried_gaps(
     fake.queue_result(returncode=0)  # git commit
     _queue_validation_head(fake, head=fixed_head)
     fake.queue_result(returncode=0, stdout="tests ok")
-    _queue_existing_pr_push(fake, head=fixed_head)
+    replacement_url = "https://github.com/x/y/pull/2"
+    if retained_pr_state == "open":
+        _queue_existing_pr_push(fake, head=fixed_head)
+    else:
+        _queue_push_and_pr(
+            fake, pr_url=replacement_url, head=fixed_head, retained_pr_state=retained_pr_state
+        )
     fake.respond_when(lambda args: args[:3] == ["gh", "pr", "comment"], returncode=0)
 
     await executor.execute(ws_id)
@@ -916,9 +932,28 @@ async def test_existing_pr_recovery_does_not_republish_carried_gaps(
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         assert ws.monitor_last_commit_sha == fixed_head
-        assert load_applied_operator_directives(
+        directives = load_applied_operator_directives(
             MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
-        ) == (advisory,)
+        )
+        if retained_pr_state == "open":
+            assert ws.pr_url == "https://github.com/x/y/pull/1"
+            assert directives == (advisory,)
+        else:
+            assert ws.pr_url == replacement_url
+            (directive,) = directives
+            assert directive.source == advisory.source
+            assert directive.directive == advisory.directive
+    create_calls = [
+        call for call in _all_push_and_pr_create_calls(fake) if call[:3] == ["gh", "pr", "create"]
+    ]
+    if retained_pr_state == "open":
+        assert create_calls == []
+    else:
+        (create_call,) = create_calls
+        body = create_call[create_call.index("--body") + 1]
+        assert (
+            "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test" in body
+        )
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in fake.calls)
 
 

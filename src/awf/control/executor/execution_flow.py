@@ -738,11 +738,13 @@ async def execute(
                     handoff=planning_validation_handoff,
                 )
         elif recovery is not None:
-            if not ws.pr_url or _pr_conformance_publication_pending(ws):
-                carried_gaps = _planning_carried_gaps_from_metadata(
-                    ws.block_planning_conformance_handoff
-                )
-                retry_gap_publication = bool(ws.pr_url and carried_gaps)
+            # A recovery push can replace a PR that closed or merged.
+            carried_gaps = _planning_carried_gaps_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
+            retry_gap_publication = bool(
+                carried_gaps and ws.pr_url and _pr_conformance_publication_pending(ws)
+            )
             # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
@@ -1507,6 +1509,7 @@ async def execute(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         carried_gaps=carried_gaps,
+        publish_gaps_on_reused_pr=recovery is None or retry_gap_publication,
         retry_gap_publication=retry_gap_publication,
     )
     if pr is None:
@@ -1522,5 +1525,5 @@ async def execute(
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
-        carried_gaps=() if retry_gap_publication and pr.url == ws.pr_url else carried_gaps,
+        carried_gaps=() if recovery is not None and pr.url == ws.pr_url else carried_gaps,
     )
