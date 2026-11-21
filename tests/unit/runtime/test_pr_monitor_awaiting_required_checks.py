@@ -49,6 +49,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+    stop_monitor_after_polls,
 )
 
 _NOW = datetime(2026, 6, 22, 8, 30, 0, tzinfo=UTC)
@@ -251,10 +252,9 @@ class TestAwaitingRequiredChecksRunner:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            max_outer_iterations=1,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 1):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -323,10 +323,9 @@ class TestAwaitingRequiredChecksRunner:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            max_outer_iterations=1,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 1):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -369,10 +368,9 @@ class TestAwaitingRequiredChecksRunner:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            max_outer_iterations=2,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 2):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
