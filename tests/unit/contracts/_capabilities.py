@@ -6,10 +6,8 @@ MCP all expose. Every entry maps a single operator capability to:
 - the canonical REST endpoint (``method`` + ``path``);
 - the MCP tool name when one exists (``mcp_tool``);
 - the CLI invocation tokens when one exists (``cli_tokens``);
-- the parity matrix Status / Backlog Slice columns at the time of writing
-  (``parity_status``, ``parity_backlog_slice``).
-- whether ``Idempotency-Key`` is optional replay support or a required
-  client-boundary contract.
+- the parity matrix Status and Backlog Slice (``parity_status``, ``parity_backlog_slice``).
+- whether clients must send an ``Idempotency-Key`` or may use one for replay.
 
 The registry is cross-validated against ``docs/MCP_CLIENT_PARITY.md`` at test
 collection time so the harness fails loudly if either side drifts. Tests that
@@ -61,9 +59,8 @@ class ContractCapability:
     mcp_required_fields: frozenset[str] = field(default_factory=frozenset)
     cli_options: frozenset[str] = field(default_factory=frozenset)
     cli_arguments: frozenset[str] = field(default_factory=frozenset)
-    # Representative client-visible keys. For MCP-backed capabilities, these
-    # must be present in the MCP structuredContent payload; REST models are
-    # tracked separately by rest_response_model.
+    # Representative response keys, required in structuredContent for MCP capabilities.
+    # REST models are tracked separately by rest_response_model.
     response_fields: frozenset[str] = field(default_factory=frozenset)
     auth_required: bool = False
 
@@ -352,6 +349,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "NOT_FOUND",
                 "WORKSPACE_PR_URL_REQUIRED",
                 "WORKSPACE_STATE_NOT_VALIDATABLE",
+                "WORKSPACE_DORMANT",
                 "VERSION_CONFLICT",
                 "IDEMPOTENCY_CONFLICT",
             }
@@ -420,6 +418,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {
                 "NOT_FOUND",
                 "WORKSPACE_STATE_NOT_REBASEABLE",
+                "WORKSPACE_DORMANT",
                 "MERGE_CANDIDATE_NOT_FOUND",
                 "WORKSPACE_REBASE_CONFLICT",
                 "WORKSPACE_OPERATION_CONFLICT",
@@ -560,6 +559,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "requested_tier",
                 "auto_merge",
                 "initial_review_grace_period_seconds",
+                "human_wait_dormant_after_seconds",
                 "provider_readiness_override",
                 "provider_readiness_override_reason",
                 "companions",
@@ -594,6 +594,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--with-db",
                 "--auto-merge/--no-auto-merge",
                 "--initial-review-grace-period-seconds",
+                "--human-wait-dormant-after-seconds",
                 "--out-of-scope-changes-json",
                 "--provider-recovery-json",
                 "--provider-readiness-override",
@@ -651,6 +652,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "auto_merge",
                 "execution",
                 "initial_review_grace_period_seconds",
+                "human_wait_dormant_after_seconds",
                 "task_title",
                 "task_prompt",
                 "task_tag",
@@ -676,6 +678,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "auto_merge",
                 "execution",
                 "initial_review_grace_period_seconds",
+                "human_wait_dormant_after_seconds",
                 "task_title",
                 "task_prompt",
                 "task_tag",
@@ -699,6 +702,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--auto-merge/--no-auto-merge",
                 "--execution",
                 "--initial-review-grace-period-seconds",
+                "--human-wait-dormant-after-seconds",
                 "--title",
                 "--prompt",
                 "--external-id",

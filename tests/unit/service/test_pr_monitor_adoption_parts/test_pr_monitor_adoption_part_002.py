@@ -395,6 +395,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
                     profile_ref="auto",
                     auto_merge=False,
                     initial_review_grace_period_seconds=7,
+                    human_wait_dormant_after_seconds=30,
                 )
             )
             await _transition_adoption(session, stale.workspace_id, WorkspaceStatus.cancelled)
@@ -414,6 +415,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
                     profile_ref="python",
                     auto_merge=True,
                     initial_review_grace_period_seconds=13,
+                    human_wait_dormant_after_seconds=60,
                 )
             )
             await session.commit()
@@ -427,6 +429,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
             "auto_merge_intent": True,
             "auto_merge_resolved": True,
             "initial_review_grace_period_seconds": 13.0,
+            "human_wait_dormant_after_seconds": 60.0,
             "execution": {"mode": "local"},
         }
 
@@ -441,10 +444,12 @@ class TestPullRequestMonitorAdoptionServicePart002:
             assert old.profile_ref == "auto"
             assert old.auto_merge is False
             assert old.initial_review_grace_period_seconds == 7
+            assert old.human_wait_dormant_after_seconds == 30
             assert new.agent == "claude_code"
             assert new.profile_ref == "python"
             assert new.auto_merge is True
             assert new.initial_review_grace_period_seconds == 13
+            assert new.human_wait_dormant_after_seconds == 60
             assert new.task_policy["pr_adoption"]["head_ref"] == "feature/current"
             assert new.task_policy["pr_adoption"]["head_sha"] == "d" * 40
 

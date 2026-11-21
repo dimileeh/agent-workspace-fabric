@@ -306,7 +306,9 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
     class _Repo:
         """Workspace repository stub returning a fixed status."""
 
-        workspace: object | None = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value)
+        workspace: object | None = SimpleNamespace(
+            status=WorkspaceStatus.monitoring_pr.value, dormant_at=None
+        )
 
         def __init__(self, _session: object) -> None:
             """Test helper for __init__."""
@@ -339,6 +341,17 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
             "ws-1",
             resume_succeeded=False,
             recovery_operation_id="op-1",
+        )
+        _Repo.workspace = SimpleNamespace(
+            status=WorkspaceStatus.monitoring_pr.value, dormant_at=datetime.now(UTC)
+        )
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=False,
+                recovery_operation_id="op-1",
+            )
         )
         _OpRepo.operation = SimpleNamespace(
             workspace_id="ws-1",

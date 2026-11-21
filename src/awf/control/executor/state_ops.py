@@ -51,7 +51,11 @@ from awf.control.executor.recovery_payloads import (
     _planning_validation_handoff_metadata,
 )
 from awf.control.executor.status_helpers import _is_callback_terminal_status
-from awf.control.executor.types import PauseResumeReason, _PlanningValidationHandoff
+from awf.control.executor.types import (
+    PauseResumeReason,
+    _PlanningCarriedGaps,
+    _PlanningValidationHandoff,
+)
 from awf.control.operator_grants import (
     active_operator_grant_specs_in_session,
     consume_active_operator_grants_in_session,
@@ -79,7 +83,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
-from awf.runtime.planning import PLAN_CONFORMANCE_NEEDS_HUMAN
+from awf.runtime.planning import PLAN_CONFORMANCE_GAPS_CARRIED, PLAN_CONFORMANCE_NEEDS_HUMAN
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 from awf.service.provider_recovery import (
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
@@ -383,6 +387,8 @@ async def _recheck_status(
                 workspace_id=workspace_id,
                 action=action,
             )
+            return False
+        if expected == WorkspaceStatus.monitoring_pr and ws.dormant_at is not None:
             return False
         status_ok = ws.status == expected.value
         owner_ok = owner_id is None or ws.execution_claimed_by == owner_id
@@ -1179,26 +1185,38 @@ async def _persist_block_planning_conformance_handoff(
     self: Any,
     workspace_id: str,
     *,
-    handoff: _PlanningValidationHandoff | None,
-) -> None:
-    """Record the pending plan-conformance handoff so a blocked-resume can reuse it.
-
-    The handoff is produced exactly once per run, in the agent/planning block.
-    A later pause into ``blocked`` preserves the row, so persisting it here lets
-    an approve-and-keep resume — which skips that block entirely — reconstruct the
-    handoff and still run the post-validation plan conformance check (gated on a
-    non-None handoff). Stores ``None`` when no handoff applies (conformance
-    satisfied inline), so a resume faithfully reproduces the original run rather
-    than inventing a pending conformance requirement (mirrors
-    ``_persist_block_baseline_coverage``).
-    """
-    metadata = _planning_validation_handoff_metadata(handoff) if handoff is not None else None
+    handoff: _PlanningValidationHandoff | _PlanningCarriedGaps | None,
+    execution_owner_id: str | None = None,
+) -> bool:
+    """Save the planning context for an approve-and-keep resume."""
     async with self._session_factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        if ws is None:
-            return
-        ws.block_planning_conformance_handoff = metadata
+        repo = WorkspaceRepository(session)
+        if isinstance(handoff, _PlanningCarriedGaps):
+            ws = await repo.get_for_update(workspace_id)
+            if (
+                ws is None
+                or ws.status != WorkspaceStatus.running.value
+                or (
+                    execution_owner_id is not None and ws.execution_claimed_by != execution_owner_id
+                )
+            ):
+                return False
+            ws.block_planning_conformance_handoff = {"carried_gaps": handoff.gaps}
+            await repo.add_event(
+                ws,
+                event_type="workspace.planning_conformance_gaps_carried",
+                reason_code=PLAN_CONFORMANCE_GAPS_CARRIED,
+                payload={"gaps": handoff.gaps},
+            )
+        else:
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                return False
+            ws.block_planning_conformance_handoff = (
+                _planning_validation_handoff_metadata(handoff) if handoff is not None else None
+            )
         await session.commit()
+        return True
 
 
 async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[GrantSpec]:

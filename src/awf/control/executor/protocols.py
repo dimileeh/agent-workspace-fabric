@@ -23,5 +23,6 @@ class _MonitorRunnerProto(Protocol):
         compose_project: str,
         compose_file: Path,
         monitor_owner_id: str | None = None,
+        dormancy_execution_claim: tuple[str, int] | None = None,
         work_slot: WorkSlot | None = None,
     ) -> None: ...

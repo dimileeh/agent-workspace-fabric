@@ -580,6 +580,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
         "profile": None,
         "auto_merge": True,
         "initial_review_grace_period_seconds": None,
+        "human_wait_dormant_after_seconds": 42.25,
         "task_title": None,
         "task_prompt": None,
         "task_tag": "PROJ-123",
@@ -603,6 +604,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
             "profile": None,
             "auto_merge": True,
             "initial_review_grace_period_seconds": None,
+            "human_wait_dormant_after_seconds": 42.25,
             "task_title": None,
             "task_prompt": None,
             "task_tag": "PROJ-123",
@@ -616,6 +618,8 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
     assert rest_request.model_dump(mode="json", exclude_none=True) == (
         mcp_request.model_dump(mode="json", exclude_none=True)
     )
+
+    assert mcp_request.human_wait_dormant_after_seconds == 42.25
 
 
 @pytest.mark.unit

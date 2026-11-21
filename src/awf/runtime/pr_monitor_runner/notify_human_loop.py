@@ -19,17 +19,22 @@ from awf.common.github_client import RepoRef
 from awf.db.enums import (
     OperationStatus,
     OperationType,
+    WorkspaceStatus,
 )
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
     PRStatus,
 )
+from awf.runtime.pr_monitor_operations import finish_monitor_operation
+from awf.runtime.pr_monitor_runner.dormancy import DormancyExit, suspend_human_wait
 from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _as_utc,
     _gate_requires_validation_recovery,
     _is_manual_ready_handoff,
     _non_check_reviewer_settle_decision,
@@ -59,8 +64,9 @@ async def handle_notify_human_action(
     compose_project: str,
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
-) -> bool:
-    """Execute a NotifyHuman action and report whether processing reached a terminal state.
+    allow_dormancy: bool = False,
+) -> bool | DormancyExit:
+    """Execute a NotifyHuman action and report whether the runner should exit.
 
     The caller dispatches on ``isinstance(action, NotifyHuman)`` before invoking
     this helper, so ``action`` is always a :class:`NotifyHuman` here.
@@ -296,7 +302,27 @@ async def handle_notify_human_action(
     # Surface the escalation as a first-class, operator-visible attention
     # signal on the still-``monitoring_pr`` row. ``since`` stays stable across
     # repeated NotifyHuman for the same block; the reason tracks the latest.
-    await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
+    threshold = self._config.human_wait_dormant_after_seconds if allow_dormancy else None
+    wait_observed_at = self._deps.now() if threshold is not None else None
+    awaiting_since = await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
+    if awaiting_since is None:
+        # A concurrent clear or replacement can reject the refresh while the
+        # workspace still needs to poll. Use the suspension lock when settling
+        # an abandoned wait so a committed dormancy result is preserved.
+        async with self._deps.session_factory.begin() as session:
+            workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+            if (
+                workspace is None
+                or workspace.status != WorkspaceStatus.monitoring_pr.value
+                or workspace.dormant_at is not None
+            ):
+                await finish_monitor_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status=OperationStatus.cancelled,
+                    result={"outcome": "superseded"},
+                )
+                return DormancyExit.SUPERSEDED
     try:
         await self._post_human_notification_once(
             repo=repo,
@@ -364,7 +390,40 @@ async def handle_notify_human_action(
         state=state,
         context="post_human_notification",
     )
+    if (
+        threshold is not None
+        and wait_observed_at is not None
+        and awaiting_since is not None
+        and (_as_utc(wait_observed_at) - _as_utc(awaiting_since)).total_seconds() >= threshold
+    ):
+        dormancy = await suspend_human_wait(
+            self,
+            workspace_id=workspace_id,
+            awaiting_since=awaiting_since,
+            threshold=threshold,
+            state=state,
+            operation=operation,
+            compose_file=compose_file,
+            monitor_log=monitor_log,
+        )
+        if dormancy is not None:
+            return dormancy
+    if threshold is not None and state.changed_thread_ids():
+        # A restart while sleeping must retain the notice posted for this head.
+        await self._persist_state(workspace_id, state)
+        if state.monitor_writes_suppressed:
+            # Use the suspension lock so a committed dormancy result is preserved.
+            async with self._deps.session_factory.begin() as session:
+                await WorkspaceRepository(session).get_for_update(workspace_id)
+                await finish_monitor_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status=OperationStatus.cancelled,
+                    result={"outcome": "superseded"},
+                )
+            return DormancyExit.SUPERSEDED
     await self._deps.sleep(self._config.poll_interval_seconds)
+    state.waited_for_human = self._config.poll_interval_seconds > 0
     await self._finish_monitor_operation(
         operation,
         status=OperationStatus.succeeded,

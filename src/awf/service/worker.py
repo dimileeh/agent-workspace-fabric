@@ -42,7 +42,7 @@ from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceCons
 from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.companion_images import CompanionImageBuilder
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeTeardownResult
 from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID, GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.secret_mounts import LocalSecretLeaseMountResolver, LocalSecretLeaseResolution
@@ -572,6 +572,9 @@ def build_worker_runtime(
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
+            "human_wait_dormant_after_seconds": getattr(
+                workspace, "human_wait_dormant_after_seconds", None
+            ),
             "non_check_reviewer_settle_seconds": (
                 profile.monitor.non_check_reviewer_settle_seconds
             ),
@@ -876,6 +879,7 @@ def build_worker_runtime(
         executor=executor,
         runtime_cleaner=runtime_cleaner,
         open_pr_resolver=open_pr_resolver,
+        pr_publication_runner=runner,
         orphan_dir_reconciler=_reconcile_orphan_dirs,
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,
@@ -940,11 +944,36 @@ def build_worker_runtime(
             reason_code: str | None = None,
             message: str | None = None,
         ) -> None:
+            async def teardown() -> ComposeTeardownResult:
+                return await compose.teardown_project(
+                    project_name=f"awf_{workspace_id}",
+                    compose_file=work_dir / "compose" / workspace_id / "compose.yml",
+                    workspace_id=workspace_id,
+                    remove_volumes=False,
+                )
+
             # Never stop a successor's workload after losing this boot identity.
             await hosted.authority.receiver.identity_status()
+            result = None
             async with session_factory() as session:
                 workspace = await session.get(Workspace, workspace_id)
-                if workspace is None or workspace.node_id != node_id:
+                lock_for_dormancy = (
+                    workspace is not None
+                    and workspace.status == WorkspaceStatus.monitoring_pr
+                    and workspace.human_wait_dormant_after_seconds is not None
+                    and authority_lost
+                )
+                if lock_for_dormancy:
+                    # Serialize external teardown with the dormant transaction.
+                    # This takes only the workspace lock until Docker returns.
+                    workspace = await session.get(
+                        Workspace, workspace_id, with_for_update=True, populate_existing=True
+                    )
+                if (
+                    workspace is None
+                    or workspace.node_id != node_id
+                    or (workspace.status == WorkspaceStatus.monitoring_pr and workspace.dormant_at)
+                ):
                     return
                 if not authority_lost:
                     # Native invocation cleanup already stopped this caller's
@@ -959,14 +988,13 @@ def build_worker_runtime(
                     "execution_claimed_by",
                     "execution_claim_epoch",
                     "monitor_claimed_by",
+                    "dormant_at",
                 )
                 fence = tuple(getattr(workspace, field) for field in fence_fields)
-            result = await compose.teardown_project(
-                project_name=f"awf_{workspace_id}",
-                compose_file=work_dir / "compose" / workspace_id / "compose.yml",
-                workspace_id=workspace_id,
-                remove_volumes=False,
-            )
+                if lock_for_dormancy:
+                    result = await teardown()
+            if result is None:
+                result = await teardown()
             if not result.ok:
                 from awf.hosted_node.identity import MaterialDeniedError
 

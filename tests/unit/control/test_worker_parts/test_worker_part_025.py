@@ -21,6 +21,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.commands import FakeCommandRunner
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
@@ -48,6 +49,12 @@ from awf.node.cleanup import (
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    AppliedOperatorDirective,
+    append_applied_operator_directive,
+    load_applied_operator_directives,
+)
 from awf.service.scheduler import (
     SchedulerOrderCursor,
     scheduler_score_from_workspace,
@@ -1220,14 +1227,19 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "workspace_status",
-        [WorkspaceStatus.running, WorkspaceStatus.pushing],
+        ("workspace_status", "advisory_state"),
+        [
+            (WorkspaceStatus.running, "no_gaps"),
+            (WorkspaceStatus.pushing, "missing"),
+            (WorkspaceStatus.pushing, "existing"),
+        ],
     )
     async def test_preserved_active_pushed_branch_open_pr_attaches_one_monitor_after_restart(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
         workspace_status: WorkspaceStatus,
+        advisory_state: str,
     ) -> None:
         compose_project_name = f"awf_preserved_pushed_branch_pr_{workspace_status.value}"
         workspace_id = await _create_active_execution(
@@ -1240,6 +1252,44 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
         )
         branch_name = f"awf/{workspace_id}"
         resolved_head_sha = "e" * 40
+        decision = AppliedOperatorDirective(
+            directive="Preserve the current interface",
+            operation_id="operator-review",
+            applied_at="2026-01-01T00:00:00+00:00",
+            head_sha="f" * 40,
+        )
+        existing_advisory = AppliedOperatorDirective(
+            directive="verification: Original advisory",
+            operation_id=workspace_id,
+            applied_at=decision.applied_at,
+            head_sha=decision.head_sha,
+            source="plan_conformance",
+        )
+        state = MonitorState()
+        append_applied_operator_directive(state, decision)
+        section = (
+            "### Unresolved plan-conformance gaps\n\n- **verification**: Add a regression test"
+        )
+        forge_runner = FakeCommandRunner()
+        if advisory_state != "no_gaps":
+            forge_runner.queue_result(stdout=section if advisory_state == "existing" else "")
+        if advisory_state == "missing":
+            forge_runner.queue_result(
+                stdout='{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}'
+            )
+            forge_runner.queue_result()
+        if advisory_state == "existing":
+            append_applied_operator_directive(state, existing_advisory)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.monitor_threads_addressed = state.threads_addressed_ids
+            if advisory_state != "no_gaps":
+                ws.block_planning_conformance_handoff = {
+                    "carried_gaps": [{"kind": "verification", "detail": "Add a regression test"}],
+                }
+            await s.commit()
+
         resolver = _RetargetedBranchOpenPRResolver(
             {
                 branch_name: [
@@ -1263,6 +1313,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
             ),
             runtime_cleaner=cleaner,
             open_pr_resolver=resolver,
+            pr_publication_runner=forge_runner,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_executions=1,
@@ -1307,6 +1358,27 @@ class TestRunOnceStaleActiveExecutionRecoveryPart010:
             assert ws.pr_number == 270
             assert ws.remote_push_branch == branch_name
             assert ws.monitor_last_commit_sha == resolved_head_sha
+            assert (
+                len(forge_runner.calls)
+                == {"no_gaps": 0, "existing": 1, "missing": 3}[advisory_state]
+            )
+            if advisory_state == "missing":
+                assert forge_runner.calls[-1].args[-2:] == ["--body", section]
+            directives = load_applied_operator_directives(
+                MonitorState(threads_addressed_ids=ws.monitor_threads_addressed)
+            )
+            if advisory_state == "missing":
+                assert len(directives) == 2
+                recovered_decision, advisory = directives
+                assert recovered_decision == decision
+                assert advisory.source == "plan_conformance"
+                assert advisory.directive == "verification: Add a regression test"
+                assert advisory.operation_id == workspace_id
+                assert advisory.head_sha == resolved_head_sha
+            elif advisory_state == "existing":
+                assert directives == (decision, existing_advisory)
+            else:
+                assert directives == (decision,)
             assert len(salvage_events) == 1
             payload = salvage_events[0].payload
             assert payload is not None

@@ -93,9 +93,9 @@ def _compose_file_path_reusable(workspace: Workspace) -> bool:
 def remonitor_compose_runtime_available(workspace: Workspace) -> bool:
     """Whether remonitor can reuse this workspace's Compose runtime metadata.
 
-    Hosted PR adoption does not need a local Compose stack. Non-hosted remonitor
-    requires both a compose project name and a compose file that still exists on
-    disk — a non-empty path string alone is not enough after GC.
+    A Compose-backed workspace needs its project name and an existing Compose
+    file. A dormant workspace can reuse these after its containers have been
+    removed. Hosted PR adoption does not require Compose.
     """
 
     if pr_adoption_is_hosted(workspace.task_policy):
@@ -687,6 +687,21 @@ async def _finish_stack_stop_failed_operation(
 
 def _bounded_operation_error_message(message: str) -> str:
     return message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
+
+
+async def _wake_dormant_monitor(
+    repo: WorkspaceRepository, workspace: Workspace, operation: Operation
+) -> bool:
+    if workspace.dormant_at is None:
+        return False
+    workspace.dormant_at = None
+    await repo.add_event(
+        workspace,
+        event_type="workspace.dormant_woken",
+        reason_code="HUMAN_WAIT_DORMANT_WOKEN",
+        payload={"control": operation.type, "operation_id": operation.id},
+    )
+    return True
 
 
 async def _add_control_audit_event(

@@ -19,6 +19,41 @@ def get_monitor_runtime_restart_reasons(
 ) -> dict[str, _ReasonText]:
     """Return the monitor-resume runtime restart catalog reason text entries."""
     return {
+        "HUMAN_WAIT_DORMANT": reason_text_cls(
+            "The PR monitor suspended after the configured period waiting for a human.",
+            "Read the current awaiting-human reason on the workspace or its pull request.",
+            "The monitor removed its runtime, preserved its volumes and released its claim.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANT"),
+        ),
+        "HUMAN_WAIT_DORMANCY_FAILED": reason_text_cls(
+            "The PR monitor could not suspend the human wait.",
+            "Read the failure stage and reason in the workspace event or monitor log.",
+            "The workspace remains eligible for ordinary monitoring and runtime recovery.",
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANCY_FAILED"),
+        ),
+        "HUMAN_WAIT_DORMANT_WOKEN": reason_text_cls(
+            "An operator requested that a dormant PR monitor resume.",
+            "Read the wake event for the control and operation that requested resume.",
+            "The worker can claim the workspace and restore the monitor runtime.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANT_WOKEN"),
+        ),
+        "HUMAN_WAIT_DORMANCY_BLOCKED": reason_text_cls(
+            "An open workspace operation is preventing PR monitor dormancy.",
+            "Inspect the operations referenced in the dormancy event.",
+            "The monitor can suspend once the blocking operations settle.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANCY_BLOCKED"),
+        ),
+        "WORKSPACE_DORMANT": reason_text_cls(
+            "The workspace is dormant and its monitor runtime is down.",
+            "Wake the workspace with remonitor or guide before requesting recovery.",
+            "Validation and rebase require a running workspace runtime.",
+            "awf workspace remonitor <workspace_id>",
+            reason_catalog_link("WORKSPACE_DORMANT"),
+        ),
         "MONITOR_RUNTIME_RESTART_EXHAUSTED": reason_text_cls(
             (
                 "AWF could not bring the workspace runtime back after several consecutive "

@@ -94,6 +94,8 @@ def _schedulable_workspace_ids_stmt(
     stmt = select(Workspace).where(Workspace.status == status.value, recovery_allows_work())
     if node_id is not None:
         stmt = stmt.where(_scheduler_node_scope_condition(status=status, node_id=node_id))
+    if status == WorkspaceStatus.monitoring_pr:
+        stmt = stmt.where(Workspace.dormant_at.is_(None))
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
         stmt = stmt.where(
             or_(
@@ -170,6 +172,7 @@ def _monitoring_pr_deferred_active_execution_claim_stmt(
     stmt = select(Workspace).where(
         recovery_allows_work(),
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        Workspace.dormant_at.is_(None),
         or_(
             Workspace.monitor_claim_expires_at.is_(None),
             Workspace.monitor_claim_expires_at <= claim_cutoff,

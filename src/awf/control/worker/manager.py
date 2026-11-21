@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
+from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner
 from awf.common.workspace_scope import WorkspaceScope
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
@@ -101,6 +102,7 @@ class ControlWorker(WorkerDelegatesMixin):
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
+        pr_publication_runner: AsyncCommandRunner | None = None,
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         classified_orphan_reaper: Callable[..., Awaitable[OrphanReapResult]] | None = None,
         claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
@@ -122,6 +124,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._runtime_cleaner = runtime_cleaner
         self._open_pr_resolver = open_pr_resolver
+        self._pr_publication_runner = pr_publication_runner or AsyncioSubprocessRunner()
         self._orphan_dir_reconciler = orphan_dir_reconciler
         self._classified_orphan_reaper = classified_orphan_reaper
         # CAP_SYS_ADMIN-context reaper for superseded shared ``~/.claude`` overlay

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor, pr_open_step
 from awf.control.executor import execution_flow as execution_flow_module
 from awf.control.executor.validation_cleanup_guards import ExecutionValidationResult
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -116,7 +116,7 @@ async def test_execute_repairs_mirror_hooks_path_after_validation_before_pr_push
         execution_flow_module, "repair_mirror_hooks_path", _repair_mirror_hooks_path
     )
     monkeypatch.setattr(
-        execution_flow_module._pr_open_step,
+        pr_open_step,
         "push_and_open_pr",
         _push_and_open_pr,
     )

@@ -1296,3 +1296,31 @@ async def test_branch_protection_marker_preserved_on_initial_grace_wait_when_rec
     assert workspace.awaiting_human_since == episode_start
     assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == original_marker
+
+
+@pytest.mark.unit
+async def test_older_dormant_candidate_keeps_its_queue_record_without_blocking(factory):
+    from awf.db.models import MergeCandidate
+    from awf.service.merge_queue import list_merge_queue_blockers_for_candidates
+
+    now = datetime.now(UTC)
+    older, _, older_id = await _seed_monitoring_candidate(
+        factory, title="Earlier candidate", pr_number=420, created_at=now
+    )
+    _, _, later_id = await _seed_monitoring_candidate(
+        factory, title="Later candidate", pr_number=421, created_at=now + timedelta(minutes=1)
+    )
+    async with factory.begin() as session:
+        assert [
+            blocker.workspace_id
+            for blocker in await list_merge_queue_blockers_for_candidate(
+                session, candidate_id=later_id
+            )
+        ] == [older]
+        (await WorkspaceRepository(session).get(older)).dormant_at = now
+    async with factory() as session:
+        assert await list_merge_queue_blockers_for_candidate(session, candidate_id=later_id) == []
+        assert (await list_merge_queue_blockers_for_candidates(session, candidate_ids=[later_id]))[
+            later_id
+        ] == []
+        assert (await session.get(MergeCandidate, older_id)).status == "open"

@@ -1119,12 +1119,18 @@ async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_acti
         payload: dict[str, object] | None = None,
         idempotency_key: str,
     ) -> tuple[object, bool]:
-        """Simulate a concurrent recovery create winning before the runner insert."""
+        """Inject an active recovery operation after the runner's precheck."""
         nonlocal inserted
         if not inserted:
             inserted = True
             async with factory() as s:
-                await OperationRepository(s).create(
+                assert (
+                    await WorkspaceRepository(s).get_for_update(workspace_id, skip_locked=True)
+                    is None
+                ), "suspension must be fenced during operation creation"
+            # Use the dispatch transaction, which already holds the workspace lock.
+            async with self._session.begin_nested():
+                await self.create(
                     workspace_id=workspace_id,
                     operation_type=operation_type,
                     status=OperationStatus.pending,
@@ -1139,7 +1145,6 @@ async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_acti
                     },
                     idempotency_key=idempotency_key,
                 )
-                await s.commit()
         return await original_create_idempotent(
             self,
             workspace_id=workspace_id,
@@ -1233,13 +1238,12 @@ async def test_recovery_dispatch_retries_when_idempotent_create_loses_race_to_te
         payload: dict[str, object] | None = None,
         idempotency_key: str,
     ) -> tuple[object, bool]:
-        """Simulate a concurrent recovery create and terminal finish winning."""
+        """Inject a terminal recovery operation after the runner's precheck."""
         nonlocal inserted
         if not inserted:
             inserted = True
-            async with factory() as s:
-                repo = OperationRepository(s)
-                operation = await repo.create(
+            async with self._session.begin_nested():
+                operation = await self.create(
                     workspace_id=workspace_id,
                     operation_type=operation_type,
                     status=OperationStatus.running,
@@ -1254,13 +1258,12 @@ async def test_recovery_dispatch_retries_when_idempotent_create_loses_race_to_te
                     },
                     idempotency_key=idempotency_key,
                 )
-                await repo.finish(
+                await self.finish(
                     operation,
                     status=terminal_status,
                     result={"reason_code": error_code},
                     error_code=error_code,
                 )
-                await s.commit()
         return await original_create_idempotent(
             self,
             workspace_id=workspace_id,
@@ -1347,13 +1350,12 @@ async def test_recovery_dispatch_rechecks_workspace_before_retrying_idempotency_
         payload: dict[str, object] | None = None,
         idempotency_key: str,
     ) -> tuple[object, bool]:
-        """Simulate another actor finishing recovery and completing the workspace."""
+        """Inject a cancelled operation and completed workspace before the retry."""
         nonlocal inserted
         if not inserted:
             inserted = True
-            async with factory() as s:
-                repo = OperationRepository(s)
-                operation = await repo.create(
+            async with self._session.begin_nested():
+                operation = await self.create(
                     workspace_id=workspace_id,
                     operation_type=operation_type,
                     status=OperationStatus.running,
@@ -1368,18 +1370,17 @@ async def test_recovery_dispatch_rechecks_workspace_before_retrying_idempotency_
                     },
                     idempotency_key=idempotency_key,
                 )
-                await repo.finish(
+                await self.finish(
                     operation,
                     status=OperationStatus.cancelled,
                     result={"reason_code": "OPERATOR_REMONITOR"},
                     error_code="OPERATOR_REMONITOR",
                 )
-                await s.execute(
+                await self._session.execute(
                     sa_update(Workspace)
                     .where(Workspace.id == workspace_id)
                     .values(status=WorkspaceStatus.completed.value)
                 )
-                await s.commit()
         return await original_create_idempotent(
             self,
             workspace_id=workspace_id,

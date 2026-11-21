@@ -683,6 +683,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf setup`
 **Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_write_failed](#host_setup_config_write_failed)
 
+### HUMAN_WAIT_DORMANCY_BLOCKED
+**Problem:** An open workspace operation is preventing PR monitor dormancy.
+**Likely Cause:** The monitor can suspend once the blocking operations settle.
+**Operator Fix:** Inspect the operations referenced in the dormancy event.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormancy_blocked](#human_wait_dormancy_blocked)
+
+### HUMAN_WAIT_DORMANCY_FAILED
+**Problem:** The PR monitor could not suspend the human wait.
+**Likely Cause:** The workspace remains eligible for ordinary monitoring and runtime recovery.
+**Operator Fix:** Read the failure stage and reason in the workspace event or monitor log.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormancy_failed](#human_wait_dormancy_failed)
+
+### HUMAN_WAIT_DORMANT
+**Problem:** The PR monitor suspended after the configured period waiting for a human.
+**Likely Cause:** The monitor removed its runtime, preserved its volumes and released its claim.
+**Operator Fix:** Read the current awaiting-human reason on the workspace or its pull request.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormant](#human_wait_dormant)
+
+### HUMAN_WAIT_DORMANT_WOKEN
+**Problem:** An operator requested that a dormant PR monitor resume.
+**Likely Cause:** The worker can claim the workspace and restore the monitor runtime.
+**Operator Fix:** Read the wake event for the control and operation that requested resume.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormant_woken](#human_wait_dormant_woken)
+
 ### IDEMPOTENCY_REPLAY_UNAVAILABLE
 **Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
 **Likely Cause:** The in-memory replay response was evicted and the durable workspace or callback subscription record is no longer available.
@@ -934,6 +962,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Review the listed resources before running cleanup.
 **Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#orphan_resources_present](#orphan_resources_present)
+
+### PLAN_CONFORMANCE_GAPS_CARRIED
+**Problem:** Plan conformance exhausted its iterations with gaps and committed workspace changes.
+**Likely Cause:** The final compare reported gaps while the branch had user-visible changes relative to its base.
+**Operator Fix:** Review the unresolved gaps on the workspace timeline and on the pull request after publication.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#plan_conformance_gaps_carried](#plan_conformance_gaps_carried)
 
 ### PLAN_CONFORMANCE_NEEDS_HUMAN
 **Problem:** Plan conformance is paused for a specific operator decision.
@@ -1376,6 +1411,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
+### PR_CONFORMANCE_COMMENT_FAILED
+**Problem:** AWF could not publish unresolved plan-conformance gaps on the pull request.
+**Likely Cause:** The forge comment request failed after the branch was pushed.
+**Operator Fix:** Read the forge error and carried gaps in workspace events. Publish the gap notice before resuming PR review.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_conformance_comment_failed](#pr_conformance_comment_failed)
+
 ### PR_CREATE_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not open a new pull request because new-PR creation only supports GitHub.
 **Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but opening a new PR shells `gh pr create` and parses github.com PR URLs, so AWF fails fast at the push step instead of mis-routing to a same-slug GitHub repository.
@@ -1725,6 +1767,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)
+
+### WORKSPACE_DORMANT
+**Problem:** The workspace is dormant and its monitor runtime is down.
+**Likely Cause:** Validation and rebase require a running workspace runtime.
+**Operator Fix:** Wake the workspace with remonitor or guide before requesting recovery.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_dormant](#workspace_dormant)
 
 ### WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE
 **Problem:** Workspace guide with require_claim_active requires monitoring_pr with a live execution or monitor claim and no grants.

@@ -33,6 +33,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+    stop_monitor_after_polls,
 )
 
 
@@ -446,10 +447,9 @@ class TestStalePendingCheckWarnings:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
             stale_pending_check_warning_seconds=60,
-            max_outer_iterations=1,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 1):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -462,9 +462,8 @@ class TestStalePendingCheckWarnings:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_message is not None
-            assert "max_outer_iterations" in ws.failure_message
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_message is None
 
 
 @pytest.mark.unit
@@ -502,17 +501,17 @@ async def test_run_restores_caller_github_retry_context(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        max_outer_iterations=1,
     )
 
     outer_ctx = GitHubRetryContext(workspace_id="outer", deadline=None)
     token = github_retry_context.set(outer_ctx)
     try:
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+        with stop_monitor_after_polls(runner, 1):
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
         assert github_retry_context.get() is outer_ctx
     finally:
         github_retry_context.reset(token)

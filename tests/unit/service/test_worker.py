@@ -237,6 +237,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            pr_publication_runner: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
             claude_base_reaper: object = None,
@@ -250,6 +251,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
             created["worker_open_pr_resolver"] = open_pr_resolver
+            created["worker_pr_publication_runner"] = pr_publication_runner
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
             created["worker_classified_orphan_reaper"] = classified_orphan_reaper
             created["worker_auth_overlay_work_dir"] = auth_overlay_work_dir
@@ -316,6 +318,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["open_pr_resolver_runner"] is created["executor_runner"]
     assert created["worker_open_pr_resolver"].__class__ is _BranchOpenPullRequestResolver
+    assert created["worker_pr_publication_runner"] is created["executor_runner"]
     git_env = created["git_env"]
     assert git_env["HOME"] == str(Path(settings.host_home).resolve())
     assert git_env["GIT_CONFIG_COUNT"] == "1"
@@ -386,6 +389,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["forge_client_runner"] is created["executor_runner"]
     assert created["feature_monitor_kwargs"]["gh"] is forge_client
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
+    assert created["feature_monitor_kwargs"]["human_wait_dormant_after_seconds"] is None
     assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 900
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
         "greptile-apps",
@@ -457,6 +461,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         SimpleNamespace(
             auto_merge=False,
             initial_review_grace_period_seconds=12.5,
+            human_wait_dormant_after_seconds=42.25,
             task_kind="feature_branch_pr",
             repo_url="https://github.com/o/r.git",
         ),
@@ -464,6 +469,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
     assert manual_monitor is not None
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
+    assert created["release_monitor_kwargs"]["human_wait_dormant_after_seconds"] == 42.25
     assert created["release_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
     assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["release_monitor_kwargs"]["require_ci"] is False

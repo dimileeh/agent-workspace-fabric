@@ -4,9 +4,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from awf.control.worker.recovery_preserved_flow import _recover_preserved_active_execution
-from awf.control.worker.recovery_stale import _recover_stale_active_execution
+from awf.control.worker.recovery_stale import (
+    _recover_stale_active_execution,
+    _stale_active_candidate_is_current,
+)
 from awf.control.worker.types import _ActiveExecutionCandidate
 from awf.db.enums import WorkspaceStatus
+
+
+class _DiagnosticWorker(SimpleNamespace):
+    _stale_active_candidate_is_current = _stale_active_candidate_is_current
 
 
 async def test_stale_and_preserved_dispatch_diagnostics_before_any_salvage(monkeypatch):
@@ -19,12 +26,14 @@ async def test_stale_and_preserved_dispatch_diagnostics_before_any_salvage(monke
     interrupt = AsyncMock(return_value=True)
     monkeypatch.setattr("awf.control.worker.provider_diagnostics.interrupt_diagnostic", interrupt)
     worker = SimpleNamespace(
+        _stale_active_candidate_is_current=AsyncMock(return_value=True),
         _has_preserved_active_recovery_evidence=AsyncMock(
             side_effect=AssertionError("ordinary salvage")
-        )
+        ),
     )
     await _recover_stale_active_execution(worker, candidate)
     assert await _recover_preserved_active_execution(worker, candidate)
+    worker._stale_active_candidate_is_current.assert_awaited_once_with(candidate)
     assert interrupt.await_count == 2
     worker._has_preserved_active_recovery_evidence.assert_not_awaited()
 
@@ -53,7 +62,7 @@ async def test_persisted_worker_loss_stops_and_settles_without_replacement(engin
             },
         }
         await session.commit()
-    worker = SimpleNamespace(
+    worker = _DiagnosticWorker(
         _config=SimpleNamespace(node_id="local"),
         _log_transient_db_retry=AsyncMock(),
         _session_factory=factory,
@@ -80,7 +89,7 @@ async def test_queued_diagnostic_is_not_worker_loss(engine, tmp_path):
     from tests.unit.control.test_provider_diagnostic_execution import prepared
 
     factory, response, _executor = await prepared(engine, tmp_path)
-    worker = SimpleNamespace(
+    worker = _DiagnosticWorker(
         _session_factory=factory,
         _runtime_cleaner=SimpleNamespace(
             cleanup=AsyncMock(return_value=WorkspaceCleanupResult.skipped())
@@ -116,7 +125,7 @@ async def test_worker_loss_with_failed_stop_retains_inconclusive_evidence_and_fi
     failed = WorkspaceCleanupResult.from_steps(
         [WorkspaceCleanupStepResult("compose_down", "failed", "DOWN_FAILED")]
     )
-    worker = SimpleNamespace(
+    worker = _DiagnosticWorker(
         _session_factory=factory,
         _runtime_cleaner=SimpleNamespace(cleanup=AsyncMock(return_value=failed)),
     )

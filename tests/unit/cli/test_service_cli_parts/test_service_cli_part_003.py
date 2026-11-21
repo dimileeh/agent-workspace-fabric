@@ -534,6 +534,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            pr_publication_runner: object,
             config: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,

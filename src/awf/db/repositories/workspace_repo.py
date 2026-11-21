@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import build_audit_payload
@@ -98,6 +99,11 @@ from awf.db.repositories.workspace_repo_scheduler import (
 )
 
 
+def _transition_clears_dormancy(old_state: str) -> bool:
+    # Valid status transitions from monitoring_pr always leave monitoring_pr.
+    return old_state == WorkspaceStatus.monitoring_pr.value
+
+
 def _transition_releases_provisioning_execution_claim(
     old_state: str,
     to: WorkspaceStatus,
@@ -172,6 +178,7 @@ class WorkspaceRepository:
         task_policy: dict[str, Any] | None = None,
         auto_merge: bool = DEFAULT_AUTO_MERGE,
         initial_review_grace_period_seconds: float | None = None,
+        human_wait_dormant_after_seconds: float | None = None,
         env_profile: str | None = None,
         profile_ref: str | None = None,
         requested_profile: dict[str, Any] | None = None,
@@ -204,6 +211,7 @@ class WorkspaceRepository:
             task_policy=dict(task_policy or {}),
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            human_wait_dormant_after_seconds=human_wait_dormant_after_seconds,
             agent=agent,
             env_profile=env_profile,
             profile_ref=profile_ref,
@@ -258,6 +266,7 @@ class WorkspaceRepository:
             ),
             auto_merge=source.auto_merge,
             initial_review_grace_period_seconds=source.initial_review_grace_period_seconds,
+            human_wait_dormant_after_seconds=source.human_wait_dormant_after_seconds,
             agent=source.agent if agent is None else agent,
             env_profile=source.env_profile,
             profile_ref=source.profile_ref,
@@ -280,7 +289,7 @@ class WorkspaceRepository:
         *,
         reason: str,
         now: datetime,
-    ) -> None:
+    ) -> datetime | None:
         """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation)."""
         return await set_workspace_attention(
             self._session,
@@ -289,9 +298,13 @@ class WorkspaceRepository:
             now=now,
         )
 
-    async def clear_workspace_attention(self, workspace_id: str) -> None:
+    async def clear_workspace_attention(
+        self, workspace_id: str, *, preserve_dormant: bool = False
+    ) -> None:
         """Clear the awaiting-human attention flag once the monitor resumes."""
-        return await clear_workspace_attention(self._session, workspace_id)
+        return await clear_workspace_attention(
+            self._session, workspace_id, preserve_dormant=preserve_dormant
+        )
 
     async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
         """Return a workspace by primary key, if it exists.
@@ -344,16 +357,20 @@ class WorkspaceRepository:
         workspace_id: str,
         *,
         skip_locked: bool = False,
+        populate_existing: bool = False,
     ) -> Workspace | None:
         """Load one workspace with a row lock when the database supports it.
 
         When ``skip_locked=True`` and the row is currently locked by another
         transaction, returns ``None`` instead of waiting (Postgres
-        ``SELECT FOR UPDATE SKIP LOCKED``).
+        ``SELECT FOR UPDATE SKIP LOCKED``). Use ``populate_existing`` to refresh an
+        identity-mapped row from the locked read.
         """
         stmt = select(Workspace).where(Workspace.id == workspace_id)
         if self._dialect_name == "postgresql":
             stmt = stmt.with_for_update(of=Workspace, skip_locked=skip_locked)
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def exists(self, workspace_id: str) -> bool:
@@ -808,6 +825,10 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_clears_dormancy(old_state):
+            workspace.dormant_at = None
+            # Include the column even when the caller loaded it before suspension.
+            flag_modified(workspace, "dormant_at")
         if _transition_invalidates_filesystem_reclamation(old_state, to):
             workspace.filesystem_reclaimed_at = None
         if _transition_releases_provisioning_execution_claim(old_state, to):
@@ -890,6 +911,8 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_clears_dormancy(old_state):
+            workspace.dormant_at = None
         if _transition_invalidates_filesystem_reclamation(old_state, to):
             workspace.filesystem_reclaimed_at = None
         workspace.updated_at = now
@@ -924,6 +947,8 @@ class WorkspaceRepository:
             "event_sequence": Workspace.event_sequence + 1,
             "version": Workspace.version + 1,
         }
+        if _transition_clears_dormancy(from_status.value):
+            values["dormant_at"] = None
         if _transition_invalidates_filesystem_reclamation(from_status.value, to):
             values["filesystem_reclaimed_at"] = None
         if to == WorkspaceStatus.monitoring_pr:

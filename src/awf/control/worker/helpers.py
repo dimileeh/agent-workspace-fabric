@@ -357,6 +357,8 @@ def _execution_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> b
 
 
 def _monitor_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> bool:
+    if workspace.dormant_at is not None:
+        return False
     if workspace.monitor_claimed_by is None or workspace.monitor_claim_expires_at is None:
         return True
 

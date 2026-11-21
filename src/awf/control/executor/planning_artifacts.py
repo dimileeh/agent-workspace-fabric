@@ -18,6 +18,7 @@ from awf.common.logging import get_logger
 from awf.control.executor.helpers import _failure_salvage_payload
 from awf.control.executor.types import (
     _ExpectedBaseShaLaunchSettled,
+    _PlanningCarriedGaps,
     _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
@@ -155,14 +156,10 @@ async def handle_agent_planning_result(
     profile: Any,
     planning_failure: Any,
     execution_owner_id: str | None = None,
-) -> tuple[_PlanningValidationHandoff | None, bool]:
-    """Interpret the agent/planning run result.
-
-    Returns ``(handoff, should_return)`` where ``handoff`` is the planning
-    validation handoff to thread into validation (``None`` when none applies)
-    and ``should_return`` signals that ``execute`` must stop because the
-    workspace was failed, paused for a decision, or otherwise settled.
-    """
+) -> tuple[_PlanningValidationHandoff | _PlanningCarriedGaps | None, bool]:
+    """Return planning context and whether the executor must stop here."""
+    if isinstance(planning_failure, _PlanningCarriedGaps):
+        return planning_failure, False
     if isinstance(planning_failure, _PlanningNeedsHuman):
         await pause_for_conformance_decision(
             self,

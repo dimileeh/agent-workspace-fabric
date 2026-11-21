@@ -6921,6 +6921,18 @@
               }
             ]
           },
+          "human_wait_dormant_after_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Wait Dormant After Seconds"
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
@@ -14477,6 +14489,18 @@
               }
             ]
           },
+          "dormant_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dormant At"
+          },
           "egress_audit": {
             "anyOf": [
               {
@@ -14529,6 +14553,17 @@
               }
             ],
             "title": "Failure Reason"
+          },
+          "human_wait_dormant_after_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Wait Dormant After Seconds"
           },
           "id": {
             "title": "Id",
@@ -15380,6 +15415,18 @@
             "minimum": 0.0,
             "title": "Human Boost",
             "type": "integer"
+          },
+          "human_wait_dormant_after_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Wait Dormant After Seconds"
           },
           "initial_review_grace_period_seconds": {
             "anyOf": [
