@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
+    _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
 )
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
@@ -17,9 +20,14 @@ from awf.control.executor.helpers import (
 )
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.work_slot_binding import work_slot_for
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    AppliedOperatorDirective,
+    append_applied_operator_directive,
+)
 
 
 async def persist_pr_and_handoff(
@@ -33,11 +41,12 @@ async def persist_pr_and_handoff(
     successful_validation_run_id: str | None,
     compose_project: str,
     compose_file: Path,
+    carried_gaps: Sequence[dict[str, str]] = (),
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
-        persisted = await repo.get(workspace_id)
+        persisted = await repo.get_for_update(workspace_id)
         if persisted is None:  # pragma: no cover - destroyed mid-flight
             return
         if persisted.status != WorkspaceStatus.pushing.value:
@@ -50,6 +59,8 @@ async def persist_pr_and_handoff(
             )
             await session.commit()
             return
+        publication = pr.open_metadata or {}
+        publication_pending = publication.get("conformance_comment_pending") is True
         had_existing_pr_url = bool(persisted.pr_url)
         persisted.pr_url = pr.url
         persisted.pr_number = _extract_pr_number(pr.url)
@@ -87,8 +98,23 @@ async def persist_pr_and_handoff(
             source_head_sha=pr.head_sha,
             evidence=pr.open_metadata,
         )
-        monitor = self._pr_monitor
-        if monitor is None and self._pr_monitor_factory is not None:
+        if carried_gaps:
+            monitor_state = MonitorState(
+                threads_addressed_ids=dict(persisted.monitor_threads_addressed or {}),
+            )
+            append_applied_operator_directive(
+                monitor_state,
+                AppliedOperatorDirective(
+                    directive="\n".join(f"{gap['kind']}: {gap['detail']}" for gap in carried_gaps),
+                    operation_id=workspace_id,
+                    applied_at=datetime.now(UTC).isoformat(),
+                    head_sha=pr.head_sha or "",
+                    source="plan_conformance",
+                ),
+            )
+            persisted.monitor_threads_addressed = monitor_state.threads_addressed_ids
+        monitor = None if publication_pending else self._pr_monitor
+        if not publication_pending and monitor is None and self._pr_monitor_factory is not None:
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,
@@ -102,7 +128,18 @@ async def persist_pr_and_handoff(
                 ),
             )
 
-        if monitor is not None:
+        if publication_pending:
+            persisted.failure_reason = FailureReason.infrastructure_failure.value
+            persisted.failure_message = (
+                "Could not publish unresolved plan-conformance gaps on the pull request: "
+                f"{publication['conformance_comment_error']}"
+            )
+            await repo.transition(
+                persisted,
+                to=WorkspaceStatus.failed,
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+            )
+        elif monitor is not None:
             if not had_existing_pr_url:
                 persisted.monitor_threads_addressed = _with_settled_disposition_baseline(
                     persisted.monitor_threads_addressed
@@ -112,14 +149,13 @@ async def persist_pr_and_handoff(
                 to=WorkspaceStatus.monitoring_pr,
                 reason_code=pr_reason_code,
             )
-            await session.commit()
         else:
             await repo.transition(
                 persisted,
                 to=WorkspaceStatus.completed,
                 reason_code=pr_reason_code,
             )
-            await session.commit()
+        await session.commit()
 
     if successful_validation_run_id is not None and pr.head_sha:
         try:
@@ -135,6 +171,8 @@ async def persist_pr_and_handoff(
                 target_head_sha=pr.head_sha,
             )
 
+    if publication_pending:
+        return
     if monitor is not None:
         _log.info(
             "executor.handoff_to_pr_monitor",

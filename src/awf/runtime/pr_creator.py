@@ -421,6 +421,9 @@ class PullRequestCreator:
                     max_retries=self._pr_create_transient_max_retries,
                 )
                 if outcome.strategy.startswith("reconciled_"):
+                    # Keep the local tip for containment checks even when the
+                    # reconciled PR's head is used for monitor handoff.
+                    open_metadata["pushed_head_sha"] = head_sha
                     matched = outcome.matched_pr or {}
                     matched_head_sha = matched.get("head_sha")
                     if isinstance(matched_head_sha, str) and matched_head_sha:

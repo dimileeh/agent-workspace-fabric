@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.control.executor.constants import (
+    _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+    _AUDIT_PR_CREATED_EVENT,
     _RECOVERY_ACTIVE_OPERATION_STATUSES,
     _VALIDATE_ONLY_RECOVERY_MODES,
     _VALIDATE_ONLY_RECOVERY_SOURCES,
@@ -15,9 +17,11 @@ from awf.control.executor.constants import (
 from awf.control.executor.metadata import _int_or_none, _str_or_none
 from awf.control.executor.types import _PlanningValidationHandoff, _RebaseRecoveryResult
 from awf.db.enums import OperationType
+from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    MAX_CONFORMANCE_GAPS,
     PlanConformanceReport,
     PlanConformanceStatus,
     render_workspace_path,
@@ -160,6 +164,38 @@ def _planning_validation_handoff_metadata(
             "reason_code": handoff.report.reason_code,
         },
     }
+
+
+def _planning_carried_gaps_from_metadata(metadata: object) -> list[dict[str, str]]:
+    """Restore redacted gaps saved by the original execution."""
+    gaps = metadata.get("carried_gaps") if isinstance(metadata, Mapping) else None
+    if not isinstance(gaps, list):
+        return []
+    return [
+        {"kind": kind, "detail": detail}
+        for gap in gaps[:MAX_CONFORMANCE_GAPS]
+        if isinstance(gap, Mapping)
+        and isinstance(kind := gap.get("kind"), str)
+        and isinstance(detail := gap.get("detail"), str)
+    ]
+
+
+def _pr_conformance_publication_pending(workspace: Workspace) -> bool:
+    """Use the latest publication evidence for the retained PR."""
+    for event in reversed(workspace.events):
+        payload = event.payload or {}
+        if payload.get("pr_url") != workspace.pr_url:
+            continue
+        outcome = payload.get("outcome")
+        if event.event_type == _AUDIT_PR_CONFORMANCE_COMMENT_EVENT and outcome == "succeeded":
+            return False
+        if event.event_type == _AUDIT_PR_CREATED_EVENT and outcome in ("succeeded", "reused"):
+            evidence = payload.get("evidence")
+            return (
+                isinstance(evidence, Mapping)
+                and evidence.get("conformance_comment_pending") is True
+            )
+    return False
 
 
 def _planning_validation_handoff_from_metadata(

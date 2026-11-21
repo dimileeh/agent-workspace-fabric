@@ -20,7 +20,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
 from awf.runtime.monitor_state_keys import (
@@ -81,18 +81,19 @@ _APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD = (
 
 @dataclass(frozen=True, slots=True)
 class AppliedOperatorDirective:
-    """One applied operator directive kept for later CI-repair prompts."""
+    """Source-tagged context for CI repair and review triage."""
 
     directive: str
     operation_id: str
     applied_at: str
     head_sha: str
+    source: Literal["operator_decision", "plan_conformance"] = "operator_decision"
 
 
 def load_applied_operator_directives(
     state: MonitorState,
 ) -> tuple[AppliedOperatorDirective, ...]:
-    """Return newest-first applied directives, or empty when the key is absent."""
+    """Load the persisted decisions and plan-conformance advisory."""
     raw = state.threads_addressed_ids.get(_applied_operator_directives_state_key())
     if not raw:
         return ()
@@ -110,28 +111,46 @@ def load_applied_operator_directives(
     return tuple(records)
 
 
+def _store_applied_operator_directives(
+    state: MonitorState, records: Sequence[AppliedOperatorDirective]
+) -> None:
+    key = _applied_operator_directives_state_key()
+    if records:
+        state.mark_addressed(
+            key, json.dumps([_record_to_mapping(item) for item in records], separators=(",", ":"))
+        )
+    else:
+        state.threads_addressed_ids.pop(key, None)
+
+
 def clear_applied_operator_directives(state: MonitorState) -> None:
-    """Drop every stored applied-operator-directive record."""
-    state.threads_addressed_ids.pop(_applied_operator_directives_state_key(), None)
+    """Drop stored decisions while retaining plan-conformance evidence."""
+    _store_applied_operator_directives(
+        state,
+        [
+            item
+            for item in load_applied_operator_directives(state)
+            if item.source == "plan_conformance"
+        ],
+    )
 
 
 def append_applied_operator_directive(
     state: MonitorState,
     record: AppliedOperatorDirective,
 ) -> None:
-    """Append ``record`` (newest first), keep at most five, clear conflict parks.
-
-    Clears ``CI_REPAIR_OPERATOR_DECISION_CONFLICT`` parks only — unfinished
-    ``CI_REPAIR_CONFLICT_ROLLBACK_PENDING`` parks are never cleared here.
-    """
-    existing = list(load_applied_operator_directives(state))
-    existing.insert(0, record)
-    trimmed = existing[:APPLIED_OPERATOR_DIRECTIVES_CAP]
-    state.mark_addressed(
-        _applied_operator_directives_state_key(),
-        json.dumps([_record_to_mapping(item) for item in trimmed], separators=(",", ":")),
+    """Store the newest five decisions and the latest plan-conformance advisory."""
+    existing = load_applied_operator_directives(state)
+    decisions = [item for item in existing if item.source == "operator_decision"]
+    if record.source == "operator_decision":
+        decisions.insert(0, record)
+        advisory = [item for item in existing if item.source == "plan_conformance"][:1]
+        clear_ci_repair_operator_decision_conflicts(state)
+    else:
+        advisory = [record]
+    _store_applied_operator_directives(
+        state, decisions[:APPLIED_OPERATOR_DIRECTIVES_CAP] + advisory
     )
-    clear_ci_repair_operator_decision_conflicts(state)
 
 
 def _split_forget_decisions_marker(text: str) -> tuple[bool, str]:
@@ -216,31 +235,40 @@ def render_applied_operator_directives_section(
     *,
     lead: str = _APPLIED_OPERATOR_DIRECTIVES_SECTION_LEAD,
 ) -> str:
-    """Render the AWF lead plus enveloped records (newest first).
-
-    ``lead`` defaults to the CI-repair wording so existing callers stay
-    byte-identical. Feedback triage passes
-    ``_APPLIED_OPERATOR_DIRECTIVES_TRIAGE_SECTION_LEAD``.
-    """
+    """Quote persisted decisions in precedence order, followed by compare evidence."""
     if not records:
         return ""
-    parts = [lead]
-    for record in records:
-        parts.append(
-            render_untrusted_evidence(
-                UntrustedEvidence(
-                    source_kind="operator_decision",
-                    source_name="AWF operator decision",
-                    source_id=record.operation_id,
-                    text=record.directive,
-                    metadata=(
-                        ("applied_at", record.applied_at),
-                        ("head_sha", record.head_sha),
-                    ),
+    decisions = [item for item in records if item.source == "operator_decision"]
+    advisories = [item for item in records if item.source == "plan_conformance"]
+    parts = []
+    for group, group_lead, source_name in (
+        (decisions, lead, "AWF operator decision"),
+        (
+            advisories,
+            "Unresolved plan-conformance gaps reported by the compare phase. "
+            "Use these findings as advisory context.\n\n",
+            "AWF plan conformance",
+        ),
+    ):
+        if not group:
+            continue
+        parts.append(group_lead)
+        for record in group:
+            parts.append(
+                render_untrusted_evidence(
+                    UntrustedEvidence(
+                        source_kind=record.source,
+                        source_name=source_name,
+                        source_id=record.operation_id,
+                        text=record.directive,
+                        metadata=(
+                            ("applied_at", record.applied_at),
+                            ("head_sha", record.head_sha),
+                        ),
+                    )
                 )
             )
-        )
-        parts.append("")
+            parts.append("")
     return "\n".join(parts).rstrip() + "\n\n"
 
 
@@ -411,6 +439,7 @@ def _record_to_mapping(record: AppliedOperatorDirective) -> dict[str, str]:
         "operation_id": record.operation_id,
         "applied_at": record.applied_at,
         "head_sha": record.head_sha,
+        "source": record.source,
     }
 
 
@@ -421,15 +450,19 @@ def _record_from_mapping(item: object) -> AppliedOperatorDirective | None:
     operation_id = item.get("operation_id")
     applied_at = item.get("applied_at")
     head_sha = item.get("head_sha")
+    source = item.get("source", "operator_decision")
     if not isinstance(directive, str) or not directive.strip():
         return None
     if not isinstance(operation_id, str):
         return None
     if not isinstance(applied_at, str) or not isinstance(head_sha, str):
         return None
+    if source != "operator_decision" and source != "plan_conformance":
+        return None
     return AppliedOperatorDirective(
         directive=directive,
         operation_id=operation_id,
         applied_at=applied_at,
         head_sha=head_sha,
+        source=source,
     )

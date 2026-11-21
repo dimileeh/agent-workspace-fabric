@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -30,12 +31,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
 from awf.control.executor import pr_open_step as _pr_open_step
+from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -49,6 +52,10 @@ from awf.node.compose_manager import ComposeManager
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+)
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     ValidationCommandResult,
@@ -277,12 +284,18 @@ class _LifecycleForgeClient:
 class _ForgeRecordingPrCreator:
     """Records the forge client + repo URL the executor resolves and passes in."""
 
-    def __init__(self, *, new_pr_url: str = "https://github.com/x/y/pull/55") -> None:
+    def __init__(
+        self,
+        *,
+        new_pr_url: str = "https://github.com/x/y/pull/55",
+        pushed_head_sha: str | None = "b" * 40,
+    ) -> None:
         self.forge_client: object | None = None
         self.repo_url: str | None = None
         self.existing_pr_url: str | None = None
         self.remote_branch_name: str | None = None
         self.new_pr_url = new_pr_url
+        self.pushed_head_sha = pushed_head_sha
         self.calls: list[dict[str, object]] = []
 
     async def push_and_open(
@@ -306,13 +319,14 @@ class _ForgeRecordingPrCreator:
                 "repo_url": repo_url,
                 "existing_pr_url": existing_pr_url,
                 "remote_branch_name": remote_branch_name,
+                "body": _kwargs.get("body"),
             }
         )
         url = existing_pr_url or self.new_pr_url
         return PullRequestResult(
             url=url,
             branch=branch_name,
-            head_sha="b" * 40,
+            head_sha=self.pushed_head_sha,
         )
 
 
@@ -1225,6 +1239,199 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            "reuse",
+            "comment_recovers",
+            "comment_error",
+            "comment_retry_tip_changed",
+            "replace",
+            "tip_mismatch",
+            "no_pushed_sha",
+        ],
+    )
+    async def test_publish_carried_gaps_on_reused_or_replacement_pr(
+        self,
+        disposition: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(
+            lifecycle=(
+                PullRequestLifecycle.closed
+                if disposition == "replace"
+                else PullRequestLifecycle.open
+            ),
+            head_ref="awf/ws_original",
+            head_sha="c" * 40 if disposition == "tip_mismatch" else "b" * 40,
+        )
+        fake.respond_when(lambda args: "--is-ancestor" in args, returncode=1)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0)
+        comments: list[str] = []
+        comment_snapshot_counts: list[int] = []
+        section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+        ws_id = await _seed_ready(factory)
+
+        async def post_comment(*, repo: object, pr_number: int, body: str) -> None:
+            assert pr_number == 55
+            comments.append(body)
+            comment_snapshot_counts.append(forge.snapshot_calls)
+            if len(comments) == 2:
+                async with factory() as session:
+                    saved = await WorkspaceRepository(session).get(ws_id)
+                    assert saved is not None
+                    assert saved.status == WorkspaceStatus.pushing.value
+                    pending = next(
+                        event
+                        for event in saved.events
+                        if event.event_type == "workspace.audit.pr_conformance_comment"
+                    )
+                    assert pending.payload["outcome"] == "pending"
+                    assert pending.payload["pr_number"] == 55
+                    assert pending.payload["pr_url"] == saved.pr_url
+                    assert pending.payload["source_head_sha"] == "b" * 40
+                    assert (
+                        pending.payload["evidence"]["error_message"] == "Comment transport failed"
+                    )
+            if disposition == "comment_retry_tip_changed":
+                forge.head_sha = "c" * 40
+                raise ForgeClientError("Comment transport failed")
+            if disposition == "comment_error" or (
+                disposition == "comment_recovers" and len(comments) == 1
+            ):
+                raise ForgeClientError("Comment transport failed")
+
+        monkeypatch.setattr(forge, "post_comment", post_comment, raising=False)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", lambda *_args: forge)
+        pr_creator = _ForgeRecordingPrCreator(
+            new_pr_url="https://github.com/x/y/pull/99",
+            pushed_head_sha=None if disposition == "no_pushed_sha" else "b" * 40,
+        )
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        profile = WorkspaceProfile(name="test")
+        carried_gaps = [{"kind": "test_work", "detail": "Add a regression test"}]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.status = WorkspaceStatus.pushing.value
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await session.commit()
+
+        with structlog.testing.capture_logs() as logs:
+            pr = await _pr_open_step.push_and_open_pr(
+                executor,
+                ws=ws,
+                profile=profile,
+                defaults=None,
+                workspace_id=ws_id,
+                worktree_path=_test_worktrees_root(factory) / ws_id,
+                carried_gaps=carried_gaps,
+            )
+
+        if disposition == "tip_mismatch":
+            assert pr is None
+            assert comments == []
+        elif disposition == "replace":
+            assert pr.url == "https://github.com/x/y/pull/99"
+            assert str(pr_creator.calls[-1]["body"]).endswith(section)
+            assert comments == []
+        elif disposition == "no_pushed_sha":
+            assert pr.url == "https://github.com/x/y/pull/55"
+            assert forge.snapshot_calls == 2
+            assert comments == []
+            monitor = SimpleNamespace(run=AsyncMock())
+            monkeypatch.setattr(executor, "_pr_monitor", monitor)
+            await persist_pr_and_handoff(
+                executor,
+                workspace_id=ws_id,
+                pr=pr,
+                adapter=None,
+                profile=profile,
+                defaults=None,
+                successful_validation_run_id=None,
+                compose_project=ws_id,
+                compose_file=tmp_path / "compose.yml",
+                carried_gaps=carried_gaps,
+            )
+            monitor.run.assert_awaited_once()
+            async with factory() as session:
+                saved = await WorkspaceRepository(session).get(ws_id)
+                assert saved is not None
+                assert saved.status == WorkspaceStatus.monitoring_pr.value
+                assert saved.pr_number == 55
+                assert saved.pr_url == pr.url
+                records = load_applied_operator_directives(
+                    MonitorState(threads_addressed_ids=saved.monitor_threads_addressed or {})
+                )
+                assert len(records) == 1
+                assert records[0].directive == "test_work: Add a regression test"
+                event = next(
+                    e for e in saved.events if e.event_type == "workspace.audit.pr_created"
+                )
+                assert event.payload["outcome"] == "reused"
+                assert event.payload["evidence"]["conformance_comment_skipped"] == (
+                    "pushed_head_sha_unavailable"
+                )
+        else:
+            assert pr is not None
+            assert pr.url == "https://github.com/x/y/pull/55"
+            retries = disposition in {"comment_recovers", "comment_error"}
+            assert comments == ([section, section] if retries else [section])
+            assert comment_snapshot_counts == ([2, 3] if retries else [2])
+            assert len(pr_creator.calls) == 1
+            monitor = SimpleNamespace(run=AsyncMock()) if disposition != "comment_error" else None
+            monkeypatch.setattr(executor, "_pr_monitor", monitor)
+            await persist_pr_and_handoff(
+                executor,
+                workspace_id=ws_id,
+                pr=pr,
+                adapter=None,
+                profile=profile,
+                defaults=None,
+                successful_validation_run_id=None,
+                compose_project=ws_id,
+                compose_file=tmp_path / "compose.yml",
+                carried_gaps=carried_gaps,
+            )
+            async with factory() as session:
+                saved = await WorkspaceRepository(session).get(ws_id)
+                assert saved is not None
+                assert saved.pr_url == pr.url
+                push = next(e for e in saved.events if e.event_type == "workspace.audit.git_push")
+                assert push.payload["outcome"] == "succeeded"
+                if disposition in {"comment_error", "comment_retry_tip_changed"}:
+                    assert saved.status == WorkspaceStatus.failed.value
+                    assert saved.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+                    if disposition == "comment_retry_tip_changed":
+                        assert "no longer contains the pushed tip" in saved.failure_message
+                        assert monitor is not None
+                        monitor.run.assert_not_awaited()
+                else:
+                    assert saved.status == WorkspaceStatus.monitoring_pr.value
+                    assert monitor is not None
+                    monitor.run.assert_awaited_once()
+                    created = next(
+                        e for e in saved.events if e.event_type == "workspace.audit.pr_created"
+                    )
+                    if disposition == "comment_recovers":
+                        assert created.payload["evidence"]["conformance_comment_retried"] is True
+                    else:
+                        assert "evidence" not in created.payload
+        failures = [
+            event for event in logs if event["event"] == "executor.pr_conformance_comment_failed"
+        ]
+        assert len(failures) == {
+            "comment_recovers": 1,
+            "comment_error": 2,
+            "comment_retry_tip_changed": 2,
+        }.get(disposition, 0)
 
     @pytest.mark.unit
     async def test_reuse_push_updates_remote_branch_when_live_head_renamed(

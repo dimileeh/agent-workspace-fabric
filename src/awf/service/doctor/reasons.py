@@ -1345,6 +1345,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service gc",
         "docs/REASON_CATALOG.md#completed_pr_not_merged",
     ),
+    "PLAN_CONFORMANCE_GAPS_CARRIED": _ReasonText(
+        "Plan conformance exhausted its iterations with gaps and committed workspace changes.",
+        "Review the unresolved gaps on the workspace timeline and on the pull request after publication.",
+        "The final compare reported gaps while the branch had user-visible changes relative to its base.",
+        "awf workspace events <workspace_id>",
+        "docs/REASON_CATALOG.md#plan_conformance_gaps_carried",
+    ),
+    "PR_CONFORMANCE_COMMENT_FAILED": _ReasonText(
+        "AWF could not publish unresolved plan-conformance gaps on the pull request.",
+        "Read the forge error and carried gaps in workspace events. Publish the gap notice before resuming PR review.",
+        "The forge comment request failed after the branch was pushed.",
+        "awf workspace events <workspace_id>",
+        "docs/REASON_CATALOG.md#pr_conformance_comment_failed",
+    ),
     "PLAN_CONFORMANCE_NEEDS_HUMAN": _ReasonText(
         "Plan conformance is paused for a specific operator decision.",
         (

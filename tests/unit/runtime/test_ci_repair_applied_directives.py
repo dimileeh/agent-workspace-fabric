@@ -1003,8 +1003,11 @@ def test_incident_regression_ci_prompt_contains_applied_guide_directive() -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("advisory", [False, True])
 async def test_ci_repair_without_directives_ignores_needs_human_verdict(
     tmp_path: Path,
+    advisory: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     push_calls: list[dict[str, Any]] = []
     runner = _ci_fix_runner(
@@ -1013,6 +1016,27 @@ async def test_ci_repair_without_directives_ignores_needs_human_verdict(
         push_calls=push_calls,
     )
 
+    state = MonitorState()
+    if advisory:
+        append_applied_operator_directive(
+            state,
+            AppliedOperatorDirective(
+                directive="test_work: Add a regression test",
+                operation_id="ws_ci",
+                applied_at="2026-11-21T00:00:00+00:00",
+                head_sha=_HEAD,
+                source="plan_conformance",
+            ),
+        )
+    prompts: list[str] = []
+    real_fix_ci_prompt = ci_ops.fix_ci_prompt
+
+    def capture_prompt(**kwargs: Any) -> str:
+        prompt = real_fix_ci_prompt(**kwargs)
+        prompts.append(prompt)
+        return prompt
+
+    monkeypatch.setattr(ci_ops, "fix_ci_prompt", capture_prompt)
     result = await ci_ops._run_ci_fix(
         runner,
         repo=_FAKE_REPO,
@@ -1023,13 +1047,17 @@ async def test_ci_repair_without_directives_ignores_needs_human_verdict(
         workspace_id="ws_ci",
         remote_branch="awf/ws_ci",
         status=_status(),
-        state=MonitorState(),
+        state=state,
     )
 
     assert result.parked_needs_human is False
     assert result.reason_code != "CI_REPAIR_OPERATOR_DECISION_CONFLICT"
     assert result.pushed is True
     assert push_calls
+    assert len(prompts) == 1
+    assert ("source_kind: plan_conformance" in prompts[0]) == advisory
+    assert ("AWF-EVIDENCE> test_work: Add a regression test" in prompts[0]) == advisory
+    assert "Applied operator decisions already on this PR" not in prompts[0]
 
 
 @pytest.mark.unit

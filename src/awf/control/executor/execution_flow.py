@@ -69,8 +69,10 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _planning_carried_gaps_from_metadata,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
+    _pr_conformance_publication_pending,
 )
 from awf.control.executor.state_ops import (
     ProviderFailureDivert,
@@ -81,6 +83,7 @@ from awf.control.executor.supply_chain_messages import _supply_chain_block_messa
 from awf.control.executor.types import (
     PauseResumeReason,
     _MonitorRebaseRecoveryError,
+    _PlanningCarriedGaps,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
@@ -249,6 +252,8 @@ async def execute(
     # provider recovery.
     agent_run_failure_reason: FailureReason | None = None
     planning_validation_handoff: _PlanningValidationHandoff | None = None
+    carried_gaps: list[dict[str, str]] = []
+    retry_gap_publication = False
     expected_branch = ws.branch_name or f"awf/{workspace_id}"
     adapter: AgentAdapter | None = None
     defaults: AgentDefaults | None = None
@@ -704,7 +709,7 @@ async def execute(
                 post_agent_mirror_repair_done = True
                 raise
             (
-                planning_validation_handoff,
+                planning_result,
                 planning_should_return,
             ) = await _planning_artifacts.handle_agent_planning_result(
                 self,
@@ -717,13 +722,29 @@ async def execute(
             )
             if planning_should_return:
                 return
-            # Persist even ``None`` so approve-and-keep resumes preserve the
-            # original post-validation conformance behavior.
-            await self._persist_block_planning_conformance_handoff(
-                workspace_id,
-                handoff=planning_validation_handoff,
-            )
+            if isinstance(planning_result, _PlanningCarriedGaps):
+                if not await self._persist_block_planning_conformance_handoff(
+                    workspace_id,
+                    handoff=planning_result,
+                    execution_owner_id=execution_owner_id,
+                ):
+                    return
+                carried_gaps = planning_result.gaps
+            else:
+                planning_validation_handoff = planning_result
+                # Persist even None so approve-and-keep preserves the original result.
+                await self._persist_block_planning_conformance_handoff(
+                    workspace_id,
+                    handoff=planning_validation_handoff,
+                )
         elif recovery is not None:
+            # A recovery push can replace a PR that closed or merged.
+            carried_gaps = _planning_carried_gaps_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
+            retry_gap_publication = bool(
+                carried_gaps and ws.pr_url and _pr_conformance_publication_pending(ws)
+            )
             # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
@@ -743,6 +764,9 @@ async def execute(
         elif resume_skip_agent:
             # Reconstruct the blocked run's persisted conformance handoff.
             planning_validation_handoff = _planning_validation_handoff_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
+            carried_gaps = _planning_carried_gaps_from_metadata(
                 ws.block_planning_conformance_handoff
             )
     except ComposeExecCleanupError as exc:
@@ -1423,6 +1447,7 @@ async def execute(
         defaults=defaults,
         compose_project=compose_project,
         compose_file=compose_file,
+        pending_gaps=carried_gaps if retry_gap_publication else (),
     ):
         return
 
@@ -1483,6 +1508,9 @@ async def execute(
         defaults=defaults,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
+        carried_gaps=carried_gaps,
+        publish_gaps_on_reused_pr=recovery is None or retry_gap_publication,
+        retry_gap_publication=retry_gap_publication,
     )
     if pr is None:
         return
@@ -1497,4 +1525,5 @@ async def execute(
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        carried_gaps=() if recovery is not None and pr.url == ws.pr_url else carried_gaps,
     )
