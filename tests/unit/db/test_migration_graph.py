@@ -41,8 +41,6 @@ _BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
 _AWAITING_HUMAN_ATTENTION_REVISION = "d7e8f9a0b1c2"
 # Flip workspaces.auto_merge database default to opt-out.
 _AUTO_MERGE_DEFAULT_OPT_OUT_REVISION = "e9f0a1b2c3d4"
-# Persist completed workspace filesystem reclamation.
-_FILESYSTEM_RECLAIMED_REVISION = "a875b1c2d3e4"
 # Independent hosted owner authority and material tombstones.
 _HOSTED_NODE_MATERIAL_REVISION = "b986c2d3e4f5"
 # Opt-in durable node admission and idle-drain barrier.
@@ -405,15 +403,8 @@ async def test_auth_overlay_unmount_backfill_postgres_seeds_only_qualifying_rows
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
-            # Upgrade to the current head so the workspaces table has every
-            # column the current ORM model writes (e.g. task_tag, the
-            # block-state columns, and the awaiting-human attention columns, all
-            # added after this backfill migration).
-            # The backfill function is invoked manually below, so the schema
-            # version does not change what the test exercises; pinning to a
-            # pre-column revision broke the ORM seeding once a later migration
-            # added a column.
-            _run_alembic(repo_root, env, "upgrade", _FILESYSTEM_RECLAIMED_REVISION)
+            # The current ORM seeds rows before the backfill is invoked manually.
+            _run_alembic(repo_root, env, "upgrade", "head")
 
         engine = make_engine(database_url)
         try:
