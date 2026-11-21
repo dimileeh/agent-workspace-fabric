@@ -9,26 +9,36 @@ adapter so no subprocesses spawn. Tests drive full loops end-to-end.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient
+from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
     MonitorConfig,
+    MonitorState,
+    NotifyHuman,
+    PRStatus,
 )
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
+    notify_human_loop,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
+from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
 from awf.runtime.pr_monitor_runner.helpers import _parse_verdict, _parse_verdict_result
 from tests.integration.runtime._pr_monitor_runner_fixtures import (
     FakeAdapter,
@@ -88,6 +98,82 @@ def _make_runner(
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
     )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "leaves_monitoring"),
+    [(None, False), (30, False), (None, True)],
+    ids=["default", "opted-in", "leaves-monitoring"],
+)
+async def test_notify_human_finishes_wait_when_attention_write_is_rejected(
+    factory, cmd, adapter, sleep_fn, tmp_path, monkeypatch, threshold, leaves_monitoring
+):
+    repo_url = "https://github.com/example/repo.git"
+    workspace_id = await _seed_monitoring_workspace(factory, repo_url=repo_url)
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = threshold
+    runner = _make_runner(
+        factory=factory, cmd=cmd, adapter=adapter, sleep_fn=sleep_fn, worktrees_root=tmp_path
+    )
+    runner._config = replace(runner._config, human_wait_dormant_after_seconds=threshold)
+    set_attention = runner._set_workspace_attention
+
+    async def reject_attention(*args, **kwargs):
+        async with factory.begin() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            (operation,) = workspace.operations
+            assert operation.status == "running"
+            if leaves_monitoring:
+                await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="test")
+            else:
+                # A replacement episode won the refresh race. Even an old
+                # timestamp from that episode cannot authorize this poll to sleep dormant.
+                workspace.awaiting_human_since = datetime.now(UTC) - timedelta(minutes=2)
+                workspace.awaiting_human_reason = "Replacement episode"
+        if leaves_monitoring:
+            return await set_attention(*args, **kwargs)
+        return None
+
+    post_notification = AsyncMock()
+    suspend = AsyncMock()
+    monkeypatch.setattr(runner, "_set_workspace_attention", reject_attention)
+    monkeypatch.setattr(runner, "_post_human_notification_once", post_notification)
+    monkeypatch.setattr(notify_human_loop, "suspend_human_wait", suspend)
+    outcome = await notify_human_loop.handle_notify_human_action(
+        runner,
+        action=NotifyHuman(message="Approval required"),
+        workspace_id=workspace_id,
+        repo_url=repo_url,
+        repo=RepoRef.from_url(repo_url),
+        pr_number=42,
+        status=PRStatus(42, "abc123", MergeableState.MERGEABLE, CheckState.SUCCESS, (), (), 0),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch="feature",
+        compose_project="awf_test",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+        allow_dormancy=threshold is not None,
+    )
+
+    suspend.assert_not_awaited()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        (operation,) = workspace.operations
+        if leaves_monitoring:
+            assert outcome is DormancyExit.SUPERSEDED
+            assert operation.status == "cancelled"
+            assert operation.result["outcome"] == "superseded"
+            assert sleep_fn.calls == []
+            post_notification.assert_not_awaited()
+        else:
+            assert outcome is False
+            assert operation.status == "succeeded"
+            assert workspace.awaiting_human_reason == "Replacement episode"
+            assert sleep_fn.calls == [60]
+            post_notification.assert_awaited_once()
 
 
 class TestCompleteWorkspaceTearsDownComposeStack:
