@@ -163,8 +163,6 @@ _CLOSED_OUTDATED_THREAD_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS
 # to just the re-exported names and drop everything historically exported by the
 # bare module.
 __all__ = [
-    # Re-exported wire-shape value types (now defined in ``pr_monitor_models``)
-    # and monitor actions (now defined in ``pr_monitor_actions``).
     "DEFAULT_NON_CHECK_REVIEWER_LOGINS",
     "CheckFailure",
     "CheckFailureLogResult",
