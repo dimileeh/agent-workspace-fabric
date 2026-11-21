@@ -1383,6 +1383,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
+### PR_CONFORMANCE_COMMENT_FAILED
+**Problem:** AWF could not publish unresolved plan-conformance gaps on the pull request.
+**Likely Cause:** The forge comment request failed after the branch was pushed.
+**Operator Fix:** Read the forge error and carried gaps in workspace events. Publish the gap notice before resuming PR review.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_conformance_comment_failed](#pr_conformance_comment_failed)
+
 ### PR_CREATE_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not open a new pull request because new-PR creation only supports GitHub.
 **Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but opening a new PR shells `gh pr create` and parses github.com PR URLs, so AWF fails fast at the push step instead of mis-routing to a same-slug GitHub repository.

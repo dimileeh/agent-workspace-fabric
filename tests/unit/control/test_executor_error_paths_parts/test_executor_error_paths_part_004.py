@@ -1242,7 +1242,16 @@ class TestPullRequestUnexpectedErrorPart002:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "disposition", ["reuse", "comment_error", "replace", "tip_mismatch", "no_pushed_sha"]
+        "disposition",
+        [
+            "reuse",
+            "comment_recovers",
+            "comment_error",
+            "comment_retry_tip_changed",
+            "replace",
+            "tip_mismatch",
+            "no_pushed_sha",
+        ],
     )
     async def test_publish_carried_gaps_on_reused_or_replacement_pr(
         self,
@@ -1264,12 +1273,37 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.respond_when(lambda args: "--is-ancestor" in args, returncode=1)
         monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0)
         comments: list[str] = []
+        comment_snapshot_counts: list[int] = []
+        section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+        ws_id = await _seed_ready(factory)
 
         async def post_comment(*, repo: object, pr_number: int, body: str) -> None:
-            assert forge.snapshot_calls == 2
             assert pr_number == 55
             comments.append(body)
-            if disposition == "comment_error":
+            comment_snapshot_counts.append(forge.snapshot_calls)
+            if len(comments) == 2:
+                async with factory() as session:
+                    saved = await WorkspaceRepository(session).get(ws_id)
+                    assert saved is not None
+                    assert saved.status == WorkspaceStatus.pushing.value
+                    pending = next(
+                        event
+                        for event in saved.events
+                        if event.event_type == "workspace.audit.pr_conformance_comment"
+                    )
+                    assert pending.payload["outcome"] == "pending"
+                    assert pending.payload["pr_number"] == 55
+                    assert pending.payload["pr_url"] == saved.pr_url
+                    assert pending.payload["source_head_sha"] == "b" * 40
+                    assert (
+                        pending.payload["evidence"]["error_message"] == "Comment transport failed"
+                    )
+            if disposition == "comment_retry_tip_changed":
+                forge.head_sha = "c" * 40
+                raise ForgeClientError("Comment transport failed")
+            if disposition == "comment_error" or (
+                disposition == "comment_recovers" and len(comments) == 1
+            ):
                 raise ForgeClientError("Comment transport failed")
 
         monkeypatch.setattr(forge, "post_comment", post_comment, raising=False)
@@ -1281,7 +1315,6 @@ class TestPullRequestUnexpectedErrorPart002:
         executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         profile = WorkspaceProfile(name="test")
         carried_gaps = [{"kind": "test_work", "detail": "Add a regression test"}]
-        ws_id = await _seed_ready(factory)
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
             assert ws is not None
@@ -1302,7 +1335,6 @@ class TestPullRequestUnexpectedErrorPart002:
                 carried_gaps=carried_gaps,
             )
 
-        section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
         if disposition == "tip_mismatch":
             assert pr is None
             assert comments == []
@@ -1348,18 +1380,58 @@ class TestPullRequestUnexpectedErrorPart002:
                     "pushed_head_sha_unavailable"
                 )
         else:
+            assert pr is not None
             assert pr.url == "https://github.com/x/y/pull/55"
-            assert comments == [section]
-            expected_metadata = (
-                {"conformance_comment_error": "Comment transport failed"}
-                if disposition == "comment_error"
-                else None
+            retries = disposition in {"comment_recovers", "comment_error"}
+            assert comments == ([section, section] if retries else [section])
+            assert comment_snapshot_counts == ([2, 3] if retries else [2])
+            assert len(pr_creator.calls) == 1
+            monitor = SimpleNamespace(run=AsyncMock()) if disposition != "comment_error" else None
+            monkeypatch.setattr(executor, "_pr_monitor", monitor)
+            await persist_pr_and_handoff(
+                executor,
+                workspace_id=ws_id,
+                pr=pr,
+                adapter=None,
+                profile=profile,
+                defaults=None,
+                successful_validation_run_id=None,
+                compose_project=ws_id,
+                compose_file=tmp_path / "compose.yml",
+                carried_gaps=carried_gaps,
             )
-            assert pr.open_metadata == expected_metadata
+            async with factory() as session:
+                saved = await WorkspaceRepository(session).get(ws_id)
+                assert saved is not None
+                assert saved.pr_url == pr.url
+                push = next(e for e in saved.events if e.event_type == "workspace.audit.git_push")
+                assert push.payload["outcome"] == "succeeded"
+                if disposition in {"comment_error", "comment_retry_tip_changed"}:
+                    assert saved.status == WorkspaceStatus.failed.value
+                    assert saved.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+                    if disposition == "comment_retry_tip_changed":
+                        assert "no longer contains the pushed tip" in saved.failure_message
+                        assert monitor is not None
+                        monitor.run.assert_not_awaited()
+                else:
+                    assert saved.status == WorkspaceStatus.monitoring_pr.value
+                    assert monitor is not None
+                    monitor.run.assert_awaited_once()
+                    created = next(
+                        e for e in saved.events if e.event_type == "workspace.audit.pr_created"
+                    )
+                    if disposition == "comment_recovers":
+                        assert created.payload["evidence"]["conformance_comment_retried"] is True
+                    else:
+                        assert "evidence" not in created.payload
         failures = [
             event for event in logs if event["event"] == "executor.pr_conformance_comment_failed"
         ]
-        assert bool(failures) == (disposition == "comment_error")
+        assert len(failures) == {
+            "comment_recovers": 1,
+            "comment_error": 2,
+            "comment_retry_tip_changed": 2,
+        }.get(disposition, 0)
 
     @pytest.mark.unit
     async def test_reuse_push_updates_remote_branch_when_live_head_renamed(

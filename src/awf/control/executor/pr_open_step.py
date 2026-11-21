@@ -27,6 +27,7 @@ from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
     _GIT_PUSH_FAILED_REASON_CODE,
+    _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
     _PR_CREATE_FAILED_REASON_CODE,
 )
 from awf.control.executor.helpers import (
@@ -46,6 +47,7 @@ _PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
 # before treating an open head that does not yet equal the tip as a race.
 _POST_PUSH_TIP_RETRY_ATTEMPTS = 3
 _POST_PUSH_TIP_RETRY_DELAY_SECONDS = 0.5
+_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS = 1.0
 
 
 class _PostPushReuseDisposition(StrEnum):
@@ -317,6 +319,7 @@ async def _fail_reuse_pr_state_lookup(
 
 
 async def _publish_pr_conformance_comment(
+    self: Any,
     *,
     forge_client: ForgeClient,
     pr: PullRequestResult,
@@ -333,6 +336,7 @@ async def _publish_pr_conformance_comment(
         return pr
     metadata = pr.open_metadata or {}
     pr_number = reused_pr_number
+    pushed_head_sha = pr.head_sha
     try:
         if isinstance(forge_client, GitHubClient) and str(metadata.get("strategy")).startswith(
             "reconciled_"
@@ -344,10 +348,11 @@ async def _publish_pr_conformance_comment(
             snapshot = await forge_client.fetch_pull_request_snapshot(
                 repo=repo, pr_number=pr_number
             )
-            pushed_head_sha = metadata.get("pushed_head_sha")
+            recorded_tip = metadata.get("pushed_head_sha")
+            pushed_head_sha = recorded_tip if isinstance(recorded_tip, str) else None
             if not await _pr_snapshot_contains_pushed_tip(
                 snapshot=snapshot,
-                pushed_head_sha=pushed_head_sha if isinstance(pushed_head_sha, str) else None,
+                pushed_head_sha=pushed_head_sha,
                 runner=runner,
                 worktree_path=worktree_path,
                 fetch_remote=fetch_remote,
@@ -370,7 +375,6 @@ async def _publish_pr_conformance_comment(
             )
         else:
             repo = RepoRef.from_url(repo_url)
-        await forge_client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
     except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
         error = redact_audit_text(str(exc), limit=500)
         _log.warning(
@@ -380,7 +384,61 @@ async def _publish_pr_conformance_comment(
             error=error,
         )
         return replace(pr, open_metadata={**metadata, "conformance_comment_error": error})
-    return pr
+
+    # Retry publication in place so the already successful push is preserved.
+    retried = False
+    while True:
+        try:
+            if retried:
+                snapshot = await forge_client.fetch_pull_request_snapshot(
+                    repo=repo, pr_number=pr_number
+                )
+                if not await _pr_snapshot_contains_pushed_tip(
+                    snapshot=snapshot,
+                    pushed_head_sha=pushed_head_sha,
+                    runner=runner,
+                    worktree_path=worktree_path,
+                    fetch_remote=fetch_remote,
+                ):
+                    raise ValueError("The pull request no longer contains the pushed tip")
+            await forge_client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
+        except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+            error = redact_audit_text(str(exc), limit=500)
+            _log.warning(
+                "executor.pr_conformance_comment_failed",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+                error=error,
+                retried=retried,
+            )
+            if retried:
+                return replace(
+                    pr,
+                    open_metadata={
+                        **metadata,
+                        "conformance_comment_pending": True,
+                        "conformance_comment_error": error,
+                    },
+                )
+            await self._record_executor_pr_audit_event(
+                workspace_id,
+                event_type="workspace.audit.pr_conformance_comment",
+                action="pr_conformance_comment",
+                outcome="pending",
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+                branch_name=pr.branch,
+                pr_number=pr_number,
+                pr_url=pr.url,
+                source_head_sha=pushed_head_sha,
+                evidence={"error_message": error},
+            )
+            retried = True
+            await asyncio.sleep(_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS)
+        else:
+            if retried:
+                return replace(pr, open_metadata={**metadata, "conformance_comment_retried": True})
+            return pr
 
 
 async def push_and_open_pr(
@@ -733,6 +791,7 @@ async def push_and_open_pr(
                         remote_url=existing_pr_remote_url,
                     )
                 pr = await _publish_pr_conformance_comment(
+                    self,
                     forge_client=forge_client,
                     pr=pr,
                     gap_section=gap_section,
@@ -817,6 +876,7 @@ async def push_and_open_pr(
                     remote_url=existing_pr_remote_url,
                 )
                 pr = await _publish_pr_conformance_comment(
+                    self,
                     forge_client=forge_client,
                     pr=pr,
                     gap_section=gap_section,

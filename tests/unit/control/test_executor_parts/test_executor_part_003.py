@@ -1215,22 +1215,21 @@ class TestHappyPathPart002:
                     ]
                 ),
             )
-            fake.queue_result(
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "repository": {
-                                "pullRequest": {
-                                    "merged": False,
-                                    "closed": False,
-                                    "headRefName": head_ref,
-                                    "headRefOid": pr_head,
-                                }
+            snapshot = json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "merged": False,
+                                "closed": False,
+                                "headRefName": head_ref,
+                                "headRefOid": pr_head,
                             }
                         }
                     }
-                ),
-            )  # live reconciled PR snapshot
+                }
+            )
+            fake.queue_result(stdout=snapshot)
             if outcome == "reconciled-tip-mismatch":
                 fake.queue_result()  # cat-file finds the reconciled head locally
                 fake.queue_result(returncode=1)  # merge-base rejects containment
@@ -1246,6 +1245,8 @@ class TestHappyPathPart002:
                     fake.queue_result()  # fallback comment
                 elif outcome == "reconciled-comment-error":
                     fake.queue_result(returncode=1, stderr=f"Comment transport failed: {token}")
+                    fake.queue_result(stdout=snapshot)
+                    fake.queue_result(returncode=1, stderr=f"Comment retry failed: {token}")
         else:
             fake.queue_result(returncode=0, stdout=pr_url)
 
@@ -1266,6 +1267,36 @@ class TestHappyPathPart002:
             assert monitor.run.await_count == 0
             assert not any(any("pytest -q" in arg for arg in call.args) for call in fake.calls)
             assert not any("push" in call.args for call in fake.calls)
+            return
+        if outcome == "reconciled-comment-error":
+            assert ws.status == WorkspaceStatus.failed.value, ws.failure_message
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert monitor.run.await_count == 0
+            assert ws.pr_url == pr_url
+            assert ws.pr_number == 55
+            assert ws.monitor_last_commit_sha == pushed_tip
+            commands = [call.args for call in fake.calls]
+            assert sum("push" in args for args in commands) == 1
+            comments = [args for args in commands if args[:3] == ["gh", "pr", "comment"]]
+            assert [args[3] for args in comments] == ["55", "55"]
+            assert [args[-1] for args in comments] == [section, section]
+            push = next(e for e in ws.events if e.event_type == "workspace.audit.git_push")
+            assert push.payload["outcome"] == "succeeded"
+            pending = next(
+                e for e in ws.events if e.event_type == "workspace.audit.pr_conformance_comment"
+            )
+            assert pending.payload["evidence"]["error_message"].endswith(
+                "Comment transport failed: [redacted]"
+            )
+            created = next(e for e in ws.events if e.event_type == "workspace.audit.pr_created")
+            assert created.payload["evidence"]["strategy"] == "reconciled_after_duplicate"
+            assert created.payload["evidence"]["conformance_comment_error"].endswith(
+                "Comment retry failed: [redacted]"
+            )
+            assert "Comment retry failed: [redacted]" in ws.failure_message
+            assert events[0].payload["gaps"] == expected_gaps
+            assert records[0].source == "plan_conformance"
             return
         assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
         assert monitor.run.await_count == 1
@@ -1299,15 +1330,6 @@ class TestHappyPathPart002:
                     assert body_reads[0] < comments[0]
                     assert commands[comments[0]][3] == "55"
                     assert commands[comments[0]][-1] == section
-            if outcome == "reconciled-comment-error":
-                created = next(
-                    event for event in ws.events if event.event_type == "workspace.audit.pr_created"
-                )
-                evidence = created.payload["evidence"]
-                assert evidence["strategy"] == "reconciled_after_duplicate"
-                assert (
-                    "Comment transport failed: [redacted]" in evidence["conformance_comment_error"]
-                )
         adapter_prompts = _adapter_prompts(fake)
         assert len(adapter_prompts) == (6 if exhausted else 5)
         assert "Iteration 1" in adapter_prompts[3]
