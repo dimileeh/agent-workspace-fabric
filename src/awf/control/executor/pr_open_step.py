@@ -25,6 +25,7 @@ from awf.common.github_client import GitHubClient, RepoRef
 from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
     _AUDIT_PR_CREATED_EVENT,
     _GIT_PUSH_FAILED_REASON_CODE,
     _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
@@ -38,7 +39,9 @@ from awf.control.executor.helpers import (
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestError, PullRequestResult
 from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 
@@ -433,7 +436,7 @@ async def _publish_pr_conformance_comment(
                 )
             await self._record_executor_pr_audit_event(
                 workspace_id,
-                event_type="workspace.audit.pr_conformance_comment",
+                event_type=_AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
                 action="pr_conformance_comment",
                 outcome="pending",
                 reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
@@ -452,6 +455,64 @@ async def _publish_pr_conformance_comment(
     return pr
 
 
+async def retry_pr_conformance_comment(
+    self: Any,
+    *,
+    ws: Workspace,
+    profile: WorkspaceProfile,
+    worktree_path: Path,
+    head_sha: str | None,
+    carried_gaps: Sequence[dict[str, str]],
+) -> str | None:
+    """Publish pending gaps when recovery can reuse the already pushed tip."""
+    pr_number = ws.pr_number or _extract_pr_number(ws.pr_url or "")
+    if not ws.pr_url or pr_number is None or not head_sha:
+        return "Could not resolve the pull request and validated tip"
+    fetch_remote = _existing_pr_remote_push_url(ws) or "origin"
+    try:
+        repo = RepoRef.from_url(ws.repo_url)
+        async with make_forge_client(
+            concrete_forge_for_repo(profile.forge, ws.repo_url), self._runner
+        ) as forge_client:
+            snapshot = await forge_client.fetch_pull_request_snapshot(
+                repo=repo, pr_number=pr_number
+            )
+            if snapshot.lifecycle not in (
+                PullRequestLifecycle.open,
+                PullRequestLifecycle.merged,
+            ) or not await _pr_snapshot_contains_pushed_tip(
+                snapshot=snapshot,
+                pushed_head_sha=head_sha,
+                runner=self._runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
+            ):
+                return "Could not verify that the pull request contains the validated tip"
+            pr = await _publish_pr_conformance_comment(
+                self,
+                forge_client=forge_client,
+                pr=PullRequestResult(url=ws.pr_url, branch=ws.branch_name or "", head_sha=head_sha),
+                gap_section=_render_pr_conformance_gaps(carried_gaps),
+                workspace_id=ws.id,
+                repo_url=ws.repo_url,
+                runner=self._runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
+                reused_pr_number=pr_number,
+            )
+    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+        return redact_audit_text(str(exc), limit=500)
+    return _conformance_comment_error(pr)
+
+
+def _conformance_comment_error(pr: PullRequestResult) -> str | None:
+    publication = pr.open_metadata or {}
+    if publication.get("conformance_comment_skipped") == "pushed_head_sha_unavailable":
+        return "Could not verify the pushed tip before publishing gaps"
+    error = publication.get("conformance_comment_error")
+    return error if isinstance(error, str) else None
+
+
 async def push_and_open_pr(
     self: Any,
     *,
@@ -461,6 +522,7 @@ async def push_and_open_pr(
     workspace_id: str,
     worktree_path: Path,
     carried_gaps: Sequence[dict[str, str]] = (),
+    retry_gap_publication: bool = False,
 ) -> Any | None:
     """Push the validated branch and open (or reuse) its PR.
 
@@ -965,4 +1027,13 @@ async def push_and_open_pr(
             message=f"unexpected error during PR creation: {exc!r}"[:2000],
         )
         return None
+    if retry_gap_publication and (error := _conformance_comment_error(pr)) is not None:
+        return replace(
+            pr,
+            open_metadata={
+                **(pr.open_metadata or {}),
+                "conformance_comment_pending": True,
+                "conformance_comment_error": error,
+            },
+        )
     return pr

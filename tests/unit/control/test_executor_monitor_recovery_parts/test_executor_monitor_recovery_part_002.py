@@ -514,8 +514,9 @@ def _queue_open_pr_lifecycle_snapshot(
     head_sha: str | None = None,
     head_ref: str | None = None,
     base_sha: str = "a" * 40,
+    closed: bool = False,
 ) -> None:
-    """Queue one open-PR ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
+    """Queue one ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
     fake.queue_result(
         returncode=0,
         stdout=json.dumps(
@@ -523,7 +524,7 @@ def _queue_open_pr_lifecycle_snapshot(
                 "data": {
                     "repository": {
                         "pullRequest": {
-                            "closed": False,
+                            "closed": closed,
                             "merged": False,
                             "headRefName": head_ref,
                             "headRefOid": head_sha,
@@ -536,12 +537,14 @@ def _queue_open_pr_lifecycle_snapshot(
     )
 
 
-def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+def _queue_existing_pr_push(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", resolve_pushed_head: bool = True
+) -> None:
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     # Reuse revalidates live forge state before push_and_open diagnostics/push.
     _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
-    fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0, stdout=f"{head}\n" if resolve_pushed_head else "")
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout=f"{head[:7]} fix\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
@@ -917,6 +920,141 @@ async def test_existing_pr_recovery_does_not_republish_carried_gaps(
             MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
         ) == (advisory,)
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in fake.calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("scenario", "expected_comment_count", "expected_error"),
+    [
+        ("unchanged", 1, None),
+        ("changed", 1, None),
+        ("comment_rejected", 2, "Comment transport failed"),
+        ("closed", 0, "Could not verify that the pull request contains the validated tip"),
+        ("lookup_failed", 0, "json parse"),
+        ("unknown_pushed_tip", 0, "Could not verify the pushed tip before publishing gaps"),
+        ("unknown_pr_number", 0, "Could not resolve the pull request and validated tip"),
+        ("already_published", 0, None),
+    ],
+)
+async def test_existing_pr_recovery_retries_pending_carried_gap_comment(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    scenario: str,
+    expected_comment_count: int,
+    expected_error: str | None,
+) -> None:
+    head_changed = scenario in {"changed", "unknown_pushed_tip"}
+    source_head = "d" * 40
+    fixed_head = "e" * 40
+    section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+
+    def comment_calls() -> list[list[str]]:
+        return [call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]]
+
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            assert len(comment_calls()) == expected_comment_count
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        source="operator_api",
+        pr_url="https://github.com/x/y/unknown"
+        if scenario == "unknown_pr_number"
+        else "https://github.com/x/y/pull/1",
+    )
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        if scenario == "unknown_pr_number":
+            ws.pr_number = None
+        ws.block_planning_conformance_handoff = {
+            "carried_gaps": [{"kind": "test_work", "detail": "Add a regression test"}],
+        }
+        await repo.add_audit_event(
+            ws,
+            event_type="workspace.audit.pr_created",
+            actor="executor",
+            action="pr_create",
+            outcome="reused",
+            reason_code="PR_UPDATED",
+            pr_url=ws.pr_url,
+            pr_number=ws.pr_number,
+            source_head_sha=source_head,
+            evidence={
+                "conformance_comment_pending": True,
+                "conformance_comment_error": "Original publication failed",
+            },
+        )
+        if scenario == "already_published":
+            await repo.add_audit_event(
+                ws,
+                event_type="workspace.audit.pr_conformance_comment",
+                actor="executor",
+                action="pr_conformance_comment",
+                outcome="succeeded",
+                reason_code="PR_CONFORMANCE_COMMENT_PUBLISHED",
+                pr_url=ws.pr_url,
+            )
+        await s.commit()
+
+    _queue_validation_head(fake, head=source_head)
+    if head_changed:
+        fake.queue_result(returncode=1, stderr="pytest: failed")
+        fake.queue_result(returncode=0)  # adapter.run (fix pass)
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    if head_changed:
+        _queue_existing_pr_push(
+            fake, head=fixed_head, resolve_pushed_head=scenario != "unknown_pushed_tip"
+        )
+    elif scenario == "lookup_failed":
+        fake.queue_result(stdout="not JSON")
+    elif scenario in {"unchanged", "closed", "comment_rejected"}:
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=source_head, closed=scenario == "closed")
+        if scenario == "comment_rejected":
+            _queue_open_pr_lifecycle_snapshot(fake, head_sha=source_head)
+    fake.respond_when(
+        lambda args: args[:3] == ["gh", "pr", "comment"],
+        returncode=int(scenario == "comment_rejected"),
+        stderr="Comment transport failed" if scenario == "comment_rejected" else "",
+    )
+
+    await executor.execute(ws_id)
+
+    assert len(_all_push_and_pr_create_calls(fake)) == int(head_changed)
+    assert [call[-1] for call in comment_calls()] == [section] * expected_comment_count
+    assert monitor_calls == ([] if expected_error else [ws_id])
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == (
+            WorkspaceStatus.failed.value if expected_error else WorkspaceStatus.monitoring_pr.value
+        )
+        assert ws.pr_number == (None if scenario == "unknown_pr_number" else 1)
+        if expected_error:
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert expected_error in (ws.failure_message or "")
+        elif not head_changed:
+            assert any(
+                event.event_type == "workspace.audit.pr_conformance_comment"
+                and (event.payload or {}).get("outcome") == "succeeded"
+                for event in ws.events
+            )
 
 
 @pytest.mark.unit
