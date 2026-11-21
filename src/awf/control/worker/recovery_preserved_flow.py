@@ -304,9 +304,6 @@ async def _recover_preserved_active_execution(
             _extract_pr_number(ws.pr_url) if ws.pr_url and ws.pr_number is None else ws.pr_number
         )
         attach_existing_pr_monitor = bool(ws.pr_url and extracted_pr_number is not None)
-        needs_workspace_scope = not attach_existing_pr_monitor or bool(
-            _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
-        )
         branch_recovery_context: (
             tuple[
                 str,
@@ -330,7 +327,7 @@ async def _recover_preserved_active_execution(
         await session.commit()
 
     workspace_id = candidate.workspace_id
-    scope = getattr(self, "_workspace_scope", None) if needs_workspace_scope else None
+    scope = getattr(self, "_workspace_scope", None)
     # Recovery runs in the worker poll, outside provisioner/executor scopes.
     # Resolve with this candidate's authority after releasing the row lock.
     # Opt out of hosted scope-entry grace waits: blocking the poll on a full
@@ -338,26 +335,26 @@ async def _recover_preserved_active_execution(
     # candidate for a later stale scan instead.
     try:
         with without_authority_grace_wait():
-            async with scope(workspace_id) if scope is not None else nullcontext():
-                if attach_existing_pr_monitor:
-                    await self._attach_preserved_active_pr_monitor(
-                        candidate,
-                        preserved_event=preserved_event,
-                        attempt_id=attempt_id,
-                        task_id=task_id,
-                    )
-                    return True
+            if attach_existing_pr_monitor:
+                await self._attach_preserved_active_pr_monitor(
+                    candidate,
+                    preserved_event=preserved_event,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                )
+                return True
 
-                assert branch_recovery_context is not None
-                (
-                    repo_url,
-                    branch_name,
-                    remote_push_branch,
-                    base_commit,
-                    expected_head_repo_slug,
-                    resolved_forge,
-                ) = branch_recovery_context
-                lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
+            assert branch_recovery_context is not None
+            (
+                repo_url,
+                branch_name,
+                remote_push_branch,
+                base_commit,
+                expected_head_repo_slug,
+                resolved_forge,
+            ) = branch_recovery_context
+            lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
+            async with scope(workspace_id) if scope is not None else nullcontext():
                 branch_lookup = await self._resolve_preserved_active_branch_open_pr(
                     repo_url=repo_url,
                     branch_name=lookup_branch_name,
@@ -369,16 +366,17 @@ async def _recover_preserved_active_execution(
                     # Recover by head branch and let match/ambiguity checks below guard safety.
                     base_branch=None,
                 )
-                if branch_lookup is not None and branch_lookup.state == "matched":
-                    await self._attach_preserved_active_pr_monitor(
-                        candidate,
-                        preserved_event=preserved_event,
-                        attempt_id=attempt_id,
-                        task_id=task_id,
-                        open_pr=branch_lookup.match,
-                        branch_pr_lookup=branch_lookup.payload,
-                    )
-                    return True
+            # Scope exit checks hosted authority before recovery uses the lookup result.
+            if branch_lookup is not None and branch_lookup.state == "matched":
+                await self._attach_preserved_active_pr_monitor(
+                    candidate,
+                    preserved_event=preserved_event,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    open_pr=branch_lookup.match,
+                    branch_pr_lookup=branch_lookup.payload,
+                )
+                return True
     except WorkspaceAuthorityDeferredError as deferred:
         # Scope entry deferred inside grace: keep the preserved candidate for a
         # later stale scan. Returning True stops this cycle from falling through
@@ -730,13 +728,15 @@ async def _attach_preserved_active_pr_monitor(
             resolved_forge = (ws.resolved_profile or {}).get("forge")
             await session.commit()
             session.expunge(ws)
-            error = await _ensure_carried_gaps_published(
-                self._pr_publication_runner,
-                pr_url=pr_url,
-                pr_number=pr_number,
-                resolved_forge=resolved_forge,
-                carried_gaps=carried_gaps,
-            )
+            scope = getattr(self, "_workspace_scope", None)
+            async with scope(candidate.workspace_id) if scope is not None else nullcontext():
+                error = await _ensure_carried_gaps_published(
+                    self._pr_publication_runner,
+                    pr_url=pr_url,
+                    pr_number=pr_number,
+                    resolved_forge=resolved_forge,
+                    carried_gaps=carried_gaps,
+                )
             ws = await repo.get_for_update(candidate.workspace_id)
             claim_cutoff = datetime.now(UTC)
             if (
