@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 from awf.cli import workspace_commands
@@ -42,9 +43,10 @@ def test_invalid_dormancy_threshold_is_rejected_before_request(
     )
 
     assert result.exit_code == 2
-    assert "--human-wait-dormant-after-seconds" in result.stderr
-    assert "must be a finite" in result.stderr
-    assert "number greater than zero" in result.stderr
+    error = Text.from_ansi(result.stderr).plain
+    assert "--human-wait-dormant-after-seconds" in error
+    assert "must be a finite" in error
+    assert "number greater than zero" in error
     request.assert_not_called()
 
 
