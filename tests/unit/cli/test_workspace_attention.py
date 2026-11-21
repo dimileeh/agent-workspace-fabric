@@ -2,11 +2,50 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import httpx
 import pytest
+from typer.testing import CliRunner
 
 from awf.cli import workspace_commands
 from awf.cli.common import OutputFormat
+from awf.cli.main import app
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        [
+            "create",
+            "--repo",
+            "git@github.com:example/repo.git",
+            "--title",
+            "Task",
+            "--prompt",
+            "Run",
+        ],
+        ["adopt-pr", "--repo", "example/repo", "--pr", "42"],
+    ],
+    ids=["create", "adopt-pr"],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_invalid_dormancy_threshold_is_rejected_before_request(
+    monkeypatch: pytest.MonkeyPatch, command: list[str], value: str
+) -> None:
+    request = Mock()
+    monkeypatch.setattr(workspace_commands, "_call", request)
+
+    result = CliRunner().invoke(
+        app, ["workspace", *command, f"--human-wait-dormant-after-seconds={value}"]
+    )
+
+    assert result.exit_code == 2
+    assert "--human-wait-dormant-after-seconds" in result.stderr
+    assert "must be a finite" in result.stderr
+    assert "number greater than zero" in result.stderr
+    request.assert_not_called()
 
 
 @pytest.mark.unit

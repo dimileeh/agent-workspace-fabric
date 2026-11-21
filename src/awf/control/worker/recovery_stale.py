@@ -844,7 +844,7 @@ async def _record_stale_active_execution_detected(
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(candidate.workspace_id)
-        if ws is None or ws.status != candidate.status.value:
+        if ws is None or ws.status != candidate.status.value or ws.dormant_at is not None:
             return False
         if not _execution_claim_is_stale(ws, datetime.now(UTC)):
             return False
@@ -934,7 +934,19 @@ async def _cleanup_and_fail_stale_active_execution(
     }
     if pr_adoption_is_hosted(candidate.task_policy):
         cleanup_kwargs["skip_compose"] = True
-    cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
+    async with self._session_factory() as session:
+        if candidate.status == WorkspaceStatus.monitoring_pr:
+            # Serialize volume removal with the monitor's dormant commit.
+            ws = await WorkspaceRepository(session).get_for_update(candidate.workspace_id)
+            claim_cutoff = datetime.now(UTC)
+            if (
+                ws is None
+                or ws.status != candidate.status.value
+                or not _monitor_claim_is_stale(ws, claim_cutoff)
+                or not _execution_claim_is_stale(ws, claim_cutoff)
+            ):
+                return
+        cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
     if not cleanup.ok:
         await self._record_stale_active_execution_cleanup_failed(
             candidate,
@@ -954,7 +966,7 @@ async def _stale_active_execution_can_fail(
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(candidate.workspace_id)
-        if ws is None or ws.status != candidate.status.value:
+        if ws is None or ws.status != candidate.status.value or ws.dormant_at is not None:
             return False
         if not _execution_claim_is_stale(ws, datetime.now(UTC)):
             return False
@@ -1091,7 +1103,7 @@ async def _fail_stale_active_execution(
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get_for_update(candidate.workspace_id)
-        if ws is None or ws.status != candidate.status.value:
+        if ws is None or ws.status != candidate.status.value or ws.dormant_at is not None:
             return
         claim_cutoff = datetime.now(UTC)
         if not _execution_claim_is_stale(ws, claim_cutoff):
@@ -1130,7 +1142,10 @@ async def _fail_stale_active_execution(
             to=WorkspaceStatus.failed,
             reason_code=reason_code,
             payload=transition_payload,
-            extra_conditions=(_stale_execution_claim_filter(claim_cutoff),),
+            extra_conditions=(
+                Workspace.dormant_at.is_(None),
+                _stale_execution_claim_filter(claim_cutoff),
+            ),
         )
         if transitioned is None:
             return

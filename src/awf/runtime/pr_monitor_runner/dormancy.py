@@ -118,11 +118,23 @@ async def suspend_human_wait(
             )
             if current is None:
                 raise _DormancyError("human_wait_operation_missing")
-            if any(
-                other.id != current.id and other.status in _OPEN_OPERATION_STATUSES
-                for other in workspace.operations
-            ):
-                return None
+            superseded_waits = []
+            for other in workspace.operations:
+                if other.id == current.id or other.status not in _OPEN_OPERATION_STATUSES:
+                    continue
+                # A restart can give the next poll a different identity. Only
+                # human waits and monitor state operations created for a sleep
+                # are safe to settle here, since neither dispatches work.
+                payload = other.payload or {}
+                if payload.get("owner") != "pr_monitor" or not (
+                    other.type == OperationType.human_wait.value
+                    or (
+                        other.type == OperationType.monitor_state.value
+                        and "wait_seconds" in payload
+                    )
+                ):
+                    return None
+                superseded_waits.append(other)
 
             # Hold the workspace fence during the external effect. Delay guarded
             # writes until after Compose so they cannot hold the node mutex here.
@@ -148,6 +160,12 @@ async def suspend_human_wait(
                     raise _DormancyError(teardown.reason_code)
 
             stage = "operation_finish"
+            for other in superseded_waits:
+                await operations.finish(
+                    other,
+                    status=OperationStatus.cancelled,
+                    result={"outcome": "superseded"},
+                )
             if current.status not in _OPEN_OPERATION_STATUSES:
                 # Repeated waits reuse the poll operation identity. Record a new
                 # wait for this action while preserving the earlier poll result.
@@ -269,12 +287,24 @@ async def _record_dormancy_failure(
                     operations = OperationRepository(session)
                     current = await operations.get(operation.operation_id)
                     if current is not None and current.status in _OPEN_OPERATION_STATUSES:
-                        await operations.finish(
-                            current,
-                            status=OperationStatus.failed,
-                            result={"outcome": "dormancy_failed", **payload},
-                            error_code=HUMAN_WAIT_DORMANCY_FAILED,
-                        )
+                        try:
+                            # Roll back a failed operation write without losing
+                            # the failure event or the persisted monitor state.
+                            async with session.begin_nested():
+                                await operations.finish(
+                                    current,
+                                    status=OperationStatus.failed,
+                                    result={"outcome": "dormancy_failed", **payload},
+                                    error_code=HUMAN_WAIT_DORMANCY_FAILED,
+                                )
+                        except (SQLAlchemyError, OSError) as exc:
+                            _log.warning(
+                                "monitor.dormancy_failure_operation_finish_failed",
+                                workspace_id=workspace_id,
+                                operation_id=operation.operation_id,
+                                reason_code=HUMAN_WAIT_DORMANCY_FAILED,
+                                error_type=type(exc).__name__,
+                            )
             await repo.add_event(
                 workspace,
                 event_type="workspace.dormancy_failed",

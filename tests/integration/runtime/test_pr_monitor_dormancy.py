@@ -1,14 +1,17 @@
 """Dormant human waits through the real monitor and transaction boundaries."""
 
+import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
 
+from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import ResourceReservation, WorkspaceSecretLease
-from awf.db.repositories import WorkerHeartbeatRepository, WorkspaceRepository
-from awf.node.compose_manager import ComposeManager, ComposeTeardownResult
+from awf.db.repositories import OperationRepository, WorkerHeartbeatRepository, WorkspaceRepository
+from awf.node.compose_manager import ComposeManager, ComposeOperationError, ComposeTeardownResult
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -103,6 +106,7 @@ async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn):
         runtime_containers = containers
         runtime_volumes = volumes
         runtime_commands = compose_commands
+        pr_status = status
 
         def build(self, threshold, *, sleep=sleep_fn):
             runner = PullRequestMonitorRunner(
@@ -115,7 +119,7 @@ async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn):
                 sleep=sleep,
                 monitor_config=MonitorConfig(human_wait_dormant_after_seconds=threshold),
             )
-            runner._fetch_status_for_decision = AsyncMock(return_value=status)
+            runner._fetch_status_for_decision = AsyncMock(return_value=self.pr_status)
             return runner
 
         async def run(self, runner, **owner):
@@ -174,6 +178,66 @@ async def test_human_wait_goes_dormant_at_threshold_without_reposting(factory, w
         assert lease.status == "revoked"
         reservation = await session.scalar(select(ResourceReservation))
         assert reservation.released_at is None
+
+
+async def test_restart_settles_interrupted_waits_after_head_changes(factory, wait, monkeypatch):
+    monitor, workspace_id, _, teardown = wait
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+
+    # A cancellation during a passive sleep leaves its operation open.
+    interrupted = AsyncMock(side_effect=asyncio.CancelledError)
+    with monkeypatch.context() as ci_poll:
+        ci_poll.setattr(runner_module, "decide", lambda *_: WaitForCI())
+        with pytest.raises(asyncio.CancelledError):
+            await monitor.run(monitor.build(30, sleep=interrupted))
+    with pytest.raises(asyncio.CancelledError):
+        await monitor.run(monitor.build(30, sleep=interrupted))
+
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        interrupted_ids = {op.type: op.id for op in workspace.operations if op.status == "running"}
+        assert set(interrupted_ids) == {"monitor_state", "human_wait"}
+        active_merge = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.monitor_state,
+            status=OperationStatus.running,
+            payload={"owner": "pr_monitor", "action": "merge"},
+        )
+        active_merge_id = active_merge.id
+    monitor.current_time += timedelta(seconds=31)
+    monitor.pr_status = replace(monitor.pr_status, head_sha="new-head")
+    monkeypatch.setattr(
+        runner_module, "observe_pr_head_sync", AsyncMock(return_value=monitor.pr_status)
+    )
+
+    with pytest.raises(PollContinuesError):
+        await monitor.run(monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)))
+    teardown.assert_not_awaited()
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.dormant_at is None
+        operations = OperationRepository(session)
+        active_merge = await operations.get(active_merge_id)
+        assert active_merge.status == "running"
+        await operations.finish(active_merge, status=OperationStatus.succeeded)
+
+    await monitor.run(monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)))
+    teardown.assert_awaited_once()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.dormant_at == monitor.current_time
+        by_id = {op.id: op for op in workspace.operations}
+        for operation_id in interrupted_ids.values():
+            assert by_id[operation_id].status == "cancelled"
+            assert by_id[operation_id].result["outcome"] == "superseded"
+        assert by_id[active_merge_id].status == "succeeded"
+        (current,) = [
+            op for op in workspace.operations if (op.result or {}).get("outcome") == "dormant"
+        ]
+        assert current.payload["source_head_sha"] == "new-head"
+        assert all(op.status not in {"pending", "running"} for op in workspace.operations)
 
 
 @pytest.mark.parametrize("action", ["unconfigured", "ci", "queued"])
@@ -279,6 +343,7 @@ async def test_existing_human_episode_and_ownership_on_resume(factory, wait, mon
     [
         "compose_teardown",
         "operation_finish",
+        "operation_repository_finish",
         "secret_revocation",
         "event",
         "monitor_log",
@@ -315,6 +380,19 @@ async def test_dormancy_failures_preserve_a_working_wait(factory, wait, monkeypa
         teardown.side_effect = partial_teardown
     elif stage == "operation_finish":
         monkeypatch.setattr(dormancy, "finish_monitor_operation", fail)
+    elif stage == "operation_repository_finish":
+        finish = OperationRepository.finish
+        attempted_statuses = []
+
+        async def fail_operation_write(operations, operation, *, status, **kwargs):
+            attempted_statuses.append(status)
+            # Flush the mutation before raising so the regression requires
+            # rolling it back while still committing the failure event.
+            await finish(operations, operation, status=status, **kwargs)
+            operation.status = None
+            await operations._session.flush()
+
+        monkeypatch.setattr(OperationRepository, "finish", fail_operation_write)
     elif stage == "secret_revocation":
         revoke = SecretLeaseService.revoke_workspace_secret_leases
 
@@ -387,9 +465,27 @@ async def test_dormancy_failures_preserve_a_working_wait(factory, wait, monkeypa
             event for event in workspace.events if event.event_type == "workspace.dormancy_failed"
         ]
         assert event.reason_code == "HUMAN_WAIT_DORMANCY_FAILED"
-        assert event.payload["stage"] == stage
+        if stage == "operation_repository_finish":
+            assert event.payload["stage"] == "operation_finish"
+            assert event.payload["failure_code"] == "IntegrityError"
+            assert attempted_statuses == [OperationStatus.succeeded, OperationStatus.failed]
+            (active_wait,) = workspace.operations
+            assert active_wait.type == "human_wait" and active_wait.status == "running"
+            assert active_wait.finished_at is None and active_wait.result is None
+        else:
+            assert event.payload["stage"] == stage
         assert event.payload["runtime_recovery_required"] == (stage != "monitor_log")
     assert any("monitor.dormancy_failed" in call.args[0] for call in sink.write.await_args_list)
+    if stage == "operation_repository_finish":
+        monkeypatch.setattr(OperationRepository, "finish", finish)
+        await monitor.run(monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)))
+        forge.post_comment.assert_awaited_once()
+        async with factory() as session:
+            row = await WorkspaceRepository(session).get(workspace_id)
+            assert row.dormant_at == monitor.current_time
+            (settled_wait,) = row.operations
+            assert settled_wait.id == active_wait.id
+            assert settled_wait.result["outcome"] == "dormant"
 
 
 async def test_dormant_monitor_is_excluded_from_scheduling_and_stale_recovery(
@@ -400,7 +496,6 @@ async def test_dormant_monitor_is_excluded_from_scheduling_and_stale_recovery(
         _monitor_recovery_terminal_finalize_status,
         _workspace_is_monitoring_pr,
     )
-    from awf.db.enums import OperationStatus
     from awf.runtime.inspection import RuntimeSnapshot
     from awf.service.metrics_slo import _count_monitor_completions
     from awf.service.workspace_runtime_health import (
@@ -521,10 +616,171 @@ async def test_dormant_monitor_is_excluded_from_scheduling_and_stale_recovery(
         assert [row.id for row in deferred] == [other]
 
 
-async def test_failed_teardown_is_followed_by_worker_compose_recovery_before_work(
+@pytest.mark.parametrize("suspend_at", ["inspection", "cleanup", None])
+async def test_stale_runtime_fallback_preserves_concurrent_dormancy(
+    factory, wait, monkeypatch, suspend_at
+):
+    from awf.control.worker import ControlWorker, WorkerConfig
+    from awf.node.cleanup import WorkspaceCleanupResult
+    from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+
+    monitor, workspace_id, _, teardown = wait
+    now = monitor.current_time
+    stale_event = "workspace.stale_active_execution_detected"
+    async with factory.begin() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        workspace.node_id = "node"
+        workspace.awaiting_human_since = now - timedelta(hours=1)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+        workspace.human_wait_dormant_after_seconds = 30 if suspend_at else None
+        await repo.add_event(
+            workspace, event_type=stale_event, reason_code="STALE_ACTIVE_EXECUTION"
+        )
+
+    snapshot = RuntimeSnapshot(
+        stack_state="running", services=[RuntimeService("agent", "agent", None, "running")]
+    )
+    cleaner = AsyncMock()
+    cleaner.cleanup.return_value = WorkspaceCleanupResult.from_steps([])
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        executor=AsyncMock(),
+        config=WorkerConfig(node_id="node"),
+        runtime_cleaner=cleaner,
+        runtime_inspector=AsyncMock(),
+    )
+    (candidate,) = await worker._list_stale_active_execution_candidates(exclude_ids=set())
+
+    async def suspend():
+        async with factory.begin() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            workspace.monitor_claimed_by = "monitor"
+            workspace.monitor_claim_expires_at = now + timedelta(hours=1)
+        await monitor.run(monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)))
+
+    async def inspect(_project):
+        if suspend_at == "inspection":
+            await suspend()
+        return snapshot
+
+    worker._runtime_inspector.inspect.side_effect = inspect
+    if suspend_at == "cleanup":
+        can_fail = worker._stale_active_execution_can_fail
+
+        async def suspend_before_cleanup(candidate):
+            assert await can_fail(candidate)
+            await suspend()
+            return True
+
+        monkeypatch.setattr(worker, "_stale_active_execution_can_fail", suspend_before_cleanup)
+
+    await worker._recover_stale_active_execution(candidate)
+    if suspend_at is None:
+        cleaner.cleanup.assert_awaited_once()
+        assert cleaner.cleanup.call_args.kwargs["remove_volumes"] is True
+        teardown.assert_not_awaited()
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace.status == "failed"
+            assert workspace.dormant_at is None
+        return
+
+    # Independently exercise the guarded write with the same obsolete candidate.
+    await worker._fail_stale_active_execution(candidate, snapshot)
+    cleaner.cleanup.assert_not_awaited()
+    teardown.assert_awaited_once()
+    assert monitor.runtime_volumes == {"data"}
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.status == "monitoring_pr"
+        assert workspace.dormant_at == now
+        assert workspace.monitor_claimed_by is None
+        assert [event.event_type for event in workspace.events].count(stale_event) == 1
+
+
+async def test_worker_finalizes_after_monitor_goes_dormant(
     factory, wait, cmd, monkeypatch, tmp_path
 ):
     from awf.control.executor import monitor_handoff, monitor_resume_runtime, runtime_setup_replay
+    from awf.control.worker import ControlWorker, WorkerConfig
+    from awf.runtime.inspection import RuntimeSnapshot
+    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
+        _make_executor,
+    )
+
+    monitor, workspace_id, forge, teardown = wait
+    now = monitor.current_time
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.awaiting_human_since = now - timedelta(hours=1)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.node_id = "node"
+        workspace.monitor_claimed_by = workspace.monitor_claim_expires_at = None
+
+    monkeypatch.setattr(monitor_handoff, "lock_resumed_worktree_registration", AsyncMock())
+    monkeypatch.setattr(
+        runtime_setup_replay, "capture_agent_container_identity", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        monitor_handoff, "replay_setup_on_monitor_resume", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        monitor_resume_runtime,
+        "inspect_resume_runtime",
+        AsyncMock(return_value=RuntimeSnapshot(stack_state="running")),
+    )
+    executor = _make_executor(
+        cmd,
+        factory,
+        tmp_path,
+        compose=ComposeManager(work_dir=tmp_path, template_path=tmp_path / "unused"),
+        pr_monitor_factory=lambda *_args, **_kwargs: monitor.build(
+            30, sleep=AsyncMock(side_effect=PollContinuesError)
+        ),
+    )
+    cleaner = AsyncMock()
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        executor=executor,
+        config=WorkerConfig(node_id="node"),
+        runtime_cleaner=cleaner,
+    )
+    assert await worker._claim_monitoring_pr(workspace_id)
+    recovery_id = worker._monitor_recovery_operation_ids[workspace_id]
+    release_runtime = AsyncMock(wraps=worker._release_terminal_runtime_promptly)
+    monkeypatch.setattr(worker, "_release_terminal_runtime_promptly", release_runtime)
+    await worker._safely_resume_claimed_pr_monitor(workspace_id, recovery_operation_id=recovery_id)
+
+    release_runtime.assert_awaited_once_with(workspace_id)
+    cleaner.cleanup.assert_not_awaited()
+    teardown.assert_awaited_once()
+    forge.post_comment.assert_awaited_once()
+    assert workspace_id not in worker._monitor_recovery_operation_ids
+    assert monitor.runtime_containers == set()
+    assert monitor.runtime_volumes == {"data"}
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.status == "monitoring_pr"
+        assert row.dormant_at == now
+        assert (row.monitor_claimed_by, row.monitor_claim_expires_at) == (None, None)
+        recovery = await OperationRepository(session).get(recovery_id)
+        assert recovery.status == "succeeded"
+        assert all(op.status == "succeeded" for op in row.operations)
+
+
+async def test_failed_teardown_is_followed_by_worker_compose_recovery_before_work(
+    factory, wait, cmd, monkeypatch, tmp_path
+):
+    from awf.control.executor import (
+        monitor_handoff,
+        monitor_resume_restart_escalation,
+        monitor_resume_runtime,
+        runtime_setup_replay,
+    )
     from awf.control.worker import ControlWorker, WorkerConfig
     from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
     from awf.runtime.pr_monitor import SyncBase
@@ -577,11 +833,31 @@ async def test_failed_teardown_is_followed_by_worker_compose_recovery_before_wor
         )
 
     monkeypatch.setattr(monitor_resume_runtime, "inspect_resume_runtime", inspect)
+    backoff = AsyncMock()
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_sleep", backoff)
+    compose = ComposeManager(work_dir=tmp_path, template_path=tmp_path / "unused")
+    compose_command = compose._compose
+    restart_attempts = []
+
+    async def up_fails_once(*args, **kwargs):
+        if kwargs["operation"] == "up" and args[2][-1] == "agent":
+            restart_attempts.append(args[2])
+            if len(restart_attempts) == 1:
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="synthetic restart failure",
+                    reason_code="DOCKER_COMPOSE_UP_FAILED",
+                )
+        return await compose_command(*args, **kwargs)
+
+    monkeypatch.setattr(compose, "_compose", up_fails_once)
     executor = _make_executor(
         cmd,
         factory,
         tmp_path,
-        compose=ComposeManager(work_dir=tmp_path, template_path=tmp_path / "unused"),
+        compose=compose,
         pr_monitor_factory=lambda *_args, **_kwargs: resumed,
     )
     worker = ControlWorker(
@@ -596,8 +872,28 @@ async def test_failed_teardown_is_followed_by_worker_compose_recovery_before_wor
     await worker._safely_resume_claimed_pr_monitor(
         workspace_id, recovery_operation_id=worker._monitor_recovery_operation_ids[workspace_id]
     )
+    assert calls == []
+    assert len(restart_attempts) == 1
+    assert "agent" not in monitor.runtime_containers
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.status == "monitoring_pr"
+        assert row.dormant_at is None and row.monitor_claimed_by is None
+        (restart_failed,) = [
+            event
+            for event in row.events
+            if event.event_type == "workspace.monitor_runtime_restart_failed"
+        ]
+        assert restart_failed.reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+        assert restart_failed.payload["reason_code"] == "DOCKER_COMPOSE_UP_FAILED"
+
+    assert await worker._claim_monitoring_pr(workspace_id)
+    await worker._safely_resume_claimed_pr_monitor(
+        workspace_id, recovery_operation_id=worker._monitor_recovery_operation_ids[workspace_id]
+    )
     assert calls == ["sync_base"]
-    assert any(args[0] == "up" for args in monitor.runtime_commands)
+    assert len(restart_attempts) == 2
+    backoff.assert_awaited_once()
     forge.post_comment.assert_awaited_once()
     async with factory() as session:
         row = await WorkspaceRepository(session).get(workspace_id)
