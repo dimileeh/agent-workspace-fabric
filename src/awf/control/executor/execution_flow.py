@@ -127,9 +127,7 @@ async def execute(
     ``blocked`` resumes may skip the agent and reuse the persisted baseline;
     ``recovering`` resumes re-run after provider cooldown and do not consume grants.
     """
-    # ``blocked`` is the only resume that reuses the persisted baseline
-    # (``skip_measure``) and consumes operator grants after the push CAS; the
-    # ``recovering`` resume re-measures and has no grants to consume.
+    # Only a blocked resume reuses the baseline and consumes grants after the push CAS.
     resume_from_blocked = resume_reason == "blocked"
     begin = await self._begin_execution(
         workspace_id,

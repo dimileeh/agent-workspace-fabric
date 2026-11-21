@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
+from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import ResourceReservation, WorkspaceSecretLease
 from awf.db.repositories import (
@@ -17,6 +18,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.compose_manager import ComposeManager, ComposeOperationError, ComposeTeardownResult
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -35,6 +37,11 @@ from awf.runtime.pr_monitor_runner import runner as runner_module
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import DispositionGateResult
 from tests.integration.runtime._pr_monitor_runner_fixtures import _seed_monitoring_workspace
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
+    _make_executor,
+    _queue_pre_agent_symlink_baseline,
+    _seed_ready,
+)
 
 pytest_plugins = ["tests.integration.runtime._pr_monitor_runner_fixtures"]
 
@@ -48,10 +55,6 @@ async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn, request):
     now = datetime.now(UTC)
     ready = getattr(request, "param", None) == "ready"
     if ready:
-        from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
-            _seed_ready,
-        )
-
         workspace_id = await _seed_ready(factory, create_task_attempt=True, create_worktree=False)
     else:
         workspace_id = await _seed_monitoring_workspace(
@@ -712,10 +715,6 @@ async def test_inline_executor_handoff_preserves_execution_claim(
     factory, wait, cmd, monkeypatch, tmp_path, threshold
 ):
     from awf.runtime.pr_creator import PullRequestResult
-    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
-        _make_executor,
-        _queue_pre_agent_symlink_baseline,
-    )
 
     monitor, workspace_id, forge, teardown = wait
     start = monitor.current_time
@@ -954,21 +953,16 @@ async def test_dormancy_failures_preserve_a_working_wait(factory, wait, monkeypa
 async def test_dormant_monitor_is_excluded_from_scheduling_and_stale_recovery(
     factory, wait, cmd, tmp_path
 ):
-    from awf.control.worker import ControlWorker, WorkerConfig
     from awf.control.worker.claims import (
         _monitor_recovery_terminal_finalize_status,
         _workspace_is_monitoring_pr,
     )
-    from awf.runtime.inspection import RuntimeSnapshot
     from awf.service.metrics_slo import _count_monitor_completions
     from awf.service.workspace_runtime_health import (
         WorkspaceRuntimeFinding,
         classify_runtime_snapshot,
         runtime_workspace_from_workspace,
         runtime_workspaces_from_session,
-    )
-    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
-        _make_executor,
     )
 
     monitor, workspace_id, _, _ = wait
@@ -1083,9 +1077,7 @@ async def test_dormant_monitor_is_excluded_from_scheduling_and_stale_recovery(
 async def test_stale_runtime_fallback_preserves_concurrent_dormancy(
     factory, wait, monkeypatch, suspend_at
 ):
-    from awf.control.worker import ControlWorker, WorkerConfig
     from awf.node.cleanup import WorkspaceCleanupResult
-    from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 
     monitor, workspace_id, _, teardown = wait
     now = monitor.current_time
@@ -1169,11 +1161,6 @@ async def test_worker_finalizes_after_monitor_goes_dormant(
     factory, wait, cmd, monkeypatch, tmp_path, keep_execution_claim
 ):
     from awf.control.executor import monitor_handoff, monitor_resume_runtime, runtime_setup_replay
-    from awf.control.worker import ControlWorker, WorkerConfig
-    from awf.runtime.inspection import RuntimeSnapshot
-    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
-        _make_executor,
-    )
 
     monitor, workspace_id, forge, teardown = wait
     now = monitor.current_time
@@ -1282,12 +1269,7 @@ async def test_failed_teardown_is_followed_by_worker_compose_recovery_before_wor
         monitor_resume_runtime,
         runtime_setup_replay,
     )
-    from awf.control.worker import ControlWorker, WorkerConfig
-    from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
     from awf.runtime.pr_monitor import SyncBase
-    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
-        _make_executor,
-    )
 
     monitor, workspace_id, forge, teardown = wait
     now = monitor.current_time
