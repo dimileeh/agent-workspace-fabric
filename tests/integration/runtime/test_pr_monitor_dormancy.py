@@ -33,18 +33,27 @@ class PollContinuesError(Exception):
 
 
 @pytest.fixture
-async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn):
+async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn, request):
     now = datetime.now(UTC)
-    workspace_id = await _seed_monitoring_workspace(
-        factory, repo_url="https://github.com/example/repo.git"
-    )
+    ready = getattr(request, "param", None) == "ready"
+    if ready:
+        from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
+            _seed_ready,
+        )
+
+        workspace_id = await _seed_ready(factory, create_task_attempt=True, create_worktree=False)
+    else:
+        workspace_id = await _seed_monitoring_workspace(
+            factory, repo_url="https://github.com/example/repo.git"
+        )
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services:\n  agent:\n    image: example\n")
     async with factory.begin() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         workspace.compose_file_path = str(compose_file)
-        workspace.monitor_claimed_by = "monitor"
-        workspace.monitor_claim_expires_at = now + timedelta(hours=1)
+        if not ready:
+            workspace.monitor_claimed_by = "monitor"
+            workspace.monitor_claim_expires_at = now + timedelta(hours=1)
         session.add(
             WorkspaceSecretLease(
                 id="human-wait-lease",
@@ -122,12 +131,12 @@ async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn):
             runner._fetch_status_for_decision = AsyncMock(return_value=self.pr_status)
             return runner
 
-        async def run(self, runner, **owner):
+        async def run(self, runner):
             await runner.run(
                 workspace_id=workspace_id,
                 compose_project=f"awf_{workspace_id}",
                 compose_file=compose_file,
-                **(owner or {"monitor_owner_id": "monitor"}),
+                monitor_owner_id="monitor",
             )
 
     return Monitor(), workspace_id, forge, teardown
@@ -178,6 +187,50 @@ async def test_human_wait_goes_dormant_at_threshold_without_reposting(factory, w
         assert lease.status == "revoked"
         reservation = await session.scalar(select(ResourceReservation))
         assert reservation.released_at is None
+
+
+async def test_expiration_scan_cannot_overwrite_dormancy_revocation(factory, wait, monkeypatch):
+    from awf.db.repositories import SecretLeaseRepository
+    from awf.hosted_node.lifecycle_store import database_quiescent, quiescence_blockers
+
+    monitor, workspace_id, _, _ = wait
+    now = monitor.current_time
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.awaiting_human_since = now - timedelta(minutes=2)
+        lease = await session.get(WorkspaceSecretLease, "human-wait-lease")
+        lease.expires_at = now
+
+    runner = monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError))
+    async with factory.begin() as expiring_session:
+        execute = expiring_session.execute
+
+        async def commit_dormancy_after_selection(statement, *args, **kwargs):
+            assert statement.is_select
+            result = await execute(statement, *args, **kwargs)
+            monkeypatch.setattr(expiring_session, "execute", execute)
+            await monitor.run(runner)
+            return result
+
+        monkeypatch.setattr(expiring_session, "execute", commit_dormancy_after_selection)
+        expired = await SecretLeaseRepository(expiring_session).expire_due_leases(now=now)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        lease = await session.get(WorkspaceSecretLease, "human-wait-lease")
+        assert workspace.dormant_at == now
+        assert lease.status == "revoked"
+        assert lease.revoked_at == now
+        assert expired == []
+        assert [
+            event.reason_code
+            for event in workspace.events
+            if event.event_type == "workspace.secret_lease"
+        ] == ["SECRET_LEASE_REVOKED"]
+        assert await quiescence_blockers(session) == []
+        assert await database_quiescent(session)
+    assert monitor.runtime_containers == set()
 
 
 async def test_restart_settles_interrupted_waits_after_head_changes(factory, wait, monkeypatch):
@@ -277,24 +330,17 @@ async def test_wait_paths_that_cannot_go_dormant(factory, wait, monkeypatch, act
         assert workspace.awaiting_human_since == (start if action == "unconfigured" else None)
 
 
-@pytest.mark.parametrize("owner", ["inline", "hosted", "changed", "expired", "new_episode"])
+@pytest.mark.parametrize("owner", ["hosted", "changed", "expired", "new_episode"])
 async def test_existing_human_episode_and_ownership_on_resume(factory, wait, monkeypatch, owner):
     from awf.runtime.pr_monitor_runner import notify_human_loop
 
     monitor, workspace_id, forge, teardown = wait
     start = monitor.current_time - timedelta(minutes=2)
-    run_kwargs = {"monitor_owner_id": "monitor"}
     async with factory.begin() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         workspace.human_wait_dormant_after_seconds = 30
         workspace.awaiting_human_since = start
-        if owner == "inline":
-            workspace.monitor_claimed_by = workspace.monitor_claim_expires_at = None
-            workspace.execution_claimed_by = "executor"
-            workspace.execution_claim_expires_at = monitor.current_time + timedelta(hours=1)
-            workspace.execution_claim_epoch = 7
-            run_kwargs = {"dormancy_execution_claim": ("executor", 7)}
-        elif owner == "hosted":
+        if owner == "hosted":
             workspace.task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
         elif owner == "changed":
             workspace.monitor_claimed_by = "successor"
@@ -315,18 +361,18 @@ async def test_existing_human_episode_and_ownership_on_resume(factory, wait, mon
     runner = monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError))
     if owner == "new_episode":
         with pytest.raises(PollContinuesError):
-            await monitor.run(runner, **run_kwargs)
+            await monitor.run(runner)
     else:
-        await monitor.run(runner, **run_kwargs)
+        await monitor.run(runner)
     forge.post_comment.assert_awaited_once()
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
-        if owner in ("inline", "hosted"):
+        if owner == "hosted":
             assert workspace.dormant_at == monitor.current_time
             assert workspace.monitor_claimed_by is None
             assert workspace.execution_claimed_by is None
             assert workspace.execution_claim_expires_at is None
-            assert workspace.execution_claim_epoch == (7 if owner == "inline" else 0)
+            assert workspace.execution_claim_epoch == 0
         else:
             assert workspace.dormant_at is None
             assert workspace.monitor_claimed_by == (
@@ -335,7 +381,88 @@ async def test_existing_human_episode_and_ownership_on_resume(factory, wait, mon
             assert any(
                 event.event_type == "workspace.dormancy_failed" for event in workspace.events
             )
-    assert teardown.await_count == (1 if owner == "inline" else 0)
+    teardown.assert_not_awaited()
+
+
+@pytest.mark.parametrize("wait", ["ready"], indirect=True)
+async def test_inline_executor_handoff_preserves_execution_claim(
+    factory, wait, cmd, monkeypatch, tmp_path
+):
+    from awf.runtime.pr_creator import PullRequestResult
+    from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
+        _make_executor,
+        _queue_pre_agent_symlink_baseline,
+    )
+
+    monitor, workspace_id, forge, teardown = wait
+    start = monitor.current_time
+    expires_at = start + timedelta(hours=1)
+    owner = "executor"
+    epoch = 7
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.execution_claim_epoch = epoch
+        workspace.test_commands = []
+    (tmp_path / "work" / "worktrees" / workspace_id).mkdir(parents=True)
+
+    _queue_pre_agent_symlink_baseline(cmd)
+    cmd.queue_result(stdout="adapter ok")
+    cmd.queue_result(stdout="awf/x\n")  # current branch
+    cmd.queue_result()  # git add
+    cmd.queue_result(stdout="a.py\n")  # staged changes
+    cmd.queue_result()  # git commit
+    cmd.queue_result(stdout="1\n")  # commit count
+    cmd.queue_result()  # untracked files
+    cmd.queue_result(stdout="abc123\n")  # validated head
+    cmd.queue_result(stdout="a.py\n")  # committed diff paths
+    cmd.queue_result(stdout="M\0a.py\0")  # committed diff status
+
+    async def advance(_seconds):
+        assert monitor.current_time == start, "monitor slept after the dormancy threshold"
+        monitor.current_time = start + timedelta(seconds=30)
+
+    sleep = AsyncMock(side_effect=advance)
+    runner = monitor.build(30, sleep=sleep)
+    run = runner.run
+
+    async def run_with_live_claim(**kwargs):
+        async with factory() as session:
+            row = await WorkspaceRepository(session).get(workspace_id)
+            persisted_claim = (row.execution_claimed_by, row.execution_claim_epoch)
+            assert persisted_claim == (owner, epoch)
+            assert kwargs.get("dormancy_execution_claim") == persisted_claim
+            assert row.execution_claim_expires_at == expires_at
+        await run(**kwargs)
+
+    run_spy = AsyncMock(side_effect=run_with_live_claim)
+    monkeypatch.setattr(runner, "run", run_spy)
+    pr_creator = AsyncMock()
+    pr_creator.push_and_open.return_value = PullRequestResult(
+        url="https://github.com/x/y/pull/42", branch="awf/x", head_sha="abc123"
+    )
+    executor = _make_executor(
+        cmd,
+        factory,
+        tmp_path,
+        pr_creator=pr_creator,
+        pr_monitor_factory=lambda *_args, **_kwargs: runner,
+    )
+
+    await executor.execute(
+        workspace_id, execution_owner_id=owner, execution_lease_expires_at=expires_at
+    )
+
+    run_spy.assert_awaited_once()
+    sleep.assert_awaited_once()
+    forge.post_comment.assert_awaited_once()
+    teardown.assert_awaited_once()
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.status == "monitoring_pr"
+        assert row.dormant_at == start + timedelta(seconds=30)
+        assert (row.execution_claimed_by, row.execution_claim_expires_at) == (None, None)
+        assert row.execution_claim_epoch == epoch
 
 
 @pytest.mark.parametrize(
