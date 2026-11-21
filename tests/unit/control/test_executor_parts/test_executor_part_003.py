@@ -1066,6 +1066,7 @@ class TestHappyPathPart002:
         [
             "satisfied",
             "exhausted",
+            "exhausted-with-nul",
             "cancelled-at-compare",
             "reconciled-duplicate",
             "reconciled-transient",
@@ -1101,12 +1102,13 @@ class TestHappyPathPart002:
             r"- **documentation**: Document the behavior ### Note \[redacted\]"
         )
         token = "ghp_" + "a" * 36
+        separator = "\0" if outcome == "exhausted-with-nul" else " "
         gaps = [
-            {"kind": "test_work", "detail": "Add a regression test"},
+            {"kind": "test_work", "detail": f"Add a regression{separator}test"},
             {"kind": "documentation", "detail": f"Document the behavior\n### Note {token}"},
         ]
         expected_gaps = [
-            gaps[0],
+            {"kind": "test_work", "detail": "Add a regression test"},
             {"kind": "documentation", "detail": "Document the behavior\n### Note [redacted]"},
         ]
         final_report = json.dumps(
@@ -1120,8 +1122,10 @@ class TestHappyPathPart002:
         report_path = worktree / "docs" / "awf-plans" / f"{ws_id}.conformance.json"
         original_run = fake.run
 
-        async def run_and_write_final_report(*args: Any, **kwargs: Any) -> Any:
-            result = await original_run(*args, **kwargs)
+        async def run_and_write_final_report(args: list[str], **kwargs: Any) -> Any:
+            if args[:3] == ["gh", "pr", "create"] and "\0" in args[args.index("--body") + 1]:
+                raise ValueError("embedded null byte")
+            result = await original_run(args, **kwargs)
             if result.stdout == final_report:
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 report_path.write_text(final_report, encoding="utf-8")
@@ -1334,7 +1338,7 @@ class TestHappyPathPart002:
                 workspace_artifact_dir(executor._config.compose_projects_root.parent, ws_id)
                 / DEPOSITED_CONFORMANCE_NAME
             )
-            assert json.loads(artifact.read_text(encoding="utf-8")) == json.loads(final_report)
+            assert artifact.read_text(encoding="utf-8") == final_report
         else:
             assert events == []
             assert records == ()

@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -37,6 +38,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import pr_open_step as _pr_open_step
+from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -50,6 +52,10 @@ from awf.node.compose_manager import ComposeManager
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+)
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     ValidationCommandResult,
@@ -278,12 +284,18 @@ class _LifecycleForgeClient:
 class _ForgeRecordingPrCreator:
     """Records the forge client + repo URL the executor resolves and passes in."""
 
-    def __init__(self, *, new_pr_url: str = "https://github.com/x/y/pull/55") -> None:
+    def __init__(
+        self,
+        *,
+        new_pr_url: str = "https://github.com/x/y/pull/55",
+        pushed_head_sha: str | None = "b" * 40,
+    ) -> None:
         self.forge_client: object | None = None
         self.repo_url: str | None = None
         self.existing_pr_url: str | None = None
         self.remote_branch_name: str | None = None
         self.new_pr_url = new_pr_url
+        self.pushed_head_sha = pushed_head_sha
         self.calls: list[dict[str, object]] = []
 
     async def push_and_open(
@@ -314,7 +326,7 @@ class _ForgeRecordingPrCreator:
         return PullRequestResult(
             url=url,
             branch=branch_name,
-            head_sha="b" * 40,
+            head_sha=self.pushed_head_sha,
         )
 
 
@@ -1229,7 +1241,9 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("disposition", ["reuse", "comment_error", "replace", "tip_mismatch"])
+    @pytest.mark.parametrize(
+        "disposition", ["reuse", "comment_error", "replace", "tip_mismatch", "no_pushed_sha"]
+    )
     async def test_publish_carried_gaps_on_reused_or_replacement_pr(
         self,
         disposition: str,
@@ -1260,8 +1274,13 @@ class TestPullRequestUnexpectedErrorPart002:
 
         monkeypatch.setattr(forge, "post_comment", post_comment, raising=False)
         monkeypatch.setattr(_pr_open_step, "make_forge_client", lambda *_args: forge)
-        pr_creator = _ForgeRecordingPrCreator(new_pr_url="https://github.com/x/y/pull/99")
+        pr_creator = _ForgeRecordingPrCreator(
+            new_pr_url="https://github.com/x/y/pull/99",
+            pushed_head_sha=None if disposition == "no_pushed_sha" else "b" * 40,
+        )
         executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        profile = WorkspaceProfile(name="test")
+        carried_gaps = [{"kind": "test_work", "detail": "Add a regression test"}]
         ws_id = await _seed_ready(factory)
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
@@ -1276,11 +1295,11 @@ class TestPullRequestUnexpectedErrorPart002:
             pr = await _pr_open_step.push_and_open_pr(
                 executor,
                 ws=ws,
-                profile=WorkspaceProfile(name="test"),
+                profile=profile,
                 defaults=None,
                 workspace_id=ws_id,
                 worktree_path=_test_worktrees_root(factory) / ws_id,
-                carried_gaps=[{"kind": "test_work", "detail": "Add a regression test"}],
+                carried_gaps=carried_gaps,
             )
 
         section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
@@ -1291,6 +1310,43 @@ class TestPullRequestUnexpectedErrorPart002:
             assert pr.url == "https://github.com/x/y/pull/99"
             assert str(pr_creator.calls[-1]["body"]).endswith(section)
             assert comments == []
+        elif disposition == "no_pushed_sha":
+            assert pr.url == "https://github.com/x/y/pull/55"
+            assert forge.snapshot_calls == 2
+            assert comments == []
+            monitor = SimpleNamespace(run=AsyncMock())
+            monkeypatch.setattr(executor, "_pr_monitor", monitor)
+            await persist_pr_and_handoff(
+                executor,
+                workspace_id=ws_id,
+                pr=pr,
+                adapter=None,
+                profile=profile,
+                defaults=None,
+                successful_validation_run_id=None,
+                compose_project=ws_id,
+                compose_file=tmp_path / "compose.yml",
+                carried_gaps=carried_gaps,
+            )
+            monitor.run.assert_awaited_once()
+            async with factory() as session:
+                saved = await WorkspaceRepository(session).get(ws_id)
+                assert saved is not None
+                assert saved.status == WorkspaceStatus.monitoring_pr.value
+                assert saved.pr_number == 55
+                assert saved.pr_url == pr.url
+                records = load_applied_operator_directives(
+                    MonitorState(threads_addressed_ids=saved.monitor_threads_addressed or {})
+                )
+                assert len(records) == 1
+                assert records[0].directive == "test_work: Add a regression test"
+                event = next(
+                    e for e in saved.events if e.event_type == "workspace.audit.pr_created"
+                )
+                assert event.payload["outcome"] == "reused"
+                assert event.payload["evidence"]["conformance_comment_skipped"] == (
+                    "pushed_head_sha_unavailable"
+                )
         else:
             assert pr.url == "https://github.com/x/y/pull/55"
             assert comments == [section]

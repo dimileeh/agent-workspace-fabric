@@ -359,6 +359,15 @@ async def _publish_pr_conformance_comment(
                 return pr
         elif pr_number is None:
             return pr
+        elif not pr.head_sha:
+            # Reuse can keep an open PR when the local pushed tip is unavailable.
+            return replace(
+                pr,
+                open_metadata={
+                    **metadata,
+                    "conformance_comment_skipped": "pushed_head_sha_unavailable",
+                },
+            )
         else:
             repo = RepoRef.from_url(repo_url)
         await forge_client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
@@ -397,11 +406,11 @@ async def push_and_open_pr(
     a replacement PR is opened for the pushed tip. When the PR is still open but
     its head ref was renamed after admission, the persisted push target is
     updated to the live ``head_ref`` before reuse. After a reuse push, the live
-    snapshot is fetched again: an open PR is kept only when its head OID equals
-    the pushed tip or is a fast-forward descendant of it (briefly retried for
-    forge propagation; otherwise fail closed); if the PR merged concurrently,
-    reuse is kept only when the merged PR's head OID equals or descends from the
-    pushed tip; otherwise identity is cleared and a replacement PR is opened. If
+    snapshot is fetched again. An open PR is kept when the local pushed tip is
+    unavailable or its head contains that tip (briefly retried for forge
+    propagation). Publishing a fallback comment requires verified containment.
+    If the PR merged concurrently, reuse requires the merged PR's head to
+    contain the pushed tip. Otherwise a replacement PR is opened for that tip. If
     ``pr_number`` cannot be resolved, or snapshot lookup fails (pre- or
     post-push), reuse fails closed (identity kept, workspace marked failed) so a
     still-open PR is not unlinked or duplicated.

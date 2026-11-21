@@ -1270,13 +1270,14 @@ async def _run_agent_task_with_optional_planning(
             if candidate_paths and not changed_paths_are_only_internal_plan_artifacts(
                 candidate_paths
             ):
+                # The forge CLI requires NUL-free text. Keep the original report intact.
                 return _PlanningCarriedGaps(
                     gaps=[
                         {
                             "kind": gap.kind.value,
                             "detail": redact_audit_text(
                                 gap.detail, limit=MAX_CONFORMANCE_TEXT_CHARS
-                            )[:MAX_CONFORMANCE_TEXT_CHARS],
+                            ).replace("\0", " ")[:MAX_CONFORMANCE_TEXT_CHARS],
                         }
                         for gap in last_report.gaps[:MAX_CONFORMANCE_GAPS]
                     ],
