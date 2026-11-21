@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.control.executor import runtime_setup_replay
+from awf.db.enums import FailureReason, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     AppliedOperatorDirective,
     append_applied_operator_directive,
     load_applied_operator_directives,
+)
+from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_006 import (
+    _seed_monitoring_pr,
 )
 from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_part_002 import (
     _all_adapter_args,
@@ -30,8 +38,153 @@ from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monit
     factory,
     fake,
 )
+from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import _service
 
 _IMPORTED_FIXTURES = (factory, fake)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("scenario", "forge_calls", "failure"),
+    [
+        ("unpublished", 3, None),
+        ("already_posted", 2, None),
+        ("settled", 0, None),
+        ("post_failed", 3, "Comment transport failed"),
+        ("missing_gaps", 0, "stored gap details are missing"),
+        ("superseded", 2, None),
+    ],
+)
+async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
+    factory: async_sessionmaker[AsyncSession],
+    fake: FakeCommandRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    forge_calls: int,
+    failure: str | None,
+) -> None:
+    notice = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+    pr_url = "https://github.com/x/y/pull/42"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n")
+    ws_id = await _seed_monitoring_pr(factory, pr_url=pr_url, compose_file_path=str(compose_file))
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        ws.monitor_last_commit_sha = "d" * 40
+        ws.block_planning_conformance_handoff = {
+            "carried_gaps": (
+                []
+                if scenario == "missing_gaps"
+                else [{"kind": "test_work", "detail": "Add a regression test"}]
+            )
+        }
+        await repo.add_audit_event(
+            ws,
+            event_type="workspace.audit.pr_created",
+            actor="executor",
+            action="pr_create",
+            outcome="reused",
+            reason_code="PR_UPDATED",
+            pr_url=pr_url,
+            pr_number=42,
+            evidence={"conformance_comment_pending": scenario != "settled"},
+        )
+        await repo.transition(
+            ws, to=WorkspaceStatus.failed, reason_code="PR_CONFORMANCE_COMMENT_FAILED"
+        )
+        ws.failure_reason = FailureReason.infrastructure_failure.value
+        ws.failure_message = "Initial publishing attempt failed"
+        await session.commit()
+
+        service, _, _ = _service(session)
+        await service.remonitor_workspace(ws_id, reason=None)
+        ws.monitor_claimed_by = "original-worker"
+        await session.commit()
+
+    nodes = [{"body": notice}] if scenario in {"already_posted", "superseded"} else []
+    comments = {"nodes": nodes, "pageInfo": {"hasNextPage": False}}
+    fake.respond_when(
+        lambda args: args[:3] == ["gh", "api", "graphql"],
+        stdout=json.dumps({"data": {"repository": {"pullRequest": {"comments": comments}}}}),
+    )
+    fake.respond_when(
+        lambda args: args[:3] == ["gh", "pr", "comment"],
+        returncode=1 if scenario == "post_failed" else 0,
+        stderr="Comment transport failed" if scenario == "post_failed" else "",
+    )
+    if scenario == "superseded":
+        run_command = fake.run
+
+        async def take_over_after_comments(args: list[str], **kwargs: Any) -> CommandResult:
+            result = await run_command(args, **kwargs)
+            if args[:3] == ["gh", "api", "graphql"]:
+                async with factory() as session:
+                    ws = await WorkspaceRepository(session).get(ws_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "replacement-worker"
+                    await session.commit()
+            return result
+
+        monkeypatch.setattr(fake, "run", take_over_after_comments)
+
+    def actual_forge_calls() -> list[list[str]]:
+        return [call.args for call in fake.calls if call.args[0] == "gh"]
+
+    async def assert_notice_checked(**_kwargs: Any) -> None:
+        assert len(actual_forge_calls()) == forge_calls
+
+    monitor_run = AsyncMock(side_effect=assert_notice_checked)
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        pr_monitor_factory=lambda *_args, **_kwargs: SimpleNamespace(run=monitor_run),
+    )
+    monkeypatch.setattr(
+        runtime_setup_replay, "capture_agent_container_identity", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        executor, "_restart_compose_runtime_for_monitor_resume", AsyncMock(return_value=True)
+    )
+    await executor.resume_pr_monitor(ws_id)
+
+    if failure or scenario == "superseded":
+        monitor_run.assert_not_awaited()
+    else:
+        monitor_run.assert_awaited_once()
+    if scenario == "unpublished":
+        await executor.resume_pr_monitor(ws_id)
+        assert monitor_run.await_count == 2
+    calls = actual_forge_calls()
+    assert len(calls) == forge_calls
+    if scenario in {"unpublished", "post_failed"}:
+        assert calls[-1][:4] == ["gh", "pr", "comment", "42"]
+        assert calls[-1][-1] == notice
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.pr_url == pr_url
+        publications = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.audit.pr_conformance_comment"
+        ]
+        if failure:
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert ws.failure_message and failure in ws.failure_message
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+        else:
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+        if scenario in {"unpublished", "already_posted"}:
+            (publication,) = publications
+            assert publication.reason_code == "PR_CONFORMANCE_COMMENT_PUBLISHED"
+            assert publication.payload and publication.payload["outcome"] == "succeeded"
+        else:
+            assert publications == []
 
 
 @pytest.mark.unit

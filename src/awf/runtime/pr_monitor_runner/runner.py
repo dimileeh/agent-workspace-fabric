@@ -519,6 +519,8 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 )
                 action = decide(status, state, self._config)
                 sleeps_before_action = completed_positive_sleeps
+                state.waited_for_merge_queue = False
+                state.waited_for_human = False
                 try:
                     outcome = await self._execute(
                         action=action,
@@ -638,7 +640,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 if outcome:
                     return
                 if action_slept and (
-                    type(action) in _EXEMPT_WAIT_ACTIONS or state.waited_for_merge_queue
+                    type(action) in _EXEMPT_WAIT_ACTIONS
+                    or state.waited_for_merge_queue
+                    or state.waited_for_human
                 ):
                     remaining_iterations += 1
 
