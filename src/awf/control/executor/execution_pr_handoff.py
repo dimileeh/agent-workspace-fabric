@@ -33,6 +33,7 @@ async def persist_pr_and_handoff(
     successful_validation_run_id: str | None,
     compose_project: str,
     compose_file: Path,
+    dormancy_execution_claim: tuple[str, int] | None = None,
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
     async with self._session_factory() as session:
@@ -147,10 +148,16 @@ async def persist_pr_and_handoff(
             action="run_pr_monitor",
         ):
             return
+        claim_kwargs = (
+            {"dormancy_execution_claim": dormancy_execution_claim}
+            if dormancy_execution_claim is not None
+            else {}
+        )
         await monitor.run(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
+            **claim_kwargs,
             **work_slot_kwargs(work_slot_for(self, workspace_id)),
         )
         return

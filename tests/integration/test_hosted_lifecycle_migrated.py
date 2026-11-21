@@ -25,7 +25,7 @@ async def engine(monkeypatch):
 
         def existing_barrier(connection):
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "9e3b7c41d2a6"
+                connection.scalar(text("SELECT version_num FROM alembic_version")) == "fa2c80d79e31"
             )
             assert connection.scalar(
                 text(
@@ -58,3 +58,48 @@ async def test_migrated_lifecycle_contract(
         await parity.test_hosted_adopt_new_association_and_attach_exact_only(
             authority, create_client, create_application
         )
+
+
+async def test_dormancy_migration_keeps_existing_monitor_and_defaults_to_unset():
+    async with postgres_empty_test_url() as url:
+        result = await asyncio.to_thread(_migrate, url, "upgrade", "9e3b7c41d2a6")
+        assert result.returncode == 0, result.stderr.decode()[-2000:]
+        database = make_engine(url)
+        try:
+            async with database.begin() as connection:
+                await connection.execute(
+                    text("""
+                    INSERT INTO workspaces (
+                        id, status, version, repo_url, branch_base, task_title, task_prompt,
+                        agent, test_commands, requires_database, created_at, updated_at
+                    ) VALUES (
+                        'ws_existing', 'monitoring_pr', 7, 'https://example.test/repo.git',
+                        'main', 'Existing monitor', 'Wait', 'codex', '[]'::json, false, now(), now()
+                    )
+                """)
+                )
+            result = await asyncio.to_thread(_migrate, url, "upgrade", "head")
+            assert result.returncode == 0, result.stderr.decode()[-2000:]
+            async with database.connect() as connection:
+                existing = await connection.execute(
+                    text("""
+                    SELECT status, version, human_wait_dormant_after_seconds, dormant_at
+                    FROM workspaces WHERE id = 'ws_existing'
+                """)
+                )
+                assert existing.one() == ("monitoring_pr", 7, None, None)
+                columns = await connection.execute(
+                    text("""
+                    SELECT column_name, data_type, is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'workspaces'
+                    AND column_name IN ('human_wait_dormant_after_seconds', 'dormant_at')
+                    ORDER BY column_name
+                """)
+                )
+                assert columns.all() == [
+                    ("dormant_at", "timestamp with time zone", "YES", None),
+                    ("human_wait_dormant_after_seconds", "double precision", "YES", None),
+                ]
+        finally:
+            await database.dispose()

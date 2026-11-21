@@ -83,6 +83,7 @@ class PullRequestMonitorAdoptionRequest(CursorAutoModeSelectionMixin):
         ),
     )
     initial_review_grace_period_seconds: float | None = Field(default=None, ge=0, le=86400)
+    human_wait_dormant_after_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
     task_prompt: Annotated[str | None, Field(default=None, min_length=1, max_length=16384)] = None
     task_tag: Annotated[

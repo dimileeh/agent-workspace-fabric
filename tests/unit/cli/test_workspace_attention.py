@@ -2,11 +2,52 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import httpx
 import pytest
+from rich.text import Text
+from typer.testing import CliRunner
 
 from awf.cli import workspace_commands
 from awf.cli.common import OutputFormat
+from awf.cli.main import app
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        [
+            "create",
+            "--repo",
+            "git@github.com:example/repo.git",
+            "--title",
+            "Task",
+            "--prompt",
+            "Run",
+        ],
+        ["adopt-pr", "--repo", "example/repo", "--pr", "42"],
+    ],
+    ids=["create", "adopt-pr"],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_invalid_dormancy_threshold_is_rejected_before_request(
+    monkeypatch: pytest.MonkeyPatch, command: list[str], value: str
+) -> None:
+    request = Mock()
+    monkeypatch.setattr(workspace_commands, "_call", request)
+
+    result = CliRunner().invoke(
+        app, ["workspace", *command, f"--human-wait-dormant-after-seconds={value}"]
+    )
+
+    assert result.exit_code == 2
+    error = Text.from_ansi(result.stderr).plain
+    assert "--human-wait-dormant-after-seconds" in error
+    assert "must be a finite" in error
+    assert "number greater than zero" in error
+    request.assert_not_called()
 
 
 @pytest.mark.unit
@@ -66,6 +107,7 @@ def test_workspace_show_pretty_emits_attention_line(
         "attention_required": True,
         "awaiting_human_reason": "blocking review requires a human",
         "awaiting_human_since": "2026-06-20T09:00:00+00:00",
+        "dormant_at": "2026-06-20T09:02:00+00:00",
     }
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -82,6 +124,7 @@ def test_workspace_show_pretty_emits_attention_line(
 
     out = capsys.readouterr().out
     assert "⚠ awaiting human: blocking review requires a human" in out
+    assert "Dormant since 2026-06-20T09:02:00+00:00" in out
 
 
 @pytest.mark.unit

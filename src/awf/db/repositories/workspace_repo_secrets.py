@@ -6,9 +6,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import (
-    select,
-)
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.ids import (
@@ -188,22 +186,29 @@ class SecretLeaseRepository:
         return leases
 
     async def expire_due_leases(self, *, now: datetime) -> list[WorkspaceSecretLease]:
+        due_and_active = (
+            WorkspaceSecretLease.status.in_(_SECRET_LEASE_ACTIVE_STATUSES),
+            WorkspaceSecretLease.expires_at <= now,
+        )
         stmt = (
-            select(WorkspaceSecretLease)
-            .where(
-                WorkspaceSecretLease.status.in_(_SECRET_LEASE_ACTIVE_STATUSES),
-                WorkspaceSecretLease.expires_at.is_not(None),
-                WorkspaceSecretLease.expires_at <= now,
-            )
+            select(WorkspaceSecretLease.id)
+            .where(*due_and_active)
             .order_by(WorkspaceSecretLease.workspace_id, WorkspaceSecretLease.issued_at)
         )
-        leases = list((await self._session.execute(stmt)).scalars())
-        if not leases:
+        lease_ids = list((await self._session.execute(stmt)).scalars())
+        if not lease_ids:
             return []
+        # Revocation or renewal may commit after the scan. Audit only rows the write changes.
+        expire = (
+            update(WorkspaceSecretLease)
+            .where(WorkspaceSecretLease.id.in_(lease_ids), *due_and_active)
+            .values(status=SECRET_LEASE_STATUS_EXPIRED)
+            .returning(WorkspaceSecretLease)
+            .execution_options(populate_existing=True)
+        )
+        expired = {lease.id: lease for lease in (await self._session.scalars(expire))}
+        leases = [expired[lease_id] for lease_id in lease_ids if lease_id in expired]
         workspaces = await self._workspaces_by_id({lease.workspace_id for lease in leases})
-        for lease in leases:
-            lease.status = SECRET_LEASE_STATUS_EXPIRED
-        await self._session.flush()
         for workspace_id, workspace_leases in _group_leases_by_workspace(leases).items():
             workspace = workspaces.get(workspace_id)
             if workspace is None:

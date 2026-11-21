@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import inspect
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import PRStatus
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
     from awf.service.merge_queue import MergeQueueBlocker
 
 _log = get_logger(__name__)
@@ -298,7 +299,8 @@ async def _handle_merge_gate_blocker(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
     skip_initial_review_grace: bool = False,
-) -> bool | None:
+    allow_human_wait_dormancy: bool = False,
+) -> bool | DormancyExit | None:
     from awf.runtime.pr_monitor import Abort, AbortReason, NotifyHuman
     from awf.runtime.pr_monitor_operations import (
         RETRYABLE_MONITOR_OPERATION_STATUSES as _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES,
@@ -326,19 +328,22 @@ async def _handle_merge_gate_blocker(
         and not ws.auto_merge
         and not _gate_requires_validation_recovery(gate)
     ):
-        return await runner._execute(
-            action=Abort(AbortReason.stale),
-            workspace_id=workspace_id,
-            repo_url=repo_url,
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            monitor_log=monitor_log,
+        return cast(
+            bool,
+            await runner._execute(
+                action=Abort(AbortReason.stale),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            ),
         )
 
     if stale_reason is not None and req_action == "rebase":
@@ -375,6 +380,7 @@ async def _handle_merge_gate_blocker(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 monitor_log=monitor_log,
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
 
     grace_wait_seconds = (
@@ -478,11 +484,16 @@ async def _handle_merge_gate_blocker(
         recovery_reason_code = _pr_monitor_recovery_reason_code(stale_reason)
         async with runner._deps.session_factory() as s:
             from awf.db.repositories import OperationRepository, WorkspaceRepository
+            from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
 
             workspace_repo = WorkspaceRepository(s)
-            _ws = await workspace_repo.get(workspace_id)
+            # Suspension leaves the status at monitoring_pr. Hold its row lock
+            # through recovery dispatch so the dormancy check stays current.
+            _ws = await workspace_repo.get_for_update(workspace_id)
             if _ws is None:  # pragma: no cover - defensive invariant
                 return True
+            if _ws.dormant_at is not None:
+                return DormancyExit.SUPERSEDED
             if _is_callback_terminal_workspace_status(_ws.status):
                 await workspace_repo.record_ignored_stale_callback(
                     _ws,
@@ -702,6 +713,7 @@ async def _handle_merge_gate_blocker(
             compose_project=compose_project,
             compose_file=compose_file,
             monitor_log=monitor_log,
+            allow_human_wait_dormancy=allow_human_wait_dormancy,
         )
 
     return None

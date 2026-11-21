@@ -1110,7 +1110,11 @@ async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
     try:
         async with self._session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
-            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+            return (
+                ws is not None
+                and ws.status == WorkspaceStatus.monitoring_pr.value
+                and ws.dormant_at is None
+            )
     except Exception:
         _log.exception(
             "worker.monitor_recovery_retry_eligibility_lookup_failed",
@@ -1162,6 +1166,8 @@ async def _monitor_recovery_terminal_finalize_status(
                     workspace_id,
                 )
                 return OperationStatus.failed, error_code, error_message
+            if ws.dormant_at is not None:
+                return OperationStatus.succeeded, None, None
             if ws.status == WorkspaceStatus.monitoring_pr.value:
                 raise _MonitorRecoveryStillMonitoringError()
             return (

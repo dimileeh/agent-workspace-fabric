@@ -394,18 +394,33 @@ async def inspect_retained_work(
         # The lifecycle mutex already serializes all ordinary guarded writes.
         # Historical events and terminal rows are evidence, not recovery work.
         # Disable default selectin relationships as well as explicit hydration.
-        actionable = or_(
-            Workspace.status.not_in(_TERMINAL),
+        dormant = and_(Workspace.status == "monitoring_pr", Workspace.dormant_at.is_not(None))
+        independent_activity = or_(
             Workspace.execution_claimed_by.is_not(None),
             Workspace.monitor_claimed_by.is_not(None),
             attention,
-            and_(
-                Workspace.compose_project_name.is_not(None),
-                ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
-            ),
             *(
                 select(model.id).where(model.workspace_id == Workspace.id, active).exists()
                 for model, active in families
+                if model not in (TaskAttempt, ResourceReservation, MergeCandidate)
+            ),
+        )
+        actionable = or_(
+            independent_activity,
+            and_(
+                ~dormant,
+                or_(
+                    Workspace.status.not_in(_TERMINAL),
+                    and_(
+                        Workspace.compose_project_name.is_not(None),
+                        ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
+                    ),
+                    *(
+                        select(model.id).where(model.workspace_id == Workspace.id, active).exists()
+                        for model, active in families
+                        if model in (TaskAttempt, ResourceReservation, MergeCandidate)
+                    ),
+                ),
             ),
         )
         attempt = TaskAttempt.workspace_id == Workspace.id
@@ -498,6 +513,8 @@ async def inspect_retained_work(
                 has_merge,
                 bad_merge,
             ) = row
+            if workspace.status == "monitoring_pr" and workspace.dormant_at is not None:
+                _unresolved()
             prior = (workspace.task_policy or {}).get(RECOVERY_POLICY_KEY)
             if restore_attention(workspace):
                 assert isinstance(prior, dict)

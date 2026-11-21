@@ -406,10 +406,12 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     settings = _settings_with_host_home(tmp_path)
+    request = _request_with_preflight_override()
+    request.task.human_wait_dormant_after_seconds = 42.25
     async with factory() as session:
         first = await create_workspace_row(
             session,
-            _request_with_preflight_override(),
+            request,
             settings=settings,
             provider_environ={},
         )
@@ -428,6 +430,8 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
         retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
 
     assert retried is not None
+    assert retried.human_wait_dormant_after_seconds == 42.25
+    assert retried.dormant_at is None
     preflight = retried.task_policy["provider_readiness_preflight"]
     assert preflight["source_workspace_id"] == first.id
     assert preflight["provider"] == "codex"

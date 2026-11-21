@@ -384,6 +384,8 @@ class TestWorkspaceCreate:
                     "--no-auto-merge",
                     "--initial-review-grace-period-seconds",
                     "0",
+                    "--human-wait-dormant-after-seconds",
+                    "42.25",
                 ],
             )
 
@@ -392,6 +394,7 @@ class TestWorkspaceCreate:
         body = mock.call_args.kwargs["json"]
         assert body["task"]["auto_merge"] is False
         assert body["task"]["initial_review_grace_period_seconds"] == 0
+        assert body["task"]["human_wait_dormant_after_seconds"] == 42.25
 
     @pytest.mark.unit
     def test_explicit_auto_merge_flag_sends_true(self) -> None:

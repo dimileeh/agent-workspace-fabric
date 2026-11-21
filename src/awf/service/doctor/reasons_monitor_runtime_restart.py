@@ -19,6 +19,20 @@ def get_monitor_runtime_restart_reasons(
 ) -> dict[str, _ReasonText]:
     """Return the monitor-resume runtime restart catalog reason text entries."""
     return {
+        "HUMAN_WAIT_DORMANT": reason_text_cls(
+            "The PR monitor suspended after the configured period waiting for a human.",
+            "Read the current awaiting-human reason on the workspace or its pull request.",
+            "The monitor removed its runtime, preserved its volumes and released its claim.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANT"),
+        ),
+        "HUMAN_WAIT_DORMANCY_FAILED": reason_text_cls(
+            "The PR monitor could not suspend the human wait.",
+            "Read the failure stage and reason in the workspace event or monitor log.",
+            "The workspace remains eligible for ordinary monitoring and runtime recovery.",
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANCY_FAILED"),
+        ),
         "MONITOR_RUNTIME_RESTART_EXHAUSTED": reason_text_cls(
             (
                 "AWF could not bring the workspace runtime back after several consecutive "

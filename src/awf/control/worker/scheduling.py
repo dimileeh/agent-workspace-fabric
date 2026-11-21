@@ -150,7 +150,7 @@ def _claim_recheck_conditions(
     if status in _ACTIVE_EXECUTION_STATUSES:
         return (_stale_execution_claim_filter(claim_cutoff),)
     if status == WorkspaceStatus.monitoring_pr:
-        return (_stale_monitor_claim_filter(claim_cutoff),)
+        return (Workspace.dormant_at.is_(None), _stale_monitor_claim_filter(claim_cutoff))
     return ()
 
 
