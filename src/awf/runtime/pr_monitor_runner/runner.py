@@ -637,7 +637,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 await self._persist_state(workspace_id, state)
                 if outcome:
                     return
-                if action_slept and type(action) in _EXEMPT_WAIT_ACTIONS:
+                if action_slept and (
+                    type(action) in _EXEMPT_WAIT_ACTIONS or state.waited_for_merge_queue
+                ):
                     remaining_iterations += 1
 
             # Safety net — max_outer_iterations hit without a terminal action.

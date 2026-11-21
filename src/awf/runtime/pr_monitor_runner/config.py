@@ -19,8 +19,8 @@ class MonitorRunnerConfig:
     """Operational knobs for the runner (separate from MonitorConfig so
     we can tune timing without touching the decision logic)."""
 
-    # Safety net against a decision-loop bug. Completed passive waits
-    # (human attention, pending checks, transient CI backoff) are exempt.
+    # Safety net against a decision-loop bug. Completed passive waits with
+    # positive delays (human attention, checks, CI backoff, merge queue) are exempt.
     max_outer_iterations: int = 10_000
     # Max fix_cycle re-polls inside a single AddressComments action.
     max_fix_cycle_passes: int = 5
