@@ -9,6 +9,7 @@ functions so the ``WorkspaceRepository`` class stays a thin delegating shell.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,7 +104,7 @@ async def set_workspace_attention(
     *,
     reason: str,
     now: datetime,
-) -> None:
+) -> datetime | None:
     """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation).
 
     Episode start (``awaiting_human_since``) flips only via a guarded UPDATE
@@ -116,6 +117,8 @@ async def set_workspace_attention(
     abort the write). This is an out-of-band metadata flag on a still-polling
     ``monitoring_pr`` row — it deliberately does NOT bump ``version`` (it is
     not a state transition).
+
+    Return the episode start when entering or refreshing it successfully.
 
     Emits ``workspace.attention_required`` exactly once when the guarded enter
     UPDATE flips the row. Reason-only refreshes (and lost enter races) do not emit.
@@ -142,7 +145,7 @@ async def set_workspace_attention(
         )
     ).one_or_none()
     if row is None:
-        return
+        return None
     # synchronize_session=False keeps any identity-mapped instance from being
     # expired (async lazy-load would otherwise raise MissingGreenlet when
     # building the event payload).
@@ -150,13 +153,14 @@ async def set_workspace_attention(
     clamped_reason = reason[:_AWAITING_HUMAN_REASON_MAX_LENGTH]
     # Episode start known before enter; used to fence a later reason-only refresh
     # to the same attention episode (not a replacement opened after a clear).
-    observed_since = row[1]
+    observed_since = cast(datetime | None, row[1])
     enter_result = await session.execute(
         update(Workspace)
         .where(
             Workspace.id == workspace_id,
             Workspace.awaiting_human_since.is_(None),
             Workspace.status == WorkspaceStatus.monitoring_pr.value,
+            Workspace.dormant_at.is_(None),
         )
         .values(
             awaiting_human_since=now,
@@ -174,7 +178,7 @@ async def set_workspace_attention(
         if workspace is None:
             workspace = await repo.get(workspace_id)
             if workspace is None:
-                return
+                return None
         workspace.awaiting_human_since = now
         workspace.awaiting_human_reason = clamped_reason
         await repo.add_event(
@@ -185,7 +189,7 @@ async def set_workspace_attention(
                 pr_url=pr_url,
             ),
         )
-        return
+        return now
 
     # Already in an episode (or lost the enter race): refresh reason only so
     # episode start stays owned by the winning writer. Fence to the observed
@@ -201,8 +205,8 @@ async def set_workspace_attention(
             )
         ).one_or_none()
         if since_row is None:
-            return
-        observed_since = since_row[0]
+            return None
+        observed_since = cast(datetime | None, since_row[0])
         if observed_since is None:
             _sync_cached_attention_columns(
                 session,
@@ -210,13 +214,14 @@ async def set_workspace_attention(
                 awaiting_human_since=None,
                 awaiting_human_reason=None,
             )
-            return
+            return None
 
     refresh_result = await session.execute(
         update(Workspace)
         .where(
             Workspace.id == workspace_id,
             Workspace.awaiting_human_since == observed_since,
+            Workspace.dormant_at.is_(None),
         )
         .values(awaiting_human_reason=clamped_reason)
         .execution_options(synchronize_session=False)
@@ -230,13 +235,16 @@ async def set_workspace_attention(
             awaiting_human_since=observed_since,
             awaiting_human_reason=clamped_reason,
         )
-    else:
-        # Episode cleared or replaced: realign from DB (do not assume cleared)
-        # without loading the Workspace selectin graph.
-        await _refresh_cached_attention_columns(session, workspace_id)
+        return observed_since
+    # Episode cleared or replaced: realign from DB (do not assume cleared)
+    # without loading the Workspace selectin graph.
+    await _refresh_cached_attention_columns(session, workspace_id)
+    return None
 
 
-async def clear_workspace_attention(session: AsyncSession, workspace_id: str) -> None:
+async def clear_workspace_attention(
+    session: AsyncSession, workspace_id: str, *, preserve_dormant: bool = False
+) -> None:
     """Clear the awaiting-human attention flag once the monitor resumes.
 
     Fenced to the snapshotted ``awaiting_human_since`` episode start so a stale
@@ -296,6 +304,8 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
         Workspace.id == workspace_id,
         Workspace.awaiting_human_since == observed_since,
     )
+    if preserve_dormant:
+        prior_stmt = prior_stmt.where(Workspace.dormant_at.is_(None))
     if repo.dialect_name == "postgresql":
         prior_stmt = prior_stmt.with_for_update()
     prior = prior_stmt.cte("attention_clear_prior")

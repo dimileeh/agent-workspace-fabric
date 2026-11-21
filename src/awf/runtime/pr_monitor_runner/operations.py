@@ -9,7 +9,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from awf.db.enums import (
     OperationStatus,
@@ -27,7 +27,32 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
     record_monitor_state_operation,
 )
+from awf.runtime.pr_monitor_runner.dormancy import _owns_wait
 from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from awf.db.models import Workspace
+
+
+class _MonitorOperationSupersededError(Exception):
+    """The poll can no longer start an operation for the workspace."""
+
+
+async def _lock_workspace_for_monitor_operation(
+    self: Any, session: AsyncSession, workspace_id: str
+) -> Workspace:
+    # Hold the same workspace lock as suspension through the operation commit.
+    workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+    if workspace is None:  # pragma: no cover - dispatch requires an existing workspace
+        raise _MonitorOperationSupersededError
+    if workspace.dormant_at is not None:
+        raise _MonitorOperationSupersededError
+    # Inline monitors receive the execution claim fence when dormancy is enabled.
+    if workspace.human_wait_dormant_after_seconds is not None and not _owns_wait(self, workspace):
+        raise _MonitorOperationSupersededError
+    return workspace
 
 
 async def _begin_monitor_operation(
@@ -49,12 +74,10 @@ async def _begin_monitor_operation(
     monitor_log: WorkspaceLogSink | None = None,
     extra_payload: Mapping[str, Any] | None = None,
     extra_identity: Sequence[object] = (),
-) -> MonitorOperationHandle | None:
+) -> MonitorOperationHandle:
     log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
     async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:  # pragma: no cover - defensive invariant
-            return None
+        workspace = await _lock_workspace_for_monitor_operation(self, session, workspace_id)
         payload = build_monitor_operation_payload(
             workspace=workspace,
             action=action,
@@ -155,12 +178,10 @@ async def _begin_monitor_state_operation(
     stale_reason: str | None = None,
     extra_payload: Mapping[str, Any] | None = None,
     extra_identity: Sequence[object] = (),
-) -> MonitorOperationHandle | None:
+) -> MonitorOperationHandle:
     log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
     async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:  # pragma: no cover - defensive invariant
-            return None
+        workspace = await _lock_workspace_for_monitor_operation(self, session, workspace_id)
         handle = await begin_monitor_state_operation(
             session,
             workspace=workspace,
@@ -204,9 +225,7 @@ async def _record_monitor_state_operation(
 ) -> None:
     log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
     async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:  # pragma: no cover - defensive invariant
-            return
+        workspace = await _lock_workspace_for_monitor_operation(self, session, workspace_id)
         await record_monitor_state_operation(
             session,
             workspace=workspace,

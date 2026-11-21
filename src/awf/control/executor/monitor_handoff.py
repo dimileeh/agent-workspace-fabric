@@ -186,6 +186,8 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         _log.warning("executor.resume_skip_unknown", workspace_id=workspace_id)
         return None
     monitor_owner_id = ws.monitor_claimed_by
+    if ws.dormant_at is not None:
+        return None
     if ws.status != WorkspaceStatus.monitoring_pr.value:
         _log.info(
             "executor.resume_skip_not_monitoring_pr",

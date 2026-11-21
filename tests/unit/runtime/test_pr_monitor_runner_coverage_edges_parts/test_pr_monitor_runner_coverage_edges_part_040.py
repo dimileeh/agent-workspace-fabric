@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -588,9 +589,10 @@ class _NotifyHumanLoopRunner:
         """Exercise the _begin_monitor_operation test helper."""
         return object()
 
-    async def _set_workspace_attention(self, _workspace_id: str, *, reason: str) -> None:
-        """Exercise the _set_workspace_attention test helper."""
+    async def _set_workspace_attention(self, _workspace_id: str, *, reason: str) -> datetime:
+        """Record the attention reason and return the simulated persisted episode start."""
         self.attention_reasons.append(reason)
+        return datetime(2026, 8, 7, 12, tzinfo=UTC)
 
     async def _post_human_notification_once(self, **_kwargs: object) -> None:
         """Exercise the _post_human_notification_once test helper."""

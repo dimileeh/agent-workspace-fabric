@@ -172,6 +172,7 @@ class WorkspaceRepository:
         task_policy: dict[str, Any] | None = None,
         auto_merge: bool = DEFAULT_AUTO_MERGE,
         initial_review_grace_period_seconds: float | None = None,
+        human_wait_dormant_after_seconds: float | None = None,
         env_profile: str | None = None,
         profile_ref: str | None = None,
         requested_profile: dict[str, Any] | None = None,
@@ -204,6 +205,7 @@ class WorkspaceRepository:
             task_policy=dict(task_policy or {}),
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            human_wait_dormant_after_seconds=human_wait_dormant_after_seconds,
             agent=agent,
             env_profile=env_profile,
             profile_ref=profile_ref,
@@ -258,6 +260,7 @@ class WorkspaceRepository:
             ),
             auto_merge=source.auto_merge,
             initial_review_grace_period_seconds=source.initial_review_grace_period_seconds,
+            human_wait_dormant_after_seconds=source.human_wait_dormant_after_seconds,
             agent=source.agent if agent is None else agent,
             env_profile=source.env_profile,
             profile_ref=source.profile_ref,
@@ -280,7 +283,7 @@ class WorkspaceRepository:
         *,
         reason: str,
         now: datetime,
-    ) -> None:
+    ) -> datetime | None:
         """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation)."""
         return await set_workspace_attention(
             self._session,
@@ -289,9 +292,13 @@ class WorkspaceRepository:
             now=now,
         )
 
-    async def clear_workspace_attention(self, workspace_id: str) -> None:
+    async def clear_workspace_attention(
+        self, workspace_id: str, *, preserve_dormant: bool = False
+    ) -> None:
         """Clear the awaiting-human attention flag once the monitor resumes."""
-        return await clear_workspace_attention(self._session, workspace_id)
+        return await clear_workspace_attention(
+            self._session, workspace_id, preserve_dormant=preserve_dormant
+        )
 
     async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
         """Return a workspace by primary key, if it exists.

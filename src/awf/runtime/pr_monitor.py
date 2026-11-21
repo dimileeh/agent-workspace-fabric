@@ -573,6 +573,7 @@ class MonitorConfig:
 
     settle_interval_seconds: float = 30.0
     initial_review_grace_period_seconds: float = 900.0
+    human_wait_dormant_after_seconds: float | None = None
     """One-time wait after the PR first enters monitoring before the first
     auto-merge. This gives slow first-pass reviewers time to post feedback.
     It is PR-scoped, not HEAD-scoped, and never restarts after fix commits."""

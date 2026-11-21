@@ -12,6 +12,7 @@ from awf.adapters.base import AgentAdapter, AgentDefaults
 from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
+    _monitor_execution_claim_kwargs,
     _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.protocols import _MonitorRunnerProto
@@ -170,6 +171,7 @@ async def handle_recovery_pr_handoff_after_validation(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
+                **_monitor_execution_claim_kwargs(ws),
                 **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
     return True

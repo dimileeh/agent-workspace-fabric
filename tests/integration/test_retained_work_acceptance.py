@@ -54,6 +54,7 @@ async def retained(authority, request, tmp_path):
         "queued": "requested",
         "monitor": "monitoring_pr",
         "human": "monitoring_pr",
+        "dormant": "monitoring_pr",
         "uncertain": "running",
         "terminal_uncertain": "completed",
         "terminal": "completed",
@@ -72,11 +73,14 @@ async def retained(authority, request, tmp_path):
                 agent="codex",
                 task_policy={"hosted_node": value["hosted"]},
                 pr_url="https://github.com/example/repo/pull/1"
-                if kind in ("monitor", "human")
+                if kind in ("monitor", "human", "dormant")
                 else None,
-                pr_number=1 if kind in ("monitor", "human") else None,
-                awaiting_human_since=datetime.now(UTC) if kind == "human" else None,
-                awaiting_human_reason="Retain this human wait" if kind == "human" else None,
+                pr_number=1 if kind in ("monitor", "human", "dormant") else None,
+                awaiting_human_since=datetime.now(UTC) if kind in ("human", "dormant") else None,
+                dormant_at=datetime.now(UTC) if kind == "dormant" else None,
+                awaiting_human_reason="Retain this human wait"
+                if kind in ("human", "dormant")
+                else None,
             )
         )
         session.add(
@@ -114,6 +118,9 @@ async def retained(authority, request, tmp_path):
                 )
             )
         await session.flush()
+        if kind == "dormant":
+            await seed_family(session, "reservation", previous.owner)
+            await seed_family(session, "merge", previous.owner)
         if isinstance(options, dict):
             await seed_family(session, options["family"], previous.owner)
     async with replacement(authority, tmp_path) as result:
@@ -346,6 +353,20 @@ async def seed_family(session, family, owner):
             await seed_family(session, name, owner)
         await session.flush()
         (await session.get(MergeCandidate, "merge")).status = "closed"
+    elif family == "dormant_monitor":
+        from tests.unit.hosted_node.test_quiescence_blockers import seed_workspace
+
+        await seed_workspace(
+            session,
+            "ws_dormant",
+            status="monitoring_pr",
+            node_id=owner,
+            compose_project_name="awf_dormant",
+            dormant_at=now,
+            awaiting_human_since=now - timedelta(hours=1),
+            awaiting_human_reason="Dormant workspace still awaits a person",
+            task_policy={"hosted_node": {"stale": True}},
+        )
     elif family == "missing_attempt":
         await session.execute(delete(TaskAttempt))
         await session.execute(delete(Task))
@@ -1352,3 +1373,77 @@ async def test_actual_http_admitted_unsubmitted_queue_recovers(
                 elif unknown_sibling == "merge":
                     assert (await session.get(MergeCandidate, "merge")).status == "open"
                     assert not await worker._claim_monitoring_pr(WS)
+
+
+@pytest.mark.parametrize("retained", ["dormant"], indirect=True)
+async def test_dormant_monitor_boots_without_bindings_or_runtime_reconciliation(retained):
+    from awf.control.worker import ControlWorker, WorkerConfig
+
+    client, runtime, factory, _, _, root = retained
+    async with factory() as session:
+        before = await session.get(Workspace, WS)
+    response = await client.post(PREFIX + "/recovery/acknowledge", json=ACK)
+    assert response.status_code == 200, response.text
+    status = response.json()
+    assert status["state"] == "ready"
+    assert status["quiescent"] and status["database_quiescent"]
+    assert status["recovery_acceptance"]["monitor_workspaces"] == 0
+    from awf.mcp.server import build_mcp_server
+    from awf.service.workspaces import WorkspaceService
+
+    public, *_ = await public_workspace_views(
+        client, WS, headers={"Authorization": "Bearer synthetic-operator"}
+    )
+    assert datetime.fromisoformat(public["dormant_at"]) == before.dormant_at
+    assert datetime.fromisoformat(public["awaiting_human_since"]) == before.awaiting_human_since
+    assert public["attention_required"] is True
+    assert public["awaiting_human_reason"] == "Retain this human wait"
+    tool = build_mcp_server(service=WorkspaceService(factory))
+    _, mcp_result = await tool.call_tool("awf_get_workspace", {"workspace_id": WS})
+    mcp_workspace = mcp_result.get("result", mcp_result)
+    assert mcp_workspace["dormant_at"] == public["dormant_at"]
+    assert mcp_workspace["awaiting_human_reason"] == public["awaiting_human_reason"]
+
+    consumers = WorkspaceConsumers(runtime, root)
+    consumers.stop_workspace = AsyncMock()
+    runtime.materials = AsyncMock(side_effect=AssertionError("inactive material lookup"))
+    consumers._retained_stop_failures.add(WS)
+    assert WS not in await runtime.retained_workspaces()
+    await client.post(PREFIX + "/maintenance/release", json={"generation": 7})
+    assert await consumers.admission_check()
+    runtime.materials.assert_not_awaited()
+    consumers.stop_workspace.assert_not_awaited()
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=AsyncMock(),
+        executor=AsyncMock(),
+        config=WorkerConfig(node_id=runtime.receiver.identity.owner),
+    )
+    assert WS not in await worker._list_monitoring_pr(limit=5)
+    assert not await worker._claim_monitoring_pr(WS)
+    async with factory() as session:
+        after = await session.get(Workspace, WS)
+        assert after.status == "monitoring_pr"
+        assert after.dormant_at == before.dormant_at
+        assert after.awaiting_human_since == before.awaiting_human_since
+        assert after.monitor_claimed_by is None
+        assert (await session.get(ResourceReservation, "reservation")).released_at is None
+        assert (await session.get(MergeCandidate, "merge")).status == "open"
+
+
+@pytest.mark.parametrize(
+    "retained", [{"kind": "monitor", "family": "dormant_monitor"}], indirect=True
+)
+async def test_mixed_boot_only_requests_bindings_for_the_active_monitor(retained):
+    client, runtime, factory, _, _, _ = retained
+    assert (await client.post(PREFIX + "/recovery/acknowledge", json=ACK)).status_code == 409
+    await fresh_bindings(retained)
+    response = await client.post(PREFIX + "/recovery/acknowledge", json=ACK)
+    assert response.status_code == 200, response.text
+    assert response.json()["recovery_acceptance"]["monitor_workspaces"] == 1
+    async with factory() as session:
+        row = await session.get(Workspace, "ws_dormant")
+        assert row.dormant_at is not None
+        assert row.status == "monitoring_pr" and row.monitor_claimed_by is None
+        assert row.task_policy == {"hosted_node": {"stale": True}}
+        assert row.id not in await runtime.retained_workspaces()

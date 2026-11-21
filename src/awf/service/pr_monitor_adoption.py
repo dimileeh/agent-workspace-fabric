@@ -581,6 +581,7 @@ class PullRequestMonitorAdoptionService:
             task_policy=task_policy,
             auto_merge=seed_auto_merge(request.auto_merge),
             initial_review_grace_period_seconds=request.initial_review_grace_period_seconds,
+            human_wait_dormant_after_seconds=request.human_wait_dormant_after_seconds,
             profile_ref=request.profile_ref,
             requested_profile=requested_profile,
             idempotency_key=idempotency_key,
@@ -963,6 +964,7 @@ class PullRequestMonitorAdoptionService:
                     workspace.initial_review_grace_period_seconds
                 ),
                 "execution": pr_adoption_execution_policy(workspace.task_policy),
+                "human_wait_dormant_after_seconds": workspace.human_wait_dormant_after_seconds,
             },
             attached_existing=attached_existing,
             validation_provenance=validation_freshness_summary(

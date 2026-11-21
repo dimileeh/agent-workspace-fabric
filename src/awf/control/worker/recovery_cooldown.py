@@ -99,7 +99,11 @@ async def _should_apply_active_salvage_monitor_resume_cooldown(
                 # changed); do not suppress the next recovery attempt.
                 return False
             ws = await WorkspaceRepository(session).get(workspace_id)
-            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+            return (
+                ws is not None
+                and ws.status == WorkspaceStatus.monitoring_pr.value
+                and ws.dormant_at is None
+            )
     except Exception:
         _log.exception(
             "worker.active_salvage_monitor_resume_cooldown_eligibility_lookup_failed",
@@ -165,7 +169,11 @@ async def _record_active_salvage_monitor_resume_cooldown(
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
-            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+            if (
+                ws is None
+                or ws.status != WorkspaceStatus.monitoring_pr.value
+                or ws.dormant_at is not None
+            ):
                 return
             await repo.add_event(
                 ws,

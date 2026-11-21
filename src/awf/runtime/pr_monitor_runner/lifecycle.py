@@ -430,59 +430,59 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
             # map or last-commit SHA (PRRT_kwDOSJAM6s6hFfgs).
             state.monitor_writes_suppressed = True
             return
-        now_monotonic = time.monotonic()
-        now_wall = datetime.now(UTC)
-        db_threads_addressed = dict(ws.monitor_threads_addressed or {})
-        _clear_processed_operator_hint_from_state(
-            state,
-            db_threads_addressed=db_threads_addressed,
-        )
-        threads_addressed = dict(state.threads_addressed_ids)
-        newly_marked_thread_ids = state.changed_thread_ids()
-        if ws.pr_number is not None:
-            threads_addressed = _initial_review_grace_state_for_persistence(
-                threads_addressed,
-                pr_number=ws.pr_number,
-                now_monotonic=now_monotonic,
-                now_wall_seconds=now_wall.timestamp(),
-            )
-            threads_addressed = _non_check_reviewer_settle_state_for_persistence(
-                threads_addressed,
-                pr_number=ws.pr_number,
-                now_monotonic=now_monotonic,
-                now_wall_seconds=now_wall.timestamp(),
-            )
-        threads_addressed = persist_operator_hint(threads_addressed, state.pending_operator_hint)
-        threads_addressed = _merge_concurrent_operator_hint(
-            threads_addressed,
-            db_threads_addressed=db_threads_addressed,
-            state_hint=state.pending_operator_hint,
-        )
-        threads_addressed = _merge_concurrent_operator_freeze_state(
-            threads_addressed,
-            db_threads_addressed=db_threads_addressed,
-            pr_number=ws.pr_number,
-            newly_marked_thread_ids=newly_marked_thread_ids,
-        )
-        if (
-            state.sync_base_no_progress_signature is not None
-            and state.sync_base_no_progress_count > 0
-        ):
-            threads_addressed[_SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY] = (
-                state.sync_base_no_progress_signature
-            )
-            threads_addressed[_SYNC_BASE_NO_PROGRESS_COUNT_KEY] = str(
-                state.sync_base_no_progress_count
-            )
-        ws.monitor_iter_count = state.iter_count
-        ws.monitor_threads_addressed = threads_addressed
-        if state.last_push_sha is not None:
-            ws.monitor_last_commit_sha = state.last_push_sha
-        if ws.monitor_started_at is None:
-            elapsed_seconds = max(now_monotonic - state.started_at, 0.0)
-            ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
+        newly_marked_thread_ids = _apply_monitor_state(ws, state)
         await s.commit()
         state.clear_changed_thread_ids(newly_marked_thread_ids)
+
+
+def _apply_monitor_state(ws: Workspace, state: MonitorState) -> set[str]:
+    now_monotonic = time.monotonic()
+    now_wall = datetime.now(UTC)
+    db_threads_addressed = dict(ws.monitor_threads_addressed or {})
+    _clear_processed_operator_hint_from_state(
+        state,
+        db_threads_addressed=db_threads_addressed,
+    )
+    threads_addressed = dict(state.threads_addressed_ids)
+    newly_marked_thread_ids = state.changed_thread_ids()
+    if ws.pr_number is not None:
+        threads_addressed = _initial_review_grace_state_for_persistence(
+            threads_addressed,
+            pr_number=ws.pr_number,
+            now_monotonic=now_monotonic,
+            now_wall_seconds=now_wall.timestamp(),
+        )
+        threads_addressed = _non_check_reviewer_settle_state_for_persistence(
+            threads_addressed,
+            pr_number=ws.pr_number,
+            now_monotonic=now_monotonic,
+            now_wall_seconds=now_wall.timestamp(),
+        )
+    threads_addressed = persist_operator_hint(threads_addressed, state.pending_operator_hint)
+    threads_addressed = _merge_concurrent_operator_hint(
+        threads_addressed,
+        db_threads_addressed=db_threads_addressed,
+        state_hint=state.pending_operator_hint,
+    )
+    threads_addressed = _merge_concurrent_operator_freeze_state(
+        threads_addressed,
+        db_threads_addressed=db_threads_addressed,
+        pr_number=ws.pr_number,
+        newly_marked_thread_ids=newly_marked_thread_ids,
+    )
+    if state.sync_base_no_progress_signature is not None and state.sync_base_no_progress_count > 0:
+        threads_addressed[_SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY] = (
+            state.sync_base_no_progress_signature
+        )
+        threads_addressed[_SYNC_BASE_NO_PROGRESS_COUNT_KEY] = str(state.sync_base_no_progress_count)
+    ws.monitor_iter_count = state.iter_count
+    ws.monitor_threads_addressed = threads_addressed
+    if state.last_push_sha is not None:
+        ws.monitor_last_commit_sha = state.last_push_sha
+    if ws.monitor_started_at is None:
+        elapsed_seconds = max(now_monotonic - state.started_at, 0.0)
+        ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
+    return newly_marked_thread_ids
 
 
 async def _persist_forge_transient_retry_count(
@@ -620,7 +620,8 @@ async def _clear_preserved_marker_and_consume_grants_durably(self: Any, workspac
 def _superseded_monitor_owner(self: Any, ws: Workspace) -> bool:
     """Return True when this runner no longer owns ``ws``'s monitor claim.
 
-    Two supersession shapes, shared by both terminal sinks:
+    Dormancy ends monitor ownership. For active workspaces the two claim
+    supersession shapes are shared by both terminal sinks:
 
     * a CLAIMED runner whose lease expired and was reassigned to a newer worker by
       ``claim_monitoring_pr`` while this runner stayed alive; and
@@ -638,7 +639,7 @@ def _superseded_monitor_owner(self: Any, ws: Workspace) -> bool:
         self._monitor_owner_id is not None and ws.monitor_claimed_by != self._monitor_owner_id
     )
     superseded_inline_handoff = self._monitor_owner_id is None and ws.monitor_claimed_by is not None
-    return superseded_claimed_runner or superseded_inline_handoff
+    return ws.dormant_at is not None or superseded_claimed_runner or superseded_inline_handoff
 
 
 async def _run_transition_committed_callback(

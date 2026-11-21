@@ -73,9 +73,10 @@
     "b555242e9032",
     "c6d7e8f9a0b1",
     "85ce3f9b2a61",
-    "9e3b7c41d2a6"
+    "9e3b7c41d2a6",
+    "fa2c80d79e31"
   ],
-  "schema_revision": "9e3b7c41d2a6",
+  "schema_revision": "fa2c80d79e31",
   "schema_version": 1,
   "sequences": [
     "hosted_node_lifecycle_singleton_seq"

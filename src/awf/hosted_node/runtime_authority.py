@@ -152,7 +152,10 @@ class WorkspaceAuthority:
                     select(Workspace.id)
                     .where(
                         Workspace.node_id == self.receiver.identity.owner,
-                        retired if historical else ~retired,
+                        retired
+                        if historical
+                        else ~retired
+                        & or_(Workspace.status != "monitoring_pr", Workspace.dormant_at.is_(None)),
                         Workspace.task_policy[POLICY_KEY].is_not(None),
                         Workspace.id > after,
                     )
@@ -162,7 +165,6 @@ class WorkspaceAuthority:
             )
 
     async def reconcile_workspace(self, workspace_id: str) -> bool:
-        publication = await self.publication(workspace_id)
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
@@ -170,6 +172,8 @@ class WorkspaceAuthority:
             if (row.task_policy or {}).get("hosted_recovery", {}).get("disposition") == "attention":
                 # Physical fencing and boot cleanup already removed execution
                 # authority. Attention is not a credential-loss failure.
+                return True
+            if row.dormant_at is not None and row.status == "monitoring_pr":
                 return True
             inactive = row.status == "destroyed" or row.filesystem_reclaimed_at is not None
         if inactive:
@@ -179,6 +183,7 @@ class WorkspaceAuthority:
         else:
             # Checkout can publish before Compose placement. Sweep every owned
             # association, but never create a readable view just by polling.
+            publication = await self.publication(workspace_id)
             association, agent = await self.association(workspace_id)
             await self.materials(
                 association,

@@ -366,6 +366,9 @@ def register_workspace_tools(
             le=86400,
             description="Optional monitor grace override before auto-merge.",
         ),
+        human_wait_dormant_after_seconds: float | None = Field(
+            default=None, gt=0, allow_inf_nan=False
+        ),
         provider_readiness_override: bool = Field(
             default=False,
             description="Explicitly admit launch when selected provider readiness is not ready.",
@@ -470,6 +473,7 @@ def register_workspace_tools(
                         "owned_paths": owned_paths,
                         "auto_merge": auto_merge,
                         "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+                        "human_wait_dormant_after_seconds": human_wait_dormant_after_seconds,
                     }.items()
                     if v is not None
                 },

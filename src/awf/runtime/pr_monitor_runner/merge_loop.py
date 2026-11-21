@@ -26,6 +26,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_BASE_BEHIND_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
     _NonCheckReviewerSettleDecision,
@@ -92,8 +93,9 @@ async def handle_merge_action(
     compose_project: str,
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
-) -> bool | None:
-    """Execute a merge action and report whether monitor processing reached a terminal state."""
+    allow_human_wait_dormancy: bool,
+) -> bool | DormancyExit | None:
+    """Execute a merge action and report whether the monitor should exit."""
     if isinstance(action, Merge):
         merge_gate = await self._merge_gate_with_legacy_head_support(
             workspace_id,
@@ -116,9 +118,10 @@ async def handle_merge_action(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 monitor_log=monitor_log,
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
             if handled is not None:
-                return cast(bool | None, handled)
+                return cast(bool | DormancyExit, handled)
         elif await self._recovery_dispatch_status_is_stale(workspace_id):
             return True
 
@@ -128,7 +131,7 @@ async def handle_merge_action(
         )
         if policy_blocked:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(
                         message=(
@@ -148,6 +151,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -173,9 +177,10 @@ async def handle_merge_action(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 monitor_log=monitor_log,
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
             if handled is not None:
-                return cast(bool | None, handled)
+                return cast(bool | DormancyExit, handled)
 
         queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
 
@@ -281,9 +286,10 @@ async def handle_merge_action(
                 compose_file=compose_file,
                 monitor_log=monitor_log,
                 skip_initial_review_grace=(self._config.non_check_reviewer_settle_seconds > 0),
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
             if handled is not None:
-                return cast(bool | None, handled)
+                return cast(bool | DormancyExit, handled)
 
         # #1018: never merge over a thread AWF resolved without its disposition
         # (#1138: a flagged thread under the cap is reopened for re-triage instead).
@@ -304,7 +310,7 @@ async def handle_merge_action(
             return False
         if disposition_gate.blocker is not None:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=disposition_gate.blocker),
                     workspace_id=workspace_id,
@@ -319,6 +325,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -925,10 +932,11 @@ async def handle_merge_action(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 monitor_log=monitor_log,
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
             if handled is None:  # pragma: no cover - defensive invariant
                 raise RuntimeError("merge gate blocker was not handled")
-            return cast(bool | None, handled)
+            return cast(bool | DormancyExit, handled)
 
         if fresh_action is not None:
             if fresh_status is None:  # pragma: no cover - defensive invariant
@@ -1011,7 +1019,7 @@ async def handle_merge_action(
             # pre-merge recheck, so decision oscillation remains bounded by the
             # outer monitor loop.
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=fresh_action,
                     workspace_id=workspace_id,
@@ -1026,6 +1034,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -1120,7 +1129,7 @@ async def handle_merge_action(
             return False
         if disposition_gate_after_lock.blocker is not None:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=disposition_gate_after_lock.blocker),
                     workspace_id=workspace_id,
@@ -1135,6 +1144,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -1252,7 +1262,7 @@ async def handle_merge_action(
                 reason=merge_method_notification_reason,
             )
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=merge_method_notification_reason),
                     workspace_id=workspace_id,
@@ -1267,6 +1277,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 

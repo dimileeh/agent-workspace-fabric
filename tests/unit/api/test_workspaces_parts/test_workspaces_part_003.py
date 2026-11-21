@@ -870,6 +870,8 @@ class TestCreateWorkspaceMonitorPolicy:
         assert body["task_policy"]["auto_merge_intent"] is None
         assert body["auto_merge"] is None
         assert body["initial_review_grace_period_seconds"] is None
+        assert body["human_wait_dormant_after_seconds"] is None
+        assert body["dormant_at"] is None
 
     @pytest.mark.unit
     async def test_persists_explicit_monitor_policy(self, client: AsyncClient) -> None:
@@ -879,6 +881,7 @@ class TestCreateWorkspaceMonitorPolicy:
                 **_V2_MINIMAL_BODY["task"],
                 "auto_merge": False,
                 "initial_review_grace_period_seconds": 12.5,
+                "human_wait_dormant_after_seconds": 42.25,
             },
         }
 
@@ -892,11 +895,17 @@ class TestCreateWorkspaceMonitorPolicy:
         body = response.json()
         assert body["auto_merge"] is False
         assert body["initial_review_grace_period_seconds"] == 12.5
+        assert body["human_wait_dormant_after_seconds"] == 42.25
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "requested_policy",
+        [{"auto_merge": True}, {"human_wait_dormant_after_seconds": 42.25}],
+    )
     async def test_idempotency_conflicts_when_monitor_policy_changes(
         self,
         client: AsyncClient,
+        requested_policy: dict[str, object],
     ) -> None:
         headers = {"Idempotency-Key": "monitor-policy-key"}
         first_payload = {
@@ -911,8 +920,9 @@ class TestCreateWorkspaceMonitorPolicy:
             **_V2_MINIMAL_BODY,
             "task": {
                 **_V2_MINIMAL_BODY["task"],
-                "auto_merge": True,
+                "auto_merge": False,
                 "initial_review_grace_period_seconds": 30,
+                **requested_policy,
             },
         }
 

@@ -62,6 +62,7 @@ class RuntimeWorkspace:
     pr_url: str | None = None
     retry_policy_allows_recovery: bool = False
     hosted_pr_adoption: bool = False
+    dormant: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ def runtime_workspace_from_workspace(workspace: Workspace) -> RuntimeWorkspace:
         pr_url=workspace.pr_url,
         retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(workspace.task_policy),
         hosted_pr_adoption=pr_adoption_is_hosted(workspace.task_policy),
+        dormant=workspace.dormant_at is not None,
     )
 
 
@@ -204,7 +206,7 @@ async def runtime_workspaces_from_session(session: AsyncSession) -> tuple[Runtim
         Workspace.compose_file_path,
         Workspace.pr_url,
         Workspace.task_policy,
-    ).where(Workspace.status.in_(ACTIVE_RUNTIME_HEALTH_STATUSES))
+    ).where(Workspace.status.in_(ACTIVE_RUNTIME_HEALTH_STATUSES), Workspace.dormant_at.is_(None))
     rows = (await session.execute(stmt)).all()
     return tuple(
         RuntimeWorkspace(
@@ -250,7 +252,7 @@ def classify_runtime_snapshot(
     workspace: RuntimeWorkspace,
     snapshot: RuntimeSnapshot,
 ) -> WorkspaceRuntimeFinding | None:
-    if workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
+    if workspace.dormant or workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
         return None
     if _pre_provisioned_request_without_metadata(workspace):
         return None
@@ -309,7 +311,7 @@ def classify_resource_inventory(
     workspace: RuntimeWorkspace,
     resources: Iterable[RuntimeResource],
 ) -> WorkspaceRuntimeFinding | None:
-    if workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
+    if workspace.dormant or workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
         return None
     if _pre_provisioned_request_without_metadata(workspace):
         return None
