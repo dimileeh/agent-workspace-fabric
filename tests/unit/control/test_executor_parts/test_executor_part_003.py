@@ -1218,7 +1218,9 @@ class TestHappyPathPart002:
         )
         await executor.execute(ws_id)
 
-        assert any("--name-only" in call.args and base_range in call.args for call in fake.calls)
+        assert sum(
+            "--name-only" in call.args and base_range in call.args for call in fake.calls
+        ) == (2 if diff_error else 1)
         assert not any("push" in call.args or "pr" in call.args for call in fake.calls)
         assert not any(any("pytest -q" in arg for arg in call.args) for call in fake.calls)
 

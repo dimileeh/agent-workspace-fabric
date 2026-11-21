@@ -1249,16 +1249,20 @@ async def _run_agent_task_with_optional_planning(
     if last_report is None:  # pragma: no cover - defensive
         return "planning conformance did not run"
     if last_report.gaps and (base_commit := getattr(workspace, "base_commit", None)):
-        try:
-            committed_paths = await self._committed_paths_since(worktree_path, base_commit)
-        except RuntimeError as exc:
-            _log.warning(
-                "executor.planning_conformance_committed_diff_failed",
-                workspace_id=workspace.id,
-                base_commit=base_commit,
-                error=redact_audit_text(str(exc), limit=500),
-            )
-        else:
+        # Retry a transient diff failure once before giving up on committed-path evidence.
+        for attempt in (1, 2):
+            try:
+                committed_paths = await self._committed_paths_since(worktree_path, base_commit)
+            except RuntimeError as exc:
+                _log.warning(
+                    "executor.planning_conformance_committed_diff_failed",
+                    workspace_id=workspace.id,
+                    base_commit=base_commit,
+                    attempt=attempt,
+                    error=redact_audit_text(str(exc), limit=500),
+                )
+                continue
+
             # The shared PR gate covers docs/awf-plans/. Local plans/ files
             # also cannot establish that this run produced user-visible work.
             decoded_paths = (
@@ -1282,6 +1286,7 @@ async def _run_agent_task_with_optional_planning(
                         for gap in last_report.gaps[:MAX_CONFORMANCE_GAPS]
                     ],
                 )
+            break
 
     gap_text = "; ".join(last_report.gaps) or last_report.summary
     message = (

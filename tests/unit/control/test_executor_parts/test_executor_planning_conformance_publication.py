@@ -47,6 +47,7 @@ class TestPlanningConformancePublication:
         [
             "satisfied",
             "exhausted",
+            "exhausted-with-transient-diff-error",
             "exhausted-with-nul",
             "cancelled-at-compare",
             "reconciled-duplicate",
@@ -173,6 +174,8 @@ class TestPlanningConformancePublication:
         fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         if exhausted:
+            if outcome == "exhausted-with-transient-diff-error":
+                fake.queue_result(returncode=1, stderr="temporary git diff failure")
             fake.queue_result(
                 returncode=0,
                 stdout="docs/awf-plans/workspace.md\ndocs/usage.md\n",
