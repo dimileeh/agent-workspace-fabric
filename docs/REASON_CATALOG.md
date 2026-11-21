@@ -683,6 +683,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf setup`
 **Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_write_failed](#host_setup_config_write_failed)
 
+### HUMAN_WAIT_DORMANCY_BLOCKED
+**Problem:** An open workspace operation is preventing PR monitor dormancy.
+**Likely Cause:** The monitor can suspend once the blocking operations settle.
+**Operator Fix:** Inspect the operations referenced in the dormancy event.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormancy_blocked](#human_wait_dormancy_blocked)
+
 ### HUMAN_WAIT_DORMANCY_FAILED
 **Problem:** The PR monitor could not suspend the human wait.
 **Likely Cause:** The workspace remains eligible for ordinary monitoring and runtime recovery.
@@ -696,6 +703,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Read the current awaiting-human reason on the workspace or its pull request.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormant](#human_wait_dormant)
+
+### HUMAN_WAIT_DORMANT_WOKEN
+**Problem:** An operator requested that a dormant PR monitor resume.
+**Likely Cause:** The worker can claim the workspace and restore the monitor runtime.
+**Operator Fix:** Read the wake event for the control and operation that requested resume.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormant_woken](#human_wait_dormant_woken)
 
 ### IDEMPOTENCY_REPLAY_UNAVAILABLE
 **Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
@@ -1739,6 +1753,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)
+
+### WORKSPACE_DORMANT
+**Problem:** The workspace is dormant and its monitor runtime is down.
+**Likely Cause:** Validation and rebase require a running workspace runtime.
+**Operator Fix:** Wake the workspace with remonitor or guide before requesting recovery.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_dormant](#workspace_dormant)
 
 ### WORKSPACE_GUIDE_CLAIM_NOT_ACTIVE
 **Problem:** Workspace guide with require_claim_active requires monitoring_pr with a live execution or monitor claim and no grants.

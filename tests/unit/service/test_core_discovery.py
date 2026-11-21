@@ -47,6 +47,7 @@ async def test_core_discovery_is_public_with_token_configured(
     assert payload["capabilities"] == [
         "workspace.execution.v1",
         "workspace.create.expected_base_sha.v1",
+        "dormant_human_wait",
     ]
     assert token not in response.text
 
@@ -112,6 +113,7 @@ async def test_core_discovery_advertises_code_schema_head() -> None:
     assert payload["capabilities"] == [
         "workspace.execution.v1",
         "workspace.create.expected_base_sha.v1",
+        "dormant_human_wait",
     ]
     assert payload["profile_capability_schema"] == (
         core_discovery_service.profile_capability_schema().model_dump()
@@ -182,6 +184,7 @@ def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> 
     assert payload.capabilities == (
         "workspace.execution.v1",
         "workspace.create.expected_base_sha.v1",
+        "dormant_human_wait",
     )
     assert RuntimeDriverConfig().capabilities == (WORKSPACE_EXECUTION_V1,)
     assert payload.profile_capability_schema == core_discovery_service.profile_capability_schema()

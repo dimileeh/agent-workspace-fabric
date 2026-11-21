@@ -485,3 +485,53 @@ async def test_rest_and_mcp_retry_invalid_state_reason_code_matches_registry(
     assert rest_envelope["error_code"] == mcp_envelope["error_code"] == "WORKSPACE_NOT_RETRYABLE"
     assert rest_envelope["message"] == mcp_envelope["message"]
     assert rest_envelope["detail"] == mcp_envelope["detail"]
+
+
+@pytest.mark.parametrize("capability_name", ["request_validation", "rebase_workspace"])
+@pytest.mark.parametrize("active", [False, True])
+async def test_rest_and_mcp_refuse_dormant_recovery(contract_stack, capability_name, active):
+    workspace_id, _ = await seed_monitoring_workspace(
+        contract_stack.factory,
+        final_status=WorkspaceStatus.monitoring_pr,
+        with_open_candidate=True,
+    )
+    # Establish idempotency through the ordinary control before seeding a
+    # dormant preimage. A matching active operation must also be refused.
+    queued = await call_rest_control(
+        contract_stack, capability_name, workspace_id=workspace_id, idempotency_key="prior"
+    )
+    assert queued.status_code == 202, queued.text
+    async with contract_stack.factory.begin() as session:
+        repo = WorkspaceRepository(session)
+        row = await repo.get(workspace_id)
+        row.status = WorkspaceStatus.monitoring_pr.value
+        row.dormant_at = row.monitor_started_at
+        if not active:
+            from awf.db.enums import OperationStatus
+            from awf.db.repositories import OperationRepository
+
+            operations_repo = OperationRepository(session)
+            previous = await operations_repo.get(queued.json()["id"])
+            await operations_repo.finish(previous, status=OperationStatus.succeeded)
+        operations = len(row.operations)
+
+    rest = await call_rest_control(
+        contract_stack, capability_name, workspace_id=workspace_id, idempotency_key="dormant-rest"
+    )
+    assert rest.status_code == 409, rest.text
+    mcp = await call_mcp_control(
+        contract_stack, capability_name, workspace_id=workspace_id, idempotency_key="dormant-mcp"
+    )
+    assert mcp.isError
+    rest_error = normalize_rest_error_body(rest.json())
+    assert rest_error == normalize_mcp_error_body(mcp.structuredContent)
+    assert rest_error["error_code"] == "WORKSPACE_DORMANT"
+    replay = await call_rest_control(
+        contract_stack, capability_name, workspace_id=workspace_id, idempotency_key="prior"
+    )
+    assert replay.status_code == 202, replay.text
+    assert replay.json()["id"] == queued.json()["id"]
+    async with contract_stack.factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.status == "monitoring_pr" and row.dormant_at is not None
+        assert len(row.operations) == operations

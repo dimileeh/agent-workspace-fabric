@@ -33,6 +33,27 @@ def get_monitor_runtime_restart_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("HUMAN_WAIT_DORMANCY_FAILED"),
         ),
+        "HUMAN_WAIT_DORMANT_WOKEN": reason_text_cls(
+            "An operator requested that a dormant PR monitor resume.",
+            "Read the wake event for the control and operation that requested resume.",
+            "The worker can claim the workspace and restore the monitor runtime.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANT_WOKEN"),
+        ),
+        "HUMAN_WAIT_DORMANCY_BLOCKED": reason_text_cls(
+            "An open workspace operation is preventing PR monitor dormancy.",
+            "Inspect the operations referenced in the dormancy event.",
+            "The monitor can suspend once the blocking operations settle.",
+            "awf workspace show <workspace_id>",
+            reason_catalog_link("HUMAN_WAIT_DORMANCY_BLOCKED"),
+        ),
+        "WORKSPACE_DORMANT": reason_text_cls(
+            "The workspace is dormant and its monitor runtime is down.",
+            "Wake the workspace with remonitor or guide before requesting recovery.",
+            "Validation and rebase require a running workspace runtime.",
+            "awf workspace remonitor <workspace_id>",
+            reason_catalog_link("WORKSPACE_DORMANT"),
+        ),
         "MONITOR_RUNTIME_RESTART_EXHAUSTED": reason_text_cls(
             (
                 "AWF could not bring the workspace runtime back after several consecutive "

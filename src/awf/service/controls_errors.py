@@ -41,6 +41,14 @@ class WorkspaceControlError(Exception):
         super().__init__(message)
 
 
+class WorkspaceDormantError(WorkspaceControlError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="WORKSPACE_DORMANT",
+            message="Wake the dormant workspace with remonitor or guide before requesting recovery.",
+        )
+
+
 class WorkspaceNotFoundError(WorkspaceControlError):
     def __init__(self, workspace_id: str) -> None:
         super().__init__(

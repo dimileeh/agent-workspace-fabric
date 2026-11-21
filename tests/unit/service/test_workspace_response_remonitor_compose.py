@@ -63,7 +63,11 @@ def test_workspace_response_reports_compose_remonitor_runtime_unavailable(
 ) -> None:
     missing = tmp_path / "removed" / "compose.yml"
     response = workspace_response(
-        _workspace(compose_file_path=str(missing))  # type: ignore[arg-type]
+        _workspace(
+            compose_file_path=str(missing),
+            status=WorkspaceStatus.monitoring_pr.value,
+            dormant_at=datetime.now(UTC),
+        )  # type: ignore[arg-type]
     )
 
     assert response.compose_file_path == str(missing)
@@ -77,7 +81,12 @@ def test_workspace_response_reports_compose_remonitor_runtime_available(
     present = tmp_path / "compose.yml"
     present.write_text("services: {}\n", encoding="utf-8")
     response = workspace_response(
-        _workspace(compose_file_path=str(present))  # type: ignore[arg-type]
+        _workspace(
+            compose_file_path=str(present),
+            status=WorkspaceStatus.monitoring_pr.value,
+            dormant_at=datetime.now(UTC),
+        )  # type: ignore[arg-type]
     )
 
     assert response.remonitor_compose_runtime_available is True
+    assert response.dormant_at is not None
