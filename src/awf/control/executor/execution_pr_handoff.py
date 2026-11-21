@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +29,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
-    AppliedOperatorDirective,
-    append_applied_operator_directive,
+    append_plan_conformance_advisory,
 )
 
 
@@ -176,15 +174,11 @@ async def persist_pr_and_handoff(
             monitor_state = MonitorState(
                 threads_addressed_ids=dict(persisted.monitor_threads_addressed or {}),
             )
-            append_applied_operator_directive(
+            append_plan_conformance_advisory(
                 monitor_state,
-                AppliedOperatorDirective(
-                    directive="\n".join(f"{gap['kind']}: {gap['detail']}" for gap in carried_gaps),
-                    operation_id=workspace_id,
-                    applied_at=datetime.now(UTC).isoformat(),
-                    head_sha=pr.head_sha or "",
-                    source="plan_conformance",
-                ),
+                workspace_id=workspace_id,
+                gaps=carried_gaps,
+                head_sha=pr.head_sha,
             )
             persisted.monitor_threads_addressed = monitor_state.threads_addressed_ids
         monitor = None if publication_pending else self._pr_monitor

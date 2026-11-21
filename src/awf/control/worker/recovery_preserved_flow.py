@@ -19,6 +19,7 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.workspace_scope import without_authority_grace_wait
+from awf.control.executor.recovery_payloads import _planning_carried_gaps_from_metadata
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_SUBPHASE,
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
@@ -79,6 +80,11 @@ from awf.hosted_node.identity import (
     WorkspaceScopeDeniedError,
 )
 from awf.runtime.inspection import RuntimeSnapshot
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    append_plan_conformance_advisory,
+    load_applied_operator_directives,
+)
 from awf.service.failure_causality import (
     attach_primary_failure,
     load_primary_failure_snapshot,
@@ -714,6 +720,21 @@ async def _attach_preserved_active_pr_monitor(
             )
             if cancelled_active_operations:
                 payload["cancelled_active_operations"] = cancelled_active_operations
+        # PR creation can succeed before the executor commits its monitor handoff.
+        carried_gaps = _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+        if carried_gaps:
+            monitor_state = MonitorState(threads_addressed_ids=dict(ws.monitor_threads_addressed))
+            if not any(
+                record.source == "plan_conformance"
+                for record in load_applied_operator_directives(monitor_state)
+            ):
+                append_plan_conformance_advisory(
+                    monitor_state,
+                    workspace_id=ws.id,
+                    gaps=carried_gaps,
+                    head_sha=ws.monitor_last_commit_sha,
+                )
+                ws.monitor_threads_addressed = monitor_state.threads_addressed_ids
         await repo.transition(
             ws,
             to=WorkspaceStatus.monitoring_pr,

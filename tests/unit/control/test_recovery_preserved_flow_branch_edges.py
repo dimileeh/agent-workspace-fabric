@@ -334,6 +334,7 @@ def _stale_workspace(**overrides: Any) -> SimpleNamespace:
         "pr_url": None,
         "pr_number": None,
         "remote_push_branch": None,
+        "block_planning_conformance_handoff": None,
         "branch_name": "feature/ws",
         "branch_base": "main",
         "base_commit": "b" * 40,

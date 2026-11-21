@@ -153,6 +153,26 @@ def append_applied_operator_directive(
     )
 
 
+def append_plan_conformance_advisory(
+    state: MonitorState,
+    *,
+    workspace_id: str,
+    gaps: Sequence[dict[str, str]],
+    head_sha: str | None,
+) -> None:
+    """Store carried plan gaps as advisory context for the monitor."""
+    append_applied_operator_directive(
+        state,
+        AppliedOperatorDirective(
+            directive="\n".join(f"{gap['kind']}: {gap['detail']}" for gap in gaps),
+            operation_id=workspace_id,
+            applied_at=datetime.now(UTC).isoformat(),
+            head_sha=head_sha or "",
+            source="plan_conformance",
+        ),
+    )
+
+
 def _split_forget_decisions_marker(text: str) -> tuple[bool, str]:
     """Return (had exact marker line, text with those lines removed)."""
     had_marker = False
