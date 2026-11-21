@@ -58,16 +58,15 @@ def _owns_wait(self: Any, workspace: Workspace) -> bool:
         return False
     now = datetime.now(UTC)
     if self._monitor_owner_id is not None:
+        # A recovery claim can preserve the same worker's execution lease.
         expires = workspace.monitor_claim_expires_at
-        if expires is None or _as_utc(expires) <= now:
-            return False
+        return expires is not None and _as_utc(expires) > now
     execution_owner = workspace.execution_claimed_by
     if execution_owner is None:
         return self._dormancy_execution_claim is None
     expires = workspace.execution_claim_expires_at
     return (
-        self._monitor_owner_id is None
-        and self._dormancy_execution_claim == (execution_owner, workspace.execution_claim_epoch)
+        self._dormancy_execution_claim == (execution_owner, workspace.execution_claim_epoch)
         and expires is not None
         and _as_utc(expires) > now
     )

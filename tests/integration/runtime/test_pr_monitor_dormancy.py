@@ -1162,8 +1162,9 @@ async def test_stale_runtime_fallback_preserves_concurrent_dormancy(
         assert [event.event_type for event in workspace.events].count(stale_event) == 1
 
 
+@pytest.mark.parametrize("keep_execution_claim", [False, True], ids=["monitor-only", "dual-claim"])
 async def test_worker_finalizes_after_monitor_goes_dormant(
-    factory, wait, cmd, monkeypatch, tmp_path
+    factory, wait, cmd, monkeypatch, tmp_path, keep_execution_claim
 ):
     from awf.control.executor import monitor_handoff, monitor_resume_runtime, runtime_setup_replay
     from awf.control.worker import ControlWorker, WorkerConfig
@@ -1210,7 +1211,21 @@ async def test_worker_finalizes_after_monitor_goes_dormant(
         config=WorkerConfig(node_id="node"),
         runtime_cleaner=cleaner,
     )
+    execution_owner = worker._worker_id if keep_execution_claim else None
+    execution_expiry = now + timedelta(hours=1) if keep_execution_claim else None
+    async with factory.begin() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        row.execution_claimed_by = execution_owner
+        row.execution_claim_expires_at = execution_expiry
+
     assert await worker._claim_monitoring_pr(workspace_id)
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.monitor_claimed_by == worker._worker_id
+        assert (row.execution_claimed_by, row.execution_claim_expires_at) == (
+            execution_owner,
+            execution_expiry,
+        )
     recovery_id = worker._monitor_recovery_operation_ids[workspace_id]
     release_runtime = AsyncMock(wraps=worker._release_terminal_runtime_promptly)
     monkeypatch.setattr(worker, "_release_terminal_runtime_promptly", release_runtime)
@@ -1228,6 +1243,7 @@ async def test_worker_finalizes_after_monitor_goes_dormant(
         assert row.status == "monitoring_pr"
         assert row.dormant_at == now
         assert (row.monitor_claimed_by, row.monitor_claim_expires_at) == (None, None)
+        assert (row.execution_claimed_by, row.execution_claim_expires_at) == (None, None)
         recovery = await OperationRepository(session).get(recovery_id)
         assert recovery.status == "succeeded"
         assert all(op.status == "succeeded" for op in row.operations)
