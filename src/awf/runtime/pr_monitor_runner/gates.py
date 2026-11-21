@@ -484,11 +484,16 @@ async def _handle_merge_gate_blocker(
         recovery_reason_code = _pr_monitor_recovery_reason_code(stale_reason)
         async with runner._deps.session_factory() as s:
             from awf.db.repositories import OperationRepository, WorkspaceRepository
+            from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
 
             workspace_repo = WorkspaceRepository(s)
-            _ws = await workspace_repo.get(workspace_id)
+            # Suspension leaves the status at monitoring_pr. Hold its row lock
+            # through recovery dispatch so the dormancy check stays current.
+            _ws = await workspace_repo.get_for_update(workspace_id)
             if _ws is None:  # pragma: no cover - defensive invariant
                 return True
+            if _ws.dormant_at is not None:
+                return DormancyExit.SUPERSEDED
             if _is_callback_terminal_workspace_status(_ws.status):
                 await workspace_repo.record_ignored_stale_callback(
                     _ws,

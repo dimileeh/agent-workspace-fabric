@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import OperationStatus, OperationType
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import ResourceReservation, WorkspaceSecretLease
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -21,6 +21,7 @@ from awf.node.compose_manager import ComposeManager, ComposeOperationError, Comp
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.pr_monitor import (
     CheckState,
+    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorConfig,
@@ -395,7 +396,7 @@ async def test_expiration_scan_cannot_overwrite_dormancy_revocation(factory, wai
 
 
 @pytest.mark.parametrize(
-    "action", [NotifyHuman(message="Old escalation"), WaitForCI(), ShortCircuitCompleted()]
+    "action", [NotifyHuman("Old escalation"), WaitForCI(), ShortCircuitCompleted(), Merge()]
 )
 async def test_stale_poll_cannot_begin_an_operation_after_dormancy(
     factory, wait, monkeypatch, action
@@ -428,6 +429,7 @@ async def test_stale_poll_cannot_begin_an_operation_after_dormancy(
     resume_old_poll = asyncio.Event()
     old_sleep = AsyncMock(side_effect=PollContinuesError)
     stale_runner = monitor.build(30, sleep=old_sleep)
+    stale_runner._config = replace(stale_runner._config, initial_review_grace_period_seconds=0)
 
     async def return_stale_status(**_kwargs):
         old_poll_at_forge.set()
@@ -454,6 +456,7 @@ async def test_stale_poll_cannot_begin_an_operation_after_dormancy(
         async with factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             assert workspace.dormant_at == now
+            attention = workspace.awaiting_human_since, workspace.awaiting_human_reason
             operation_ids = {op.id for op in workspace.operations}
             assert operation_ids
             assert await database_quiescent(session)
@@ -464,6 +467,8 @@ async def test_stale_poll_cannot_begin_an_operation_after_dormancy(
             workspace = await WorkspaceRepository(session).get(workspace_id)
             assert {op.id for op in workspace.operations} == operation_ids
             assert workspace.dormant_at == now
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            assert (workspace.awaiting_human_since, workspace.awaiting_human_reason) == attention
             assert workspace.monitor_claimed_by is None
             assert await quiescence_blockers(session) == []
             assert await database_quiescent(session)
