@@ -222,6 +222,7 @@ async def handle_merge_action(
                 state=state,
                 monitor_log=monitor_log,
             )
+            state.waited_for_merge_queue = self._config.poll_interval_seconds > 0
             return False
 
         settle_decision = _non_check_reviewer_settle_decision(
@@ -916,6 +917,7 @@ async def handle_merge_action(
                 state=state,
                 monitor_log=monitor_log,
             )
+            state.waited_for_merge_queue = self._config.poll_interval_seconds > 0
             return False
 
         if merge_gate_after_lock is not None and _merge_gate_blocks(merge_gate_after_lock):

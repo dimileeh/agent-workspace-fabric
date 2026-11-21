@@ -29,6 +29,7 @@ from awf.common.github_client_parsing import (
 )
 from awf.common.github_graphql import (
     _GQL_ADD_REVIEW_THREAD_REPLY,
+    _GQL_PR_ISSUE_COMMENTS_PAGE,
     _GQL_REVIEW_THREAD_AUDIT,
     _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
     _GQL_REVIEW_THREAD_AUDIT_ONE,
@@ -38,6 +39,37 @@ from awf.common.github_retry import RetryPolicy
 
 if TYPE_CHECKING:
     from awf.common.github_client import GitHubClient, RepoRef
+
+
+async def fetch_pull_request_comment_bodies(
+    self: GitHubClient, *, repo: RepoRef, pr_number: int
+) -> tuple[str, ...]:
+    """Read visible top-level comments, including AWF's own notices."""
+    from awf.common.github_client import GitHubClientError
+
+    payload = await self._graphql(
+        query=_GQL_PR_ISSUE_COMMENTS_PAGE,
+        variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
+    )
+    first_page = _dig(payload, "data", "repository", "pullRequest", "comments")
+    if not isinstance(first_page, dict):
+        raise GitHubClientError(
+            operation="fetch_pull_request_comment_bodies",
+            returncode=0,
+            stderr=f"PR {repo.slug()}#{pr_number} returned no comment connection",
+        )
+    nodes = await self._fetch_paginated_pr_connection_nodes(
+        repo=repo,
+        pr_number=pr_number,
+        first_page=first_page,
+        connection_name="comments",
+        query=_GQL_PR_ISSUE_COMMENTS_PAGE,
+    )
+    return tuple(
+        body
+        for node in nodes
+        if not node.get("isMinimized") and isinstance(body := node.get("body"), str)
+    )
 
 
 async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> str:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +10,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.adapters.base import AgentAdapter, AgentDefaults
 from awf.common.work_slot import work_slot_kwargs
+from awf.control.executor.constants import (
+    _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+    _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+)
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
     _monitor_execution_claim_kwargs,
     _provider_recovery_default_model_for_monitor_handoff,
 )
+from awf.control.executor.pr_open_step import retry_pr_conformance_comment
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.recovery_payloads import (
@@ -23,7 +28,7 @@ from awf.control.executor.recovery_payloads import (
 )
 from awf.control.executor.types import _RebaseRecoveryResult
 from awf.control.executor.work_slot_binding import work_slot_for
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
@@ -44,6 +49,7 @@ async def handle_recovery_pr_handoff_after_validation(
     defaults: AgentDefaults | None,
     compose_project: str,
     compose_file: Path,
+    pending_gaps: Sequence[dict[str, str]] = (),
 ) -> bool:
     """Return True when recovery handoff handled execution flow."""
     if recovery is None or not ws.pr_url:
@@ -112,6 +118,27 @@ async def handle_recovery_pr_handoff_after_validation(
         action="recovery_skip_push",
     ):
         return True
+    if pending_gaps:
+        publication_error = await retry_pr_conformance_comment(
+            self,
+            ws=ws,
+            profile=profile,
+            worktree_path=self._config.worktrees_root / workspace_id,
+            head_sha=successful_validation_workspace_head_sha,
+            carried_gaps=pending_gaps,
+        )
+        if publication_error is not None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.validating,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Could not publish unresolved plan-conformance gaps on the pull request: "
+                    f"{publication_error}"
+                ),
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+            )
+            return True
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         persisted = await repo.get(workspace_id)
@@ -127,6 +154,16 @@ async def handle_recovery_pr_handoff_after_validation(
             )
             await session.commit()
             return True
+        if pending_gaps:
+            await self._add_executor_pr_audit_event(
+                repo,
+                persisted,
+                event_type=_AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+                action="pr_conformance_comment",
+                outcome="succeeded",
+                reason_code="PR_CONFORMANCE_COMMENT_PUBLISHED",
+                source_head_sha=successful_validation_workspace_head_sha,
+            )
         has_monitor = self._pr_monitor is not None or self._pr_monitor_factory is not None
         await repo.transition(
             persisted,

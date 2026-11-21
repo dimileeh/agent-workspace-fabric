@@ -789,6 +789,29 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             json_body={"content": {"raw": body}},
         )
 
+    async def fetch_pull_request_body(self, *, repo: RepoRef, pr_number: int) -> str:
+        """Return the PR description."""
+        pr = await self._request_json(
+            "GET", self._pr_path(repo, pr_number), operation="bitbucket fetch_pull_request_body"
+        )
+        description = _as_dict(pr).get("description")
+        return description if isinstance(description, str) else ""
+
+    async def fetch_pull_request_comment_bodies(
+        self, *, repo: RepoRef, pr_number: int
+    ) -> tuple[str, ...]:
+        """Read visible top-level comments, including AWF's own notices."""
+        comments = await self._paginate(
+            f"{self._pr_path(repo, pr_number)}/comments",
+            operation="bitbucket fetch_pull_request_comment_bodies",
+        )
+        return tuple(
+            body
+            for comment in comments
+            if not (comment.get("deleted") or comment.get("inline") or comment.get("parent"))
+            and isinstance(body := _as_dict(comment.get("content")).get("raw"), str)
+        )
+
     async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
         """Open a tracking issue and return its URL.
 

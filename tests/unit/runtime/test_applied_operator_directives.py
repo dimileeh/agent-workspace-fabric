@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from awf.runtime.monitor_prompts import address_review_comment_prompt, address_thread_prompt
 from awf.runtime.monitor_state_keys import (
     _applied_operator_directives_state_key,
     _ci_repair_operator_decision_conflict_key_prefix,
 )
 from awf.runtime.pr_monitor import CheckFailure, MonitorState, OperatorHint
+from awf.runtime.pr_monitor_models import ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     APPLIED_OPERATOR_FORGET_DECISIONS_MARKER,
     AppliedOperatorDirective,
@@ -80,6 +82,7 @@ def test_corrupt_or_non_list_payload_loads_empty() -> None:
                 key: (
                     '[{"directive":"","operation_id":"op","applied_at":"t","head_sha":"h"},'
                     '{"directive":"keep","operation_id":"op2","applied_at":"t","head_sha":"h"},'
+                    '{"directive":"bad source","operation_id":"op3","applied_at":"t","head_sha":"h","source":"other"},'
                     '"skip-me"]'
                 )
             }
@@ -400,3 +403,76 @@ def test_forget_marker_requires_exact_line_not_substring() -> None:
     records = load_applied_operator_directives(state)
     assert [r.operation_id for r in records] == ["op-mention", "op-keep"]
     assert "Do not emit AWF-FORGET-DECISIONS unless withdrawing." in records[0].directive
+
+
+@pytest.mark.unit
+def test_plan_conformance_advisory_round_trips_and_keeps_operator_precedence() -> None:
+    key = _applied_operator_directives_state_key()
+    state = MonitorState(
+        threads_addressed_ids={
+            key: '[{"directive":"Keep the API stable.","operation_id":"op","applied_at":"t","head_sha":"h"}]'
+        }
+    )
+    failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="failed"),)
+    mark_ci_repair_operator_decision_conflict(state, head_sha="h", failures=failures, reason="park")
+    advisory = AppliedOperatorDirective(
+        directive="test_work: Add a regression test",
+        operation_id="ws_example",
+        applied_at="t",
+        head_sha="h",
+        source="plan_conformance",
+    )
+    append_applied_operator_directive(state, advisory)
+    append_applied_operator_directive(state, advisory)
+    records = load_applied_operator_directives(
+        MonitorState(threads_addressed_ids=dict(state.threads_addressed_ids))
+    )
+    assert [record.source for record in records] == ["operator_decision", "plan_conformance"]
+    assert records[1] == advisory
+    assert (
+        ci_repair_operator_decision_conflict_reason(state, head_sha="h", failures=failures)
+        == "park"
+    )
+
+    prompts = [
+        address_thread_prompt(
+            pr_number=1,
+            repo_slug="x/y",
+            thread=ReviewThread("thread", "docs/usage.md", 1, "Review this"),
+            applied_operator_directives=records,
+        ),
+        address_review_comment_prompt(
+            pr_number=1,
+            repo_slug="x/y",
+            comment=ReviewComment("comment", "Review this"),
+            applied_operator_directives=records,
+        ),
+    ]
+    for prompt in prompts:
+        assert "source_kind: operator_decision" in prompt
+        assert "source_kind: plan_conformance" in prompt
+        assert "AWF-EVIDENCE> test_work: Add a regression test" in prompt
+        assert prompt.index("Keep the API stable.") < prompt.index("Add a regression test")
+
+    for index in range(5):
+        append_applied_operator_directive(
+            state,
+            AppliedOperatorDirective(f"decision {index}", str(index), "t", "h"),
+        )
+    append_applied_operator_directive(state, advisory)
+    assert [record.operation_id for record in load_applied_operator_directives(state)] == [
+        "4",
+        "3",
+        "2",
+        "1",
+        "0",
+        "ws_example",
+    ]
+    record_applied_operator_directive_from_hint(
+        state,
+        hint=OperatorHint(
+            reason="withdraw decisions", directive=APPLIED_OPERATOR_FORGET_DECISIONS_MARKER
+        ),
+        head_sha="h",
+    )
+    assert load_applied_operator_directives(state) == (advisory,)

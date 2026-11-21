@@ -963,6 +963,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#orphan_resources_present](#orphan_resources_present)
 
+### PLAN_CONFORMANCE_GAPS_CARRIED
+**Problem:** Plan conformance exhausted its iterations with gaps and committed workspace changes.
+**Likely Cause:** The final compare reported gaps while the branch had user-visible changes relative to its base.
+**Operator Fix:** Review the unresolved gaps on the workspace timeline and on the pull request after publication.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#plan_conformance_gaps_carried](#plan_conformance_gaps_carried)
+
 ### PLAN_CONFORMANCE_NEEDS_HUMAN
 **Problem:** Plan conformance is paused for a specific operator decision.
 **Likely Cause:** The agent reported missing operator authority or external dependency input.
@@ -1403,6 +1410,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Do not adopt or retry the merged pull request. Use workspace cleanup or status commands, or create a new workspace for follow-up work.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
+
+### PR_CONFORMANCE_COMMENT_FAILED
+**Problem:** AWF could not publish unresolved plan-conformance gaps on the pull request.
+**Likely Cause:** The forge comment request failed after the branch was pushed.
+**Operator Fix:** Read the forge error and carried gaps in workspace events. Publish the gap notice before resuming PR review.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_conformance_comment_failed](#pr_conformance_comment_failed)
 
 ### PR_CREATE_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not open a new pull request because new-PR creation only supports GitHub.

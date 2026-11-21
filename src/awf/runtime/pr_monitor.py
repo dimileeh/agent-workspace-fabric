@@ -227,6 +227,8 @@ class MonitorState:
         repr=False,
         compare=False,
     )
+    # In-memory only: the merge action waited behind an older queue candidate.
+    waited_for_merge_queue: bool = field(default=False, init=False, repr=False, compare=False)
     current_pr_head_ref: str | None = field(
         default=None,
         init=False,

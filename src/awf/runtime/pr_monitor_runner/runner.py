@@ -189,12 +189,13 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
         sleep = self._deps.sleep
-        completed_sleeps = 0
+        completed_positive_sleeps = 0
 
         async def track_sleep(seconds: float) -> None:
-            nonlocal completed_sleeps
+            nonlocal completed_positive_sleeps
             await sleep(seconds)
-            completed_sleeps += 1
+            if seconds > 0:
+                completed_positive_sleeps += 1
 
         # ``run()`` is awaited inline on the executor's initial handoff and on the
         # worker's monitor-resume task (both in ``execution_pr_handoff`` /
@@ -517,7 +518,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     monitor_log=monitor_log,
                 )
                 action = decide(status, state, self._config)
-                sleeps_before_action = completed_sleeps
+                sleeps_before_action = completed_positive_sleeps
                 try:
                     outcome = await self._execute(
                         action=action,
@@ -539,7 +540,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                             else {}
                         ),
                     )
-                    action_slept = completed_sleeps > sleeps_before_action
+                    action_slept = completed_positive_sleeps > sleeps_before_action
                 except _MonitorOperationSupersededError:
                     return
                 except ForgeClientError as exc:
@@ -636,7 +637,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 await self._persist_state(workspace_id, state)
                 if outcome:
                     return
-                if action_slept and type(action) in _EXEMPT_WAIT_ACTIONS:
+                if action_slept and (
+                    type(action) in _EXEMPT_WAIT_ACTIONS or state.waited_for_merge_queue
+                ):
                     remaining_iterations += 1
 
             # Safety net — max_outer_iterations hit without a terminal action.

@@ -180,9 +180,13 @@ async def test_initial_conformance_fresh_file_takes_precedence_over_stdout(
         "sha1\n",
         "?? ws_decision.md\n",
         "?? ws_decision.md\n?? ws_decision.json\n",
-        "sha2\n",
+        "sha2\n",  # the implementation committed before the final compare
     ):
         runner.queue_result(returncode=0, stdout=output)
+    runner.respond_when(
+        lambda args: "base..HEAD" in args and "--name-only" in args,
+        stdout="src/x.py\n",
+    )
     executor = _executor_with_runner(runner, tmp_path)
 
     class Adapter:
@@ -201,7 +205,9 @@ async def test_initial_conformance_fresh_file_takes_precedence_over_stdout(
     adapter = Adapter()
     result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
         adapter=adapter,
-        workspace=SimpleNamespace(id="ws_decision", task_prompt="task", task_tag=None),
+        workspace=SimpleNamespace(
+            id="ws_decision", task_prompt="task", task_tag=None, base_commit="base"
+        ),
         profile=WorkspaceProfile.model_validate(
             {
                 "name": "decision",
@@ -224,6 +230,7 @@ async def test_initial_conformance_fresh_file_takes_precedence_over_stdout(
         assert isinstance(result, _PlanningNeedsHuman)
         assert result.report.summary == "Fresh file report"
     assert adapter.calls == 3
+    assert not any("base..HEAD" in call.args for call in runner.calls)
 
 
 @pytest.mark.unit

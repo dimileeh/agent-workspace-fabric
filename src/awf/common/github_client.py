@@ -869,6 +869,7 @@ class GitHubClient:
     reply_to_thread = _review_threads.reply_to_thread
     unresolve_thread = _review_threads.unresolve_thread
     fetch_review_thread_audit = _review_threads.fetch_review_thread_audit
+    fetch_pull_request_comment_bodies = _review_threads.fetch_pull_request_comment_bodies
     fetch_actions_runs_state = _actions_runs.fetch_actions_runs_state  # #1230 (line cap)
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:

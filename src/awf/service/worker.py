@@ -879,6 +879,7 @@ def build_worker_runtime(
         executor=executor,
         runtime_cleaner=runtime_cleaner,
         open_pr_resolver=open_pr_resolver,
+        pr_publication_runner=runner,
         orphan_dir_reconciler=_reconcile_orphan_dirs,
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,

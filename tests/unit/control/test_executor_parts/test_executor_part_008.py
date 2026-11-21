@@ -968,6 +968,75 @@ async def test_blocked_resume_grant_skips_conformance_check_without_persisted_ha
 
 
 @pytest.mark.unit
+async def test_blocked_grant_resume_reuses_carried_plan_conformance_gaps(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.control.executor.types import _PlanningCarriedGaps
+
+    ws_id = await _seed_resumable_blocked_workspace(factory)
+    gaps = [{"kind": "test_work", "detail": "Add a regression test"}]
+    assert await executor._persist_block_planning_conformance_handoff(
+        ws_id, handoff=_PlanningCarriedGaps(gaps)
+    )
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    assert all(call.input_bytes is None for call in fake.calls)
+    create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
+    assert "- **test_work**: Add a regression test" in create_call[create_call.index("--body") + 1]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        events = [
+            event for event in ws.events if event.reason_code == "PLAN_CONFORMANCE_GAPS_CARRIED"
+        ]
+        assert len(events) == 1
+        assert events[0].payload["gaps"] == gaps
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("exists", [False, True])
+async def test_carried_conformance_persistence_rejects_missing_or_superseded_workspace(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    exists: bool,
+) -> None:
+    from awf.control.executor.types import _PlanningCarriedGaps
+
+    ws_id = (
+        await _seed_resumable_blocked_workspace(factory, execution_claimed_by="new-owner")
+        if exists
+        else "ws_missing"
+    )
+    saved = await executor._persist_block_planning_conformance_handoff(
+        ws_id,
+        handoff=_PlanningCarriedGaps([{"kind": "test_work", "detail": "Add a regression test"}]),
+        execution_owner_id="old-owner",
+    )
+    assert saved is False
+    if exists:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.block_planning_conformance_handoff is None
+            assert all(event.reason_code != "PLAN_CONFORMANCE_GAPS_CARRIED" for event in ws.events)
+
+
+@pytest.mark.unit
+def test_carried_conformance_metadata_ignores_malformed_entries() -> None:
+    from awf.control.executor.recovery_payloads import _planning_carried_gaps_from_metadata
+
+    gap = {"kind": "implementation", "detail": "Finish the fallback"}
+    assert _planning_carried_gaps_from_metadata(
+        {"carried_gaps": ["malformed", {"detail": "missing kind"}, {"kind": "test_work"}, gap]}
+    ) == [gap]
+
+
+@pytest.mark.unit
 async def test_blocked_resume_missing_workspace_is_a_noop(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
