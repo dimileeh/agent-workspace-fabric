@@ -69,6 +69,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+    stop_monitor_after_polls,
 )
 
 _OLD_HEAD = "4ac31db6f749f18652716e9c83e24f130524205d"
@@ -678,10 +679,9 @@ class TestPrHeadSyncRunnerWiring:
             adapter=FakeAdapter(),
             sleep_fn=_sleep_and_snapshot,  # type: ignore[arg-type]
             worktrees_root=tmp_path / "worktrees",
-            max_outer_iterations=1,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 1):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -737,10 +737,9 @@ class TestPrHeadSyncRunnerWiring:
             adapter=FakeAdapter(),
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            max_outer_iterations=1,
         )
 
-        with structlog.testing.capture_logs() as captured:
+        with structlog.testing.capture_logs() as captured, stop_monitor_after_polls(runner, 1):
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",

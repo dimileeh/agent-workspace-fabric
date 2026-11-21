@@ -47,7 +47,15 @@ from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
-from awf.runtime.pr_monitor import MonitorConfig, MonitorState, decide
+from awf.runtime.pr_monitor import (
+    Abort,
+    Merge,
+    MonitorConfig,
+    MonitorState,
+    RerunTransientCI,
+    ShortCircuitCompleted,
+    decide,
+)
 from awf.runtime.pr_monitor_runner.config import (
     MonitorRunnerConfig,
     PostMergeTargetReconciler,
@@ -59,6 +67,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_forge_retry_state,
     _infer_service_work_dir,
 )
+from awf.runtime.pr_monitor_runner.loop import _WORK_SLOT_MONITOR_ACTIONS
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
@@ -88,6 +97,15 @@ from awf.runtime.pr_push_remote import (
 )
 from awf.runtime.validation import ValidationRunner
 from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
+
+# Lease release also covers forge mutations and terminal decisions.
+_BUDGETED_MONITOR_ACTIONS = (
+    *_WORK_SLOT_MONITOR_ACTIONS,
+    Merge,
+    RerunTransientCI,
+    Abort,
+    ShortCircuitCompleted,
+)
 
 
 def _utcnow() -> datetime:
@@ -196,7 +214,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             github_retry_context_token = github_retry_context.set(
                 GitHubRetryContext(workspace_id=workspace_id)
             )
-            for _ in range(self._runner_config.max_outer_iterations):
+            remaining_iterations = self._runner_config.max_outer_iterations
+            while remaining_iterations > 0:
+                remaining_iterations -= 1
                 ws = await self._load_workspace(workspace_id)
                 if ws.status != WorkspaceStatus.monitoring_pr.value:
                     # Someone else terminated us (cancel, crash recovery, etc.).
@@ -591,6 +611,8 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 await self._persist_state(workspace_id, state)
                 if terminal:
                     return
+                if not isinstance(action, _BUDGETED_MONITOR_ACTIONS):
+                    remaining_iterations += 1
 
             # Safety net — max_outer_iterations hit without a terminal action.
             await self._write_monitor_log(

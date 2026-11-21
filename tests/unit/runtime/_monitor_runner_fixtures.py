@@ -12,13 +12,17 @@ surface.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
@@ -35,7 +39,7 @@ from awf.db.repositories import (
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
-from awf.runtime.pr_monitor import MonitorConfig
+from awf.runtime.pr_monitor import MonitorConfig, PRStatus
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
@@ -165,6 +169,25 @@ class RecordedSleep:
     async def __call__(self, seconds: float) -> None:
         """Record the requested sleep duration without delaying."""
         self.calls.append(seconds)
+
+
+@contextmanager
+def stop_monitor_after_polls(runner: PullRequestMonitorRunner, polls: int) -> Iterator[None]:
+    """Cancel at the next decision fetch after the scripted polls have persisted."""
+    fetch = runner._fetch_status_for_decision
+
+    async def fetch_or_cancel(**kwargs: Any) -> PRStatus:
+        nonlocal polls
+        if polls == 0:
+            raise asyncio.CancelledError("scripted monitor polls complete")
+        polls -= 1
+        return await fetch(**kwargs)
+
+    with (
+        patch.object(runner, "_fetch_status_for_decision", side_effect=fetch_or_cancel),
+        pytest.raises(asyncio.CancelledError, match="scripted monitor polls complete"),
+    ):
+        yield
 
 
 def pr_payload(

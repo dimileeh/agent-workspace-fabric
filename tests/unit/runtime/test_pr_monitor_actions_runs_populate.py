@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Sequence
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import MethodType
@@ -33,6 +34,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
+    stop_monitor_after_polls,
 )
 
 _REPO = RepoRef(owner="o", name="r")
@@ -285,7 +287,6 @@ async def test_runner_waits_on_pending_actions_runs_then_takes_the_ready_path(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         auto_merge=auto_merge,
-        max_outer_iterations=2,
     )
     # Use the real ``gh run list`` read instead of the harness's SETTLED stub.
     gh = runner._deps.gh
@@ -293,7 +294,8 @@ async def test_runner_waits_on_pending_actions_runs_then_takes_the_ready_path(
         GitHubClient.fetch_actions_runs_state, gh
     )
 
-    with structlog.testing.capture_logs() as captured:
+    stop = nullcontext() if auto_merge else stop_monitor_after_polls(runner, 2)
+    with structlog.testing.capture_logs() as captured, stop:
         await runner.run(
             workspace_id=workspace_id,
             compose_project="proj",
