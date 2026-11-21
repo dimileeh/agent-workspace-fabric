@@ -67,6 +67,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.git_porcelain import unquote_porcelain_path
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
@@ -1260,8 +1261,11 @@ async def _run_agent_task_with_optional_planning(
         else:
             # The shared PR gate covers docs/awf-plans/. Local plans/ files
             # also cannot establish that this run produced user-visible work.
+            decoded_paths = (
+                Path(unquote_porcelain_path(path.as_posix())) for path in committed_paths
+            )
             candidate_paths = [
-                path.as_posix() for path in committed_paths if Path("plans") not in path.parents
+                path.as_posix() for path in decoded_paths if Path("plans") not in path.parents
             ]
             if candidate_paths and not changed_paths_are_only_internal_plan_artifacts(
                 candidate_paths

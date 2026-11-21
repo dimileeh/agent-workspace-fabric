@@ -1061,7 +1061,18 @@ class TestHappyPathPart002:
         ]
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("outcome", ["satisfied", "exhausted", "cancelled-at-compare"])
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            "satisfied",
+            "exhausted",
+            "cancelled-at-compare",
+            "reconciled-duplicate",
+            "reconciled-transient",
+            "reconciled-comment-error",
+            "reconciled-tip-mismatch",
+        ],
+    )
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
         self,
         executor: WorkspaceExecutor,
@@ -1083,6 +1094,12 @@ class TestHappyPathPart002:
         )
 
         exhausted = outcome != "satisfied"
+        reconciled = outcome.startswith("reconciled-")
+        section = (
+            "### Unresolved plan-conformance gaps\n\n"
+            "- **test_work**: Add a regression test\n"
+            r"- **documentation**: Document the behavior ### Note \[redacted\]"
+        )
         token = "ghp_" + "a" * 36
         gaps = [
             {"kind": "test_work", "detail": "Add a regression test"},
@@ -1166,9 +1183,67 @@ class TestHappyPathPart002:
             fake.queue_result(returncode=0)  # fix commit
             _queue_validation_head(fake, head="b" * 40)
         fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_diagnostics(fake)
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+        pushed_tip = "b" * 40
+        _queue_pre_push_diagnostics(fake, head=pushed_tip)
+        fake.queue_result(returncode=0)  # push
+        pr_url = "https://github.com/dimileeh/aira-agent/pull/55"
+        if reconciled:
+            pr_head = "c" * 40 if outcome == "reconciled-tip-mismatch" else pushed_tip
+            head_ref = f"awf/{ws_id}"
+            fake.queue_result(
+                returncode=1,
+                stderr=(
+                    'Post "https://api.github.com/graphql": dial tcp: i/o timeout'
+                    if outcome == "reconciled-transient"
+                    else f'a pull request for branch "{head_ref}" already exists'
+                ),
+            )
+            fake.queue_result(
+                stdout=json.dumps(
+                    [
+                        {
+                            "number": 55,
+                            "url": pr_url,
+                            "headRefName": head_ref,
+                            "headRefOid": pr_head,
+                            "headRepository": {"nameWithOwner": "dimileeh/aira-agent"},
+                        }
+                    ]
+                ),
+            )
+            fake.queue_result(
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "merged": False,
+                                    "closed": False,
+                                    "headRefName": head_ref,
+                                    "headRefOid": pr_head,
+                                }
+                            }
+                        }
+                    }
+                ),
+            )  # live reconciled PR snapshot
+            if outcome == "reconciled-tip-mismatch":
+                fake.queue_result()  # cat-file finds the reconciled head locally
+                fake.queue_result(returncode=1)  # merge-base rejects containment
+            else:
+                fake.queue_result(
+                    stdout=(
+                        f"Original body\n\n{section}\n".replace("\n", "\r\n")
+                        if outcome == "reconciled-transient"
+                        else "Existing body\n"
+                    ),
+                )
+                if outcome == "reconciled-duplicate":
+                    fake.queue_result()  # fallback comment
+                elif outcome == "reconciled-comment-error":
+                    fake.queue_result(returncode=1, stderr=f"Comment transport failed: {token}")
+        else:
+            fake.queue_result(returncode=0, stdout=pr_url)
 
         await executor.execute(ws_id)
 
@@ -1190,7 +1265,45 @@ class TestHappyPathPart002:
             return
         assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
         assert monitor.run.await_count == 1
+        assert ws.pr_url == pr_url
+        assert ws.pr_number == 55
         body = _created_pr_body(fake)
+        if reconciled:
+            commands = [call.args for call in fake.calls]
+            snapshot_index = next(
+                index for index, args in enumerate(commands) if args[:3] == ["gh", "api", "graphql"]
+            )
+            body_reads = [
+                index for index, args in enumerate(commands) if args[:3] == ["gh", "pr", "view"]
+            ]
+            comments = [
+                index for index, args in enumerate(commands) if args[:3] == ["gh", "pr", "comment"]
+            ]
+            if outcome == "reconciled-tip-mismatch":
+                assert [args[-2:] for args in commands if "--is-ancestor" in args][-1] == [
+                    pushed_tip,
+                    pr_head,
+                ]
+                assert body_reads == comments == []
+            else:
+                assert len(body_reads) == 1
+                assert snapshot_index < body_reads[0]
+                if outcome == "reconciled-transient":
+                    assert comments == []
+                else:
+                    assert len(comments) == 1
+                    assert body_reads[0] < comments[0]
+                    assert commands[comments[0]][3] == "55"
+                    assert commands[comments[0]][-1] == section
+            if outcome == "reconciled-comment-error":
+                created = next(
+                    event for event in ws.events if event.event_type == "workspace.audit.pr_created"
+                )
+                evidence = created.payload["evidence"]
+                assert evidence["strategy"] == "reconciled_after_duplicate"
+                assert (
+                    "Comment transport failed: [redacted]" in evidence["conformance_comment_error"]
+                )
         adapter_prompts = _adapter_prompts(fake)
         assert len(adapter_prompts) == (6 if exhausted else 5)
         assert "Iteration 1" in adapter_prompts[3]
@@ -1208,11 +1321,7 @@ class TestHappyPathPart002:
             assert prompt_indexes[5] < validation_indexes[1] < push_index
             assert len(events) == 1
             assert events[0].payload["gaps"] == expected_gaps
-            assert body.endswith(
-                "### Unresolved plan-conformance gaps\n\n"
-                "- **test_work**: Add a regression test\n"
-                r"- **documentation**: Document the behavior ### Note \[redacted\]"
-            )
+            assert body.endswith(section)
             assert len(records) == 1
             assert records[0].source == "plan_conformance"
             for gap in expected_gaps:
@@ -1326,6 +1435,16 @@ class TestHappyPathPart002:
             pytest.param("", "", False, "reverted-head", id="reverted-net-diff"),
             pytest.param("docs/awf-plans/plan.md\n", "", False, "sha1", id="workspace-plan"),
             pytest.param("plans/PLAN.md\n", "", False, "sha1", id="local-plan"),
+            pytest.param(
+                r'"docs/awf-plans/caf\303\251.md"' + "\n",
+                "",
+                False,
+                "sha1",
+                id="quoted-workspace-plan",
+            ),
+            pytest.param(
+                r'"plans/caf\303\251.md"' + "\n", "", False, "sha1", id="quoted-local-plan"
+            ),
             pytest.param("docs/awf-plans/plan.md\nplans/PLAN.md\n", "", False, "sha1", id="both"),
             pytest.param("plans/PLAN.md\n", " M src/x.py\n", False, "sha1", id="unstaged-source"),
             pytest.param("plans/PLAN.md\n", "M  src/x.py\n", False, "sha1", id="staged-source"),
