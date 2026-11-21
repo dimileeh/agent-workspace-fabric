@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor, pr_open_step
 from awf.control.executor import execution_flow as execution_flow_module
 from awf.control.executor.recovery_payloads import _validate_only_recovery_target_head_sha
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -280,7 +280,7 @@ async def test_missing_worktree_before_pr_push_stops_after_pushing_transition(
             return False
         return True
 
-    original_push_and_open = execution_flow_module._pr_open_step.push_and_open_pr
+    original_push_and_open = pr_open_step.push_and_open_pr
 
     async def _unexpected_push_and_open(*args: object, **kwargs: object) -> object:
         push_attempts.append(str(kwargs.get("workspace_id")))
@@ -288,7 +288,7 @@ async def test_missing_worktree_before_pr_push_stops_after_pushing_transition(
 
     monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_worktree_available)
     monkeypatch.setattr(
-        execution_flow_module._pr_open_step,
+        pr_open_step,
         "push_and_open_pr",
         _unexpected_push_and_open,
     )
@@ -355,7 +355,7 @@ async def test_start_push_transition_race_stops_before_push(
 
     monkeypatch.setattr(executor, "_transition_if_current", _transition)
     monkeypatch.setattr(
-        execution_flow_module._pr_open_step,
+        pr_open_step,
         "push_and_open_pr",
         _unexpected_push_and_open,
     )
@@ -405,7 +405,7 @@ async def test_pr_target_head_update_failure_is_non_fatal_after_open(
         raise RuntimeError("target-head metadata store unavailable")
 
     monkeypatch.setattr(
-        execution_flow_module._pr_open_step,
+        pr_open_step,
         "push_and_open_pr",
         _push_and_open_pr,
     )
@@ -463,7 +463,7 @@ async def test_pr_open_without_head_sha_skips_target_head_update(
         update_calls.append(str(kwargs["validation_run_id"]))
 
     monkeypatch.setattr(
-        execution_flow_module._pr_open_step,
+        pr_open_step,
         "push_and_open_pr",
         _push_and_open_pr,
     )

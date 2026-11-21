@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from awf.adapters.base import AgentAdapter, AgentDefaults
 from awf.common.work_slot import work_slot_kwargs
+from awf.control.executor import pr_open_step
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
@@ -21,13 +23,82 @@ from awf.control.executor.helpers import (
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     AppliedOperatorDirective,
     append_applied_operator_directive,
 )
+
+
+async def push_and_handoff_pr(
+    self: Any,
+    *,
+    workspace_id: str,
+    ws: Workspace,
+    worktree_path: Path,
+    adapter: AgentAdapter | None,
+    profile: WorkspaceProfile,
+    defaults: AgentDefaults | None,
+    successful_validation_run_id: str | None,
+    compose_project: str,
+    compose_file: Path,
+    resume_from_blocked: bool,
+    in_recovery: bool,
+    carried_gaps: Sequence[dict[str, str]],
+    retry_gap_publication: bool,
+) -> None:
+    """Push a validated workspace, record the PR, and start its monitor."""
+    if not await self._transition_if_current(
+        workspace_id,
+        from_status=WorkspaceStatus.validating,
+        to=WorkspaceStatus.pushing,
+        reason="VALIDATION_OK",
+        action="start_push",
+    ):
+        return
+
+    if resume_from_blocked:
+        # Consume single-use grants after the transition succeeds. A workspace
+        # that loses the status race still needs its grants on the next resume.
+        await self._consume_active_operator_grants(workspace_id)
+    if not await self._ensure_worktree_available(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        expected=WorkspaceStatus.pushing,
+        action="pr_push_open",
+    ):
+        return
+
+    pr = await pr_open_step.push_and_open_pr(
+        self,
+        ws=ws,
+        profile=profile,
+        defaults=defaults,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        carried_gaps=carried_gaps,
+        publish_gaps_on_reused_pr=not in_recovery or retry_gap_publication,
+        retry_gap_publication=retry_gap_publication,
+    )
+    if pr is None:
+        return
+
+    await persist_pr_and_handoff(
+        self,
+        workspace_id=workspace_id,
+        pr=pr,
+        adapter=adapter,
+        profile=profile,
+        defaults=defaults,
+        successful_validation_run_id=successful_validation_run_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        carried_gaps=() if in_recovery and pr.url == ws.pr_url else carried_gaps,
+    )
 
 
 async def persist_pr_and_handoff(

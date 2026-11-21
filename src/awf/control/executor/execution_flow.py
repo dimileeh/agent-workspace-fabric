@@ -27,7 +27,6 @@ from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
-from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.agent_service_recovery import (
     _build_agent_service_recovery_callbacks,
     _run_agent_task_with_service_recovery,
@@ -36,7 +35,7 @@ from awf.control.executor.constants import (
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
 )
-from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
+from awf.control.executor.execution_pr_handoff import push_and_handoff_pr
 from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
@@ -1468,62 +1467,19 @@ async def execute(
     ):
         return
 
-    # PR creation is forge-neutral: ``push_and_open`` does a plain ``git push``
-    # and routes the PR-open step through the resolved ``ForgeClient`` (GitHub or
-    # Bitbucket Cloud). The forge client is resolved from the persisted profile +
-    # repo URL and passed in per-call, so a Bitbucket feature workspace opens its
-    # PR via ``BitbucketClient`` instead of the GitHub-only ``gh pr create``.
-
-    if not await self._transition_if_current(
-        workspace_id,
-        from_status=WorkspaceStatus.validating,
-        to=WorkspaceStatus.pushing,
-        reason="VALIDATION_OK",
-        action="start_push",
-    ):
-        return
-
-    if resume_from_blocked:
-        # The protected gate passed with the operator's grants applied, so the
-        # grants are now single-use spent: consume them so a later DIFFERENT
-        # change to the same file must be granted again. This MUST run only
-        # after the validating→pushing CAS above commits this validated change
-        # to push. Consuming before the transition would mark the grants spent
-        # even when the CAS loses (cancel, version race, stale status) and the
-        # workspace never enters ``pushing`` — a later protected check on the
-        # same resume would then re-block with no usable grant.
-        await self._consume_active_operator_grants(workspace_id)
-    if not await self._ensure_worktree_available(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        expected=WorkspaceStatus.pushing,
-        action="pr_push_open",
-    ):
-        return
-
-    pr = await _pr_open_step.push_and_open_pr(
+    await push_and_handoff_pr(
         self,
+        workspace_id=workspace_id,
         ws=ws,
-        profile=profile,
-        defaults=defaults,
-        workspace_id=workspace_id,
         worktree_path=worktree_path,
-        carried_gaps=carried_gaps,
-        publish_gaps_on_reused_pr=recovery is None or retry_gap_publication,
-        retry_gap_publication=retry_gap_publication,
-    )
-    if pr is None:
-        return
-
-    await persist_pr_and_handoff(
-        self,
-        workspace_id=workspace_id,
-        pr=pr,
         adapter=adapter,
         profile=profile,
         defaults=defaults,
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
-        carried_gaps=() if recovery is not None and pr.url == ws.pr_url else carried_gaps,
+        resume_from_blocked=resume_from_blocked,
+        in_recovery=recovery is not None,
+        carried_gaps=carried_gaps,
+        retry_gap_publication=retry_gap_publication,
     )
