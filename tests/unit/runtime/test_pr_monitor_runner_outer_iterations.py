@@ -195,29 +195,48 @@ async def test_scope_policy_human_wait_budget(
     )
     runner._config = replace(runner._config, poll_interval_seconds=poll_seconds)
     status = replace(_status(CheckState.SUCCESS), changed_paths=("src/outside.py",))
-    fetch = AsyncMock(side_effect=[status] * _WAIT_POLLS + [asyncio.CancelledError])
+    merge_sha = "0123456789abcdef"
+    merge = AsyncMock(return_value=merge_sha)
+
+    async def fetch_status(**_kwargs: object) -> PRStatus:
+        assert fetch.await_count <= _WAIT_POLLS + 2, "scope approval did not unblock the merge"
+        if fetch.await_count == _WAIT_POLLS + 1:
+            merge.assert_not_awaited()
+            async with factory.begin() as session:
+                ws = await WorkspaceRepository(session).get(ws_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.monitoring_pr.value
+                assert ws.failure_message is None
+                assert ws.awaiting_human_since is not None
+                ws.task_policy = {
+                    "out_of_scope_changes": {
+                        "mode": "block",
+                        "allowlist_patterns": ["src/outside.py"],
+                    }
+                }
+        return status
+
+    fetch = AsyncMock(side_effect=fetch_status)
     monkeypatch.setattr(runner, "_fetch_status_for_decision", fetch)
-    merge = AsyncMock(side_effect=AssertionError("scope policy blocked the merge"))
     monkeypatch.setattr(runner._deps.gh, "merge_pr", merge)
 
-    with pytest.raises(asyncio.CancelledError) if poll_seconds > 0 else nullcontext():
-        await runner.run(
-            workspace_id=ws_id, compose_project="proj", compose_file=tmp_path / "c.yml"
-        )
+    await runner.run(workspace_id=ws_id, compose_project="proj", compose_file=tmp_path / "c.yml")
 
     expected_polls = _WAIT_POLLS if poll_seconds > 0 else _CAP
     assert sleep_fn.calls == [poll_seconds] * expected_polls
-    merge.assert_not_awaited()
     [comment] = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert "OUT_OF_SCOPE_CHANGE" in " ".join(comment.args)
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
         if poll_seconds > 0:
-            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            merge.assert_awaited_once()
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_merge_sha == merge_sha
             assert ws.failure_message is None
-            assert ws.awaiting_human_since is not None
+            assert ws.awaiting_human_since is None
         else:
+            merge.assert_not_awaited()
             assert ws.status == WorkspaceStatus.failed.value
             assert "max_outer_iterations" in (ws.failure_message or "")
 
