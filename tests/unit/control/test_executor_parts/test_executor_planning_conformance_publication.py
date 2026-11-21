@@ -81,6 +81,14 @@ class TestPlanningConformancePublication:
                 "phases": {"validate": ["pytest -q"]},
             },
         )
+        execution_owner_id = "worker-a" if outcome == "exhausted" else None
+        if execution_owner_id is not None:
+            async with factory() as session:
+                ws = await WorkspaceRepository(session).get(ws_id)
+                assert ws is not None
+                ws.human_wait_dormant_after_seconds = 60
+                ws.execution_claim_epoch = 5
+                await session.commit()
 
         exhausted = outcome != "satisfied"
         reconciled = outcome.startswith("reconciled-")
@@ -267,7 +275,7 @@ class TestPlanningConformancePublication:
         else:
             fake.queue_result(returncode=0, stdout=pr_url)
 
-        await executor.execute(ws_id)
+        await executor.execute(ws_id, execution_owner_id=execution_owner_id)
 
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
@@ -379,6 +387,11 @@ class TestPlanningConformancePublication:
             return
         assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
         assert monitor.run.await_count == 1
+        if execution_owner_id is not None:
+            assert monitor.run.await_args.kwargs["dormancy_execution_claim"] == (
+                execution_owner_id,
+                5,
+            )
         assert ws.pr_url == pr_url
         assert ws.pr_number == 55
         body = _created_pr_body(fake)

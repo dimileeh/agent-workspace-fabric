@@ -81,19 +81,20 @@ def _merge_block_attention_queue_verdict(
     return "indeterminate"
 
 
-async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str) -> None:
+async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str) -> datetime | None:
     """Persist the awaiting-human attention flag when the monitor escalates.
 
     Set at the single ``NotifyHuman`` touch-point. Keeps the episode start stable
     across repeated escalations (COALESCE in the repo) while refreshing the reason.
     """
     async with self._deps.session_factory() as s:
-        await WorkspaceRepository(s).set_workspace_attention(
+        since = await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
             now=_now(self),
         )
         await s.commit()
+        return since
 
 
 async def _set_workspace_attention_with_merge_block_marker(
@@ -138,7 +139,7 @@ async def _set_workspace_attention_with_merge_block_marker(
     origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
-        if ws is None:
+        if ws is None or ws.dormant_at is not None:
             return
         if stamped is not None:
             threads_addressed = dict(ws.monitor_threads_addressed or {})
@@ -405,7 +406,7 @@ async def _clear_merge_block_attention_and_workspace_attention_row_durably(
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.get_for_update(workspace_id)
-        if ws is None:
+        if ws is None or ws.dormant_at is not None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
         removed_marker = threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None
@@ -434,7 +435,7 @@ async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
     operation/state/audit writes each poll already performs.
     """
     async with self._deps.session_factory() as s:
-        await WorkspaceRepository(s).clear_workspace_attention(workspace_id)
+        await WorkspaceRepository(s).clear_workspace_attention(workspace_id, preserve_dormant=True)
         await s.commit()
 
 
@@ -476,7 +477,7 @@ async def _persist_merge_block_attention_durably(
     origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
-        if ws is None:
+        if ws is None or ws.dormant_at is not None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
         if (

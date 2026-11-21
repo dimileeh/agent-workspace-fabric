@@ -111,29 +111,59 @@ async def test_maintenance_trigger_schema_compatibility_and_nonhosted_writes(sch
         engine = make_engine(url)
         try:
             factory = make_session_factory(engine)
+            workspace_id = "ws_maintenance_compatibility"
+
+            async def insert_workspace(writer):
+                # Use columns shared by all the revisions under test.
+                async with writer.begin() as session:
+                    await session.execute(
+                        text("""
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base, task_title,
+                                task_prompt, agent, test_commands, requires_database,
+                                created_at, updated_at
+                            ) VALUES (
+                                :id, 'requested', 1, 'https://example.invalid/repo.git',
+                                'main', 'synthetic', 'must never execute', 'codex',
+                                '[]', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                            )
+                        """),
+                        {"id": workspace_id},
+                    )
+                    await session.execute(
+                        text("""
+                            INSERT INTO workspace_events (
+                                id, workspace_id, event_type, new_state, reason_code, occurred_at
+                            ) VALUES (
+                                'evt_maintenance_compatibility', :id, 'workspace.created',
+                                'requested', 'CREATED', CURRENT_TIMESTAMP
+                            )
+                        """),
+                        {"id": workspace_id},
+                    )
 
             async def workspace_roundtrip(writer):
-                workspace = await create(writer)
+                await insert_workspace(writer)
                 async with writer.begin() as session:
                     assert (
                         await session.scalar(
                             text(
                                 "UPDATE workspaces SET status='completed' WHERE id=:id RETURNING id"
                             ),
-                            {"id": workspace.id},
+                            {"id": workspace_id},
                         )
-                        == workspace.id
+                        == workspace_id
                     )
                     await session.execute(
                         text("DELETE FROM workspace_events WHERE workspace_id=:id"),
-                        {"id": workspace.id},
+                        {"id": workspace_id},
                     )
                     assert (
                         await session.scalar(
                             text("DELETE FROM workspaces WHERE id=:id RETURNING id"),
-                            {"id": workspace.id},
+                            {"id": workspace_id},
                         )
-                        == workspace.id
+                        == workspace_id
                     )
 
             async with engine.connect() as conn:
@@ -165,12 +195,12 @@ async def test_maintenance_trigger_schema_compatibility_and_nonhosted_writes(sch
                     {"identity": identity.model_dump_json()},
                 )
             with pytest.raises(DBAPIError, match="NODE_IDENTITY_MISMATCH"):
-                await create(factory)
+                await insert_workspace(factory)
             for changed in ({"owner": "foreign/node"}, {"incarnation": "old"}, {"boot_epoch": 1}):
                 foreign = make_session_factory(engine)
                 bind_factory(foreign, identity.model_copy(update=changed))
                 with pytest.raises(DBAPIError, match="NODE_IDENTITY_MISMATCH"):
-                    await create(foreign)
+                    await insert_workspace(foreign)
             bound = make_session_factory(engine)
             bind_factory(bound, identity)
             # A typed %ROWTYPE lacks the additive fields on legacy/downgraded schemas.
@@ -178,11 +208,11 @@ async def test_maintenance_trigger_schema_compatibility_and_nonhosted_writes(sch
             async with engine.begin() as conn:
                 await conn.execute(text("UPDATE hosted_node_lifecycle SET phase='recovering'"))
             with pytest.raises(DBAPIError, match="NODE_ADMISSION_CLOSED"):
-                await create(bound)
+                await insert_workspace(bound)
             async with engine.begin() as conn:
                 await conn.execute(text("DELETE FROM hosted_node_lifecycle"))
             with pytest.raises(DBAPIError, match="NODE_GATE_MISSING"):
-                await create(bound)
+                await insert_workspace(bound)
             await workspace_roundtrip(factory)
         finally:
             await engine.dispose()

@@ -239,6 +239,7 @@ class WorkspaceTask(CursorAutoModeSelectionMixin):
         le=86400,
     )
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
+    human_wait_dormant_after_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     provider_budget_usd: ProviderBudgetUsd = None
 
     @field_validator("task_tag")
@@ -919,6 +920,7 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     )
     initial_review_grace_period_seconds: float | None
 
+    human_wait_dormant_after_seconds: float | None = None
     agent: AgentRuntime | str
     agent_provider: str | None = None
     agent_execution: dict[str, Any] | None = None
@@ -977,6 +979,7 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     # surfaces without changing the retained status or inventing a wait timestamp.
     attention_required: bool = False
     awaiting_human_since: datetime | None = None
+    dormant_at: datetime | None = None
     awaiting_human_reason: str | None = None
     claim_active: bool = Field(
         default=False,

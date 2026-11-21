@@ -18,6 +18,7 @@ from awf.control.executor.constants import (
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
     _extract_pr_number,
+    _monitor_execution_claim_kwargs,
     _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.quality_gates import _log
@@ -98,6 +99,7 @@ async def push_and_handoff_pr(
         compose_project=compose_project,
         compose_file=compose_file,
         carried_gaps=() if in_recovery and pr.url == ws.pr_url else carried_gaps,
+        **_monitor_execution_claim_kwargs(ws),
     )
 
 
@@ -113,6 +115,7 @@ async def persist_pr_and_handoff(
     compose_project: str,
     compose_file: Path,
     carried_gaps: Sequence[dict[str, str]] = (),
+    dormancy_execution_claim: tuple[str, int] | None = None,
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
     async with self._session_factory() as session:
@@ -256,10 +259,16 @@ async def persist_pr_and_handoff(
             action="run_pr_monitor",
         ):
             return
+        claim_kwargs = (
+            {"dormancy_execution_claim": dormancy_execution_claim}
+            if dormancy_execution_claim is not None
+            else {}
+        )
         await monitor.run(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
+            **claim_kwargs,
             **work_slot_kwargs(work_slot_for(self, workspace_id)),
         )
         return

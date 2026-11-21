@@ -950,6 +950,7 @@ async def test_the_park_sink_records_the_evidence_before_it_persists_the_park(
     state = MonitorState(started_at=0.0)
     workspace = SimpleNamespace(
         status=WorkspaceStatus.monitoring_pr.value,
+        dormant_at=None,
         monitor_started_at=datetime.now(UTC),
         repo_url="git@github.com:dimileeh/aira-web.git",
         pr_number=42,

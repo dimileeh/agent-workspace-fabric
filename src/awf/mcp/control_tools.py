@@ -206,6 +206,9 @@ def register_control_tools(
             le=86400,
             description="Optional monitor grace override before auto-merge.",
         ),
+        human_wait_dormant_after_seconds: float | None = Field(
+            default=None, gt=0, allow_inf_nan=False
+        ),
         task_title: str | None = Field(
             default=None,
             min_length=1,
@@ -273,6 +276,7 @@ def register_control_tools(
                     auto_merge=auto_merge,
                     execution=execution,
                     initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
+                    human_wait_dormant_after_seconds=human_wait_dormant_after_seconds,
                     task_title=task_title,
                     task_prompt=task_prompt,
                     task_tag=task_tag,

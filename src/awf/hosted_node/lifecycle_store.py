@@ -77,11 +77,7 @@ DATABASE_BLOCKER_NAMES: tuple[QuiescenceBlockerName, ...] = (
 
 
 def _database_predicates() -> tuple[tuple[Any, ColumnElement[bool]], ...]:
-    """The conservative idle predicates, in fixed vocabulary order.
-
-    The three workspace names split the historical single OR; their union is
-    exactly the old predicate, so ``database_quiescent`` is unchanged.
-    """
+    """The conservative idle predicates, in fixed vocabulary order."""
     # Imports are local to avoid the central ORM registry's hosted-model cycle.
     from awf.db.models import (
         CallbackDelivery,
@@ -97,8 +93,44 @@ def _database_predicates() -> tuple[tuple[Any, ColumnElement[bool]], ...]:
     from awf.db.repositories.base import terminal_runtime_effectively_released_expr
 
     terminal = ("completed", "failed", "cancelled", "destroyed")
+    dormant = and_(Workspace.status == "monitoring_pr", Workspace.dormant_at.is_not(None))
+    dormant_attempt = (
+        select(Workspace.id).where(Workspace.id == TaskAttempt.workspace_id, dormant).exists()
+    )
+    dormant_reservation = (
+        select(Workspace.id)
+        .where(
+            Workspace.id == ResourceReservation.workspace_id,
+            dormant,
+            or_(Workspace.node_id.is_(None), Workspace.node_id == ResourceReservation.node_id),
+            select(TaskAttempt.id)
+            .where(
+                TaskAttempt.id == ResourceReservation.attempt_id,
+                TaskAttempt.workspace_id == ResourceReservation.workspace_id,
+            )
+            .correlate(ResourceReservation)
+            .exists(),
+        )
+        .exists()
+    )
+    dormant_candidate = (
+        select(Workspace.id)
+        .where(
+            Workspace.id == MergeCandidate.workspace_id,
+            dormant,
+            select(TaskAttempt.id)
+            .where(
+                TaskAttempt.id == MergeCandidate.attempt_id,
+                TaskAttempt.workspace_id == MergeCandidate.workspace_id,
+                TaskAttempt.task_id == MergeCandidate.task_id,
+            )
+            .correlate(MergeCandidate)
+            .exists(),
+        )
+        .exists()
+    )
     return (
-        (Workspace.id, Workspace.status.not_in(terminal)),
+        (Workspace.id, and_(Workspace.status.not_in(terminal), ~dormant)),
         (
             Workspace.id,
             or_(
@@ -110,13 +142,17 @@ def _database_predicates() -> tuple[tuple[Any, ColumnElement[bool]], ...]:
             Workspace.id,
             and_(
                 Workspace.compose_project_name.is_not(None),
+                ~dormant,
                 ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
             ),
         ),
-        (TaskAttempt.id, TaskAttempt.status.not_in(terminal)),
+        (TaskAttempt.id, and_(TaskAttempt.status.not_in(terminal), ~dormant_attempt)),
         (Operation.id, Operation.status.not_in(("succeeded", "failed", "cancelled"))),
         (ValidationRun.id, ValidationRun.status.not_in(("succeeded", "failed"))),
-        (ResourceReservation.id, ResourceReservation.released_at.is_(None)),
+        (
+            ResourceReservation.id,
+            and_(ResourceReservation.released_at.is_(None), ~dormant_reservation),
+        ),
         (
             ServiceGCRequest.id,
             ServiceGCRequest.status.not_in(("completed", "failed", "expired")),
@@ -125,7 +161,10 @@ def _database_predicates() -> tuple[tuple[Any, ColumnElement[bool]], ...]:
             CallbackDelivery.id,
             CallbackDelivery.status.not_in(("succeeded", "failed", "skipped")),
         ),
-        (MergeCandidate.id, MergeCandidate.status.not_in(("merged", "closed"))),
+        (
+            MergeCandidate.id,
+            and_(MergeCandidate.status.not_in(("merged", "closed")), ~dormant_candidate),
+        ),
         (
             WorkspaceSecretLease.id,
             WorkspaceSecretLease.status.not_in(("revoked", "released")),

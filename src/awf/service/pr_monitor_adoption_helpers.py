@@ -1273,6 +1273,17 @@ def _raise_if_policy_conflicts(
             },
         )
 
+    if request.human_wait_dormant_after_seconds != workspace.human_wait_dormant_after_seconds:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different human wait dormancy threshold.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_human_wait_dormant_after_seconds": workspace.human_wait_dormant_after_seconds,
+                "requested_human_wait_dormant_after_seconds": request.human_wait_dormant_after_seconds,
+            },
+        )
+
 
 def _adoption_auto_merge_intent(workspace: Workspace) -> bool | None:
     """Reconstruct the adoption's tri-state auto-merge intent for idempotency.

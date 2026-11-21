@@ -683,6 +683,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf setup`
 **Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_write_failed](#host_setup_config_write_failed)
 
+### HUMAN_WAIT_DORMANCY_FAILED
+**Problem:** The PR monitor could not suspend the human wait.
+**Likely Cause:** The workspace remains eligible for ordinary monitoring and runtime recovery.
+**Operator Fix:** Read the failure stage and reason in the workspace event or monitor log.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormancy_failed](#human_wait_dormancy_failed)
+
+### HUMAN_WAIT_DORMANT
+**Problem:** The PR monitor suspended after the configured period waiting for a human.
+**Likely Cause:** The monitor removed its runtime, preserved its volumes and released its claim.
+**Operator Fix:** Read the current awaiting-human reason on the workspace or its pull request.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#human_wait_dormant](#human_wait_dormant)
+
 ### IDEMPOTENCY_REPLAY_UNAVAILABLE
 **Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
 **Likely Cause:** The in-memory replay response was evicted and the durable workspace or callback subscription record is no longer available.

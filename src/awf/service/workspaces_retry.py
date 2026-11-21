@@ -992,6 +992,7 @@ async def retry_workspace_row(
         task_policy=retried_task_policy,
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(source.initial_review_grace_period_seconds),
+        human_wait_dormant_after_seconds=getattr(source, "human_wait_dormant_after_seconds", None),
         agent=target_agent,
         env_profile=source.env_profile,
         profile_ref=retry_profile_ref,

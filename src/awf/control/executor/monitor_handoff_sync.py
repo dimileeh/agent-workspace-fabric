@@ -34,6 +34,7 @@ from awf.control.executor.constants import (
 from awf.control.executor.helpers import (
     _extract_pr_number,
     _missing_sync_feature_pr_adoption_metadata,
+    _monitor_execution_claim_kwargs,
     _release_sync_source_branch,
     _release_sync_target_branch,
     _required_metadata_str,
@@ -455,6 +456,7 @@ async def _handoff_sync_release_pr_monitor(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        **_monitor_execution_claim_kwargs(workspace),
         **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )
 
@@ -679,5 +681,6 @@ async def _handoff_sync_feature_pr_monitor(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        **_monitor_execution_claim_kwargs(workspace),
         **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )

@@ -20,7 +20,7 @@ from dataclasses import (
 )
 from html import escape
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from awf.adapters.base import (
     AgentAdapter,
@@ -335,6 +335,25 @@ def _nonblank_metadata_str(metadata: Mapping[str, object], key: str) -> str | No
         return None
     stripped = value.strip()
     return stripped or None
+
+
+class _MonitorExecutionClaimKwargs(TypedDict, total=False):
+    dormancy_execution_claim: tuple[str, int]
+
+
+def _monitor_execution_claim_kwargs(workspace: Workspace) -> _MonitorExecutionClaimKwargs:
+    """Pass the inline executor's original claim fence to opted-in monitors."""
+    if (
+        getattr(workspace, "human_wait_dormant_after_seconds", None) is not None
+        and workspace.execution_claimed_by is not None
+    ):
+        return {
+            "dormancy_execution_claim": (
+                workspace.execution_claimed_by,
+                workspace.execution_claim_epoch,
+            )
+        }
+    return {}
 
 
 def _call_pr_monitor_factory(

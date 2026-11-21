@@ -320,8 +320,10 @@ async def _count_monitor_completions(
     completed_recent_pr_workspace = (
         Workspace.status == WorkspaceStatus.completed.value
     ) & recent_pr_workspace
-    stuck_monitor_workspace = (Workspace.status == WorkspaceStatus.monitoring_pr.value) & (
-        Workspace.created_at < cutoff
+    stuck_monitor_workspace = (
+        (Workspace.status == WorkspaceStatus.monitoring_pr.value)
+        & Workspace.dormant_at.is_(None)
+        & (Workspace.created_at < cutoff)
     )
 
     stmt = (
