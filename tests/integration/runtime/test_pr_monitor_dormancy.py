@@ -10,17 +10,25 @@ from sqlalchemy import select
 
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import ResourceReservation, WorkspaceSecretLease
-from awf.db.repositories import OperationRepository, WorkerHeartbeatRepository, WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    WorkerHeartbeatRepository,
+    WorkspaceRepository,
+)
 from awf.node.compose_manager import ComposeManager, ComposeOperationError, ComposeTeardownResult
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
+    MergeStateStatus,
     MonitorConfig,
     NotifyHuman,
     PRStatus,
     ShortCircuitCompleted,
     WaitForCI,
+    decide,
 )
+from awf.runtime.pr_monitor_models import ActionsRunsState
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner import runner as runner_module
 from tests.integration.runtime._pr_monitor_runner_fixtures import _seed_monitoring_workspace
@@ -188,6 +196,78 @@ async def test_human_wait_goes_dormant_at_threshold_without_reposting(factory, w
         assert lease.status == "revoked"
         reservation = await session.scalar(select(ResourceReservation))
         assert reservation.released_at is None
+
+
+@pytest.mark.parametrize(
+    ("blocker", "threshold"),
+    [("missing_candidate", 30), ("failed_rebase", 30), ("missing_candidate", None)],
+)
+async def test_merge_gate_human_wait_honors_dormancy_opt_in(
+    factory, wait, monkeypatch, blocker, threshold
+):
+    monitor, workspace_id, forge, teardown = wait
+    start = monitor.current_time
+    next_poll = start + timedelta(seconds=30)
+    monitor.pr_status = replace(
+        monitor.pr_status,
+        merge_state_status=MergeStateStatus.CLEAN,
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    monkeypatch.setattr(
+        runner_module, "observe_pr_head_sync", AsyncMock(return_value=monitor.pr_status)
+    )
+    monkeypatch.setattr(runner_module, "decide", decide)
+
+    async def advance(_seconds):
+        if monitor.current_time == next_poll:
+            raise PollContinuesError("merge-gate human wait scheduled another poll")
+        monitor.current_time = next_poll
+
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = threshold
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+            workspace.task_attempt.id
+        )
+        assert candidate is not None
+        if blocker == "failed_rebase":
+            candidate.stale = True
+            candidate.stale_reason = "STALE_TARGET_ADVANCED"
+            await OperationRepository(session).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                status=OperationStatus.failed,
+            )
+            expected_reason = "Rebase conflicted. Manual intervention required."
+        else:
+            await session.delete(candidate)
+            expected_reason = "candidate provenance is repaired"
+
+    runner = monitor.build(threshold, sleep=advance)
+    runner._config = replace(runner._config, auto_merge=True, initial_review_grace_period_seconds=0)
+    if threshold is None:
+        with pytest.raises(PollContinuesError):
+            await monitor.run(runner)
+        teardown.assert_not_awaited()
+    else:
+        await monitor.run(runner)
+        teardown.assert_awaited_once()
+
+    forge.post_comment.assert_awaited_once()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.status == "monitoring_pr"
+        assert workspace.awaiting_human_since == start
+        assert expected_reason in workspace.awaiting_human_reason
+        if threshold is None:
+            assert workspace.dormant_at is None
+            assert workspace.monitor_claimed_by == "monitor"
+        else:
+            assert workspace.dormant_at == next_poll
+            assert workspace.monitor_claimed_by is None
+            assert [
+                op.result["outcome"] for op in workspace.operations if op.type == "human_wait"
+            ].count("dormant") == 1
 
 
 async def test_expiration_scan_cannot_overwrite_dormancy_revocation(factory, wait, monkeypatch):

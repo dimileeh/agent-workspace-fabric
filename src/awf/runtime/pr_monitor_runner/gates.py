@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import PRStatus
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
     from awf.service.merge_queue import MergeQueueBlocker
 
 _log = get_logger(__name__)
@@ -298,7 +299,8 @@ async def _handle_merge_gate_blocker(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
     skip_initial_review_grace: bool = False,
-) -> bool | None:
+    allow_human_wait_dormancy: bool = False,
+) -> bool | DormancyExit | None:
     from awf.runtime.pr_monitor import Abort, AbortReason, NotifyHuman
     from awf.runtime.pr_monitor_operations import (
         RETRYABLE_MONITOR_OPERATION_STATUSES as _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES,
@@ -360,27 +362,25 @@ async def _handle_merge_gate_blocker(
             for op in ws.operations
         )
         if has_failed_rebase:
-            return cast(
-                bool,
-                await runner._execute(
-                    action=NotifyHuman(
-                        message=(
-                            f"Agent could not resolve {stale_reason}. "
-                            "Rebase conflicted. Manual intervention required."
-                        )
-                    ),
-                    workspace_id=workspace_id,
-                    repo_url=repo_url,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=status,
-                    state=state,
-                    base_branch=base_branch,
-                    remote_branch=remote_branch,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    monitor_log=monitor_log,
+            return await runner._execute(
+                action=NotifyHuman(
+                    message=(
+                        f"Agent could not resolve {stale_reason}. "
+                        "Rebase conflicted. Manual intervention required."
+                    )
                 ),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+                allow_human_wait_dormancy=allow_human_wait_dormancy,
             )
 
     grace_wait_seconds = (
@@ -695,22 +695,20 @@ async def _handle_merge_gate_blocker(
         return True
 
     if gate.notify_message is not None:
-        return cast(
-            bool,
-            await runner._execute(
-                action=NotifyHuman(message=gate.notify_message),
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
-            ),
+        return await runner._execute(
+            action=NotifyHuman(message=gate.notify_message),
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            monitor_log=monitor_log,
+            allow_human_wait_dormancy=allow_human_wait_dormancy,
         )
 
     return None

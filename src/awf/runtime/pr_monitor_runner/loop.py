@@ -1316,6 +1316,7 @@ async def _execute(
         compose_project=compose_project,
         compose_file=compose_file,
         monitor_log=monitor_log,
+        allow_human_wait_dormancy=allow_human_wait_dormancy,
     )
     if merge_result is not None:
         return merge_result
