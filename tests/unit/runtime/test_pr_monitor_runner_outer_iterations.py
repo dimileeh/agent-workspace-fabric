@@ -20,7 +20,6 @@ from awf.runtime.pr_monitor import (
     Merge,
     MergeableState,
     MergeStateStatus,
-    MonitorAction,
     PRStatus,
     RerunTransientCI,
     SyncBase,
@@ -128,19 +127,22 @@ async def test_passive_waits_outlast_outer_iterations_cap(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "decisions",
+    ("decisions", "sleeping_iterations"),
     [
-        pytest.param((SyncBase(), SyncBase()), id="sync-base"),
-        pytest.param((Merge(), Merge()), id="merge"),
-        pytest.param((RerunTransientCI(()), RerunTransientCI(())), id="rerun-ci"),
-        pytest.param((SyncBase(), WaitForCI(), SyncBase()), id="sync-base-with-wait"),
+        pytest.param((SyncBase(), SyncBase()), (), id="sync-base"),
+        pytest.param((Merge(), Merge()), (), id="merge"),
+        pytest.param((RerunTransientCI(()), RerunTransientCI(())), (), id="rerun-ci"),
+        pytest.param((SyncBase(), WaitForCI(), SyncBase()), (2,), id="sync-base-with-wait"),
+        pytest.param((WaitForCI(), WaitForCI(), WaitForCI()), (1,), id="wait-without-sleep"),
+        pytest.param((object(), object()), (1, 2), id="new-action-with-sleep"),
     ],
 )
-async def test_non_wait_actions_exhaust_outer_iterations_cap(
+async def test_decision_loop_exhausts_outer_iterations_cap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    decisions: tuple[MonitorAction, ...],
+    decisions: tuple[object, ...],
+    sleeping_iterations: tuple[int, ...],
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
@@ -153,10 +155,23 @@ async def test_non_wait_actions_exhaust_outer_iterations_cap(
     )
     actions = iter(decisions)
     write_log = AsyncMock(wraps=runner._write_monitor_log)
-    execute = AsyncMock(return_value=False)
+
+    async def execute_action(**kwargs: object) -> bool:
+        if execute.await_count in sleeping_iterations:
+            await runner._deps.sleep(60)
+        return False
+
+    execute = AsyncMock(side_effect=execute_action)
     monkeypatch.setattr(monitor_runner, "decide", lambda *_: next(actions))
     monkeypatch.setattr(
-        runner, "_fetch_status_for_decision", AsyncMock(return_value=_status(CheckState.SUCCESS))
+        runner,
+        "_fetch_status_for_decision",
+        AsyncMock(
+            side_effect=[
+                *([_status(CheckState.SUCCESS)] * len(decisions)),
+                AssertionError("monitor polled past its outer iteration budget"),
+            ]
+        ),
     )
     monkeypatch.setattr(runner, "_execute", execute)
     monkeypatch.setattr(runner, "_write_monitor_log", write_log)

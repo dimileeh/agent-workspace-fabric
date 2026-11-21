@@ -48,12 +48,11 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.pr_monitor import (
-    Abort,
-    Merge,
     MonitorConfig,
     MonitorState,
-    RerunTransientCI,
-    ShortCircuitCompleted,
+    NotifyHuman,
+    WaitForCI,
+    WaitForTransientCI,
     decide,
 )
 from awf.runtime.pr_monitor_runner.config import (
@@ -67,7 +66,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_forge_retry_state,
     _infer_service_work_dir,
 )
-from awf.runtime.pr_monitor_runner.loop import _WORK_SLOT_MONITOR_ACTIONS
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
@@ -98,14 +96,7 @@ from awf.runtime.pr_push_remote import (
 from awf.runtime.validation import ValidationRunner
 from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
 
-# Lease release also covers forge mutations and terminal decisions.
-_BUDGETED_MONITOR_ACTIONS = (
-    *_WORK_SLOT_MONITOR_ACTIONS,
-    Merge,
-    RerunTransientCI,
-    Abort,
-    ShortCircuitCompleted,
-)
+_EXEMPT_WAIT_ACTIONS = (WaitForCI, WaitForTransientCI, NotifyHuman)
 
 
 def _utcnow() -> datetime:
@@ -192,6 +183,14 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         self._work_slot = work_slot
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
+        sleep = self._deps.sleep
+        completed_sleeps = 0
+
+        async def track_sleep(seconds: float) -> None:
+            nonlocal completed_sleeps
+            await sleep(seconds)
+            completed_sleeps += 1
+
         # ``run()`` is awaited inline on the executor's initial handoff and on the
         # worker's monitor-resume task (both in ``execution_pr_handoff`` /
         # ``run_resumed_pr_monitor``), so the ``github_retry_context`` mutations
@@ -214,6 +213,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             github_retry_context_token = github_retry_context.set(
                 GitHubRetryContext(workspace_id=workspace_id)
             )
+            self._deps.sleep = track_sleep
             remaining_iterations = self._runner_config.max_outer_iterations
             while remaining_iterations > 0:
                 remaining_iterations -= 1
@@ -512,6 +512,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     monitor_log=monitor_log,
                 )
                 action = decide(status, state, self._config)
+                sleeps_before_action = completed_sleeps
                 try:
                     terminal = await self._execute(
                         action=action,
@@ -528,6 +529,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         compose_file=compose_file,
                         monitor_log=monitor_log,
                     )
+                    action_slept = completed_sleeps > sleeps_before_action
                 except ForgeClientError as exc:
                     # The status-fetch path above catches the same base, but
                     # ``_execute`` drives merge, thread-resolve, CI-rerun and
@@ -611,7 +613,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 await self._persist_state(workspace_id, state)
                 if terminal:
                     return
-                if not isinstance(action, _BUDGETED_MONITOR_ACTIONS):
+                if action_slept and type(action) in _EXEMPT_WAIT_ACTIONS:
                     remaining_iterations += 1
 
             # Safety net — max_outer_iterations hit without a terminal action.
@@ -711,6 +713,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             )
             return
         finally:
+            self._deps.sleep = sleep
             # Restore the caller's transport context so a stale monitor cycle
             # deadline never leaks onto later gh calls on this asyncio task.
             if github_retry_context_token is not None:
