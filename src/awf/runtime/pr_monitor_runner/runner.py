@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _infer_service_work_dir,
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
+from awf.runtime.pr_monitor_runner.operations import _MonitorOperationSupersededError
 from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
 from awf.runtime.pr_monitor_runner.provider_park_stranded_edits import (
     record_provider_park_stranded_edits_evidence,
@@ -517,6 +518,8 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                             else {}
                         ),
                     )
+                except _MonitorOperationSupersededError:
+                    return
                 except ForgeClientError as exc:
                     # The status-fetch path above catches the same base, but
                     # ``_execute`` drives merge, thread-resolve, CI-rerun and

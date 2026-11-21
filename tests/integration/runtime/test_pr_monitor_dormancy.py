@@ -18,6 +18,7 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     NotifyHuman,
     PRStatus,
+    ShortCircuitCompleted,
     WaitForCI,
 )
 from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
@@ -131,12 +132,12 @@ async def wait(factory, cmd, adapter, tmp_path, monkeypatch, sleep_fn, request):
             runner._fetch_status_for_decision = AsyncMock(return_value=self.pr_status)
             return runner
 
-        async def run(self, runner):
+        async def run(self, runner, *, owner="monitor"):
             await runner.run(
                 workspace_id=workspace_id,
                 compose_project=f"awf_{workspace_id}",
                 compose_file=compose_file,
-                monitor_owner_id="monitor",
+                monitor_owner_id=owner,
             )
 
     return Monitor(), workspace_id, forge, teardown
@@ -231,6 +232,169 @@ async def test_expiration_scan_cannot_overwrite_dormancy_revocation(factory, wai
         assert await quiescence_blockers(session) == []
         assert await database_quiescent(session)
     assert monitor.runtime_containers == set()
+
+
+@pytest.mark.parametrize(
+    "action", [NotifyHuman(message="Old escalation"), WaitForCI(), ShortCircuitCompleted()]
+)
+async def test_stale_poll_cannot_begin_an_operation_after_dormancy(
+    factory, wait, monkeypatch, action
+):
+    from awf.hosted_node.lifecycle_store import database_quiescent, quiescence_blockers
+
+    monitor, workspace_id, forge, teardown = wait
+    now = monitor.current_time
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.awaiting_human_since = now - timedelta(minutes=2)
+
+    stale_status = replace(monitor.pr_status, head_sha="stale-head")
+    monkeypatch.setattr(
+        runner_module,
+        "observe_pr_head_sync",
+        AsyncMock(side_effect=lambda _runner, *, status, **_kwargs: status),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "decide",
+        lambda status, *_: (
+            action
+            if status.head_sha == stale_status.head_sha
+            else NotifyHuman(message="Approval required")
+        ),
+    )
+    old_poll_at_forge = asyncio.Event()
+    resume_old_poll = asyncio.Event()
+    old_sleep = AsyncMock(side_effect=PollContinuesError)
+    stale_runner = monitor.build(30, sleep=old_sleep)
+
+    async def return_stale_status(**_kwargs):
+        old_poll_at_forge.set()
+        await resume_old_poll.wait()
+        return stale_status
+
+    stale_runner._fetch_status_for_decision = return_stale_status
+    stale_poll = asyncio.create_task(monitor.run(stale_runner))
+    try:
+        await asyncio.wait_for(old_poll_at_forge.wait(), timeout=10)
+        async with factory.begin() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            workspace.monitor_claim_expires_at = now - timedelta(seconds=1)
+            await session.flush()
+            assert await repo.claim_monitoring_pr(
+                workspace_id, owner_id="replacement", lease_expires_at=now + timedelta(hours=1)
+            )
+
+        await monitor.run(
+            monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)),
+            owner="replacement",
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace.dormant_at == now
+            operation_ids = {op.id for op in workspace.operations}
+            assert operation_ids
+            assert await database_quiescent(session)
+        forge.post_comment.assert_awaited_once()
+        resume_old_poll.set()
+        outcome = await asyncio.gather(stale_poll, return_exceptions=True)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert {op.id for op in workspace.operations} == operation_ids
+            assert workspace.dormant_at == now
+            assert workspace.monitor_claimed_by is None
+            assert await quiescence_blockers(session) == []
+            assert await database_quiescent(session)
+        forge.post_comment.assert_awaited_once()
+        old_sleep.assert_not_awaited()
+        assert outcome == [None]
+        teardown.assert_awaited_once()
+        assert monitor.runtime_containers == set()
+    finally:
+        if not stale_poll.done():
+            stale_poll.cancel()
+            await asyncio.gather(stale_poll, return_exceptions=True)
+
+
+async def test_stale_human_wait_stops_before_notification_when_attention_is_rejected(
+    factory, wait, monkeypatch
+):
+    monitor, workspace_id, forge, teardown = wait
+    now = monitor.current_time
+    start = now - timedelta(minutes=2)
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.awaiting_human_since = start
+    monkeypatch.setattr(
+        runner_module,
+        "decide",
+        lambda _status, _state, config: NotifyHuman(
+            message="Old escalation"
+            if config.human_wait_dormant_after_seconds is None
+            else "New escalation"
+        ),
+    )
+    stale_runner = monitor.build(None, sleep=AsyncMock(side_effect=PollContinuesError))
+    set_attention = stale_runner._set_workspace_attention
+
+    async def take_over_then_set_attention(*args, **kwargs):
+        async with factory.begin() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            (operation,) = workspace.operations
+            assert operation.type == "human_wait" and operation.status == "running"
+            workspace.monitor_claim_expires_at = now - timedelta(seconds=1)
+            await session.flush()
+            assert await repo.claim_monitoring_pr(
+                workspace_id,
+                owner_id="replacement",
+                lease_expires_at=now + timedelta(hours=1),
+            )
+        await monitor.run(
+            monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)),
+            owner="replacement",
+        )
+        return await set_attention(*args, **kwargs)
+
+    monkeypatch.setattr(stale_runner, "_set_workspace_attention", take_over_then_set_attention)
+    await monitor.run(stale_runner)
+
+    forge.post_comment.assert_awaited_once()
+    stale_runner._deps.sleep.assert_not_awaited()
+    teardown.assert_awaited_once()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.awaiting_human_since == start
+        assert workspace.awaiting_human_reason == "New escalation"
+        assert workspace.monitor_claimed_by is None
+        assert workspace.dormant_at == now
+        assert {op.result["outcome"]: op.status for op in workspace.operations} == {
+            "superseded": "cancelled",
+            "dormant": "succeeded",
+        }
+
+
+async def test_expired_monitor_claim_cannot_start_an_opted_in_human_wait(factory, wait):
+    monitor, workspace_id, forge, teardown = wait
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+        workspace.monitor_claim_expires_at = monitor.current_time - timedelta(seconds=1)
+
+    sleep = AsyncMock(side_effect=PollContinuesError)
+    await monitor.run(monitor.build(30, sleep=sleep))
+
+    forge.post_comment.assert_not_awaited()
+    sleep.assert_not_awaited()
+    teardown.assert_not_awaited()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace.operations == []
+        assert workspace.awaiting_human_since is None
+        assert workspace.dormant_at is None
 
 
 async def test_restart_settles_interrupted_waits_after_head_changes(factory, wait, monkeypatch):
@@ -342,21 +506,22 @@ async def test_existing_human_episode_and_ownership_on_resume(factory, wait, mon
         workspace.awaiting_human_since = start
         if owner == "hosted":
             workspace.task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
-        elif owner == "changed":
-            workspace.monitor_claimed_by = "successor"
-        elif owner == "expired":
-            workspace.monitor_claim_expires_at = start
 
-    if owner == "new_episode":
+    if owner != "hosted":
         suspend = notify_human_loop.suspend_human_wait
 
-        async def replace_episode(*args, **kwargs):
+        async def change_wait_before_suspension(*args, **kwargs):
             async with factory.begin() as session:
                 workspace = await WorkspaceRepository(session).get(workspace_id)
-                workspace.awaiting_human_since = monitor.current_time
+                if owner == "changed":
+                    workspace.monitor_claimed_by = "successor"
+                elif owner == "expired":
+                    workspace.monitor_claim_expires_at = start
+                else:
+                    workspace.awaiting_human_since = monitor.current_time
             return await suspend(*args, **kwargs)
 
-        monkeypatch.setattr(notify_human_loop, "suspend_human_wait", replace_episode)
+        monkeypatch.setattr(notify_human_loop, "suspend_human_wait", change_wait_before_suspension)
 
     runner = monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError))
     if owner == "new_episode":
@@ -385,8 +550,9 @@ async def test_existing_human_episode_and_ownership_on_resume(factory, wait, mon
 
 
 @pytest.mark.parametrize("wait", ["ready"], indirect=True)
+@pytest.mark.parametrize("threshold", [30, None], ids=["opted-in", "default"])
 async def test_inline_executor_handoff_preserves_execution_claim(
-    factory, wait, cmd, monkeypatch, tmp_path
+    factory, wait, cmd, monkeypatch, tmp_path, threshold
 ):
     from awf.runtime.pr_creator import PullRequestResult
     from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
@@ -401,7 +567,7 @@ async def test_inline_executor_handoff_preserves_execution_claim(
     epoch = 7
     async with factory.begin() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
-        workspace.human_wait_dormant_after_seconds = 30
+        workspace.human_wait_dormant_after_seconds = threshold
         workspace.execution_claim_epoch = epoch
         workspace.test_commands = []
     (tmp_path / "work" / "worktrees" / workspace_id).mkdir(parents=True)
@@ -419,11 +585,13 @@ async def test_inline_executor_handoff_preserves_execution_claim(
     cmd.queue_result(stdout="M\0a.py\0")  # committed diff status
 
     async def advance(_seconds):
+        if threshold is None:
+            raise PollContinuesError
         assert monitor.current_time == start, "monitor slept after the dormancy threshold"
         monitor.current_time = start + timedelta(seconds=30)
 
     sleep = AsyncMock(side_effect=advance)
-    runner = monitor.build(30, sleep=sleep)
+    runner = monitor.build(threshold, sleep=sleep)
     run = runner.run
 
     async def run_with_live_claim(**kwargs):
@@ -431,9 +599,15 @@ async def test_inline_executor_handoff_preserves_execution_claim(
             row = await WorkspaceRepository(session).get(workspace_id)
             persisted_claim = (row.execution_claimed_by, row.execution_claim_epoch)
             assert persisted_claim == (owner, epoch)
-            assert kwargs.get("dormancy_execution_claim") == persisted_claim
+            assert kwargs.get("dormancy_execution_claim") == (
+                persisted_claim if threshold is not None else None
+            )
             assert row.execution_claim_expires_at == expires_at
-        await run(**kwargs)
+        if threshold is None:
+            with pytest.raises(PollContinuesError):
+                await run(**kwargs)
+        else:
+            await run(**kwargs)
 
     run_spy = AsyncMock(side_effect=run_with_live_claim)
     monkeypatch.setattr(runner, "run", run_spy)
@@ -456,12 +630,17 @@ async def test_inline_executor_handoff_preserves_execution_claim(
     run_spy.assert_awaited_once()
     sleep.assert_awaited_once()
     forge.post_comment.assert_awaited_once()
-    teardown.assert_awaited_once()
     async with factory() as session:
         row = await WorkspaceRepository(session).get(workspace_id)
         assert row.status == "monitoring_pr"
-        assert row.dormant_at == start + timedelta(seconds=30)
-        assert (row.execution_claimed_by, row.execution_claim_expires_at) == (None, None)
+        if threshold is None:
+            teardown.assert_not_awaited()
+            assert row.dormant_at is None
+            assert (row.execution_claimed_by, row.execution_claim_expires_at) == (owner, expires_at)
+        else:
+            teardown.assert_awaited_once()
+            assert row.dormant_at == start + timedelta(seconds=threshold)
+            assert (row.execution_claimed_by, row.execution_claim_expires_at) == (None, None)
         assert row.execution_claim_epoch == epoch
 
 
@@ -1075,12 +1254,12 @@ async def test_database_reconnect_publishes_pending_dormancy_failure_once(
         workspace.awaiting_human_since = monitor.current_time - timedelta(minutes=1)
 
     get_for_update = WorkspaceRepository.get_for_update
-    calls = 0
+    connection_lost = False
 
     async def temporarily_unavailable(repo, *args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+        nonlocal connection_lost
+        if teardown.await_count and not connection_lost:
+            connection_lost = True
             raise ConnectionRefusedError("synthetic outage")
         return await get_for_update(repo, *args, **kwargs)
 

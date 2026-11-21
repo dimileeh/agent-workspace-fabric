@@ -302,6 +302,9 @@ async def handle_notify_human_action(
     threshold = self._config.human_wait_dormant_after_seconds if allow_dormancy else None
     wait_observed_at = self._deps.now() if threshold is not None else None
     awaiting_since = await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
+    if awaiting_since is None:
+        # Suspension may have settled this wait since the operation committed.
+        return DormancyExit.SUPERSEDED
     try:
         await self._post_human_notification_once(
             repo=repo,
@@ -372,7 +375,6 @@ async def handle_notify_human_action(
     if (
         threshold is not None
         and wait_observed_at is not None
-        and awaiting_since is not None
         and (_as_utc(wait_observed_at) - _as_utc(awaiting_since)).total_seconds() >= threshold
     ):
         dormancy = await suspend_human_wait(
