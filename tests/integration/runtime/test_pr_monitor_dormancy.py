@@ -1217,8 +1217,29 @@ async def test_worker_finalizes_after_monitor_goes_dormant(
         row = await WorkspaceRepository(session).get(workspace_id)
         row.execution_claimed_by = execution_owner
         row.execution_claim_expires_at = execution_expiry
+        execution_epoch = row.execution_claim_epoch
 
-    assert await worker._claim_monitoring_pr(workspace_id)
+    if execution_owner is not None:
+        # Claim recovery after the inline poll has already loaded the workspace.
+        async def claim_during_status_fetch(**_kwargs):
+            assert await worker._claim_monitoring_pr(workspace_id)
+            return monitor.pr_status
+
+        inline_sleep = AsyncMock(side_effect=PollContinuesError)
+        inline_runner = monitor.build(30, sleep=inline_sleep)
+        inline_runner._fetch_status_for_decision = claim_during_status_fetch
+        await inline_runner.run(
+            workspace_id=workspace_id,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            dormancy_execution_claim=(execution_owner, execution_epoch),
+        )
+        inline_sleep.assert_not_awaited()
+        forge.post_comment.assert_not_awaited()
+        teardown.assert_not_awaited()
+    else:
+        assert await worker._claim_monitoring_pr(workspace_id)
+
     async with factory() as session:
         row = await WorkspaceRepository(session).get(workspace_id)
         assert row.monitor_claimed_by == worker._worker_id
@@ -1226,6 +1247,7 @@ async def test_worker_finalizes_after_monitor_goes_dormant(
             execution_owner,
             execution_expiry,
         )
+        assert all(op.type != OperationType.human_wait.value for op in row.operations)
     recovery_id = worker._monitor_recovery_operation_ids[workspace_id]
     release_runtime = AsyncMock(wraps=worker._release_terminal_runtime_promptly)
     monkeypatch.setattr(worker, "_release_terminal_runtime_promptly", release_runtime)
