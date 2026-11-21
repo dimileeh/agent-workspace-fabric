@@ -225,8 +225,9 @@ class MonitorState:
         repr=False,
         compare=False,
     )
-    # In-memory only: the merge action waited behind an older queue candidate.
+    # In-memory waits eligible for an outer iteration refund.
     waited_for_merge_queue: bool = field(default=False, init=False, repr=False, compare=False)
+    waited_for_human: bool = field(default=False, init=False, repr=False, compare=False)
     current_pr_head_ref: str | None = field(
         default=None,
         init=False,
