@@ -138,6 +138,7 @@ def test_monitor_claim_staleness_and_json_datetime_handle_naive_datetimes() -> N
         SimpleNamespace(
             monitor_claimed_by="worker",
             monitor_claim_expires_at=datetime(2026, 4, 27, 11, 59),
+            dormant_at=None,
         ),
         cutoff,
     )

@@ -194,6 +194,7 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
             "owned_paths": [".github/workflows/publish.yml"],
             "auto_merge": False,
             "initial_review_grace_period_seconds": 0,
+            "human_wait_dormant_after_seconds": 42.25,
         },
     )
 
@@ -206,12 +207,14 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
     assert body["head_ref"] == "feature/ready"
     assert body["base_ref"] == "development"
     assert body["auto_merge"] is False
+    assert body["monitor_policy"]["human_wait_dormant_after_seconds"] == 42.25
     assert body["attached_existing"] is False
     assert body["validation_provenance"]["freshness_status"] == "unavailable"
     assert fetcher.calls == [("dimileeh/aira-web", 277)]
     session_factory = make_session_factory(engine)
     async with session_factory() as session:
         workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.human_wait_dormant_after_seconds == 42.25
     assert workspace.owned_paths == [".github/workflows/publish.yml"]
     assert workspace.monitor_last_commit_sha == "h" * 40
     assert workspace.base_commit == "b" * 40
@@ -578,8 +581,15 @@ async def test_adopt_pr_ignores_destroyed_prior_adoption_and_creates_fresh_monit
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "field, initial, changed",
+    [("auto_merge", False, True), ("human_wait_dormant_after_seconds", None, 42.25)],
+)
 async def test_adopt_pr_active_policy_mismatch_returns_structured_conflict(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    field: str,
+    initial: bool | None,
+    changed: bool | float,
 ) -> None:
     client, _fetcher = adoption_client
     headers = {"Authorization": "Bearer secret"}
@@ -590,7 +600,7 @@ async def test_adopt_pr_active_policy_mismatch_returns_structured_conflict(
         json={
             "repo_slug": "dimileeh/aira-web",
             "pr_number": 277,
-            "auto_merge": False,
+            field: initial,
         },
     )
     assert first.status_code == 202
@@ -601,7 +611,7 @@ async def test_adopt_pr_active_policy_mismatch_returns_structured_conflict(
         json={
             "repo_slug": "dimileeh/aira-web",
             "pr_number": 277,
-            "auto_merge": True,
+            field: changed,
         },
     )
 
@@ -610,8 +620,8 @@ async def test_adopt_pr_active_policy_mismatch_returns_structured_conflict(
     assert body["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
     assert body["detail"] == {
         "workspace_id": first.json()["workspace_id"],
-        "existing_auto_merge": False,
-        "requested_auto_merge": True,
+        f"existing_{field}": initial,
+        f"requested_{field}": changed,
     }
 
 
@@ -1142,3 +1152,22 @@ async def test_adopt_pr_without_hint_leaves_monitor_state_empty(
     async with session_factory() as session:
         workspace = (await session.execute(select(Workspace))).scalar_one()
     assert workspace.monitor_threads_addressed in (None, {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [None, 0.25, 0, -1, float("nan"), float("inf"), -float("inf")])
+def test_dormancy_threshold_validation_is_shared_by_create_and_adoption(value):
+    from pydantic import ValidationError
+
+    from awf.api.schemas import WorkspaceTask
+
+    for schema, defaults in (
+        (WorkspaceTask, {"title": "Example", "prompt": "Example", "external_id": None}),
+        (PullRequestMonitorAdoptionRequest, {"repo_slug": "example/repo", "pr_number": 42}),
+    ):
+        payload = {**defaults, "human_wait_dormant_after_seconds": value}
+        if value is None or value == 0.25:
+            assert schema.model_validate(payload).human_wait_dormant_after_seconds == value
+        else:
+            with pytest.raises(ValidationError, match="human_wait_dormant_after_seconds"):
+                schema.model_validate(payload)

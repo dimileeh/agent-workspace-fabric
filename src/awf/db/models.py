@@ -157,6 +157,8 @@ class Workspace(Base):
     ``None`` means use ``resolved_profile.monitor.initial_review_grace_period_seconds``.
     """
 
+    human_wait_dormant_after_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     env_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)
     profile_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -335,6 +337,7 @@ class Workspace(Base):
     ``NotifyHuman`` for the same ongoing block."""
 
     awaiting_human_reason: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    dormant_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     """Latest human-readable escalation reason; refreshed on each ``NotifyHuman``.
     Sized like ``failure_message`` (the reason is a short human sentence)."""
 

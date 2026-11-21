@@ -308,6 +308,7 @@ async def create_workspace_row(
         task_policy=task_policy,
         auto_merge=seed_auto_merge(payload.task.auto_merge),
         initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
+        human_wait_dormant_after_seconds=payload.task.human_wait_dormant_after_seconds,
         agent=payload.task.agent.value,
         env_profile=None,
         profile_ref=payload.workspace.profile_ref,
@@ -479,6 +480,8 @@ def workspace_create_payload_matches(
             getattr(existing, "initial_review_grace_period_seconds", None)
             == payload.task.initial_review_grace_period_seconds
         )
+        and getattr(existing, "human_wait_dormant_after_seconds", None)
+        == payload.task.human_wait_dormant_after_seconds
         and existing.agent == payload.task.agent.value
         and stored_task_kind == payload.task.kind
         and _profile_ref_matches(existing, payload)

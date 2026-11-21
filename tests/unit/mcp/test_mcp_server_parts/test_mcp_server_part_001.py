@@ -12,8 +12,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -255,6 +257,35 @@ async def test_core_release_readiness_rejects_invalid_provider_names(mcp) -> Non
 
 class TestToolRegistration:
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            (
+                "awf_create_workspace",
+                {
+                    "repo_url": "git@github.com:example/repo.git",
+                    "base_branch": "main",
+                    "task_title": "Task",
+                    "task_prompt": "Run",
+                },
+            ),
+            ("awf_adopt_pull_request_monitor", {"repo_slug": "example/repo", "pr_number": 42}),
+        ],
+    )
+    @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+    async def test_tools_reject_invalid_dormancy_threshold(
+        self, tool: str, args: dict[str, object], value: float
+    ) -> None:
+        service = AsyncMock(spec=WorkspaceService)
+        mcp = build_mcp_server(service=service)
+
+        with pytest.raises(ToolError, match="human_wait_dormant_after_seconds"):
+            await mcp.call_tool(tool, {**args, "human_wait_dormant_after_seconds": value})
+
+        service.create.assert_not_awaited()
+        service.adopt_pull_request_monitor.assert_not_awaited()
+
+    @pytest.mark.unit
     async def test_existing_and_observability_tools_registered(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
@@ -457,6 +488,7 @@ class TestToolRegistration:
                 "pr_number": 277,
                 "auto_merge": False,
                 "model": "gpt-5.3-codex",
+                "human_wait_dormant_after_seconds": 42.25,
             },
         )
 
@@ -466,11 +498,13 @@ class TestToolRegistration:
         assert payload["pr_number"] == 277
         assert payload["head_ref"] == "feature/ready"
         assert payload["auto_merge"] is False
+        assert payload["monitor_policy"]["human_wait_dormant_after_seconds"] == 42.25
         async with factory() as session:
             workspace = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
         assert workspace is not None
         assert workspace.task_policy["agent_model"] == "gpt-5.3-codex"
         assert workspace.task_policy["agent_effort"] == "xhigh"
+        assert workspace.human_wait_dormant_after_seconds == 42.25
 
     @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_forwards_model_and_effort(self) -> None:
@@ -509,6 +543,7 @@ class TestToolRegistration:
                 "model": "gpt-5.3-codex",
                 "effort": "high",
                 "owned_paths": [".github/workflows/publish.yml", "pyproject.toml"],
+                "human_wait_dormant_after_seconds": 42.25,
             },
         )
 
@@ -517,6 +552,7 @@ class TestToolRegistration:
         assert service.request is not None
         assert service.request.model == "gpt-5.3-codex"
         assert service.request.effort == "high"
+        assert service.request.human_wait_dormant_after_seconds == 42.25
         assert service.request.owned_paths == [
             ".github/workflows/publish.yml",
             "pyproject.toml",

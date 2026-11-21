@@ -689,6 +689,7 @@ async def create_provider_recovery_attempt_row(
         task_policy=new_policy,
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=source.initial_review_grace_period_seconds,
+        human_wait_dormant_after_seconds=source.human_wait_dormant_after_seconds,
         agent=target_agent,
         env_profile=source.env_profile,
         profile_ref=source.profile_ref,

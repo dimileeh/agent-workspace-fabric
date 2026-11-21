@@ -1155,6 +1155,7 @@ def test_worker_helper_branches_normalize_naive_datetimes() -> None:
     stale_monitor = SimpleNamespace(
         monitor_claimed_by="monitor",
         monitor_claim_expires_at=datetime(2026, 5, 2, 11, 59),
+        dormant_at=None,
     )
     fresh_execution = SimpleNamespace(
         execution_claimed_by="worker",

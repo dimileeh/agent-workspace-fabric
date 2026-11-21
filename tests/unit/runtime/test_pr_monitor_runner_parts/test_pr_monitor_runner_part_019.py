@@ -61,6 +61,7 @@ async def test_run_handles_provider_recovery_exceptions_without_crashing(
     state = MonitorState(started_at=0.0)
     workspace = SimpleNamespace(
         status=WorkspaceStatus.monitoring_pr.value,
+        dormant_at=None,
         monitor_started_at=datetime.now(UTC),
         repo_url="git@github.com:dimileeh/aira-web.git",
         pr_number=42,

@@ -41,8 +41,6 @@ _BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
 _AWAITING_HUMAN_ATTENTION_REVISION = "d7e8f9a0b1c2"
 # Flip workspaces.auto_merge database default to opt-out.
 _AUTO_MERGE_DEFAULT_OPT_OUT_REVISION = "e9f0a1b2c3d4"
-# Persist completed workspace filesystem reclamation.
-_FILESYSTEM_RECLAIMED_REVISION = "a875b1c2d3e4"
 # Independent hosted owner authority and material tombstones.
 _HOSTED_NODE_MATERIAL_REVISION = "b986c2d3e4f5"
 # Opt-in durable node admission and idle-drain barrier.
@@ -60,6 +58,7 @@ _BARRIER_IDLE_CLEAR_ONLY_REVISION = "b555242e9032"
 _WORK_SLOT_LEASES_REVISION = "c6d7e8f9a0b1"
 _PROVIDER_CONNECTIONS_REVISION = "85ce3f9b2a61"
 _PROVIDER_MANAGED_KEYS_REVISION = "9e3b7c41d2a6"
+_HUMAN_WAIT_DORMANCY_REVISION = "fa2c80d79e31"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -127,7 +126,11 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_PROVIDER_MANAGED_KEYS_REVISION]
+    assert script.get_heads() == [_HUMAN_WAIT_DORMANCY_REVISION]
+    dormancy = script.get_revision(_HUMAN_WAIT_DORMANCY_REVISION)
+    assert dormancy is not None
+    assert dormancy.down_revision == _PROVIDER_MANAGED_KEYS_REVISION
+    assert dormancy.module.destructive is False
     managed_keys = script.get_revision(_PROVIDER_MANAGED_KEYS_REVISION)
     assert managed_keys is not None
     assert managed_keys.down_revision == _PROVIDER_CONNECTIONS_REVISION
@@ -141,7 +144,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     assert clear_only is not None
     assert clear_only.down_revision == _RESTORE_RECONCILIATION_REVISION
     # Checkpoint cut and restore require the database to sit at exactly this head.
-    assert CHECKPOINT_SCHEMA_REVISION == _PROVIDER_MANAGED_KEYS_REVISION
+    assert CHECKPOINT_SCHEMA_REVISION == _HUMAN_WAIT_DORMANCY_REVISION
     restored_head = script.get_revision(_RESTORE_RECONCILIATION_REVISION)
     assert restored_head is not None
     assert restored_head.down_revision == _CHECKPOINT_REVISION
@@ -400,15 +403,8 @@ async def test_auth_overlay_unmount_backfill_postgres_seeds_only_qualifying_rows
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
-            # Upgrade to the current head so the workspaces table has every
-            # column the current ORM model writes (e.g. task_tag, the
-            # block-state columns, and the awaiting-human attention columns, all
-            # added after this backfill migration).
-            # The backfill function is invoked manually below, so the schema
-            # version does not change what the test exercises; pinning to a
-            # pre-column revision broke the ORM seeding once a later migration
-            # added a column.
-            _run_alembic(repo_root, env, "upgrade", _FILESYSTEM_RECLAIMED_REVISION)
+            # The current ORM seeds rows before the backfill is invoked manually.
+            _run_alembic(repo_root, env, "upgrade", "head")
 
         engine = make_engine(database_url)
         try:
