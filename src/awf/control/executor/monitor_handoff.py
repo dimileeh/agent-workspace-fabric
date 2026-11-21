@@ -54,9 +54,8 @@ from awf.control.executor.monitor_resume_restart_escalation import (
 )
 from awf.control.executor.monitor_resume_setup_replay import replay_setup_on_monitor_resume
 from awf.control.executor.protocols import _MonitorRunnerProto
-from awf.control.executor.quality_gates import (
-    _log,
-)
+from awf.control.executor.quality_gates import _log
+from awf.control.executor.recovery_handoff import confirm_pending_gap_notice
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
 from awf.control.executor.state_ops import (
     _execution_circuit_allows_launch,
@@ -173,12 +172,9 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
 async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHandoff | None:
     """Prepare monitor recovery through compose restart; return handoff or ``None`` on failure.
 
-    The current monitor claim owner (``monitor_claimed_by`` on the row this worker
-    reclaimed) is threaded into the runner so the protected-scope pause CAS can
-    fence on it and refuse to clobber the row once a newer worker has reclaimed an
-    expired monitor lease: a stale runner captures the owner string it set, and if
-    a takeover changed ``monitor_claimed_by`` the pause CAS matches 0 rows and does
-    not enter ``blocked`` with its stale preserved commit (PRRT_kwDOSJAM6s6KHtX5).
+    Pass the current monitor claim owner to the runner so its protected-scope
+    pause CAS cannot put a newer claimant's row in ``blocked`` with a stale
+    preserved commit (PRRT_kwDOSJAM6s6KHtX5).
     """
 
     ws = await self._load_workspace(workspace_id)
@@ -199,6 +195,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
         action="resume_pr_monitor",
+        monitor_owner_id=monitor_owner_id,
     ):
         return None
 
@@ -232,6 +229,8 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             )[:2000],
             reason_code="MONITOR_RECOVERY_METADATA_MISSING",
         )
+        return None
+    if not await confirm_pending_gap_notice(self, ws):
         return None
 
     if workspace_is_hosted:
