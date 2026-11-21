@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import build_audit_payload
@@ -826,6 +827,8 @@ class WorkspaceRepository:
         workspace.status = to.value
         if _transition_clears_dormancy(old_state):
             workspace.dormant_at = None
+            # Include the column even when the caller loaded it before suspension.
+            flag_modified(workspace, "dormant_at")
         if _transition_invalidates_filesystem_reclamation(old_state, to):
             workspace.filesystem_reclaimed_at = None
         if _transition_releases_provisioning_execution_claim(old_state, to):

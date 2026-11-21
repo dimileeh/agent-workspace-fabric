@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from awf.control.executor import monitor_handoff, monitor_resume_runtime, runtime_setup_replay
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import OperationStatus, OperationType
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import ResourceReservation
 from awf.db.repositories import MergeCandidateRepository, OperationRepository, WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
@@ -102,6 +102,24 @@ async def test_dormant_control_wakes_atomically(factory, wait, monkeypatch, acti
         if action == "guide":
             assert operator_hint_from_threads(row.monitor_threads_addressed).directive == DIRECTIVE
     assert await worker._claim_monitoring_pr(workspace_id)
+
+
+async def test_transition_clears_dormancy_committed_after_workspace_load(factory, wait):
+    _, workspace_id, _, _ = wait
+    async with factory.begin() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace.dormant_at is None
+
+        await suspend(factory, wait)
+        assert workspace.dormant_at is None
+        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="TEST")
+
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        assert any(event.event_type == "workspace.dormant" for event in row.events)
+        assert row.status == WorkspaceStatus.cancelled.value
+        assert row.dormant_at is None
 
 
 async def test_guide_waiting_on_suspend_lock_wakes_committed_dormancy(
@@ -420,20 +438,14 @@ async def test_open_operation_blocks_dormancy_once_across_polls(factory, wait):
         row = await WorkspaceRepository(session).get(workspace_id)
         (blocked,) = [e for e in row.events if e.event_type == "workspace.dormancy_blocked"]
         assert blocked.reason_code == "HUMAN_WAIT_DORMANCY_BLOCKED"
+        episode = row.awaiting_human_since.isoformat()
+        assert blocked.payload["awaiting_human_since"] == episode
         assert blocked.payload["blocking_operation_ids"] == [blocking.id]
         operations = OperationRepository(session)
         await operations.finish(await operations.get(blocking.id), status=OperationStatus.succeeded)
 
-    # Start a fresh episode. A new operation opens after preflight has
-    # released the workspace lock for the log, before teardown can start.
-    await control(factory, workspace_id, "remonitor")
-    monitor.current_time += timedelta(minutes=1)
-    async with factory.begin() as session:
-        row = await WorkspaceRepository(session).get(workspace_id)
-        row.monitor_claimed_by = "monitor"
-        row.monitor_claim_expires_at = monitor.current_time + timedelta(hours=1)
-        row.awaiting_human_since = monitor.current_time - timedelta(seconds=THRESHOLD)
-
+    # A new operation opens in the same wait after eligible preflight releases
+    # the workspace lock for the log, before teardown can start.
     later = None
 
     async def open_during_request_log(line):
@@ -455,11 +467,12 @@ async def test_open_operation_blocks_dormancy_once_across_polls(factory, wait):
     assert later is not None
     async with factory.begin() as session:
         row = await WorkspaceRepository(session).get(workspace_id)
+        assert row.awaiting_human_since.isoformat() == episode
         assert [
-            e.payload["blocking_operation_ids"]
+            (e.payload["awaiting_human_since"], e.payload["blocking_operation_ids"])
             for e in row.events
             if e.event_type == "workspace.dormancy_blocked"
-        ] == [[blocking.id], [later.id]]
+        ] == [(episode, [blocking.id]), (episode, [later.id])]
         operations = OperationRepository(session)
         await operations.finish(await operations.get(later.id), status=OperationStatus.succeeded)
 

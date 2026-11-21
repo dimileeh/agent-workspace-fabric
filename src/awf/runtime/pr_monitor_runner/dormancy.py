@@ -81,6 +81,7 @@ async def _suspension_operations(
     awaiting_since: datetime,
     threshold: float,
     operation: MonitorOperationHandle | None,
+    after_eligible_preflight: bool = False,
 ) -> tuple[Workspace, Operation, list[Operation]] | None:
     repo = WorkspaceRepository(session)
     workspace = await repo.get_for_update(workspace_id)
@@ -142,7 +143,8 @@ async def _suspension_operations(
         None,
     )
     if (
-        latest_outcome is None
+        after_eligible_preflight
+        or latest_outcome is None
         or latest_outcome.event_type != "workspace.dormancy_blocked"
         or (latest_outcome.payload or {}).get("awaiting_human_since") != episode
     ):
@@ -208,6 +210,7 @@ async def suspend_human_wait(
                 awaiting_since=awaiting_since,
                 threshold=threshold,
                 operation=operation,
+                after_eligible_preflight=monitor_log is not None,
             )
             if eligible is None:
                 return None
