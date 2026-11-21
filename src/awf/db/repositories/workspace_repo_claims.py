@@ -35,6 +35,7 @@ async def claim_monitoring_pr(
         recovery_allows_work(),
         Workspace.id == workspace_id,
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        Workspace.dormant_at.is_(None),
         or_(
             Workspace.monitor_claim_expires_at.is_(None),
             Workspace.monitor_claim_expires_at <= cutoff,
@@ -182,6 +183,7 @@ async def refresh_monitoring_pr_claim(
         .where(
             Workspace.id == workspace_id,
             Workspace.status == WorkspaceStatus.monitoring_pr.value,
+            Workspace.dormant_at.is_(None),
             Workspace.monitor_claimed_by == owner_id,
         )
         .values(

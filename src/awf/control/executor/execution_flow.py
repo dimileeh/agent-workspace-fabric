@@ -47,6 +47,7 @@ from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
     _failure_reason_for_phase,
+    _monitor_execution_claim_kwargs,
     _profile_for_workspace,
 )
 from awf.control.executor.logging_ops import (
@@ -1497,4 +1498,5 @@ async def execute(
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        **_monitor_execution_claim_kwargs(ws),
     )

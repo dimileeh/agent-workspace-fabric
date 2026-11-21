@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import inspect
 
@@ -326,19 +326,22 @@ async def _handle_merge_gate_blocker(
         and not ws.auto_merge
         and not _gate_requires_validation_recovery(gate)
     ):
-        return await runner._execute(
-            action=Abort(AbortReason.stale),
-            workspace_id=workspace_id,
-            repo_url=repo_url,
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            monitor_log=monitor_log,
+        return cast(
+            bool,
+            await runner._execute(
+                action=Abort(AbortReason.stale),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            ),
         )
 
     if stale_reason is not None and req_action == "rebase":
@@ -357,24 +360,27 @@ async def _handle_merge_gate_blocker(
             for op in ws.operations
         )
         if has_failed_rebase:
-            return await runner._execute(
-                action=NotifyHuman(
-                    message=(
-                        f"Agent could not resolve {stale_reason}. "
-                        "Rebase conflicted. Manual intervention required."
-                    )
+            return cast(
+                bool,
+                await runner._execute(
+                    action=NotifyHuman(
+                        message=(
+                            f"Agent could not resolve {stale_reason}. "
+                            "Rebase conflicted. Manual intervention required."
+                        )
+                    ),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
                 ),
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
             )
 
     grace_wait_seconds = (
@@ -689,19 +695,22 @@ async def _handle_merge_gate_blocker(
         return True
 
     if gate.notify_message is not None:
-        return await runner._execute(
-            action=NotifyHuman(message=gate.notify_message),
-            workspace_id=workspace_id,
-            repo_url=repo_url,
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            monitor_log=monitor_log,
+        return cast(
+            bool,
+            await runner._execute(
+                action=NotifyHuman(message=gate.notify_message),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            ),
         )
 
     return None

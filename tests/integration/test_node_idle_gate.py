@@ -719,3 +719,99 @@ async def test_real_work_names_its_blockers_and_survives_the_reaper(node, work):
         assert not await session.scalar(
             select(WorkspaceEvent.id).where(WorkspaceEvent.event_type == REAPED_EVENT)
         )
+
+
+async def test_dormancy_excludes_retained_monitor_metadata_from_idle_blockers(node):
+    from awf.db.models import ResourceReservation
+
+    client, receiver, _ = node
+    service = evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    now = datetime.now(UTC)
+    async with receiver.factory.begin() as session:
+        await seed_workspace(
+            session,
+            "ws_wait",
+            status="monitoring_pr",
+            node_id=receiver.identity.owner,
+            compose_project_name="awf_wait",
+            awaiting_human_since=now,
+        )
+        session.add(candidate("ws_wait", status="open"))
+        session.add(
+            ResourceReservation(
+                id="reservation-wait",
+                workspace_id="ws_wait",
+                attempt_id="att_ws_wait",
+                node_id=receiver.identity.owner,
+                steady_cpu=1,
+                steady_memory_gb=1,
+                peak_cpu=1,
+                peak_memory_gb=1,
+                phase="monitoring_pr",
+            )
+        )
+
+    waiting = (await client.get(PREFIX + "/readiness")).json()
+    assert not waiting["database_quiescent"]
+    assert [item["name"] for item in waiting["blockers"]] == [
+        "WORKSPACE_ACTIVE",
+        "COMPOSE_NOT_RELEASED",
+        "ATTEMPT_ACTIVE",
+        "RESERVATION_HELD",
+        "MERGE_CANDIDATE_OPEN",
+    ]
+    async with receiver.factory.begin() as session:
+        (await session.get(Workspace, "ws_wait")).dormant_at = now
+    dormant = (await client.get(PREFIX + "/readiness")).json()
+    assert dormant["quiescent"] and dormant["database_quiescent"]
+    assert dormant["blockers"] == []
+
+    async def residual_workload(identity):
+        return HostObservation(
+            identity, now + timedelta(minutes=1), False, True, ("CGROUP_POPULATED",)
+        )
+
+    service.observe_host = residual_workload
+    busy_host = (await client.get(PREFIX + "/readiness")).json()
+    assert busy_host["database_quiescent"] and not busy_host["quiescent"]
+    assert [item["name"] for item in busy_host["blockers"]] == ["CGROUP_POPULATED"]
+
+
+async def test_dormant_marker_cannot_hide_live_claims_operations_or_secrets(node):
+    from awf.db.models import WorkspaceSecretLease
+
+    client, receiver, _ = node
+    evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    now = datetime.now(UTC)
+    async with receiver.factory.begin() as session:
+        await seed_workspace(
+            session,
+            "ws_dormant_live",
+            status="monitoring_pr",
+            node_id=receiver.identity.owner,
+            dormant_at=now,
+            monitor_claimed_by="stray-monitor",
+        )
+        session.add(operation("ws_dormant_live", "op_stray", status="running"))
+        session.add(
+            WorkspaceSecretLease(
+                id="lease-stray",
+                workspace_id="ws_dormant_live",
+                secret_name="example",
+                kind="mount",
+                mode="ro",
+                target="/run/secrets/example",
+                provider="protected",
+                status="mounted",
+                issued_at=now,
+            )
+        )
+    status = (await client.get(PREFIX + "/readiness")).json()
+    assert not status["database_quiescent"] and not status["quiescent"]
+    assert [item["name"] for item in status["blockers"]] == [
+        "WORKSPACE_CLAIMED",
+        "OPERATION_ACTIVE",
+        "SECRET_LEASE_ACTIVE",
+    ]

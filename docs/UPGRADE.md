@@ -20,8 +20,7 @@ It includes migration **85ce3f9b2a61**, worker capability enforcement, isolated
 runtime support and complete snapshot recovery. Package version `0.1.0` is not
 a unique rollback floor; baseline `3aae1ac6e` predates this contract and is not
 compatible with the expanded schema. Hosted checkpoint cut/restore expects the
-current schema head exactly (`9e3b7c41d2a6` since
-[managed OpenRouter keys](#managed-openrouter-keys-and-budgets)).
+current schema head exactly (`fa2c80d79e31` since human-wait dormancy).
 
 Required rollout order:
 

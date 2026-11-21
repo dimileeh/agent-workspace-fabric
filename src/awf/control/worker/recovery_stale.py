@@ -264,6 +264,7 @@ async def _list_stale_active_execution_candidates(
                 ),
                 and_(
                     Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                    Workspace.dormant_at.is_(None),
                     _stale_monitor_claim_filter(claim_cutoff),
                 ),
             )
@@ -304,6 +305,8 @@ async def _recover_stale_active_execution(
 ) -> None:
     from awf.service.provider_diagnostics import is_diagnostic
 
+    if not await self._stale_active_candidate_is_current(candidate):
+        return
     if is_diagnostic(candidate.task_policy):
         from awf.control.worker.provider_diagnostics import interrupt_diagnostic
 
@@ -330,8 +333,6 @@ async def _recover_stale_active_execution(
             candidate
         ) and await self._recover_preserved_active_execution(candidate):
             return
-    if not await self._stale_active_candidate_is_current(candidate):
-        return
     if await self._recover_hosted_pr_adoption_active_execution(candidate):
         return
     try:
@@ -764,7 +765,7 @@ async def _stale_active_candidate_is_current(
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(candidate.workspace_id)
-        return ws is not None and ws.status == candidate.status.value
+        return ws is not None and ws.status == candidate.status.value and ws.dormant_at is None
 
 
 async def _candidate_has_claim(
@@ -1256,7 +1257,7 @@ async def _record_recoverable_runtime_stranding(
     payload = _runtime_stranding_event_payload(candidate, snapshot, finding)
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
-        ws = await repo.get(candidate.workspace_id)
+        ws = await repo.get_for_update(candidate.workspace_id)
         if ws is None or ws.status != candidate.status.value:
             return
         if not _candidate_claim_is_stale(ws, candidate.status, datetime.now(UTC)):

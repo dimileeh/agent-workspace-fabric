@@ -53,6 +53,7 @@ from awf.runtime.pr_monitor_runner.config import (
     PostMergeTargetReconciler,
 )
 from awf.runtime.pr_monitor_runner.constants import _GIT_BASE_BEHIND_FAILED_REASON
+from awf.runtime.pr_monitor_runner.dormancy import HUMAN_WAIT_DORMANT, DormancyExit
 from awf.runtime.pr_monitor_runner.helpers import (
     _awaiting_required_checks_grace,
     _clear_transient_base_fetch_retry_state,
@@ -148,6 +149,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         # ``None`` on the inline initial handoff, where the executor still holds
         # the execution claim rather than a monitor claim.
         self._monitor_owner_id: str | None = None
+        self._dormancy_execution_claim: tuple[str, int] | None = None
         # Work slot injected by the worker task driving this run (slot-release):
         # agent and validation runs hold it, and every pure wait releases it.
         self._work_slot: WorkSlot | None = None
@@ -161,6 +163,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         compose_project: str,
         compose_file: Path,
         monitor_owner_id: str | None = None,
+        dormancy_execution_claim: tuple[str, int] | None = None,
         work_slot: WorkSlot | None = None,
     ) -> None:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires.
@@ -171,6 +174,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         """
 
         self._monitor_owner_id = monitor_owner_id
+        self._dormancy_execution_claim = dormancy_execution_claim
         self._work_slot = work_slot
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
@@ -198,7 +202,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             )
             for _ in range(self._runner_config.max_outer_iterations):
                 ws = await self._load_workspace(workspace_id)
-                if ws.status != WorkspaceStatus.monitoring_pr.value:
+                if ws.status != WorkspaceStatus.monitoring_pr.value or ws.dormant_at is not None:
                     # Someone else terminated us (cancel, crash recovery, etc.).
                     return
 
@@ -493,7 +497,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 )
                 action = decide(status, state, self._config)
                 try:
-                    terminal = await self._execute(
+                    outcome = await self._execute(
                         action=action,
                         workspace_id=workspace_id,
                         repo_url=ws.repo_url,
@@ -507,6 +511,11 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         compose_project=compose_project,
                         compose_file=compose_file,
                         monitor_log=monitor_log,
+                        **(
+                            {"allow_human_wait_dormancy": True}
+                            if self._config.human_wait_dormant_after_seconds is not None
+                            else {}
+                        ),
                     )
                 except ForgeClientError as exc:
                     # The status-fetch path above catches the same base, but
@@ -573,6 +582,17 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         reason_code=exc.reason_code,
                     )
                     return
+                if isinstance(outcome, DormancyExit):
+                    if outcome is DormancyExit.DORMANT:
+                        await self._write_monitor_log(
+                            monitor_log,
+                            {
+                                "event": "monitor.dormant",
+                                "workspace_id": workspace_id,
+                                "reason_code": HUMAN_WAIT_DORMANT,
+                            },
+                        )
+                    return
                 # ``_execute`` returned without raising, so the execute-path forge
                 # calls recovered: clear any stale ``execute_action`` retry count so a
                 # recovered blip never accumulates toward the budget across polls. The
@@ -589,7 +609,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # The new owner's next poll re-derives everything from the DB.
                     return
                 await self._persist_state(workspace_id, state)
-                if terminal:
+                if outcome:
                     return
 
             # Safety net — max_outer_iterations hit without a terminal action.

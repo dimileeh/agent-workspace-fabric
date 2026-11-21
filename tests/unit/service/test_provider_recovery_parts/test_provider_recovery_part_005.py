@@ -46,6 +46,7 @@ def _request() -> WorkspaceCreateRequest:
             "owned_paths": ["src/awf/provider/**"],
             "auto_merge": False,
             "initial_review_grace_period_seconds": 45,
+            "human_wait_dormant_after_seconds": 42.25,
             "provider_recovery": {
                 "fallbacks": [
                     {
@@ -465,6 +466,8 @@ class TestFallbackInheritanceCompleteness:
         assert fallback.initial_review_grace_period_seconds == (
             source.initial_review_grace_period_seconds
         )
+        assert fallback.human_wait_dormant_after_seconds == 42.25
+        assert fallback.dormant_at is None
         assert fallback.task_kind == source.task_kind
 
         assert fallback.task_policy is not None

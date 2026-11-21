@@ -66,6 +66,7 @@ def test_workspace_show_pretty_emits_attention_line(
         "attention_required": True,
         "awaiting_human_reason": "blocking review requires a human",
         "awaiting_human_since": "2026-06-20T09:00:00+00:00",
+        "dormant_at": "2026-06-20T09:02:00+00:00",
     }
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -82,6 +83,7 @@ def test_workspace_show_pretty_emits_attention_line(
 
     out = capsys.readouterr().out
     assert "⚠ awaiting human: blocking review requires a human" in out
+    assert "Dormant since 2026-06-20T09:02:00+00:00" in out
 
 
 @pytest.mark.unit
