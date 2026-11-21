@@ -6,10 +6,8 @@ MCP all expose. Every entry maps a single operator capability to:
 - the canonical REST endpoint (``method`` + ``path``);
 - the MCP tool name when one exists (``mcp_tool``);
 - the CLI invocation tokens when one exists (``cli_tokens``);
-- the parity matrix Status / Backlog Slice columns at the time of writing
-  (``parity_status``, ``parity_backlog_slice``).
-- whether ``Idempotency-Key`` is optional replay support or a required
-  client-boundary contract.
+- the parity matrix Status and Backlog Slice (``parity_status``, ``parity_backlog_slice``).
+- whether clients must send an ``Idempotency-Key`` or may use one for replay.
 
 The registry is cross-validated against ``docs/MCP_CLIENT_PARITY.md`` at test
 collection time so the harness fails loudly if either side drifts. Tests that
