@@ -649,3 +649,57 @@ class TestSchedulerLocking:
         )
         assert "FOR UPDATE" in sql
         assert "workspaces.id = 'ws_locked'" in sql
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "postgresql", "sqlite"])
+@pytest.mark.parametrize(
+    "target",
+    sorted(
+        WorkspaceStatus(status)
+        for status in ("ready", "blocked", "completed", "failed", "cancelled")
+    ),
+)
+async def test_transition_out_of_monitoring_clears_dormancy(session, mode, target):
+    repo = WorkspaceRepository(session, dialect_name="postgresql" if mode == "ordinary" else mode)
+    ws = await repo.create(
+        repo_url="git@github.com:example/repo.git",
+        branch_base="main",
+        task_title="Dormant monitor",
+        task_prompt="Review PR",
+        agent="codex",
+        test_commands=[],
+    )
+    ws.status = WorkspaceStatus.monitoring_pr.value
+    ws.dormant_at = datetime.now(UTC)
+    await session.commit()
+
+    if mode == "ordinary":
+        with pytest.raises(InvalidWorkspaceTransitionError):
+            await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST")
+        assert ws.dormant_at is not None
+        await repo.transition(ws, to=target, reason_code="TEST")
+    else:
+        assert (
+            await repo.transition_if_current(
+                ws.id,
+                from_status=WorkspaceStatus.provisioning,
+                to=WorkspaceStatus.ready,
+                reason_code="TEST",
+            )
+            is None
+        )
+        assert ws.dormant_at is not None
+        assert (
+            await repo.transition_if_current(
+                ws.id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                to=target,
+                reason_code="TEST",
+            )
+            is ws
+        )
+
+    await session.commit()
+    await session.refresh(ws)
+    assert ws.status == target.value
+    assert ws.dormant_at is None

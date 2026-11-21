@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 HUMAN_WAIT_DORMANT = "HUMAN_WAIT_DORMANT"
 HUMAN_WAIT_DORMANCY_FAILED = "HUMAN_WAIT_DORMANCY_FAILED"
+HUMAN_WAIT_DORMANCY_BLOCKED = "HUMAN_WAIT_DORMANCY_BLOCKED"
 _OPEN_OPERATION_STATUSES = {OperationStatus.pending.value, OperationStatus.running.value}
 
 
@@ -72,21 +73,121 @@ def _owns_wait(self: Any, workspace: Workspace) -> bool:
     )
 
 
+async def _suspension_operations(
+    self: Any,
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    awaiting_since: datetime,
+    threshold: float,
+    operation: MonitorOperationHandle | None,
+    after_eligible_preflight: bool = False,
+) -> tuple[Workspace, Operation, list[Operation]] | None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.get_for_update(workspace_id)
+    if workspace is None or not _owns_wait(self, workspace):
+        raise _DormancyError("ownership_changed")
+    if workspace.awaiting_human_since != awaiting_since:
+        raise _DormancyError("attention_episode_changed")
+
+    latest_failure = next(
+        (
+            event
+            for event in reversed(workspace.events)
+            if event.event_type == "workspace.dormancy_failed"
+        ),
+        None,
+    )
+    if (
+        latest_failure is not None
+        and (_as_utc(self._deps.now()) - _as_utc(latest_failure.occurred_at)).total_seconds()
+        < threshold
+    ):
+        return None
+
+    if operation is None:
+        raise _DormancyError("human_wait_operation_missing")
+    current = await session.get(
+        Operation, operation.operation_id, with_for_update=True, populate_existing=True
+    )
+    if current is None:
+        raise _DormancyError("human_wait_operation_missing")
+
+    superseded_waits = []
+    blocking_ids = []
+    for other in workspace.operations:
+        if other.id == current.id or other.status not in _OPEN_OPERATION_STATUSES:
+            continue
+        # A restart can give the next poll a different identity. Only passive
+        # monitor waits can be settled as part of suspension.
+        payload = other.payload or {}
+        if payload.get("owner") == "pr_monitor" and (
+            other.type == OperationType.human_wait.value
+            or (other.type == OperationType.monitor_state.value and "wait_seconds" in payload)
+        ):
+            superseded_waits.append(other)
+        else:
+            blocking_ids.append(other.id)
+
+    if not blocking_ids:
+        return workspace, current, superseded_waits
+
+    episode = awaiting_since.isoformat()
+    latest_outcome = next(
+        (
+            event
+            for event in reversed(workspace.events)
+            if event.event_type
+            in {"workspace.dormancy_blocked", "workspace.dormancy_failed", "workspace.dormant"}
+        ),
+        None,
+    )
+    if (
+        after_eligible_preflight
+        or latest_outcome is None
+        or latest_outcome.event_type != "workspace.dormancy_blocked"
+        or (latest_outcome.payload or {}).get("awaiting_human_since") != episode
+    ):
+        await repo.add_event(
+            workspace,
+            event_type="workspace.dormancy_blocked",
+            reason_code=HUMAN_WAIT_DORMANCY_BLOCKED,
+            payload={"awaiting_human_since": episode, "blocking_operation_ids": blocking_ids},
+        )
+        await session.commit()
+    return None
+
+
 async def suspend_human_wait(
     self: Any,
     *,
     workspace_id: str,
     awaiting_since: datetime,
+    threshold: float,
     state: MonitorState,
     operation: MonitorOperationHandle | None,
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
 ) -> DormancyExit | None:
-    stage = "monitor_log"
+    stage = "ownership"
     teardown_started = False
     dormant_at = None
     try:
         if monitor_log is not None:
+            async with self._deps.session_factory() as session:
+                if (
+                    await _suspension_operations(
+                        self,
+                        session,
+                        workspace_id,
+                        awaiting_since=awaiting_since,
+                        threshold=threshold,
+                        operation=operation,
+                    )
+                    is None
+                ):
+                    return None
+            stage = "monitor_log"
             # A sink can also update workspace activity in a separate session.
             # Write the attempt before acquiring the row lock.
             await monitor_log.write(
@@ -102,38 +203,27 @@ async def suspend_human_wait(
             )
         stage = "ownership"
         async with self._deps.session_factory() as session:
-            repo = WorkspaceRepository(session)
-            workspace = await repo.get_for_update(workspace_id)
-            if workspace is None or not _owns_wait(self, workspace):
-                raise _DormancyError("ownership_changed")
-            if workspace.awaiting_human_since != awaiting_since:
-                raise _DormancyError("attention_episode_changed")
-            if operation is None:
-                raise _DormancyError("human_wait_operation_missing")
-
-            operations = OperationRepository(session)
-            current = await session.get(
-                Operation, operation.operation_id, with_for_update=True, populate_existing=True
+            eligible = await _suspension_operations(
+                self,
+                session,
+                workspace_id,
+                awaiting_since=awaiting_since,
+                threshold=threshold,
+                operation=operation,
+                after_eligible_preflight=monitor_log is not None,
             )
-            if current is None:
-                raise _DormancyError("human_wait_operation_missing")
-            superseded_waits = []
-            for other in workspace.operations:
-                if other.id == current.id or other.status not in _OPEN_OPERATION_STATUSES:
-                    continue
-                # A restart can give the next poll a different identity. Only
-                # human waits and monitor state operations created for a sleep
-                # are safe to settle here, since neither dispatches work.
-                payload = other.payload or {}
-                if payload.get("owner") != "pr_monitor" or not (
-                    other.type == OperationType.human_wait.value
-                    or (
-                        other.type == OperationType.monitor_state.value
-                        and "wait_seconds" in payload
-                    )
-                ):
-                    return None
-                superseded_waits.append(other)
+            if eligible is None:
+                return None
+            workspace, current, superseded_waits = eligible
+            if monitor_log is None:
+                _log.info(
+                    "monitor.dormancy_requested",
+                    workspace_id=workspace_id,
+                    reason_code=HUMAN_WAIT_DORMANT,
+                    awaiting_human_since=awaiting_since.isoformat(),
+                )
+            repo = WorkspaceRepository(session)
+            operations = OperationRepository(session)
 
             # Hold the workspace fence during the external effect. Delay guarded
             # writes until after Compose so they cannot hold the node mutex here.

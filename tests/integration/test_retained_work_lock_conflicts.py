@@ -51,8 +51,8 @@ async def test_operator_writer_conflict_aborts_entire_retained_acceptance(
         original_bindings = runtime.receiver.lifecycle.verify_bindings
         pids, errors = {}, []
 
-        async def locked_workspace(repo, workspace_id):
-            row = await original_get(repo, workspace_id)
+        async def locked_workspace(repo, workspace_id, **kwargs):
+            row = await original_get(repo, workspace_id, **kwargs)
             if workspace_id == "ws_timing_1":
                 pids["operator"] = await repo._session.scalar(text("SELECT pg_backend_pid()"))
                 workspace_locked.set()

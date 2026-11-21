@@ -66,6 +66,7 @@ from awf.service.controls_helpers import (
     _remonitor_current_head_sha,
     _reset_failed_workspace_for_remonitor,
     _reset_stale_monitor_execution_claims,
+    _wake_dormant_monitor,
     _workspace_pr_operation_context,
 )
 from awf.service.controls_provider_budget import _ProviderBudgetControlMixin
@@ -192,21 +193,14 @@ async def guide_workspace(
         )
 
     if require_claim_active:
-        # Compare-and-act: after exact replay is ruled out and before any
-        # mutation, re-read under the same FOR UPDATE lock and accept only a
-        # live monitoring_pr claim (no grants / no failed-reset / no blocked-arm).
-        # ``get_for_update`` acquires the row lock but does not populate_existing,
-        # so a prior identity-mapped load (``workspace_for_payload`` /
-        # ``_prepare_operation``) can still expose stale status/claim fields if a
-        # worker released its claim or left ``monitoring_pr`` before the lock.
-        # Refresh attributes under that lock before evaluating the precondition.
-        row = await self._require_workspace_for_update(repo, workspace_id)
-        await self._session.refresh(row)
-        now = utcnow()
-        claim_active = workspace_claim_active(row, now=now)
-        if grant_inputs or row.status != WorkspaceStatus.monitoring_pr.value or not claim_active:
-            raise WorkspaceGuideClaimNotActiveError(row, claim_active=claim_active)
-        workspace = row
+        # The control lock excludes a concurrent claim change through commit.
+        claim_active = workspace_claim_active(workspace, now=utcnow())
+        if (
+            grant_inputs
+            or workspace.status != WorkspaceStatus.monitoring_pr.value
+            or not claim_active
+        ):
+            raise WorkspaceGuideClaimNotActiveError(workspace, claim_active=claim_active)
 
     current = WorkspaceStatus(workspace.status)
     if current not in _GUIDE_ELIGIBLE_STATUSES:
@@ -347,6 +341,7 @@ async def guide_workspace(
     # ``awaiting_human_since IS NOT NULL`` so it is a DB-level no-op (no row
     # churn, no spurious ``updated_at`` bump) when there is no episode — a
     # ``monitoring_pr`` workspace with no prior escalation is untouched.
+    await _wake_dormant_monitor(repo, workspace, operation)
     await repo.clear_workspace_attention(workspace.id)
     if state_reset is None:
         await repo.advance_workspace_version(workspace)
