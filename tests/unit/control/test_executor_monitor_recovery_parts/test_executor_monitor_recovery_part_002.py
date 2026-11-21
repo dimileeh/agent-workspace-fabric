@@ -47,6 +47,8 @@ from awf.runtime.planning import (
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    AppliedOperatorDirective,
+    append_applied_operator_directive,
     load_applied_operator_directives,
 )
 from awf.runtime.validation import (
@@ -835,6 +837,86 @@ async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
         event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
         for event in events
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source", "recovery_mode", "operation_type"),
+    [
+        ("pr_monitor", "validate_only", OperationType.validate),
+        ("operator_api", "rebase_only", OperationType.rebase),
+    ],
+)
+async def test_existing_pr_recovery_does_not_republish_carried_gaps(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    source: str,
+    recovery_mode: str,
+    operation_type: OperationType,
+) -> None:
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, source=source, recovery_mode=recovery_mode, operation_type=operation_type
+    )
+    advisory = AppliedOperatorDirective(
+        directive="test_work: Add a regression test",
+        operation_id=ws_id,
+        applied_at="2026-01-01T00:00:00+00:00",
+        head_sha="d" * 40,
+        source="plan_conformance",
+    )
+    state = MonitorState()
+    append_applied_operator_directive(state, advisory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = state.threads_addressed_ids
+        ws.block_planning_conformance_handoff = {
+            "carried_gaps": [{"kind": "test_work", "detail": "Add a regression test"}],
+        }
+        await s.commit()
+
+    validation_head = "d" * 40
+    if recovery_mode == "rebase_only":
+        _queue_rebase_recovery(fake)
+        validation_head = "c" * 40
+    fixed_head = "e" * 40
+    _queue_validation_head(fake, head=validation_head)
+    fake.queue_result(returncode=1, stderr="pytest: failed")
+    fake.queue_result(returncode=0)  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    _queue_existing_pr_push(fake, head=fixed_head)
+    fake.respond_when(lambda args: args[:3] == ["gh", "pr", "comment"], returncode=0)
+
+    await executor.execute(ws_id)
+
+    assert monitor_calls == [ws_id]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_last_commit_sha == fixed_head
+        assert load_applied_operator_directives(
+            MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
+        ) == (advisory,)
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in fake.calls)
 
 
 @pytest.mark.unit
