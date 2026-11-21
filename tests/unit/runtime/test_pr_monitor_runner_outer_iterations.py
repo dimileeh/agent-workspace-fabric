@@ -244,10 +244,14 @@ async def test_merge_queue_wait_budget(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "wait_for_queue_first", [False, True], ids=["without-queue-wait", "after-queue-wait"]
+)
 async def test_merge_retries_with_backoff_exhaust_outer_iterations_cap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    wait_for_queue_first: bool,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
@@ -259,8 +263,28 @@ async def test_merge_retries_with_backoff_exhaust_outer_iterations_cap(
         worktrees_root=tmp_path / "worktrees",
         max_outer_iterations=_CAP,
     )
+    if wait_for_queue_first:
+        # Reuse monitor state to exercise the runner's reset independently of the loader.
+        state = runner._load_state(await runner._load_workspace(ws_id))
+        monkeypatch.setattr(runner, "_load_state", lambda _: state)
+        blocker = MergeQueueBlocker(
+            candidate_id="older-candidate",
+            workspace_id="older-workspace",
+            attempt_id="older-attempt",
+            task_id="older-task",
+            title="Older candidate",
+            pr_url=None,
+            pr_number=41,
+            status="open",
+            blocker_state="ready",
+        )
+        monkeypatch.setattr(
+            runner,
+            "_merge_queue_blockers_for_workspace",
+            AsyncMock(side_effect=[[blocker]] + [[]] * (2 * _CAP)),
+        )
     fetch = AsyncMock(
-        side_effect=[_status(CheckState.SUCCESS)] * (2 * _CAP)
+        side_effect=[_status(CheckState.SUCCESS)] * (2 * _CAP + int(wait_for_queue_first))
         + [AssertionError("monitor exceeded the iteration cap")]
     )
     merge = AsyncMock(
@@ -274,12 +298,14 @@ async def test_merge_retries_with_backoff_exhaust_outer_iterations_cap(
     await runner.run(workspace_id=ws_id, compose_project="proj", compose_file=tmp_path / "c.yml")
 
     assert merge.await_count == _CAP
-    assert sleep_fn.calls == [5, 10]
+    assert sleep_fn.calls == ([60, 5, 10] if wait_for_queue_first else [5, 10])
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
-        assert "max_outer_iterations" in (ws.failure_message or "")
+        assert ws.failure_message == (
+            "monitor: hit max_outer_iterations without a terminal action (likely a decision loop bug)"
+        )
 
 
 @pytest.mark.unit

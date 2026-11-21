@@ -519,6 +519,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 )
                 action = decide(status, state, self._config)
                 sleeps_before_action = completed_positive_sleeps
+                state.waited_for_merge_queue = False
                 try:
                     outcome = await self._execute(
                         action=action,
