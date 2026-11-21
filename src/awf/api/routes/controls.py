@@ -49,7 +49,7 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
-from awf.service.controls_errors import WorkspaceGuideClaimNotActiveError
+from awf.service.controls_errors import WorkspaceDormantError, WorkspaceGuideClaimNotActiveError
 from awf.service.controls_provider_budget import ProviderBudgetControlError
 from awf.service.openrouter_management import management_client_from_settings
 
@@ -369,6 +369,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
             ActiveWorkspaceDestroyError,
             IdempotencyConflictError,
             VersionConflictError,
+            WorkspaceDormantError,
             WorkspaceGuideClaimNotActiveError,
             WorkspaceGuideStateError,
             WorkspaceRefreshStateError,

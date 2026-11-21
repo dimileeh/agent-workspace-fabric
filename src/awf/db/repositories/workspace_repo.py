@@ -98,6 +98,11 @@ from awf.db.repositories.workspace_repo_scheduler import (
 )
 
 
+def _transition_clears_dormancy(old_state: str) -> bool:
+    # Valid status transitions from monitoring_pr always leave monitoring_pr.
+    return old_state == WorkspaceStatus.monitoring_pr.value
+
+
 def _transition_releases_provisioning_execution_claim(
     old_state: str,
     to: WorkspaceStatus,
@@ -351,16 +356,20 @@ class WorkspaceRepository:
         workspace_id: str,
         *,
         skip_locked: bool = False,
+        populate_existing: bool = False,
     ) -> Workspace | None:
         """Load one workspace with a row lock when the database supports it.
 
         When ``skip_locked=True`` and the row is currently locked by another
         transaction, returns ``None`` instead of waiting (Postgres
-        ``SELECT FOR UPDATE SKIP LOCKED``).
+        ``SELECT FOR UPDATE SKIP LOCKED``). Use ``populate_existing`` to refresh an
+        identity-mapped row from the locked read.
         """
         stmt = select(Workspace).where(Workspace.id == workspace_id)
         if self._dialect_name == "postgresql":
             stmt = stmt.with_for_update(of=Workspace, skip_locked=skip_locked)
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def exists(self, workspace_id: str) -> bool:
@@ -815,6 +824,8 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_clears_dormancy(old_state):
+            workspace.dormant_at = None
         if _transition_invalidates_filesystem_reclamation(old_state, to):
             workspace.filesystem_reclaimed_at = None
         if _transition_releases_provisioning_execution_claim(old_state, to):
@@ -897,6 +908,8 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_clears_dormancy(old_state):
+            workspace.dormant_at = None
         if _transition_invalidates_filesystem_reclamation(old_state, to):
             workspace.filesystem_reclaimed_at = None
         workspace.updated_at = now
@@ -931,6 +944,8 @@ class WorkspaceRepository:
             "event_sequence": Workspace.event_sequence + 1,
             "version": Workspace.version + 1,
         }
+        if _transition_clears_dormancy(from_status.value):
+            values["dormant_at"] = None
         if _transition_invalidates_filesystem_reclamation(from_status.value, to):
             values["filesystem_reclaimed_at"] = None
         if to == WorkspaceStatus.monitoring_pr:

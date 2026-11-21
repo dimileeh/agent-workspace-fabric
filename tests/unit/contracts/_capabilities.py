@@ -351,6 +351,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "NOT_FOUND",
                 "WORKSPACE_PR_URL_REQUIRED",
                 "WORKSPACE_STATE_NOT_VALIDATABLE",
+                "WORKSPACE_DORMANT",
                 "VERSION_CONFLICT",
                 "IDEMPOTENCY_CONFLICT",
             }
@@ -419,6 +420,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {
                 "NOT_FOUND",
                 "WORKSPACE_STATE_NOT_REBASEABLE",
+                "WORKSPACE_DORMANT",
                 "MERGE_CANDIDATE_NOT_FOUND",
                 "WORKSPACE_REBASE_CONFLICT",
                 "WORKSPACE_OPERATION_CONFLICT",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,14 +33,15 @@ def test_remonitor_compose_runtime_available_requires_existing_compose_file(
     tmp_path: Path,
 ) -> None:
     missing_path = tmp_path / "gone" / "compose.yml"
+    dormant_at = datetime.now(UTC)
     assert not remonitor_compose_runtime_available(
-        _workspace(compose_file_path=str(missing_path))  # type: ignore[arg-type]
+        _workspace(compose_file_path=str(missing_path), dormant_at=dormant_at)  # type: ignore[arg-type]
     )
 
     present = tmp_path / "compose.yml"
     present.write_text("services: {}\n", encoding="utf-8")
     assert remonitor_compose_runtime_available(
-        _workspace(compose_file_path=str(present))  # type: ignore[arg-type]
+        _workspace(compose_file_path=str(present), dormant_at=dormant_at)  # type: ignore[arg-type]
     )
 
 
@@ -47,6 +49,7 @@ def test_remonitor_compose_runtime_available_requires_existing_compose_file(
 def test_remonitor_compose_runtime_available_hosted_skips_compose_checks() -> None:
     assert remonitor_compose_runtime_available(
         _workspace(  # type: ignore[arg-type]
+            dormant_at=datetime.now(UTC),
             compose_project_name=None,
             compose_file_path=None,
             task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},

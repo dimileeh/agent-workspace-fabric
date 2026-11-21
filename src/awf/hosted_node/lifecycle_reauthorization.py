@@ -3,6 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Operation, Workspace
 from awf.hosted_node.identity import MaterialDeniedError, check
 from awf.hosted_node.lifecycle_models import NodeLifecycleRow
@@ -32,7 +33,11 @@ async def historical_source(
 
 
 async def historical_evidence(
-    session: AsyncSession, authority: WorkspaceAuthority, association: HostedWorkspace
+    session: AsyncSession,
+    authority: WorkspaceAuthority,
+    association: HostedWorkspace,
+    *,
+    allow_revoked: bool = False,
 ) -> None:
     receiver = authority.receiver
     owner = await check(session, receiver.identity)
@@ -69,6 +74,9 @@ async def historical_evidence(
     # grant. reset_boot forbids unapproved storage changes; boot monotonically
     # fences generations/epochs and preserves the last accepted predecessor.
     # Every accepted replacement has therefore crossed the physical proof gate.
+    receipt_states = {"installed", "expired"}
+    if allow_revoked:
+        receipt_states.add("revoked")
     for binding in (association.credentials.agent, association.credentials.github):
         evidence = (
             await session.execute(
@@ -95,7 +103,7 @@ async def historical_evidence(
             or grant.grant_id != binding.grant_id
             or receipt.binding != binding.model_dump(mode="json")
             or receipt.operation not in {"install", "refresh"}
-            or receipt.state not in {"installed", "expired"}
+            or receipt.state not in receipt_states
         ):
             raise MaterialDeniedError("HOSTED_WORKSPACE_HISTORY_MISMATCH", 403)
 
@@ -142,8 +150,9 @@ async def authorize_rebinding(
     if association not in (pair.expected_association, pair.replacement_association):
         raise MaterialDeniedError("HOSTED_REAUTHORIZATION_PREIMAGE_MISMATCH", 409)
     if association == pair.expected_association:
-        await require_rebind_quiet(session, authority, row, association)
-        await historical_evidence(session, authority, association)
+        dormant = row.status == WorkspaceStatus.monitoring_pr.value and row.dormant_at is not None
+        await require_rebind_quiet(session, authority, row, association, dormant=dormant)
+        await historical_evidence(session, authority, association, allow_revoked=dormant)
 
 
 async def require_rebind_quiet(
@@ -151,6 +160,8 @@ async def require_rebind_quiet(
     authority: WorkspaceAuthority,
     row: Workspace,
     association: HostedWorkspace,
+    *,
+    dormant: bool = False,
 ) -> None:
     if (
         row.execution_claimed_by is not None
@@ -167,8 +178,9 @@ async def require_rebind_quiet(
         # Paused work may retain its warm stack. The node/workspace locks exclude
         # a new claim through commit; no old invocation or uncertain operation
         # may cross this fresh-authority boundary. Old-boot nonterminal work must
-        # first pass the existing retained-work reconciliation.
-        if association.credentials.agent.identity != authority.receiver.identity:
+        # first pass retained-work reconciliation. Dormant monitors are excluded
+        # from that inventory and keep the association from their last active boot.
+        if not dormant and association.credentials.agent.identity != authority.receiver.identity:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
     else:
         await require_source_quiet(session, row)
