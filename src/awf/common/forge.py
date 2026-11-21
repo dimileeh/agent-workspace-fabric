@@ -213,6 +213,16 @@ class ForgeClient(Protocol):
         """Post a top-level PR comment."""
         ...
 
+    async def fetch_pull_request_body(self, *, repo: RepoRef, pr_number: int) -> str:
+        """Return the PR description."""
+        ...
+
+    async def fetch_pull_request_comment_bodies(
+        self, *, repo: RepoRef, pr_number: int
+    ) -> tuple[str, ...]:
+        """Return visible top-level PR comments, including the caller's comments."""
+        ...
+
     async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
         """Open a tracking issue and return its URL."""
         ...

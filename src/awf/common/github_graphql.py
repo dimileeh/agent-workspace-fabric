@@ -248,7 +248,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
 
 
 _GQL_PR_ISSUE_COMMENTS_PAGE = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       comments(first: 100, after: $cursor) {

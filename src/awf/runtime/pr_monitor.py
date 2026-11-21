@@ -163,8 +163,6 @@ _CLOSED_OUTDATED_THREAD_VERDICTS = CLOSED_OUTDATED_THREAD_VERDICTS
 # to just the re-exported names and drop everything historically exported by the
 # bare module.
 __all__ = [
-    # Re-exported wire-shape value types (now defined in ``pr_monitor_models``)
-    # and monitor actions (now defined in ``pr_monitor_actions``).
     "DEFAULT_NON_CHECK_REVIEWER_LOGINS",
     "CheckFailure",
     "CheckFailureLogResult",
@@ -227,6 +225,9 @@ class MonitorState:
         repr=False,
         compare=False,
     )
+    # In-memory waits eligible for an outer iteration refund.
+    waited_for_merge_queue: bool = field(default=False, init=False, repr=False, compare=False)
+    waited_for_human: bool = field(default=False, init=False, repr=False, compare=False)
     current_pr_head_ref: str | None = field(
         default=None,
         init=False,

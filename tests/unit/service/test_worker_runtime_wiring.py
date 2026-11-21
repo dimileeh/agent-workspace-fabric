@@ -203,6 +203,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["worker_kwargs"]["executor"] is created["executor"]
     assert created["worker_kwargs"]["runtime_cleaner"] is created["runtime_cleaner"]
     assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
+    assert created["worker_kwargs"]["pr_publication_runner"] is created["executor_kwargs"]["runner"]
     # Restart adoption and the reconciler probe tagged awf-exec processes (slot-release).
     assert isinstance(created["worker_kwargs"]["work_slot_probe"], LocalWorkSlotProcessProbe)
     assert created["executor_kwargs"]["compose"] is created["compose"]
@@ -707,6 +708,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            pr_publication_runner: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
             claude_base_reaper: object = None,
@@ -803,6 +805,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            pr_publication_runner: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
             claude_base_reaper: object = None,
@@ -1109,6 +1112,7 @@ def _stub_worker_runtime_dependencies(
             executor: object,
             runtime_cleaner: object,
             open_pr_resolver: object,
+            pr_publication_runner: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
             claude_base_reaper: object = None,

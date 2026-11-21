@@ -47,6 +47,37 @@ def test_bitbucket_client_satisfies_forge_client_protocol() -> None:
     assert isinstance(_client(), ForgeClient)
 
 
+@pytest.mark.parametrize("description", ["Gap notice", None])
+async def test_read_pull_request_notice_sources(description: str | None) -> None:
+    from tests.unit.common.test_bitbucket_client_parts._helpers import FakeBitbucket, make_client
+
+    pr = "/2.0/repositories/o/r/pullrequests/7"
+    comments = f"{pr}/comments"
+    fake = FakeBitbucket()
+    fake.enqueue("GET", pr, json={"description": description})
+    fake.page(
+        "GET",
+        comments,
+        values=[
+            {"deleted": True, "content": {"raw": "Deleted"}},
+            {"inline": {"path": "file.py"}, "content": {"raw": "Inline"}},
+            {"parent": {"id": 1}, "content": {"raw": "Reply"}},
+            {},
+        ],
+        next_url=f"{comments}?page=2",
+    )
+    fake.page(
+        "GET", comments, values=[{"content": {"raw": "Visible notice"}}], params={"page": "2"}
+    )
+    repo = RepoRef(owner="o", name="r", forge="bitbucket")
+
+    async with make_client(fake) as client:
+        assert await client.fetch_pull_request_body(repo=repo, pr_number=7) == (description or "")
+        assert await client.fetch_pull_request_comment_bodies(repo=repo, pr_number=7) == (
+            "Visible notice",
+        )
+
+
 async def test_unresolve_thread_reports_unsupported_without_a_request() -> None:
     """#1138: Bitbucket has no reopen call yet, so the gate keeps today's blocker."""
     from tests.unit.common.test_bitbucket_client_parts._helpers import FakeBitbucket, make_client

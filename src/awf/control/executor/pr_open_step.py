@@ -9,32 +9,40 @@ except for execution-time revalidation of a reused PR. Keeping the forge-neutral
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge import ForgeClient, concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.git_identity import git_safe_directory_config_args
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClient, RepoRef
 from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
     _AUDIT_PR_CREATED_EVENT,
     _GIT_PUSH_FAILED_REASON_CODE,
+    _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
     _PR_CREATE_FAILED_REASON_CODE,
 )
 from awf.control.executor.helpers import (
     _build_pr_body,
     _existing_pr_remote_push_url,
     _extract_pr_number,
+    _render_pr_conformance_gaps,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.pr_creator import PullRequestError
+from awf.profiles.models import WorkspaceProfile
+from awf.runtime.pr_creator import PullRequestError, PullRequestResult
 from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 
 _PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
@@ -42,6 +50,7 @@ _PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
 # before treating an open head that does not yet equal the tip as a race.
 _POST_PUSH_TIP_RETRY_ATTEMPTS = 3
 _POST_PUSH_TIP_RETRY_DELAY_SECONDS = 0.5
+_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS = 1.0
 
 
 class _PostPushReuseDisposition(StrEnum):
@@ -312,6 +321,198 @@ async def _fail_reuse_pr_state_lookup(
     )
 
 
+async def _publish_pr_conformance_comment(
+    self: Any,
+    *,
+    forge_client: ForgeClient,
+    pr: PullRequestResult,
+    gap_section: str,
+    workspace_id: str,
+    repo_url: str,
+    runner: AsyncCommandRunner,
+    worktree_path: Path,
+    fetch_remote: str,
+    reused_pr_number: int | None = None,
+) -> PullRequestResult:
+    """Publish gaps when the PR creation body may have been bypassed."""
+    if not gap_section:
+        return pr
+    metadata = pr.open_metadata or {}
+    pr_number = reused_pr_number
+    pushed_head_sha = pr.head_sha
+    reconcile_client = (
+        forge_client
+        if isinstance(forge_client, GitHubClient)
+        and str(metadata.get("strategy")).startswith("reconciled_")
+        else None
+    )
+    try:
+        if reconcile_client is not None:
+            pr_number = _extract_pr_number(pr.url)
+            if pr_number is None:  # pragma: no cover - reconciled GitHub PR URLs include the number
+                raise ValueError("Could not determine the reconciled PR number")
+            recorded_tip = metadata.get("pushed_head_sha")
+            pushed_head_sha = recorded_tip if isinstance(recorded_tip, str) else None
+        elif pr_number is None:
+            return pr
+        elif not pr.head_sha:
+            # Reuse can keep an open PR when the local pushed tip is unavailable.
+            return replace(
+                pr,
+                open_metadata={
+                    **metadata,
+                    "conformance_comment_skipped": "pushed_head_sha_unavailable",
+                },
+            )
+        repo = RepoRef.from_url(repo_url)
+    except ValueError as exc:
+        error = redact_audit_text(str(exc), limit=500)
+        _log.warning(
+            "executor.pr_conformance_comment_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            error=error,
+        )
+        return replace(pr, open_metadata={**metadata, "conformance_comment_error": error})
+
+    # Retry publication in place so the already successful push is preserved.
+    retried = False
+    # Reused PRs already passed the post-push containment check.
+    pushed_tip_verified = reconcile_client is None
+    while True:
+        try:
+            if reconcile_client is not None or retried:
+                snapshot = await forge_client.fetch_pull_request_snapshot(
+                    repo=repo, pr_number=pr_number
+                )
+                if not await _pr_snapshot_contains_pushed_tip(
+                    snapshot=snapshot,
+                    pushed_head_sha=pushed_head_sha,
+                    runner=runner,
+                    worktree_path=worktree_path,
+                    fetch_remote=fetch_remote,
+                ):
+                    if pushed_tip_verified:
+                        raise ValueError("The pull request no longer contains the pushed tip")
+                    error = "Could not verify that the reconciled PR contains the pushed tip"
+                    _log.warning(
+                        "executor.pr_conformance_comment_failed",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        error=error,
+                    )
+                    return replace(
+                        pr, open_metadata={**metadata, "conformance_comment_error": error}
+                    )
+                pushed_tip_verified = True
+            if reconcile_client is not None:
+                body = await reconcile_client.fetch_pull_request_body(
+                    repo=repo, pr_number=pr_number
+                )
+                normalized_body = f"\n{body}\n".replace("\r\n", "\n")
+                if f"\n{gap_section}\n" in normalized_body:
+                    break
+                # After this read, a comment retry only needs to revalidate the tip.
+                reconcile_client = None
+            await forge_client.post_comment(repo=repo, pr_number=pr_number, body=gap_section)
+        except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+            error = redact_audit_text(str(exc), limit=500)
+            _log.warning(
+                "executor.pr_conformance_comment_failed",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+                error=error,
+                retried=retried,
+            )
+            if retried:
+                return replace(
+                    pr,
+                    open_metadata={
+                        **metadata,
+                        "conformance_comment_pending": True,
+                        "conformance_comment_error": error,
+                    },
+                )
+            await self._record_executor_pr_audit_event(
+                workspace_id,
+                event_type=_AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
+                action="pr_conformance_comment",
+                outcome="pending",
+                reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
+                branch_name=pr.branch,
+                pr_number=pr_number,
+                pr_url=pr.url,
+                source_head_sha=pushed_head_sha,
+                evidence={"error_message": error},
+            )
+            retried = True
+            await asyncio.sleep(_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS)
+        else:
+            break
+    if retried:
+        return replace(pr, open_metadata={**metadata, "conformance_comment_retried": True})
+    return pr
+
+
+async def retry_pr_conformance_comment(
+    self: Any,
+    *,
+    ws: Workspace,
+    profile: WorkspaceProfile,
+    worktree_path: Path,
+    head_sha: str | None,
+    carried_gaps: Sequence[dict[str, str]],
+) -> str | None:
+    """Publish pending gaps when recovery can reuse the already pushed tip."""
+    pr_number = ws.pr_number or _extract_pr_number(ws.pr_url or "")
+    if not ws.pr_url or pr_number is None or not head_sha:
+        return "Could not resolve the pull request and validated tip"
+    fetch_remote = _existing_pr_remote_push_url(ws) or "origin"
+    try:
+        repo = RepoRef.from_url(ws.repo_url)
+        async with make_forge_client(
+            concrete_forge_for_repo(profile.forge, ws.repo_url), self._runner
+        ) as forge_client:
+            snapshot = await forge_client.fetch_pull_request_snapshot(
+                repo=repo, pr_number=pr_number
+            )
+            if snapshot.lifecycle not in (
+                PullRequestLifecycle.open,
+                PullRequestLifecycle.merged,
+            ) or not await _pr_snapshot_contains_pushed_tip(
+                snapshot=snapshot,
+                pushed_head_sha=head_sha,
+                runner=self._runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
+            ):
+                return "Could not verify that the pull request contains the validated tip"
+            pr = await _publish_pr_conformance_comment(
+                self,
+                forge_client=forge_client,
+                pr=PullRequestResult(url=ws.pr_url, branch=ws.branch_name or "", head_sha=head_sha),
+                gap_section=_render_pr_conformance_gaps(carried_gaps),
+                workspace_id=ws.id,
+                repo_url=ws.repo_url,
+                runner=self._runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
+                reused_pr_number=pr_number,
+            )
+    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+        return redact_audit_text(str(exc), limit=500)
+    return _conformance_comment_error(pr)
+
+
+def _conformance_comment_error(pr: PullRequestResult) -> str | None:
+    publication = pr.open_metadata or {}
+    if publication.get("conformance_comment_skipped") == "pushed_head_sha_unavailable":
+        return "Could not verify the pushed tip before publishing gaps"
+    error = publication.get("conformance_comment_error")
+    return error if isinstance(error, str) else None
+
+
 async def push_and_open_pr(
     self: Any,
     *,
@@ -320,6 +521,9 @@ async def push_and_open_pr(
     defaults: Any,
     workspace_id: str,
     worktree_path: Path,
+    carried_gaps: Sequence[dict[str, str]] = (),
+    publish_gaps_on_reused_pr: bool = True,
+    retry_gap_publication: bool = False,
 ) -> Any | None:
     """Push the validated branch and open (or reuse) its PR.
 
@@ -334,17 +538,20 @@ async def push_and_open_pr(
     a replacement PR is opened for the pushed tip. When the PR is still open but
     its head ref was renamed after admission, the persisted push target is
     updated to the live ``head_ref`` before reuse. After a reuse push, the live
-    snapshot is fetched again: an open PR is kept only when its head OID equals
-    the pushed tip or is a fast-forward descendant of it (briefly retried for
-    forge propagation; otherwise fail closed); if the PR merged concurrently,
-    reuse is kept only when the merged PR's head OID equals or descends from the
-    pushed tip; otherwise identity is cleared and a replacement PR is opened. If
+    snapshot is fetched again. An open PR is kept when the local pushed tip is
+    unavailable or its head contains that tip (briefly retried for forge
+    propagation). Publishing a fallback comment requires verified containment.
+    If the PR merged concurrently, reuse requires the merged PR's head to
+    contain the pushed tip. Otherwise a replacement PR is opened for that tip. If
     ``pr_number`` cannot be resolved, or snapshot lookup fails (pre- or
     post-push), reuse fails closed (identity kept, workspace marked failed) so a
     still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, profile=profile, defaults=defaults)
+    gap_section = _render_pr_conformance_gaps(carried_gaps) if carried_gaps else ""
+    if gap_section:
+        pr_body += "\n" + gap_section
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
     existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
@@ -400,6 +607,7 @@ async def push_and_open_pr(
                 return None
 
             async with forge_client:
+                reused_pr_number = None
                 pr_number = ws.pr_number or _extract_pr_number(ws.pr_url)
                 if pr_number is None:
                     # Cannot revalidate without a number. Fail closed (keep
@@ -580,6 +788,7 @@ async def push_and_open_pr(
                         )
                         return None
                     if disposition is _PostPushReuseDisposition.keep:
+                        reused_pr_number = pr_number
                         if post_snapshot.lifecycle is PullRequestLifecycle.merged:
                             _log.info(
                                 "executor.pr_reuse_merged_tip_contained",
@@ -655,6 +864,20 @@ async def push_and_open_pr(
                         remote_branch_name=None,
                         remote_url=existing_pr_remote_url,
                     )
+                pr = await _publish_pr_conformance_comment(
+                    self,
+                    forge_client=forge_client,
+                    pr=pr,
+                    gap_section=(
+                        gap_section if reused_pr_number is None or publish_gaps_on_reused_pr else ""
+                    ),
+                    workspace_id=workspace_id,
+                    repo_url=ws.repo_url,
+                    runner=self._runner,
+                    worktree_path=worktree_path,
+                    fetch_remote=existing_pr_remote_url or "origin",
+                    reused_pr_number=reused_pr_number,
+                )
         else:
             # New PR: ``make_forge_client`` builds the Bitbucket client eagerly
             # via ``from_env()``, so a missing/invalid Bitbucket API env raises
@@ -728,6 +951,17 @@ async def push_and_open_pr(
                     remote_branch_name=existing_pr_remote_branch,
                     remote_url=existing_pr_remote_url,
                 )
+                pr = await _publish_pr_conformance_comment(
+                    self,
+                    forge_client=forge_client,
+                    pr=pr,
+                    gap_section=gap_section,
+                    workspace_id=workspace_id,
+                    repo_url=ws.repo_url,
+                    runner=self._runner,
+                    worktree_path=worktree_path,
+                    fetch_remote=existing_pr_remote_url or "origin",
+                )
     except PullRequestError as exc:
         _log.error(
             "executor.pr_failed",
@@ -796,4 +1030,13 @@ async def push_and_open_pr(
             message=f"unexpected error during PR creation: {exc!r}"[:2000],
         )
         return None
+    if retry_gap_publication and (error := _conformance_comment_error(pr)) is not None:
+        return replace(
+            pr,
+            open_metadata={
+                **(pr.open_metadata or {}),
+                "conformance_comment_pending": True,
+                "conformance_comment_error": error,
+            },
+        )
     return pr

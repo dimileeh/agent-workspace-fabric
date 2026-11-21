@@ -423,6 +423,7 @@ async def handle_notify_human_action(
                 )
             return DormancyExit.SUPERSEDED
     await self._deps.sleep(self._config.poll_interval_seconds)
+    state.waited_for_human = self._config.poll_interval_seconds > 0
     await self._finish_monitor_operation(
         operation,
         status=OperationStatus.succeeded,

@@ -222,6 +222,7 @@ async def handle_merge_action(
                 state=state,
                 monitor_log=monitor_log,
             )
+            state.waited_for_merge_queue = self._config.poll_interval_seconds > 0
             return False
 
         settle_decision = _non_check_reviewer_settle_decision(
@@ -382,6 +383,7 @@ async def handle_merge_action(
         merge_blocker: GitHubClientError | BitbucketClientError | None = None
         merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
+        merge_attempted = False
         recheck_forge_error: ForgeClientError | None = None
         recheck_base_error: BaseFetchError | None = None
         recheck_behind_error: BaseBehindCountError | None = None
@@ -800,6 +802,7 @@ async def handle_merge_action(
                                 )
                                 await self._persist_state(workspace_id, state)
                             else:
+                                merge_attempted = True
                                 for attempt_index, merge_method in enumerate(effective_methods):
                                     merge_attempt = await _attempt_merge_method(
                                         self,
@@ -916,6 +919,7 @@ async def handle_merge_action(
                 state=state,
                 monitor_log=monitor_log,
             )
+            state.waited_for_merge_queue = self._config.poll_interval_seconds > 0
             return False
 
         if merge_gate_after_lock is not None and _merge_gate_blocks(merge_gate_after_lock):
@@ -1242,6 +1246,7 @@ async def handle_merge_action(
                 context="post_human_notification",
             )
             await self._deps.sleep(self._config.poll_interval_seconds)
+            state.waited_for_human = self._config.poll_interval_seconds > 0
             return False
 
         # Past the preflight guard with no captured error: the merge-method preflight
@@ -1261,7 +1266,7 @@ async def handle_merge_action(
                 base_branch=base_branch,
                 reason=merge_method_notification_reason,
             )
-            return cast(
+            outcome = cast(
                 bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=merge_method_notification_reason),
@@ -1280,6 +1285,10 @@ async def handle_merge_action(
                     allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
+            # Keep the outer budget charge for a rejected merge call.
+            if merge_attempted:
+                state.waited_for_human = False
+            return outcome
 
         if merge_blocker is not None:
             if isinstance(merge_blocker, BitbucketClientError):

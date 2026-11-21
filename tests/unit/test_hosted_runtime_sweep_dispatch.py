@@ -40,6 +40,7 @@ from tests.unit.test_hosted_runtime_review_retained import retained
         ("expiry", "watcher", None),
         ("revoke", "final_check", None),
         ("expiry", "final_check", None),
+        ("revoke", "publication_final_check", None),
         ("revoke", "watcher", "material"),
         ("revoke", "watcher", "os"),
         ("revoke", "final_check", "material"),
@@ -52,16 +53,21 @@ async def test_denied_preserved_recovery_does_not_block_healthy_dispatch(
     runtime, value, factory = authority
     denied = await retained(runtime, value, factory, "ws_cloud_stable", status="pushing")
     healthy = await retained(runtime, value, factory, "ws_healthy", status="pushing", other=True)
+    publish_gaps = when == "publication_final_check"
     async with factory.begin() as session:
         for workspace_id in ("ws_cloud_stable", "ws_healthy"):
             row = await session.get(Workspace, workspace_id)
             row.branch_name = row.remote_push_branch = f"awf/{workspace_id}"
             row.base_commit = "a" * 40
+            if publish_gaps:
+                row.block_planning_conformance_handoff = {
+                    "carried_gaps": [{"kind": "verification", "detail": "Add a regression test"}],
+                }
     calls = []
+    publication_reads = []
 
     class Commands:
         async def run(self, args, **kwargs):
-            assert args[:3] == ["gh", "pr", "list"]
             workspace_id = consumers.workspace_id.get()
             assert workspace_id in {"ws_cloud_stable", "ws_healthy"}
             assert kwargs["env"]["GH_TOKEN"] == (
@@ -78,8 +84,19 @@ async def test_denied_preserved_recovery_does_not_block_healthy_dispatch(
                     )
                     is not None
                 )
+            if publish_gaps and args[:3] == ["gh", "pr", "view"]:
+                publication_reads.append(workspace_id)
+                if workspace_id == "ws_cloud_stable":
+                    await deny(runtime, value, failure, monkeypatch)
+                return CommandResult(
+                    0,
+                    "### Unresolved plan-conformance gaps\n\n"
+                    "- **verification**: Add a regression test",
+                    "",
+                )
+            assert args[:3] == ["gh", "pr", "list"]
             calls.append(workspace_id)
-            if workspace_id == "ws_cloud_stable":
+            if workspace_id == "ws_cloud_stable" and not publish_gaps:
                 assert when in {"watcher", "final_check"}
                 await deny(runtime, value, failure, monkeypatch)
                 if when == "watcher":
@@ -152,19 +169,29 @@ async def test_denied_preserved_recovery_does_not_block_healthy_dispatch(
         assert executor.resume_calls == ["ws_healthy"]
         assert calls == (
             ["ws_cloud_stable", "ws_healthy"]
-            if when in {"watcher", "final_check"}
+            if when in {"watcher", "final_check", "publication_final_check"}
             else ["ws_healthy"]
         )
+        assert publication_reads == (["ws_cloud_stable", "ws_healthy"] if publish_gaps else [])
         assert not denied.exists() and healthy.is_dir()
         assert {call.args[0] for call in consumers.stop_workspace.await_args_list} == {
             "ws_cloud_stable"
         }
         assert consumers.workspace_id.get() is None
+        denied_pr_number = 270 if publish_gaps else None
         async with factory() as session:
             bad = await session.get(Workspace, "ws_cloud_stable")
             good = await session.get(Workspace, "ws_healthy")
-            assert bad.status == "pushing" and bad.pr_number is None
+            assert bad.status == "pushing" and bad.pr_number == denied_pr_number
             assert good.status == "monitoring_pr" and good.pr_number == 270
+            publication_events = await session.execute(
+                select(WorkspaceEvent.workspace_id, WorkspaceEvent.reason_code).where(
+                    WorkspaceEvent.event_type == "workspace.audit.pr_conformance_comment"
+                )
+            )
+            assert publication_events.all() == (
+                [("ws_healthy", "PR_CONFORMANCE_COMMENT_PUBLISHED")] if publish_gaps else []
+            )
             version = bad.version
             events = await session.scalar(
                 select(func.count())
@@ -176,7 +203,7 @@ async def test_denied_preserved_recovery_does_not_block_healthy_dispatch(
             assert await built.worker.run_once() == 0
             async with factory() as session:
                 bad = await session.get(Workspace, "ws_cloud_stable")
-                assert bad.version == version and bad.pr_number is None
+                assert bad.version == version and bad.pr_number == denied_pr_number
                 assert (
                     await session.scalar(
                         select(func.count())

@@ -277,12 +277,18 @@ class _LifecycleForgeClient:
 class _ForgeRecordingPrCreator:
     """Records the forge client + repo URL the executor resolves and passes in."""
 
-    def __init__(self, *, new_pr_url: str = "https://github.com/x/y/pull/55") -> None:
+    def __init__(
+        self,
+        *,
+        new_pr_url: str = "https://github.com/x/y/pull/55",
+        pushed_head_sha: str | None = "b" * 40,
+    ) -> None:
         self.forge_client: object | None = None
         self.repo_url: str | None = None
         self.existing_pr_url: str | None = None
         self.remote_branch_name: str | None = None
         self.new_pr_url = new_pr_url
+        self.pushed_head_sha = pushed_head_sha
         self.calls: list[dict[str, object]] = []
 
     async def push_and_open(
@@ -306,13 +312,14 @@ class _ForgeRecordingPrCreator:
                 "repo_url": repo_url,
                 "existing_pr_url": existing_pr_url,
                 "remote_branch_name": remote_branch_name,
+                "body": _kwargs.get("body"),
             }
         )
         url = existing_pr_url or self.new_pr_url
         return PullRequestResult(
             url=url,
             branch=branch_name,
-            head_sha="b" * 40,
+            head_sha=self.pushed_head_sha,
         )
 
 
