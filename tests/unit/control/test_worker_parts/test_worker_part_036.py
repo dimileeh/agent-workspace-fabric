@@ -1245,6 +1245,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart021:
             status=WorkspaceStatus.running.value,
             execution_claimed_by="worker-a",
             execution_claim_expires_at=stale_expires_at,
+            dormant_at=None,
             failure_reason=None,
             failure_message=None,
         )
@@ -1353,7 +1354,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart021:
                 "to": WorkspaceStatus.failed,
                 "reason_code": "STALE_ACTIVE_EXECUTION",
                 "payload": None,
-                "extra_conditions_count": 1,
+                "extra_conditions_count": 2,
             }
         ]
         assert recording_session.committed is False
