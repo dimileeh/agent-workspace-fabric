@@ -853,8 +853,7 @@ async def test_dormancy_failures_preserve_a_working_wait(factory, wait, monkeypa
 
         async def fail_operation_write(operations, operation, *, status, **kwargs):
             attempted_statuses.append(status)
-            # Flush the mutation before raising so the regression requires
-            # rolling it back while still committing the failure event.
+            # Flush before raising to test that only the failure event commits.
             await finish(operations, operation, status=status, **kwargs)
             operation.status = None
             await operations._session.flush()
@@ -944,6 +943,7 @@ async def test_dormancy_failures_preserve_a_working_wait(factory, wait, monkeypa
         assert event.payload["runtime_recovery_required"] == (stage != "monitor_log")
     assert any("monitor.dormancy_failed" in call.args[0] for call in sink.write.await_args_list)
     if stage == "operation_repository_finish":
+        monitor.current_time = event.occurred_at + timedelta(seconds=30)
         monkeypatch.setattr(OperationRepository, "finish", finish)
         await monitor.run(monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError)))
         forge.post_comment.assert_awaited_once()

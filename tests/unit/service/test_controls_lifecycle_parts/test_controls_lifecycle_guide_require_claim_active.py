@@ -307,11 +307,9 @@ async def test_require_claim_active_refreshes_stale_identity_map_under_lock(
 ) -> None:
     """Stale ORM claim fields must not defeat the locked compare-and-act check.
 
-    ``workspace_for_payload`` and ``_prepare_operation`` load the row before the
-    ``require_claim_active`` re-read. ``get_for_update`` acquires FOR UPDATE but
-    does not ``populate_existing``, so a concurrent claim release committed into
-    the same session (identity map still showing a live claim) would otherwise
-    be accepted. Refresh under the lock before evaluating status/claim.
+    Guide reads the workspace for operation context before preparing the
+    control. The locked read must refresh identity-mapped fields before the
+    claim check so a concurrent claim release is visible.
     """
     workspace = await _monitoring_workspace(session)
     future = datetime.now(UTC) + timedelta(minutes=10)

@@ -400,6 +400,7 @@ async def handle_notify_human_action(
             self,
             workspace_id=workspace_id,
             awaiting_since=awaiting_since,
+            threshold=threshold,
             state=state,
             operation=operation,
             compose_file=compose_file,
