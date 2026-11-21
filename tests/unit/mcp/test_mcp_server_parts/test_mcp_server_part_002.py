@@ -412,6 +412,7 @@ class TestCreateWorkspace:
                 "requested_tier": 2,
                 "auto_merge": False,
                 "initial_review_grace_period_seconds": 12.5,
+                "human_wait_dormant_after_seconds": 42.25,
                 "out_of_scope_changes": {
                     "mode": "block",
                     "allowlist_patterns": ["src/**", "docs/**"],
@@ -459,6 +460,7 @@ class TestCreateWorkspace:
         assert ws.test_commands == ["uv run pytest tests/unit -q"]
         assert ws.auto_merge is False
         assert ws.initial_review_grace_period_seconds == 12.5
+        assert ws.human_wait_dormant_after_seconds == 42.25
         assert ws.task_policy["out_of_scope_changes"] == {
             "mode": "block",
             "allowlist_patterns": ["src/**", "docs/**"],

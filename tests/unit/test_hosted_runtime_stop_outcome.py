@@ -409,3 +409,65 @@ async def test_authorized_shutdown_leaves_stack_to_ordinary_worker(authority, st
     async with factory() as session:
         row = await session.get(Workspace, "ws_cloud_stable")
         assert row.status == status and row.failure_reason is None
+
+
+@pytest.mark.parametrize("when", ["before_teardown", "during_teardown"])
+async def test_authority_loss_cannot_fail_a_dormant_monitor(authority, stop_worker, when):
+    from datetime import UTC, datetime
+
+    runtime, payload, factory = authority
+    workspace_id = "ws_cloud_stable"
+    await retained(runtime, payload, factory, workspace_id, status="monitoring_pr")
+    scope, teardown = stop_worker
+    now = datetime.now(UTC)
+
+    async def dormant(**kwargs):
+        async with factory.begin() as session:
+            row = await session.get(Workspace, workspace_id)
+            row.dormant_at = now
+        return ComposeTeardownResult(status="succeeded", reason_code="synthetic")
+
+    if when == "before_teardown":
+        await dormant()
+    else:
+        teardown.side_effect = dormant
+    await scope.stop_workspace(workspace_id)
+    assert teardown.await_count == int(when == "during_teardown")
+    async with factory() as session:
+        row = await session.get(Workspace, workspace_id)
+        assert row.dormant_at == now
+        assert row.status == "monitoring_pr"
+        assert row.failure_reason is None
+
+
+async def test_authority_stop_waits_for_opted_in_monitor_teardown(
+    authority, stop_worker, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    runtime, payload, factory = authority
+    workspace_id = "ws_cloud_stable"
+    await retained(runtime, payload, factory, workspace_id, status="monitoring_pr")
+    scope, teardown = stop_worker
+    locking = asyncio.Event()
+    get = AsyncSession.get
+
+    async def observed_get(session, model, ident, **kwargs):
+        if model is Workspace and ident == workspace_id and kwargs.get("populate_existing"):
+            locking.set()
+        return await get(session, model, ident, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", observed_get)
+    async with factory.begin() as session:
+        row = await session.get(Workspace, workspace_id)
+        row.human_wait_dormant_after_seconds = 30
+    async with factory.begin() as session:
+        row = await session.get(Workspace, workspace_id, with_for_update=True)
+        stop = asyncio.create_task(scope.stop_workspace(workspace_id))
+        await asyncio.wait_for(locking.wait(), timeout=5)
+        teardown.assert_not_awaited()
+        row.dormant_at = datetime.now(UTC)
+    await asyncio.wait_for(stop, timeout=5)
+    teardown.assert_not_awaited()

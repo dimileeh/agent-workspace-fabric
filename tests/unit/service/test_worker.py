@@ -386,6 +386,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["forge_client_runner"] is created["executor_runner"]
     assert created["feature_monitor_kwargs"]["gh"] is forge_client
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
+    assert created["feature_monitor_kwargs"]["human_wait_dormant_after_seconds"] is None
     assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 900
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
         "greptile-apps",
@@ -457,6 +458,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         SimpleNamespace(
             auto_merge=False,
             initial_review_grace_period_seconds=12.5,
+            human_wait_dormant_after_seconds=42.25,
             task_kind="feature_branch_pr",
             repo_url="https://github.com/o/r.git",
         ),
@@ -464,6 +466,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
     assert manual_monitor is not None
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
+    assert created["release_monitor_kwargs"]["human_wait_dormant_after_seconds"] == 42.25
     assert created["release_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
     assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["release_monitor_kwargs"]["require_ci"] is False

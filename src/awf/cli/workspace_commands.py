@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import urllib.parse
 from collections.abc import Mapping
@@ -60,6 +61,12 @@ def _option_default(value: Any) -> Any:
     """Return Typer option defaults for direct command-helper calls."""
     if isinstance(value, OptionInfo):
         return value.default
+    return value
+
+
+def _human_wait_dormancy_callback(value: float | None) -> float | None:
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        raise typer.BadParameter("must be a finite number greater than zero")
     return value
 
 
@@ -178,6 +185,12 @@ def workspace_create(
         max=86400,
         help="Override profile monitor grace; omit to use the profile setting.",
     ),
+    human_wait_dormant_after_seconds: float | None = typer.Option(
+        None,
+        "--human-wait-dormant-after-seconds",
+        callback=_human_wait_dormancy_callback,
+        help="Suspend monitoring after this many seconds waiting for a human.",
+    ),
     provider_readiness_override: bool = typer.Option(
         False,
         "--provider-readiness-override",
@@ -246,6 +259,8 @@ def workspace_create(
     }
 
     provider = _option_default(provider)
+    if (threshold := _option_default(human_wait_dormant_after_seconds)) is not None:
+        body["task"]["human_wait_dormant_after_seconds"] = threshold
     if provider is not None:
         body["task"]["provider"] = provider
     if _option_default(allow_unverified_model):
@@ -389,6 +404,9 @@ def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) 
     for line in (format_attention_line(payload), format_provider_spend_line(payload)):
         if line is not None:
             typer.echo(line)
+
+    if dormant_at := payload.get("dormant_at"):
+        typer.echo(f"Dormant since {dormant_at}")
 
 
 def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) -> None:
@@ -1038,6 +1056,12 @@ def workspace_adopt_pr(
         max=86400,
         help="Override profile monitor grace; omit to use the profile setting.",
     ),
+    human_wait_dormant_after_seconds: float | None = typer.Option(
+        None,
+        "--human-wait-dormant-after-seconds",
+        callback=_human_wait_dormancy_callback,
+        help="Suspend monitoring after this many seconds waiting for a human.",
+    ),
     task_title: str | None = typer.Option(None, "--title"),
     task_prompt: str | None = typer.Option(None, "--prompt"),
     task_tag: str | None = typer.Option(
@@ -1109,6 +1133,8 @@ def workspace_adopt_pr(
         "task_prompt": task_prompt,
         "reason": reason,
     }
+    if (threshold := _option_default(human_wait_dormant_after_seconds)) is not None:
+        body["human_wait_dormant_after_seconds"] = threshold
     if model is not None:
         body["model"] = model
     if effort is not None:

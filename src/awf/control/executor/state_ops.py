@@ -384,6 +384,8 @@ async def _recheck_status(
                 action=action,
             )
             return False
+        if expected == WorkspaceStatus.monitoring_pr and ws.dormant_at is not None:
+            return False
         status_ok = ws.status == expected.value
         owner_ok = owner_id is None or ws.execution_claimed_by == owner_id
         monitor_owner_ok = monitor_owner_id is None or ws.monitor_claimed_by == monitor_owner_id

@@ -774,7 +774,8 @@ def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
 
 def _is_merge_ready_candidate(candidate: MergeCandidate) -> bool:
     return (
-        candidate.status == "open"
+        candidate.workspace.dormant_at is None
+        and candidate.status == "open"
         and candidate.attempt.is_canonical_for_merge
         and candidate.workspace.auto_merge
         and _workspace_status(candidate.workspace) == WorkspaceStatus.monitoring_pr
@@ -785,7 +786,8 @@ def _is_merge_ready_candidate(candidate: MergeCandidate) -> bool:
 def _is_monitor_owned_recovery(candidate: MergeCandidate) -> bool:
     workspace_status = _workspace_status(candidate.workspace)
     return (
-        candidate.status == "open"
+        candidate.workspace.dormant_at is None
+        and candidate.status == "open"
         and candidate.attempt.is_canonical_for_merge
         and candidate.workspace.auto_merge
         and workspace_status in _MONITOR_RECOVERY_STATUSES

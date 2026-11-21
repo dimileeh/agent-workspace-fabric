@@ -122,3 +122,17 @@ def test_openapi_json_consistent_with_current_app(openapi_spec: dict) -> None:
         "Checked-in openapi.json has drifted from the current app's OpenAPI spec. "
         "Run: python scripts/generate_openapi.py"
     )
+
+
+@pytest.mark.unit
+def test_human_wait_dormancy_schema(openapi_spec: dict) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+    for name in ("WorkspaceTask", "PullRequestMonitorAdoptionRequest"):
+        properties = schemas[name]["properties"]
+        threshold = properties["human_wait_dormant_after_seconds"]
+        assert threshold["anyOf"] == [{"exclusiveMinimum": 0.0, "type": "number"}, {"type": "null"}]
+        assert "human_wait_dormant_after_seconds" not in schemas[name].get("required", [])
+    assert schemas["WorkspaceResponse"]["properties"]["dormant_at"]["anyOf"] == [
+        {"format": "date-time", "type": "string"},
+        {"type": "null"},
+    ]

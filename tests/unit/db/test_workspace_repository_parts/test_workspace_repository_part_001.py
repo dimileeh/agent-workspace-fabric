@@ -226,6 +226,7 @@ class TestCreate:
             task_policy={"provider": {"model": "gpt-5.5"}},
             auto_merge=False,
             initial_review_grace_period_seconds=30.0,
+            human_wait_dormant_after_seconds=42.25,
             agent="codex",
             env_profile="python",
             profile_ref="repo-profile",
@@ -242,6 +243,7 @@ class TestCreate:
         source.base_commit = "a" * 40
         source.pr_url = "https://github.com/example/a/pull/1"
         source.monitor_last_commit_sha = "b" * 40
+        source.dormant_at = datetime.now(UTC)
 
         replacement = await repo.create_replacement_from(
             source,
@@ -262,6 +264,8 @@ class TestCreate:
         assert replacement.task_policy == {"provider": {"model": "gpt-5.5"}}
         assert replacement.auto_merge is False
         assert replacement.initial_review_grace_period_seconds == 30.0
+        assert replacement.human_wait_dormant_after_seconds == 42.25
+        assert replacement.dormant_at is None
         assert replacement.agent == source.agent
         assert replacement.env_profile == source.env_profile
         assert replacement.profile_ref == source.profile_ref

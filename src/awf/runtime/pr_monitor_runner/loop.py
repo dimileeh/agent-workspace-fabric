@@ -58,6 +58,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _CI_TRANSIENT_RERUN_FAILED_REASON,
     _CI_TRANSIENT_RERUN_REASON,
 )
+from awf.runtime.pr_monitor_runner.dormancy import DormancyExit
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
@@ -140,10 +141,11 @@ async def _execute(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
     remote_push_url: str | None = None,
-) -> bool:
+    allow_human_wait_dormancy: bool = False,
+) -> bool | DormancyExit:
     """Execute one monitor action.
 
-    Returns True iff the monitor reached a terminal state.
+    True means terminal. DormancyExit means the runner should return without a transition.
     """
     # One structured log line per iteration, BEFORE any side effect —
     # operators grepping logs need to see which arm the decision
@@ -1314,6 +1316,7 @@ async def _execute(
         compose_project=compose_project,
         compose_file=compose_file,
         monitor_log=monitor_log,
+        allow_human_wait_dormancy=allow_human_wait_dormancy,
     )
     if merge_result is not None:
         return merge_result
@@ -1333,6 +1336,7 @@ async def _execute(
             compose_project=compose_project,
             compose_file=compose_file,
             monitor_log=monitor_log,
+            allow_dormancy=allow_human_wait_dormancy,
         )
 
     # If we got here the MonitorAction union gained a variant without
