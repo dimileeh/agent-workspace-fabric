@@ -24,13 +24,15 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     NotifyHuman,
     PRStatus,
+    ReviewComment,
     ShortCircuitCompleted,
     WaitForCI,
     decide,
 )
 from awf.runtime.pr_monitor_models import ActionsRunsState
-from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, merge_loop
 from awf.runtime.pr_monitor_runner import runner as runner_module
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import DispositionGateResult
 from tests.integration.runtime._pr_monitor_runner_fixtures import _seed_monitoring_workspace
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
@@ -200,7 +202,13 @@ async def test_human_wait_goes_dormant_at_threshold_without_reposting(factory, w
 
 @pytest.mark.parametrize(
     ("blocker", "threshold"),
-    [("missing_candidate", 30), ("failed_rebase", 30), ("missing_candidate", None)],
+    [
+        ("missing_candidate", 30),
+        ("failed_rebase", 30),
+        ("missing_candidate", None),
+        ("owned_paths", 30),
+        ("owned_paths", None),
+    ],
 )
 async def test_merge_gate_human_wait_honors_dormancy_opt_in(
     factory, wait, monkeypatch, blocker, threshold
@@ -213,6 +221,8 @@ async def test_merge_gate_human_wait_honors_dormancy_opt_in(
         merge_state_status=MergeStateStatus.CLEAN,
         actions_runs=ActionsRunsState.SETTLED,
     )
+    if blocker == "owned_paths":
+        monitor.pr_status = replace(monitor.pr_status, changed_paths=("src/outside.py",))
     monkeypatch.setattr(
         runner_module, "observe_pr_head_sync", AsyncMock(return_value=monitor.pr_status)
     )
@@ -239,6 +249,10 @@ async def test_merge_gate_human_wait_honors_dormancy_opt_in(
                 status=OperationStatus.failed,
             )
             expected_reason = "Rebase conflicted. Manual intervention required."
+        elif blocker == "owned_paths":
+            workspace.owned_paths = ["src/owned.py"]
+            workspace.task_policy = {"out_of_scope_changes": {"mode": "block"}}
+            expected_reason = "OUT_OF_SCOPE_CHANGE"
         else:
             await session.delete(candidate)
             expected_reason = "candidate provenance is repaired"
@@ -268,6 +282,67 @@ async def test_merge_gate_human_wait_honors_dormancy_opt_in(
             assert [
                 op.result["outcome"] for op in workspace.operations if op.type == "human_wait"
             ].count("dormant") == 1
+
+
+@pytest.mark.parametrize(
+    ("blocker", "expected_reason"),
+    [
+        ("disposition_before_lock", "Review thread disposition is missing"),
+        ("fresh_review", "merge-blocking changes-requested review"),
+        ("disposition_after_lock", "Review thread disposition is missing"),
+        ("merge_method", "MERGE_METHOD_MISMATCH"),
+    ],
+)
+async def test_nested_merge_human_wait_persists_notice_before_sleep(
+    factory, wait, monkeypatch, blocker, expected_reason
+):
+    monitor, workspace_id, forge, _ = wait
+    monitor.pr_status = replace(
+        monitor.pr_status,
+        merge_state_status=MergeStateStatus.CLEAN,
+        actions_runs=ActionsRunsState.SETTLED,
+    )
+    monkeypatch.setattr(
+        runner_module, "observe_pr_head_sync", AsyncMock(return_value=monitor.pr_status)
+    )
+    monkeypatch.setattr(runner_module, "decide", decide)
+    runner = monitor.build(30, sleep=AsyncMock(side_effect=PollContinuesError))
+    runner._config = replace(
+        runner._config,
+        auto_merge=True,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=0,
+        pre_merge_settle_seconds=0,
+    )
+
+    async with factory.begin() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace.human_wait_dormant_after_seconds = 30
+    if blocker == "fresh_review":
+        review = ReviewComment("review-1", "Changes requested", blocks_merge=True)
+        runner._fetch_status_for_decision.side_effect = [
+            monitor.pr_status,
+            replace(monitor.pr_status, blocking_reviews=(review,)),
+        ]
+    elif blocker == "merge_method":
+        monkeypatch.setattr(forge, "fetch_repo_merge_methods", AsyncMock(return_value=()))
+    else:
+        gate_name = (
+            "review_thread_disposition_gate_with_reopen"
+            if blocker == "disposition_before_lock"
+            else "review_thread_disposition_gate"
+        )
+        gate = DispositionGateResult(blocker=expected_reason)
+        monkeypatch.setattr(merge_loop, gate_name, AsyncMock(return_value=gate))
+
+    with pytest.raises(PollContinuesError):
+        await monitor.run(runner)
+
+    forge.post_comment.assert_awaited_once()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert expected_reason in workspace.awaiting_human_reason
+        assert "notified" in (workspace.monitor_threads_addressed or {}).values()
 
 
 async def test_expiration_scan_cannot_overwrite_dormancy_revocation(factory, wait, monkeypatch):

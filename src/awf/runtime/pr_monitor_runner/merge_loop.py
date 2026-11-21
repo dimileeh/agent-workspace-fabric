@@ -131,7 +131,7 @@ async def handle_merge_action(
         )
         if policy_blocked:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(
                         message=(
@@ -151,6 +151,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -309,7 +310,7 @@ async def handle_merge_action(
             return False
         if disposition_gate.blocker is not None:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=disposition_gate.blocker),
                     workspace_id=workspace_id,
@@ -324,6 +325,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -1017,7 +1019,7 @@ async def handle_merge_action(
             # pre-merge recheck, so decision oscillation remains bounded by the
             # outer monitor loop.
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=fresh_action,
                     workspace_id=workspace_id,
@@ -1032,6 +1034,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -1126,7 +1129,7 @@ async def handle_merge_action(
             return False
         if disposition_gate_after_lock.blocker is not None:
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=disposition_gate_after_lock.blocker),
                     workspace_id=workspace_id,
@@ -1141,6 +1144,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
@@ -1258,7 +1262,7 @@ async def handle_merge_action(
                 reason=merge_method_notification_reason,
             )
             return cast(
-                bool | None,
+                bool | DormancyExit,
                 await self._execute(
                     action=NotifyHuman(message=merge_method_notification_reason),
                     workspace_id=workspace_id,
@@ -1273,6 +1277,7 @@ async def handle_merge_action(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    allow_human_wait_dormancy=allow_human_wait_dormancy,
                 ),
             )
 
