@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.control.executor import (
     ExecutorConfig,
@@ -306,6 +307,7 @@ class _ForgeRecordingPrCreator:
                 "repo_url": repo_url,
                 "existing_pr_url": existing_pr_url,
                 "remote_branch_name": remote_branch_name,
+                "body": _kwargs.get("body"),
             }
         )
         url = existing_pr_url or self.new_pr_url
@@ -1225,6 +1227,83 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("disposition", ["reuse", "comment_error", "replace", "tip_mismatch"])
+    async def test_publish_carried_gaps_on_reused_or_replacement_pr(
+        self,
+        disposition: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(
+            lifecycle=(
+                PullRequestLifecycle.closed
+                if disposition == "replace"
+                else PullRequestLifecycle.open
+            ),
+            head_ref="awf/ws_original",
+            head_sha="c" * 40 if disposition == "tip_mismatch" else "b" * 40,
+        )
+        fake.respond_when(lambda args: "--is-ancestor" in args, returncode=1)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0)
+        comments: list[str] = []
+
+        async def post_comment(*, repo: object, pr_number: int, body: str) -> None:
+            assert forge.snapshot_calls == 2
+            assert pr_number == 55
+            comments.append(body)
+            if disposition == "comment_error":
+                raise ForgeClientError("Comment transport failed")
+
+        monkeypatch.setattr(forge, "post_comment", post_comment, raising=False)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", lambda *_args: forge)
+        pr_creator = _ForgeRecordingPrCreator(new_pr_url="https://github.com/x/y/pull/99")
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        ws_id = await _seed_ready(factory)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.status = WorkspaceStatus.pushing.value
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await session.commit()
+
+        with structlog.testing.capture_logs() as logs:
+            pr = await _pr_open_step.push_and_open_pr(
+                executor,
+                ws=ws,
+                profile=WorkspaceProfile(name="test"),
+                defaults=None,
+                workspace_id=ws_id,
+                worktree_path=_test_worktrees_root(factory) / ws_id,
+                carried_gaps=[{"kind": "test_work", "detail": "Add a regression test"}],
+            )
+
+        section = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+        if disposition == "tip_mismatch":
+            assert pr is None
+            assert comments == []
+        elif disposition == "replace":
+            assert pr.url == "https://github.com/x/y/pull/99"
+            assert str(pr_creator.calls[-1]["body"]).endswith(section)
+            assert comments == []
+        else:
+            assert pr.url == "https://github.com/x/y/pull/55"
+            assert comments == [section]
+            expected_metadata = (
+                {"conformance_comment_error": "Comment transport failed"}
+                if disposition == "comment_error"
+                else None
+            )
+            assert pr.open_metadata == expected_metadata
+        failures = [
+            event for event in logs if event["event"] == "executor.pr_conformance_comment_failed"
+        ]
+        assert bool(failures) == (disposition == "comment_error")
 
     @pytest.mark.unit
     async def test_reuse_push_updates_remote_branch_when_live_head_renamed(

@@ -18,6 +18,7 @@ from awf.db.enums import OperationType
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    MAX_CONFORMANCE_GAPS,
     PlanConformanceReport,
     PlanConformanceStatus,
     render_workspace_path,
@@ -160,6 +161,20 @@ def _planning_validation_handoff_metadata(
             "reason_code": handoff.report.reason_code,
         },
     }
+
+
+def _planning_carried_gaps_from_metadata(metadata: object) -> list[dict[str, str]]:
+    """Restore redacted gaps saved by the original execution."""
+    gaps = metadata.get("carried_gaps") if isinstance(metadata, Mapping) else None
+    if not isinstance(gaps, list):
+        return []
+    return [
+        {"kind": kind, "detail": detail}
+        for gap in gaps[:MAX_CONFORMANCE_GAPS]
+        if isinstance(gap, Mapping)
+        and isinstance(kind := gap.get("kind"), str)
+        and isinstance(detail := gap.get("detail"), str)
+    ]
 
 
 def _planning_validation_handoff_from_metadata(

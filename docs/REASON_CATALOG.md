@@ -935,6 +935,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#orphan_resources_present](#orphan_resources_present)
 
+### PLAN_CONFORMANCE_GAPS_CARRIED
+**Problem:** Plan conformance exhausted its iterations with gaps and committed workspace changes.
+**Likely Cause:** The final compare reported gaps while the branch had user-visible changes relative to its base.
+**Operator Fix:** Review the unresolved gaps on the workspace timeline and on the pull request after publication.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#plan_conformance_gaps_carried](#plan_conformance_gaps_carried)
+
 ### PLAN_CONFORMANCE_NEEDS_HUMAN
 **Problem:** Plan conformance is paused for a specific operator decision.
 **Likely Cause:** The agent reported missing operator authority or external dependency input.

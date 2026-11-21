@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
@@ -45,13 +46,19 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_operations import (
     build_monitor_operation_payload,
     monitor_operation_idempotency_key,
 )
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    load_applied_operator_directives,
+)
 from awf.runtime.validation import (
     ValidationRunner,
 )
+from awf.service.artifacts import DEPOSITED_CONFORMANCE_NAME, workspace_artifact_dir
+from awf.service.doctor.reasons import reason_text_for_code
 from tests.postgres import postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktrees_root
 
@@ -1054,11 +1061,14 @@ class TestHappyPathPart002:
         ]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("outcome", ["satisfied", "exhausted", "cancelled-at-compare"])
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: str,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1072,6 +1082,46 @@ class TestHappyPathPart002:
             },
         )
 
+        exhausted = outcome != "satisfied"
+        token = "ghp_" + "a" * 36
+        gaps = [
+            {"kind": "test_work", "detail": "Add a regression test"},
+            {"kind": "documentation", "detail": f"Document the behavior\n### Note {token}"},
+        ]
+        expected_gaps = [
+            gaps[0],
+            {"kind": "documentation", "detail": "Document the behavior\n### Note [redacted]"},
+        ]
+        final_report = json.dumps(
+            {
+                "status": "needs_iteration" if exhausted else "satisfied",
+                "summary": "remaining gaps" if exhausted else "done",
+                "gaps": gaps if exhausted else [],
+            }
+        )
+        worktree = _test_worktrees_root(factory) / ws_id
+        report_path = worktree / "docs" / "awf-plans" / f"{ws_id}.conformance.json"
+        original_run = fake.run
+
+        async def run_and_write_final_report(*args: Any, **kwargs: Any) -> Any:
+            result = await original_run(*args, **kwargs)
+            if result.stdout == final_report:
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(final_report, encoding="utf-8")
+                if outcome == "cancelled-at-compare":
+                    async with factory() as session:
+                        repo = WorkspaceRepository(session)
+                        ws = await repo.get(ws_id)
+                        assert ws is not None
+                        await repo.transition(
+                            ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL"
+                        )
+                        await session.commit()
+            return result
+
+        monkeypatch.setattr(fake, "run", run_and_write_final_report)
+        monitor = SimpleNamespace(run=AsyncMock())
+        monkeypatch.setattr(executor, "_pr_monitor", monitor)
         _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
@@ -1092,13 +1142,15 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
-        fake.queue_result(  # compare satisfied
-            returncode=0,
-            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
-        )
+        fake.queue_result(returncode=0, stdout=final_report)  # final compare
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
+        if exhausted:
+            fake.queue_result(
+                returncode=0,
+                stdout="docs/awf-plans/workspace.md\ndocs/usage.md\n",
+            )  # committed net diff from the provisioned base
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="src/x.py\n")
@@ -1106,6 +1158,13 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
+        if exhausted:
+            fake.queue_result(returncode=1, stderr="pytest: failed")
+            fake.queue_result(returncode=0, stdout="fixed tests")  # validation fix agent
+            fake.queue_result(returncode=0)  # fix git add
+            fake.queue_result(returncode=0, stdout="tests/test_x.py\n")
+            fake.queue_result(returncode=0)  # fix commit
+            _queue_validation_head(fake, head="b" * 40)
         fake.queue_result(returncode=0, stdout="tests ok")
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)
@@ -1113,9 +1172,64 @@ class TestHappyPathPart002:
 
         await executor.execute(ws_id)
 
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            events = [
+                event for event in ws.events if event.reason_code == "PLAN_CONFORMANCE_GAPS_CARRIED"
+            ]
+            records = load_applied_operator_directives(
+                MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
+            )
+        if outcome == "cancelled-at-compare":
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert events == []
+            assert monitor.run.await_count == 0
+            assert not any(any("pytest -q" in arg for arg in call.args) for call in fake.calls)
+            assert not any("push" in call.args for call in fake.calls)
+            return
+        assert ws.status == WorkspaceStatus.monitoring_pr.value, ws.failure_message
+        assert monitor.run.await_count == 1
+        body = _created_pr_body(fake)
         adapter_prompts = _adapter_prompts(fake)
-        assert len(adapter_prompts) == 5
+        assert len(adapter_prompts) == (6 if exhausted else 5)
         assert "Iteration 1" in adapter_prompts[3]
+        assert sum("Conformance phase" in prompt for prompt in adapter_prompts) == 2
+        if exhausted:
+            assert "Validation failed after your previous pass" in adapter_prompts[-1]
+            validation_indexes = [
+                index
+                for index, call in enumerate(fake.calls)
+                if any("pytest -q" in arg for arg in call.args)
+            ]
+            push_index = next(index for index, call in enumerate(fake.calls) if "push" in call.args)
+            prompt_indexes = [index for index, _ in _adapter_prompt_calls(fake)]
+            assert prompt_indexes[4] < validation_indexes[0] < prompt_indexes[5]
+            assert prompt_indexes[5] < validation_indexes[1] < push_index
+            assert len(events) == 1
+            assert events[0].payload["gaps"] == expected_gaps
+            assert body.endswith(
+                "### Unresolved plan-conformance gaps\n\n"
+                "- **test_work**: Add a regression test\n"
+                r"- **documentation**: Document the behavior ### Note \[redacted\]"
+            )
+            assert len(records) == 1
+            assert records[0].source == "plan_conformance"
+            for gap in expected_gaps:
+                assert f"{gap['kind']}: {gap['detail']}" in records[0].directive
+            assert token not in body and token not in records[0].directive
+            assert reason_text_for_code(events[0].reason_code) is not None
+            catalog = Path("docs/REASON_CATALOG.md").read_text(encoding="utf-8")
+            assert "PLAN_CONFORMANCE_GAPS_CARRIED" in catalog
+            artifact = (
+                workspace_artifact_dir(executor._config.compose_projects_root.parent, ws_id)
+                / DEPOSITED_CONFORMANCE_NAME
+            )
+            assert json.loads(artifact.read_text(encoding="utf-8")) == json.loads(final_report)
+        else:
+            assert events == []
+            assert records == ()
+            assert "Unresolved plan-conformance gaps" not in body
 
     @pytest.mark.unit
     async def test_planning_mixed_validation_and_api_gap_stays_agent_owned(
@@ -1205,11 +1319,28 @@ class TestHappyPathPart002:
         assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("committed_paths", "status", "diff_error", "head"),
+        [
+            pytest.param("", "", False, "sha1", id="empty-net-diff"),
+            pytest.param("", "", False, "reverted-head", id="reverted-net-diff"),
+            pytest.param("docs/awf-plans/plan.md\n", "", False, "sha1", id="workspace-plan"),
+            pytest.param("plans/PLAN.md\n", "", False, "sha1", id="local-plan"),
+            pytest.param("docs/awf-plans/plan.md\nplans/PLAN.md\n", "", False, "sha1", id="both"),
+            pytest.param("plans/PLAN.md\n", " M src/x.py\n", False, "sha1", id="unstaged-source"),
+            pytest.param("plans/PLAN.md\n", "M  src/x.py\n", False, "sha1", id="staged-source"),
+            pytest.param("src/x.py\n", "", True, "sha1", id="git-diff-failed"),
+        ],
+    )
     async def test_planning_profile_failure_records_conformance_evidence_and_salvage(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        committed_paths: str,
+        status: str,
+        diff_error: bool,
+        head: str,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1230,7 +1361,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n{status}")
         fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(
             returncode=0,
@@ -1241,18 +1372,29 @@ class TestHappyPathPart002:
             stdout=(
                 f"?? docs/awf-plans/{ws_id}.md\n"
                 f"?? docs/awf-plans/{ws_id}.conformance.json\n"
-                " M src/x.py\n"
+                f"{status}"
             ),
         )
         fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
+        fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD iter 0 post
 
+        base_range = f"{'a' * 40}..HEAD"
+        fake.respond_when(
+            lambda args: "diff" in args and "--name-only" in args and base_range in args,
+            returncode=int(diff_error),
+            stdout=committed_paths,
+        )
         await executor.execute(ws_id)
+
+        assert any("--name-only" in call.args and base_range in call.args for call in fake.calls)
+        assert not any("push" in call.args or "pr" in call.args for call in fake.calls)
+        assert not any(any("pytest -q" in arg for arg in call.args) for call in fake.calls)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
+            assert all(event.reason_code != "PLAN_CONFORMANCE_GAPS_CARRIED" for event in ws.events)
             assert ws.failure_reason == "agent_failure"
             assert ws.failure_message == (
                 "plan conformance was not satisfied after 0 iteration(s): add tests"

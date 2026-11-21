@@ -9,10 +9,13 @@ except for execution-time revalidation of a reused PR. Keeping the forge-neutral
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
@@ -30,6 +33,7 @@ from awf.control.executor.helpers import (
     _build_pr_body,
     _existing_pr_remote_push_url,
     _extract_pr_number,
+    _render_pr_conformance_gaps,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
@@ -320,6 +324,7 @@ async def push_and_open_pr(
     defaults: Any,
     workspace_id: str,
     worktree_path: Path,
+    carried_gaps: Sequence[dict[str, str]] = (),
 ) -> Any | None:
     """Push the validated branch and open (or reuse) its PR.
 
@@ -345,6 +350,9 @@ async def push_and_open_pr(
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, profile=profile, defaults=defaults)
+    gap_section = _render_pr_conformance_gaps(carried_gaps) if carried_gaps else ""
+    if gap_section:
+        pr_body += "\n" + gap_section
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
     existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
@@ -588,6 +596,28 @@ async def push_and_open_pr(
                                 pr_url=ws.pr_url,
                                 head_sha=pr.head_sha,
                             )
+                        if gap_section:
+                            try:
+                                await forge_client.post_comment(
+                                    repo=RepoRef.from_url(ws.repo_url),
+                                    pr_number=pr_number,
+                                    body=gap_section,
+                                )
+                            except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+                                error = redact_audit_text(str(exc), limit=500)
+                                _log.warning(
+                                    "executor.pr_conformance_comment_failed",
+                                    workspace_id=workspace_id,
+                                    pr_number=pr_number,
+                                    error=error,
+                                )
+                                pr = replace(
+                                    pr,
+                                    open_metadata={
+                                        **(pr.open_metadata or {}),
+                                        "conformance_comment_error": error,
+                                    },
+                                )
                     elif disposition is _PostPushReuseDisposition.fail_closed:
                         await _fail_reuse_pr_state_lookup(
                             self,

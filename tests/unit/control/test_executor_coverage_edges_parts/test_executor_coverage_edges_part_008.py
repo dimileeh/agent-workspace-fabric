@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -816,8 +817,10 @@ async def test_planning_required_allows_extra_changes_when_profile_disables_guar
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("gaps", [(), ("gap one",)])
 async def test_planning_required_reports_unsatisfied_conformance_after_iterations(
     tmp_path: Path,
+    gaps: tuple[str, ...],
 ) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan
@@ -830,15 +833,15 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
         returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n"
     )  # after_compare (first)
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
-    runner.queue_result(
-        returncode=0,
-        stdout="?? docs/awf-plans/ws_unsat.md\n?? docs/awf-plans/ws_unsat.json\n",
-    )  # after_compare (second) — unused on max_iterations=0
+    runner.respond_when(
+        lambda args: "base..HEAD" in args and "--name-only" in args,
+        stdout="src/code.py\n",
+    )
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
         "implementation",
-        '{"status":"needs_iteration","summary":"more tests needed","gaps":["gap one"]}',
+        json.dumps({"status": "needs_iteration", "summary": "more tests needed", "gaps": gaps}),
     )
     profile = WorkspaceProfile.model_validate(
         {
@@ -854,7 +857,9 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
 
     failure = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_unsat", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(  # type: ignore[arg-type]
+            id="ws_unsat", task_prompt="do it", task_tag=None, base_commit=None if gaps else "base"
+        ),
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -864,11 +869,13 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
 
     assert failure is not None
     assert not isinstance(failure, str)
-    assert failure.message == "plan conformance was not satisfied after 0 iteration(s): gap one"
+    detail = gaps[0] if gaps else "more tests needed"
+    assert failure.message == f"plan conformance was not satisfied after 0 iteration(s): {detail}"
+    assert not any("base..HEAD" in call.args for call in runner.calls)
     assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
     assert failure.details["conformance"] == {
         "summary": "more tests needed",
-        "gaps": ["gap one"],
+        "gaps": list(gaps),
         "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
         "report_reason_code": "PLAN_CONFORMANCE_REPORTED",
         "iterations_used": 1,

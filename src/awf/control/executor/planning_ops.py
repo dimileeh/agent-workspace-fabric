@@ -55,11 +55,13 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.time_utils import _monotonic
 from awf.control.executor.types import (
     _ExpectedBaseShaLaunchSettled,
+    _PlanningCarriedGaps,
     _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
 from awf.control.executor.work_slot_binding import work_slot_for
+from awf.control.quality_gates import changed_paths_are_only_internal_plan_artifacts
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     WorkspaceRepository,
@@ -68,6 +70,8 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    MAX_CONFORMANCE_GAPS,
+    MAX_CONFORMANCE_TEXT_CHARS,
     ConformanceGap,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
@@ -688,6 +692,7 @@ async def _run_agent_task_with_optional_planning(
     | _PlanningRunFailure
     | _PlanningValidationHandoff
     | _PlanningNeedsHuman
+    | _PlanningCarriedGaps
     | _ExpectedBaseShaLaunchSettled
     | None
 ):
@@ -1236,12 +1241,43 @@ async def _run_agent_task_with_optional_planning(
             workspace_id=workspace.id,
             iteration=iteration,
             max_iterations=planning.max_iterations,
-            gaps=list(gaps),
+            gaps=[redact_audit_text(gap) for gap in gaps[:MAX_CONFORMANCE_GAPS]],
             reason_code=report.reason_code,
         )
 
     if last_report is None:  # pragma: no cover - defensive
         return "planning conformance did not run"
+    if last_report.gaps and (base_commit := getattr(workspace, "base_commit", None)):
+        try:
+            committed_paths = await self._committed_paths_since(worktree_path, base_commit)
+        except RuntimeError as exc:
+            _log.warning(
+                "executor.planning_conformance_committed_diff_failed",
+                workspace_id=workspace.id,
+                base_commit=base_commit,
+                error=redact_audit_text(str(exc), limit=500),
+            )
+        else:
+            # The shared PR gate covers docs/awf-plans/. Local plans/ files
+            # also cannot establish that this run produced user-visible work.
+            candidate_paths = [
+                path.as_posix() for path in committed_paths if Path("plans") not in path.parents
+            ]
+            if candidate_paths and not changed_paths_are_only_internal_plan_artifacts(
+                candidate_paths
+            ):
+                return _PlanningCarriedGaps(
+                    gaps=[
+                        {
+                            "kind": gap.kind.value,
+                            "detail": redact_audit_text(
+                                gap.detail, limit=MAX_CONFORMANCE_TEXT_CHARS
+                            )[:MAX_CONFORMANCE_TEXT_CHARS],
+                        }
+                        for gap in last_report.gaps[:MAX_CONFORMANCE_GAPS]
+                    ],
+                )
+
     gap_text = "; ".join(last_report.gaps) or last_report.summary
     message = (
         "plan conformance was not satisfied after "

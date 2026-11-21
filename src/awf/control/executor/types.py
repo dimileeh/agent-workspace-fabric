@@ -66,6 +66,13 @@ class _PlanningNeedsHuman:
 
 
 @dataclass(frozen=True)
+class _PlanningCarriedGaps:
+    """Redacted gaps from the exhausted initial compare loop."""
+
+    gaps: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
 class _PlanningValidationHandoff:
     report: PlanConformanceReport
     plan_path: Path

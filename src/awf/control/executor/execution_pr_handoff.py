@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,11 @@ from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.applied_operator_directives import (
+    AppliedOperatorDirective,
+    append_applied_operator_directive,
+)
 
 
 async def persist_pr_and_handoff(
@@ -33,6 +40,7 @@ async def persist_pr_and_handoff(
     successful_validation_run_id: str | None,
     compose_project: str,
     compose_file: Path,
+    carried_gaps: Sequence[dict[str, str]] = (),
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
     async with self._session_factory() as session:
@@ -87,6 +95,21 @@ async def persist_pr_and_handoff(
             source_head_sha=pr.head_sha,
             evidence=pr.open_metadata,
         )
+        if carried_gaps:
+            monitor_state = MonitorState(
+                threads_addressed_ids=dict(persisted.monitor_threads_addressed or {}),
+            )
+            append_applied_operator_directive(
+                monitor_state,
+                AppliedOperatorDirective(
+                    directive="\n".join(f"{gap['kind']}: {gap['detail']}" for gap in carried_gaps),
+                    operation_id=workspace_id,
+                    applied_at=datetime.now(UTC).isoformat(),
+                    head_sha=pr.head_sha or "",
+                    source="plan_conformance",
+                ),
+            )
+            persisted.monitor_threads_addressed = monitor_state.threads_addressed_ids
         monitor = self._pr_monitor
         if monitor is None and self._pr_monitor_factory is not None:
             monitor = _call_pr_monitor_factory(
