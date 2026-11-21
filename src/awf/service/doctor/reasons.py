@@ -22,6 +22,7 @@ from awf.service.doctor.reasons_hosted_quiescence import get_hosted_quiescence_r
 from awf.service.doctor.reasons_monitor_runtime_restart import (
     get_monitor_runtime_restart_reasons,
 )
+from awf.service.doctor.reasons_plan_conformance import get_plan_conformance_reasons
 from awf.service.doctor.reasons_provider_budget import get_provider_budget_reasons
 from awf.service.doctor.reasons_providers import get_provider_reasons
 from awf.service.doctor.reasons_runtime_setup_replay import get_runtime_setup_replay_reasons
@@ -1345,33 +1346,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service gc",
         "docs/REASON_CATALOG.md#completed_pr_not_merged",
     ),
-    "PLAN_CONFORMANCE_NEEDS_HUMAN": _ReasonText(
-        "Plan conformance is paused for a specific operator decision.",
-        (
-            "Read conformance.json or the workspace transition event, then supply the decision "
-            "using guide --directive. A file grant alone cannot resume this pause; normal "
-            "validation and merge gates remain required."
-        ),
-        "The agent reported missing operator authority or external dependency input.",
-        "awf workspace guide <workspace_id> --directive '<your decision>'",
-        "docs/REASON_CATALOG.md#plan_conformance_needs_human",
-    ),
-    "CONFORMANCE_REQUIRES_AWF_VALIDATION": _ReasonText(
-        (
-            "Plan conformance found no deterministic implementation gap, but "
-            "AWF-owned validation evidence is missing, stale, or insufficient."
-        ),
-        (
-            "Let AWF run validation and rerun conformance against the persisted "
-            "validation provenance and log stream references."
-        ),
-        (
-            "The agent completed the implementation before AWF ran or persisted "
-            "the required profile validation gates."
-        ),
-        "awf workspace show <workspace_id>",
-        "docs/REASON_CATALOG.md#conformance_requires_awf_validation",
-    ),
     "POST_AGENT_COMMIT_FAILED": _ReasonText(
         (
             "The post-agent ``git commit`` exited non-zero for a reason unrelated "
@@ -1453,6 +1427,7 @@ _REASON_TEXT.update(get_provider_reasons(_ReasonText))
 _REASON_TEXT.update(get_provider_budget_reasons(_ReasonText))
 _REASON_TEXT.update(get_hosted_profile_secret_reasons(_ReasonText))
 _REASON_TEXT.update(get_hosted_quiescence_reasons(_ReasonText))
+_REASON_TEXT.update(get_plan_conformance_reasons(_ReasonText))
 
 
 _REASON_TEXT.update(

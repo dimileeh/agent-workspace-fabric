@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import traceback
 from collections.abc import (
     Callable,
@@ -17,6 +18,7 @@ from collections.abc import (
 from dataclasses import (
     replace,
 )
+from html import escape
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -394,6 +396,16 @@ def _call_pr_monitor_factory(
         return factory(*args, **kwargs)
 
     raise bind_errors[0]
+
+
+def _render_pr_conformance_gaps(gaps: Sequence[dict[str, str]]) -> str:
+    """Format each compare finding as a single Markdown list item."""
+    lines = ["### Unresolved plan-conformance gaps", ""]
+    for gap in gaps:
+        detail = escape(" ".join(gap["detail"].splitlines()), quote=False)
+        detail = re.sub(r"([\\`*_~\[\]])", r"\\\1", detail)
+        lines.append(f"- **{gap['kind']}**: {detail}")
+    return "\n".join(lines)
 
 
 def _build_pr_body(

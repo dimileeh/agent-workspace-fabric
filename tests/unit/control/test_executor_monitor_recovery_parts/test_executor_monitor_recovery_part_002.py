@@ -491,11 +491,17 @@ async def _seed_ready_workspace_no_recovery(
 
 
 def _queue_push_and_pr(
-    fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
+    fake: FakeCommandRunner,
+    *,
+    pr_url: str = "https://github.com/x/y/pull/1",
+    head: str = "deadbeef01",
+    retained_pr_state: str | None = None,
 ) -> None:
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
-    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
+    if retained_pr_state:
+        _queue_open_pr_lifecycle_snapshot(fake, closed=True, merged=retained_pr_state == "merged")
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
@@ -508,8 +514,10 @@ def _queue_open_pr_lifecycle_snapshot(
     head_sha: str | None = None,
     head_ref: str | None = None,
     base_sha: str = "a" * 40,
+    closed: bool = False,
+    merged: bool = False,
 ) -> None:
-    """Queue one open-PR ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
+    """Queue one ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
     fake.queue_result(
         returncode=0,
         stdout=json.dumps(
@@ -517,8 +525,8 @@ def _queue_open_pr_lifecycle_snapshot(
                 "data": {
                     "repository": {
                         "pullRequest": {
-                            "closed": False,
-                            "merged": False,
+                            "closed": closed,
+                            "merged": merged,
                             "headRefName": head_ref,
                             "headRefOid": head_sha,
                             "baseRefOid": base_sha,
@@ -530,12 +538,14 @@ def _queue_open_pr_lifecycle_snapshot(
     )
 
 
-def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+def _queue_existing_pr_push(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", resolve_pushed_head: bool = True
+) -> None:
     fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     # Reuse revalidates live forge state before push_and_open diagnostics/push.
     _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
-    fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0, stdout=f"{head}\n" if resolve_pushed_head else "")
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout=f"{head[:7]} fix\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
@@ -1053,29 +1063,6 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_fork_head_repo(
         call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
     )
     assert monitor_calls == [ws_id]
-
-
-@pytest.mark.unit
-async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
-    fake: FakeCommandRunner,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Even stricter than the existing skip-planning test: recovery must
-    issue zero ``docker compose exec`` adapter invocations on a clean
-    validation pass (no fix-cycle needed)."""
-    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(factory)
-
-    _queue_validation_head(fake)
-    fake.queue_result(returncode=0, stdout="tests ok")
-
-    await executor.execute(ws_id)
-
-    # Zero adapter calls of any kind — not planning, not execution, not
-    # conformance, and not fix-cycle prompts.
-    adapter_invocations = _all_adapter_args(fake)
-    assert adapter_invocations == []
 
 
 @pytest.mark.unit

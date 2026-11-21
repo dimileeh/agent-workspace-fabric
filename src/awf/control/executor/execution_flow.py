@@ -27,7 +27,6 @@ from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
-from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.agent_service_recovery import (
     _build_agent_service_recovery_callbacks,
     _run_agent_task_with_service_recovery,
@@ -36,7 +35,7 @@ from awf.control.executor.constants import (
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
 )
-from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
+from awf.control.executor.execution_pr_handoff import push_and_handoff_pr
 from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
@@ -47,7 +46,6 @@ from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
     _failure_reason_for_phase,
-    _monitor_execution_claim_kwargs,
     _profile_for_workspace,
 )
 from awf.control.executor.logging_ops import (
@@ -70,8 +68,10 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _planning_carried_gaps_from_metadata,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
+    _pr_conformance_publication_pending,
 )
 from awf.control.executor.state_ops import (
     ProviderFailureDivert,
@@ -82,6 +82,7 @@ from awf.control.executor.supply_chain_messages import _supply_chain_block_messa
 from awf.control.executor.types import (
     PauseResumeReason,
     _MonitorRebaseRecoveryError,
+    _PlanningCarriedGaps,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
@@ -248,6 +249,8 @@ async def execute(
     # provider recovery.
     agent_run_failure_reason: FailureReason | None = None
     planning_validation_handoff: _PlanningValidationHandoff | None = None
+    carried_gaps: list[dict[str, str]] = []
+    retry_gap_publication = False
     expected_branch = ws.branch_name or f"awf/{workspace_id}"
     adapter: AgentAdapter | None = None
     defaults: AgentDefaults | None = None
@@ -703,7 +706,7 @@ async def execute(
                 post_agent_mirror_repair_done = True
                 raise
             (
-                planning_validation_handoff,
+                planning_result,
                 planning_should_return,
             ) = await _planning_artifacts.handle_agent_planning_result(
                 self,
@@ -716,13 +719,29 @@ async def execute(
             )
             if planning_should_return:
                 return
-            # Persist even ``None`` so approve-and-keep resumes preserve the
-            # original post-validation conformance behavior.
-            await self._persist_block_planning_conformance_handoff(
-                workspace_id,
-                handoff=planning_validation_handoff,
-            )
+            if isinstance(planning_result, _PlanningCarriedGaps):
+                if not await self._persist_block_planning_conformance_handoff(
+                    workspace_id,
+                    handoff=planning_result,
+                    execution_owner_id=execution_owner_id,
+                ):
+                    return
+                carried_gaps = planning_result.gaps
+            else:
+                planning_validation_handoff = planning_result
+                # Persist even None so approve-and-keep preserves the original result.
+                await self._persist_block_planning_conformance_handoff(
+                    workspace_id,
+                    handoff=planning_validation_handoff,
+                )
         elif recovery is not None:
+            # A recovery push can replace a PR that closed or merged.
+            carried_gaps = _planning_carried_gaps_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
+            retry_gap_publication = bool(
+                carried_gaps and ws.pr_url and _pr_conformance_publication_pending(ws)
+            )
             # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
@@ -742,6 +761,9 @@ async def execute(
         elif resume_skip_agent:
             # Reconstruct the blocked run's persisted conformance handoff.
             planning_validation_handoff = _planning_validation_handoff_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
+            carried_gaps = _planning_carried_gaps_from_metadata(
                 ws.block_planning_conformance_handoff
             )
     except ComposeExecCleanupError as exc:
@@ -1422,6 +1444,7 @@ async def execute(
         defaults=defaults,
         compose_project=compose_project,
         compose_file=compose_file,
+        pending_gaps=carried_gaps if retry_gap_publication else (),
     ):
         return
 
@@ -1442,59 +1465,19 @@ async def execute(
     ):
         return
 
-    # PR creation is forge-neutral: ``push_and_open`` does a plain ``git push``
-    # and routes the PR-open step through the resolved ``ForgeClient`` (GitHub or
-    # Bitbucket Cloud). The forge client is resolved from the persisted profile +
-    # repo URL and passed in per-call, so a Bitbucket feature workspace opens its
-    # PR via ``BitbucketClient`` instead of the GitHub-only ``gh pr create``.
-
-    if not await self._transition_if_current(
-        workspace_id,
-        from_status=WorkspaceStatus.validating,
-        to=WorkspaceStatus.pushing,
-        reason="VALIDATION_OK",
-        action="start_push",
-    ):
-        return
-
-    if resume_from_blocked:
-        # The protected gate passed with the operator's grants applied, so the
-        # grants are now single-use spent: consume them so a later DIFFERENT
-        # change to the same file must be granted again. This MUST run only
-        # after the validating→pushing CAS above commits this validated change
-        # to push. Consuming before the transition would mark the grants spent
-        # even when the CAS loses (cancel, version race, stale status) and the
-        # workspace never enters ``pushing`` — a later protected check on the
-        # same resume would then re-block with no usable grant.
-        await self._consume_active_operator_grants(workspace_id)
-    if not await self._ensure_worktree_available(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        expected=WorkspaceStatus.pushing,
-        action="pr_push_open",
-    ):
-        return
-
-    pr = await _pr_open_step.push_and_open_pr(
+    await push_and_handoff_pr(
         self,
+        workspace_id=workspace_id,
         ws=ws,
-        profile=profile,
-        defaults=defaults,
-        workspace_id=workspace_id,
         worktree_path=worktree_path,
-    )
-    if pr is None:
-        return
-
-    await persist_pr_and_handoff(
-        self,
-        workspace_id=workspace_id,
-        pr=pr,
         adapter=adapter,
         profile=profile,
         defaults=defaults,
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
-        **_monitor_execution_claim_kwargs(ws),
+        resume_from_blocked=resume_from_blocked,
+        in_recovery=recovery is not None,
+        carried_gaps=carried_gaps,
+        retry_gap_publication=retry_gap_publication,
     )

@@ -905,7 +905,11 @@ async def _run_ci_fix(
     # conflict rewind can CAS; failed rewind parks ROLLBACK_PENDING instead of
     # leaving the rejected repair on the PR (Greptile P1 on PR #1268). A sync
     # failure without the conflict verdict must leave monitor state untouched.
-    if post_agent_err is None and applied_directives and state is not None:
+    if (
+        post_agent_err is None
+        and state is not None
+        and any(record.source == "operator_decision" for record in applied_directives)
+    ):
         conflict_stdout = ""
         if agent_result is not None:
             conflict_stdout = agent_result.stdout or ""
