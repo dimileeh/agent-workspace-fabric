@@ -736,6 +736,11 @@ async def execute(
                     handoff=planning_validation_handoff,
                 )
         elif recovery is not None:
+            # The original run saved PR gaps on the workspace, separate from the
+            # recovery operation's validation payload.
+            carried_gaps = _planning_carried_gaps_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
             # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
@@ -751,9 +756,6 @@ async def execute(
                 workspace_id=workspace_id,
                 profile=profile,
                 recovery_payload=recovery,
-            )
-            carried_gaps = _planning_carried_gaps_from_metadata(
-                ws.block_planning_conformance_handoff
             )
         elif resume_skip_agent:
             # Reconstruct the blocked run's persisted conformance handoff.

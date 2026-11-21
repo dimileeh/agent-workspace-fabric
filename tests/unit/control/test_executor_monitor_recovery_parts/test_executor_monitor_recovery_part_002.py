@@ -1088,7 +1088,28 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.monitoring_pr.value
+                assert ws.pr_url == "https://github.com/x/y/pull/1"
+                (directive,) = load_applied_operator_directives(
+                    MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
+                )
+                assert directive.source == "plan_conformance"
+                assert directive.directive == "test_work: Add a regression test"
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
     ws_id = await _seed_ready_workspace_no_recovery(factory)
     gap = {"kind": "test_work", "detail": "Add a regression test"}
     head = "d" * 40
@@ -1119,18 +1140,8 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
         call for call in _all_push_and_pr_create_calls(fake) if call[:3] == ["gh", "pr", "create"]
     )
     body = create_call[create_call.index("--body") + 1]
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(ws_id)
-        assert ws is not None
-        assert ws.pr_url == "https://github.com/x/y/pull/1"
-        directives = load_applied_operator_directives(
-            MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
-        )
-
     assert "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test" in body
-    (directive,) = directives
-    assert directive.source == "plan_conformance"
-    assert directive.directive == "test_work: Add a regression test"
+    assert monitor_calls == [ws_id]
 
 
 @pytest.mark.unit
