@@ -10,6 +10,7 @@ from awf.common.redaction import (
     redact_secrets_byte_slice,
     redact_secrets_slice,
 )
+from awf.common.token_patterns import compile_known_token_re
 
 
 @pytest.mark.unit
@@ -54,11 +55,23 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("length", [390, 4096])
+def test_redact_secrets_masks_entire_dotted_github_installation_token(length: int) -> None:
+    token = "ghs_FakeHeader.middle-part_tail.".ljust(length, "Z")
+
+    assert redact_secrets(f"clone failed with {token} in stderr") == (
+        f"clone failed with {REDACTION_MARKER} in stderr"
+    )
+    assert compile_known_token_re(match_truncated_provider_tokens=False).fullmatch(token)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "token",
     [
         "ghp_ABCDEF",
         "gho_ABCDEFG",
+        "ghs_A.-B",
         "github_pat_ABCDEF",
         "github_pat_ABCDEFG",
     ],

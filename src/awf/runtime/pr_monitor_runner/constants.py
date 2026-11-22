@@ -9,6 +9,7 @@ from awf.common.github_transient import (
     NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     TRANSIENT_GITHUB_ERROR_MARKERS,
 )
+from awf.common.token_patterns import STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.runtime.pr_monitor_operations import RETRYABLE_MONITOR_OPERATION_STATUSES
 from awf.service.staleness import (
@@ -210,7 +211,8 @@ _AUTHORIZATION_BEARER_RE = re.compile(
 
 _TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])("
-    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
+    r"gh[apour]_[A-Za-z0-9_]{8,}|"
+    f"{STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN}|"
     r"github_pat_[A-Za-z0-9_]{8,}|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"

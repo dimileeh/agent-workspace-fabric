@@ -267,6 +267,7 @@ def test_provider_readiness_default_subprocess_and_http_wrappers(
     [
         "ghp_providerreadinesssecret",
         "gho_providerreadinesssecret",
+        pytest.param("ghs_FakeHeader.middle-part_tail.".ljust(4096, "Z"), id="installation"),
         "github_pat_providerreadinesssecret",
         "sk-proj-provider-readiness-secret",
         "sk-ant-provider-readiness-secret",
