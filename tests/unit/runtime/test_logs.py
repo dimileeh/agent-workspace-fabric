@@ -318,8 +318,17 @@ async def test_workspace_log_sink_does_not_redact_live_frame_after_persisting(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param("ghp_FA", "KEgithubTokenValue123456", id="legacy"),
+        pytest.param("ghs_FakeHeader.", "middle-part_tail.".ljust(375, "Z"), id="installation"),
+    ],
+)
 async def test_workspace_log_sink_redacts_tokens_split_across_write_boundaries(
     tmp_path: Path,
+    first: str,
+    second: str,
 ) -> None:
     path = tmp_path / "workspace.log"
     broadcaster = LogBroadcaster()
@@ -334,11 +343,11 @@ async def test_workspace_log_sink_redacts_tokens_split_across_write_boundaries(
     )
 
     async with broadcaster.subscribe("ws_split") as queue:
-        await sink.write("context ghp_FA")
+        await sink.write(f"context {first}")
         assert not path.exists() or path.read_text(encoding="utf-8") == ""
         assert queue.empty()
 
-        await sink.write("KEgithubTokenValue123456 done\n")
+        await sink.write(f"{second} done\n")
         frame = await asyncio.wait_for(queue.get(), timeout=1)
 
     persisted = path.read_text(encoding="utf-8")

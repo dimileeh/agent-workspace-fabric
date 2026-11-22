@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from awf.common.token_patterns import STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN
 from awf.db.enums import AgentRuntime
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
@@ -107,7 +108,8 @@ _SECRET_ENV_KEY_NAMES = {
 
 URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
 _GITHUB_TOKEN_PATTERNS = (
-    r"gh[pousr]_[A-Za-z0-9_]{8,}",
+    r"gh[pour]_[A-Za-z0-9_]{8,}",
+    STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN,
     r"github_pat_[A-Za-z0-9_]{8,}",
 )
 _OPENAI_TOKEN_PATTERNS = (r"sk-proj-[A-Za-z0-9_-]{8,}",)
