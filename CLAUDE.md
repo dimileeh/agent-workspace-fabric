@@ -160,9 +160,10 @@ requested → provisioning → ready → running → validating → pushing → 
 `runtime/pr_monitor.decide()` (no I/O, unit-testable) returns exactly one action —
 `AddressComments`, `ReportCiFailure`, `SyncBase`, `WaitForCI`, `Merge`, `NotifyHuman`,
 `ShortCircuitCompleted`, `Abort` — and `pr_monitor_runner/runner.py` performs the I/O and
-persists `MonitorState`. Feature vs release monitors differ **only** by `auto_merge` (release PRs
-return `NotifyHuman` on green instead of merging). Merge gates are conservative: comments
-addressed, checks green, GitHub-mergeable, branch not behind, plus a final pre-merge settle.
+persists `MonitorState`. When all gates are green and the resolved `auto_merge`
+value is `false`, the monitor returns `NotifyHuman` for manual merge. Merge gates
+are conservative: comments addressed, checks green, GitHub-mergeable, branch
+not behind, plus a final pre-merge settle.
 
 ### Domain model (`db/models.py`)
 
