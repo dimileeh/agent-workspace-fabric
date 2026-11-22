@@ -71,7 +71,7 @@ AWF turns one coding task into a durable, observable lifecycle:
 12. Fix CI failures when logs are available.
 13. Sync the base branch into the PR branch when needed.
 14. Respect reviewer timing through an initial review grace window.
-15. Auto-merge only after all gates pass.
+15. Auto-merge when the resolved policy enables it and all gates pass.
 16. Tear down successful workspaces and preserve failed ones for inspection.
 
 Project-specific knowledge belongs in workspace profiles. The AWF control plane
@@ -106,7 +106,8 @@ Implemented now:
 - Feature PR monitor with automated comment handling and opt-in auto-merge
   (`auto_merge` defaults to off; enable per task with `--auto-merge` or per repo
   under `monitor.auto_merge` in `workspace.yml`).
-- Release/sync PR monitor variants that keep workspaces alive until human merge.
+- Manual PR monitoring when auto-merge is off, with a readiness notification
+  and a workspace that stays in `monitoring_pr` while awaiting human merge.
 - Post-merge target-branch reconciliation for Python/Alembic multi-head repair.
 - Initial PR review grace period before auto-merge.
 - Durable task policy metadata (`task_class`, `owned_paths`) for scheduling and review provenance.

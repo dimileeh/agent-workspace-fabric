@@ -206,9 +206,10 @@ files are repo files, not generated local secret files. Use
 `compose_up_timeout_seconds` inside the companion JSON when a companion image
 needs a longer cold-cache build/start budget than the profile default.
 
-Auto-merge is opt-in: omit the flag to use the repo/profile default (off unless
-configured in `monitor.auto_merge`), which keeps AWF monitoring after it posts
-the ready-for-human comment. Add `--auto-merge` to let the monitor merge once
+Auto-merge is opt-in. Omit the flag to use the repo/profile default (off unless
+configured in `monitor.auto_merge`). When auto-merge resolves to off and all
+gates pass, AWF posts the ready-for-human comment and stays in `monitoring_pr`
+while awaiting a manual merge. Add `--auto-merge` to let the monitor merge once
 gates are green, or `--no-auto-merge` to force manual merge. Use
 `--initial-review-grace-period-seconds 0` only for explicit fast-path tests.
 
@@ -326,11 +327,12 @@ with an explicit `--idempotency-key <stable-key>` value so AWF can replay the
 same operation instead of starting a fresh one. Pass `--if-match <version>` when
 you want optimistic concurrency against a workspace version or ETag.
 
-Steer a live PR-monitoring workspace without cancelling it:
+Steer a live PR-monitoring workspace without cancelling it. This example assumes
+auto-merge is enabled.
 
 ```bash
 uv run --python 3.12 --extra dev awf workspace guide ws_123 \
-  --directive "Resolve the remaining low-value review nits via DEFER replies, then auto-merge on green CI." \
+  --directive "Resolve the remaining low-value review nits via DEFER replies, then merge once all gates pass." \
   --reason "operator convergence nudge"
 ```
 
