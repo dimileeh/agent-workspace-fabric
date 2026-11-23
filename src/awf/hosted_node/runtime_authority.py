@@ -448,7 +448,7 @@ class WorkspaceAuthority:
                 value = raw.decode("ascii")
             except UnicodeError:
                 raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422) from None
-            if re.fullmatch(r"[A-Za-z0-9_-]{1,512}", value) is None:
+            if re.fullmatch(r"[A-Za-z0-9._-]{1,4096}", value) is None:
                 raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422)
             values[agent_environment if name == "agent" else "GH_TOKEN"] = value
             files[Path(bindings[name].target).name] = raw

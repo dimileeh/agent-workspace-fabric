@@ -3,6 +3,10 @@
 > Historical design note: this plan predates the current service-backed
 > CLI/API/MCP workflow. References to retired helper scripts are preserved as
 > implementation history, not current operator guidance.
+>
+> `sync_release_pr` now follows the same opt-in `auto_merge` policy as other
+> tasks. The resolved flag alone selects the monitor.
+> See [current auto-merge policy](CONCEPTS.md#auto-merge-opt-in-default-off).
 
 ## Problem
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import re
 from typing import Final
 
+STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN: Final = r"ghs_[A-Za-z0-9._-]{8,}"
+
 KNOWN_TOKEN_PATTERN: Final = (
     # Python's regex alternation is left-to-right: keep provider-specific
     # ``sk-`` prefixes before the generic ``sk-`` catch-all.
     r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]*|"
+    r"gh[apour]_[A-Za-z0-9_]*|"
+    r"ghs_[A-Za-z0-9._-]*|"
     r"github_pat_[A-Za-z0-9_]*|"
     r"glpat-[A-Za-z0-9_-]*|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
@@ -57,7 +60,8 @@ PROVIDER_REF_KEY_SUFFIX_PATTERN: Final = (
 
 STRICT_KNOWN_TOKEN_PATTERN: Final = (
     r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
+    r"gh[apour]_[A-Za-z0-9_]{8,}|"
+    f"{STRICT_GITHUB_INSTALLATION_TOKEN_PATTERN}|"
     r"github_pat_[A-Za-z0-9_]{8,}|"
     r"glpat-[A-Za-z0-9_-]{6,}|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
@@ -78,7 +82,7 @@ def compile_known_token_re(
 ) -> re.Pattern[str]:
     """Compile the shared known-token pattern with optional case folding.
 
-    Several provider-specific prefixes (``gh[apousr]_``, ``glpat-``, and
+    Several provider-specific prefixes (``gh[apour]_``, ``ghs_``, ``glpat-``, and
     ``xox[baprs]-``) can use ``*`` so truncated or rejected token values are
     still redacted. Passing ``match_truncated_provider_tokens=True`` makes this
     false-positive tradeoff explicit at security redaction call sites. Use

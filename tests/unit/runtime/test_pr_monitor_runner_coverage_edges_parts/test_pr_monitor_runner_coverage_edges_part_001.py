@@ -836,6 +836,15 @@ def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
 
 
 @pytest.mark.unit
+def test_github_error_redaction_masks_entire_dotted_installation_token() -> None:
+    token = "ghs_FakeHeader.middle-part_tail.".ljust(4096, "Z")
+
+    assert _redact_and_truncate_forge_error(f"HTTP 503 {token} failed") == (
+        "HTTP 503 <redacted> failed"
+    )
+
+
+@pytest.mark.unit
 async def test_transient_retry_event_payload_is_structured_and_redacted(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

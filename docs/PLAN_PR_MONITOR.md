@@ -4,6 +4,10 @@
 > monitor adoption and remonitor surfaces. References to retired watchdog or
 > helper-script paths are preserved as implementation history, not current
 > operator guidance.
+>
+> Auto-merge is now opt-in and off by default. The resolved `auto_merge` flag
+> selects the monitor for every task kind.
+> See [current auto-merge policy](CONCEPTS.md#auto-merge-opt-in-default-off).
 
 ## Context
 

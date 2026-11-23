@@ -29,7 +29,7 @@ from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.material_store import MaterialStore
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
-from awf.hosted_node.schemas import Binding, Install, Preparation
+from awf.hosted_node.schemas import Binding, Install, Preparation, Refresh
 from tests.conftest import _ok_workspace_admission_disk_check
 from tests.unit.test_hosted_runtime_contract import hosted_create
 
@@ -132,6 +132,7 @@ async def test_authority_resolves_both_current_credentials_and_actual_workspace(
     assert material.environment["CODEX_API_KEY"] == "synthetic-agent-key"
     assert "OPENAI_API_KEY" not in material.environment
     assert material.environment["GH_TOKEN"] == "synthetic-github-key"
+    assert material.environment["GITHUB_TOKEN"] == "synthetic-github-key"
     assert "synthetic-agent-key" not in repr(material)
     assert not (
         runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
@@ -159,6 +160,73 @@ async def bound_workspace(authority):
             )
         )
     return runtime, value, factory
+
+
+async def _refresh_github_material(runtime: WorkspaceAuthority, raw: bytes) -> None:
+    association, _ = await runtime.association("ws_cloud_stable")
+    binding = association.credentials.github
+    receipt = await runtime.receiver.status(binding)
+    result = await runtime.receiver.install(
+        Refresh(
+            **{
+                **binding.model_dump(),
+                "idempotency_key": "github-refresh",
+                "revision": 2,
+                "fence": 2,
+            },
+            predecessor=receipt.receipt_id,
+            material=base64.b64encode(raw).decode("ascii"),
+        ),
+        refresh=True,
+    )
+    assert result.status == "current"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param(".", id="minimum"),
+        pytest.param("ghs_FakeHeader.payload-with_dashes.".ljust(390, "Z"), id="installation"),
+        pytest.param(".opaque-value_".ljust(4095, "A") + ".", id="maximum"),
+    ],
+)
+async def test_workspace_delivers_refreshed_github_material_unchanged(bound_workspace, token):
+    runtime, _, _ = bound_workspace
+    raw = token.encode("ascii")
+    await _refresh_github_material(runtime, raw)
+
+    material = await runtime.workspace("ws_cloud_stable")
+
+    assert material.environment["GH_TOKEN"] == token
+    assert material.environment["GITHUB_TOKEN"] == token
+    view = runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
+    assert (view / "github.api-key").read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"A" * 4097, id="over-limit"),
+        pytest.param(b"ghs_Fake Header", id="space"),
+        pytest.param(b"ghs_FakeHeader\n", id="newline"),
+        pytest.param(b"ghs_Fake/Header", id="slash"),
+        pytest.param(b"ghs_Fake+Header", id="plus"),
+        pytest.param(b"ghs_FakeHeader=", id="equals"),
+        pytest.param(b"ghs_Fake\x00Header", id="nul"),
+        pytest.param("ghs_FakeHéader".encode(), id="non-ascii"),
+    ],
+)
+async def test_workspace_rejects_invalid_refreshed_github_material(bound_workspace, raw):
+    runtime, _, _ = bound_workspace
+    await _refresh_github_material(runtime, raw)
+
+    with pytest.raises(MaterialDeniedError) as denied:
+        await runtime.workspace("ws_cloud_stable")
+
+    assert denied.value.reason == "INVALID_API_KEY_MATERIAL"
+    assert denied.value.status == 422
+    view = runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
+    assert not view.exists()
 
 
 async def test_runtime_profile_uses_only_readable_workspace_view(bound_workspace):
@@ -202,8 +270,6 @@ async def test_expiry_during_final_database_checks_denies_material(authority, mo
 
 
 async def test_oauth_json_is_not_converted_to_an_api_key(authority):
-    from awf.hosted_node.schemas import Refresh
-
     runtime, value, _ = authority
     binding = Binding.model_validate(value["hosted"]["credentials"]["agent"])
     receipt = await runtime.receiver.status(binding)

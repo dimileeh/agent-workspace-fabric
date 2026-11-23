@@ -38,10 +38,11 @@ against that worktree. File edits are auto-committed; the profile's validation
 phases run against the real stack; if they pass, AWF pushes the branch and opens
 a PR against the base branch — then **keeps running** in a `monitoring_pr`
 state, resolving review comments, fixing CI, and syncing the base until the PR
-merges (feature flow) or is declared ready for a human (release flow). If any
-step fails, the workspace is left in `failed` with a structured `failure_reason`;
-its worktree, logs, and `failed` row are preserved for post-mortem (the runtime
-stack itself is reclaimed promptly, like any terminal workspace — see §12).
+merges or closes. With auto-merge off, the workspace stays in `monitoring_pr`
+after reporting readiness and waits for a manual merge. If any step fails, the
+workspace is left in `failed` with a structured `failure_reason`. Its worktree,
+logs, and `failed` row are preserved for post-mortem (the runtime stack itself
+is reclaimed promptly, like any terminal workspace — see §12).
 
 ## 2 — First: AWF is a persistent local service
 
@@ -137,6 +138,9 @@ this is `workspace.profile_ref` (default `"auto"`) and/or an inline
    Useful flags: `--task-kind {feature_branch_pr|sync_release_pr}`,
    `--model`, `--effort`, `--owned-path` (repeatable — see §10),
    `--auto-merge/--no-auto-merge`, `--profile <ref>`.
+   Omitting both auto-merge flags leaves per-task intent unset and uses the
+   resolved profile's `monitor.auto_merge` policy. With no applicable profile
+   setting, auto-merge is off.
 2. **REST**: `POST /v1/workspaces` with the **nested** body below
    (`Idempotency-Key` header supported):
    ```json
@@ -277,8 +281,9 @@ explicitly need to A/B.
 ## 10 — PR monitor, adoption, and owned_paths
 
 Once a PR opens, the workspace enters `monitoring_pr` and stays there until the
-PR is **merged** (feature flow) or **declared ready for a human** (release flow).
-Monitoring is automatic — nothing in the task spec opts in.
+PR is merged or closed, or the workspace fails. A workspace waiting for a
+manual merge remains in `monitoring_pr` after AWF reports readiness.
+Monitoring starts automatically.
 
 ### Adopt an existing PR
 
@@ -358,12 +363,39 @@ settle window for more, and pushes once quiet. One push → one CI run.
 
 ### Release (`development → main`) vs feature
 
-The `--auto-merge`/`--no-auto-merge` flag selects the monitor: `--auto-merge`
-(default) → feature monitor (squash-merges + deletes branch on green);
-`--no-auto-merge` (or `--task-kind sync_release_pr`) → release/manual monitor
-that **never calls `gh pr merge`** — when all gates are green it posts
-`✅ PR #N is ready to merge at commit <sha>` and notifies a human. Dev→main PRs
-must never be auto-merged.
+Auto-merge is opt-in. AWF resolves it in this order, with the first applicable
+setting winning.
+
+1. Explicit per-task intent (`--auto-merge` or `--no-auto-merge`).
+2. An exact match on the PR base branch in `monitor.auto_merge.by_base_branch`.
+3. The repo-wide `monitor.auto_merge.default`.
+4. The built-in default (`false`).
+
+The persisted `workspace.auto_merge` value alone selects the monitor for every
+`task_kind`, including `sync_release_pr`. With auto-merge on, the feature monitor
+can squash-merge once all gates pass. When all gates pass with auto-merge off,
+the manual monitor posts
+`✅ PR #N is ready to merge at commit <sha>.` and emits
+`workspace.attention_required` with the reason “PR is ready to merge — AWF will
+not merge automatically; human action required.” The workspace stays in
+`monitoring_pr` while it waits for a human or operator to merge the PR.
+
+Before reporting whether AWF will merge, check the `resolved` value in the
+`workspace.auto_merge_resolved` event (`awf workspace events <id>`) and the
+`auto_merge` field in `awf workspace show <id>`. A `null` field while provisioning
+means resolution is pending.
+
+To enable auto-merge by base branch, add this to `.awf/workspace.yml` under `awf`
+if the profile uses that wrapper. Keep release PRs into `main` manual. An
+explicit per-task flag overrides the profile even for release PRs.
+
+```yaml
+monitor:
+  auto_merge:
+    by_base_branch:
+      development: true
+      main: false
+```
 
 ### Recovery & directives
 
@@ -397,10 +429,11 @@ own. Respond, do not restart:
 drawing one more incremental bot comment over many commits): direct the monitor to
 clear low-value/incremental comments via `DEFER`/`FALSE POSITIVE` *replies* instead
 of code edits (every edit triggers another CI + re-review cycle), and to defer anything
-needing files outside `owned_paths` — so it stops looping and merges on green CI. Mind
-which reply actually unblocks merge: `DEFER` breaks the loop only for **bot** comments
-and for inline threads the monitor can auto-resolve (it files a tracking issue, posts an
-explanatory comment, and resolves the thread). A `DEFER` on a **human-authored
+needing files outside `owned_paths`. With auto-merge enabled, AWF can then merge once
+all gates pass. Mind which reply actually unblocks merge: `DEFER` breaks the loop
+only for **bot** comments and for inline threads the monitor can auto-resolve
+(it files a tracking issue, posts an explanatory comment, and resolves the thread).
+A `DEFER` on a **human-authored
 review-level comment** has no thread to auto-resolve and still routes to `NotifyHuman`,
 blocking auto-merge — there, use `FALSE POSITIVE` (only when it genuinely is one; never
 to dismiss valid feedback) as the non-blocking reply, or answer the comment. `NEEDS_HUMAN`
@@ -506,6 +539,9 @@ show`/`events`/`logs` (§11) and the worktree on disk.
 7. **Treating re-review as redundant.** The feature→dev and dev→main reviews
    catch different corner cases; let the monitor run as many cycles as the
    reviewers want.
+8. **Dispatching a feature PR you expect to land unattended without passing
+   `--auto-merge` or confirming the profile enables it, then reporting
+   “AWF will merge it.”**
 
 ## 14 — Minimal end-to-end proof
 
