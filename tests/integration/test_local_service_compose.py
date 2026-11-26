@@ -164,6 +164,23 @@ def test_compose_published_host_port_extracts_port_template(mapping: str, expect
 
 
 @pytest.mark.integration
+def test_local_service_compose_declares_restart_policies() -> None:
+    compose_path = _REPO_ROOT / "docker/compose/local-service.yml"
+    services = yaml.safe_load(compose_path.read_text())["services"]
+
+    assert {name: service.get("restart") for name, service in services.items()} == {
+        "agent-runtime": "no",
+        "postgres": "unless-stopped",
+        "migrate": "no",
+        "api": "unless-stopped",
+        "gitconfig-source": "unless-stopped",
+        "worker": "unless-stopped",
+        "console": "unless-stopped",
+        "ollama-bridge": "unless-stopped",
+    }
+
+
+@pytest.mark.integration
 def test_local_service_compose_declares_control_plane_stack() -> None:
     compose_path = Path("docker/compose/local-service.yml")
     dockerfile_path = Path("docker/control-plane.Dockerfile")
