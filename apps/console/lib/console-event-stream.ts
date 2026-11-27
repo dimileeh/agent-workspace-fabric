@@ -105,6 +105,9 @@ export function openConsoleEventStream(path: string): ConsoleEventStream {
   }
 
   if (isConsoleSessionExpired()) close();
-  else void connect();
+  else queueMicrotask(() => {
+    // Let effect cleanup discard a superseded stream before starting its fetch.
+    if (!stream.closed) void connect();
+  });
   return stream;
 }

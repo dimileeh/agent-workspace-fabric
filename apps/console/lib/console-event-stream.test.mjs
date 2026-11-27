@@ -13,6 +13,22 @@ function sse(chunks) {
   }), { headers: { "content-type": "text/event-stream; charset=utf-8" } });
 }
 
+test("replacing a stream before its first connection only opens the replacement", async (t) => {
+  const fetch = t.mock.method(globalThis, "fetch", async () => sse(["data: connected\n\n"]));
+  const discarded = openConsoleEventStream("/stream?selection=previous");
+  discarded.close();
+  const replacement = openConsoleEventStream("/stream?selection=current");
+  const message = await new Promise(resolve => {
+    replacement.onmessage = ({ data }) => {
+      replacement.close();
+      resolve(data);
+    };
+  });
+
+  assert.equal(message, "connected");
+  assert.deepEqual(fetch.mock.calls.map(call => call.arguments[0]), ["/stream?selection=current"]);
+});
+
 test("stream joins chunked multiline messages, honors retry, and closes intentionally", async (t) => {
   const messages = [];
   let connectionCount = 0;
