@@ -82,6 +82,8 @@ workspaceFilterSummary
 } from "./console-dashboard-shared";
 
 export function TopBar({
+  embedded,
+  sessionExpired,
   apiState,
   streamState,
   lastRefresh,
@@ -91,6 +93,8 @@ export function TopBar({
   isPending,
   onRefresh,
 }: {
+  embedded: boolean;
+  sessionExpired: boolean;
   apiState: "checking" | "ok" | "error";
   streamState: "idle" | "connecting" | "live" | "error";
   lastRefresh: Date | null;
@@ -102,19 +106,21 @@ export function TopBar({
 }) {
   return (
     <header className="flex min-h-14 flex-wrap items-center justify-between gap-3 bg-white px-4 py-2">
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-slate-950 text-white">
-          <Boxes size={18} aria-hidden />
+      {!embedded && (
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-slate-950 text-white">
+            <Boxes size={18} aria-hidden />
+          </div>
+          <div>
+            <h1 className="text-sm font-semibold">AWF Console</h1>
+            <p className="mono text-[11px] text-[var(--muted)]">
+              {selectedId ? compactId(selectedId, 10) : "no workspace selected"}
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-sm font-semibold">AWF Console</h1>
-          <p className="mono text-[11px] text-[var(--muted)]">
-            {selectedId ? compactId(selectedId, 10) : "no workspace selected"}
-          </p>
-        </div>
-      </div>
+      )}
       <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs sm:w-auto sm:flex-1 sm:justify-end">
-        <PreferenceControls preferences={preferences} onChange={onPreferencesChange} />
+        {!embedded && <PreferenceControls preferences={preferences} onChange={onPreferencesChange} />}
         <StatePill icon={<HeartPulse size={13} />} label="API" state={apiState} />
         <StatePill icon={<Radio size={13} />} label="Stream" state={streamState} />
         <span className="inline-flex h-8 w-[24ch] items-center justify-center rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-center font-mono text-[11px] tabular-nums text-slate-600">
@@ -123,6 +129,7 @@ export function TopBar({
         <button
           type="button"
           onClick={onRefresh}
+          disabled={sessionExpired}
           className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-slate-800 transition hover:bg-slate-50"
         >
           <RefreshCw size={14} className={isPending ? "animate-spin" : ""} aria-hidden />

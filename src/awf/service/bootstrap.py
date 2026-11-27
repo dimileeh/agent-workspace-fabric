@@ -424,6 +424,10 @@ def _persist_work_dir_propagation_result(
 
 @dataclass(frozen=True)
 class _MountInfoEntry:
+    mount_id: str
+    parent_id: str
+    device: str
+    root: str
     mount_point: str
     shared: bool
     fs_type: str
@@ -475,6 +479,10 @@ def _parse_mountinfo(text: str) -> list[_MountInfoEntry]:
         optional = fields[6:separator]
         entries.append(
             _MountInfoEntry(
+                mount_id=fields[0],
+                parent_id=fields[1],
+                device=fields[2],
+                root=_unescape_mountinfo_field(fields[3]),
                 mount_point=_unescape_mountinfo_field(fields[4]),
                 shared=any(option.startswith("shared:") for option in optional),
                 fs_type=fields[separator + 1],
@@ -492,7 +500,9 @@ def _path_within_mount(mount_point: str, path: str) -> bool:
     return path == normalized or path.startswith(normalized + "/")
 
 
-def _work_dir_mount_entry(mountinfo_path: Path, target: Path) -> _MountInfoEntry | None:
+def _work_dir_mount_entry(
+    mountinfo_path: Path, target: Path, *, ignore_work_dir_self_bind: bool
+) -> _MountInfoEntry | None:
     """Return the longest-prefix mount entry backing ``target``, or ``None``.
 
     Resolves symlinks in ``target`` (``realpath``) before prefix-matching: the
@@ -509,10 +519,20 @@ def _work_dir_mount_entry(mountinfo_path: Path, target: Path) -> _MountInfoEntry
     except OSError:
         return None
     resolved = os.path.realpath(os.fspath(target))  # noqa: PTH100 - match kernel canonical mount paths
+    entries = _parse_mountinfo(text)
+    entries_by_id = {entry.mount_id: entry for entry in entries}
     best: _MountInfoEntry | None = None
-    for entry in _parse_mountinfo(text):
+    for entry in entries:
         if not _path_within_mount(entry.mount_point, resolved):
             continue
+        if ignore_work_dir_self_bind and entry.shared:
+            parent = entries_by_id.get(entry.parent_id)
+            if parent is not None and parent is not entry and entry.device == parent.device:
+                # A legacy bootstrap self-bind exposes the same filesystem
+                # subtree and can also cover a work dir moved beneath it.
+                relative = os.path.relpath(entry.mount_point, parent.mount_point)
+                if Path(entry.root) == Path(parent.root, relative):
+                    continue
         if best is None or len(entry.mount_point) > len(best.mount_point):
             best = entry
     return best
@@ -583,6 +603,7 @@ def ensure_work_dir_mount_propagation(
     run_subprocess: SubprocessRun,
     environ: Mapping[str, str] | None = None,
     mountinfo_path: Path = DEFAULT_MOUNTINFO_PATH,
+    allow_work_dir_self_bind: bool = True,
 ) -> WorkDirPropagationResult:
     """Ensure ``host_work_dir`` is an ``rshared`` host mount, or force the copy fallback.
 
@@ -595,19 +616,26 @@ def ensure_work_dir_mount_propagation(
       non-propagating fs (Docker Desktop / virtiofs / grpcfuse / Plan 9) forces
       the copy fallback even when flagged shared, since the overlay never reaches
       the sibling regardless of propagation mode.
-    - Private but Linux with ``mount(8)`` available → create the work dir if it
-      does not yet exist (the bind source), then attempt ``mount --bind`` +
-      ``mount --make-rshared`` (idempotent), then report ``rshared`` on success.
+    - If a work-dir self-bind is allowed on a private Linux mount and
+      ``mount(8)`` is available → create the work dir if needed, then attempt
+      ``mount --bind`` and ``mount --make-rshared``, and report ``rshared`` on
+      success.
     - Non-propagating (Docker Desktop / virtiofs / grpcfuse / Plan 9), non-Linux,
       no ``mount(8)``, an unreadable mountinfo, or a failed ``--make-rshared`` →
       ``rprivate`` + ``force_copy=True`` so the worker uses the per-workspace copy
       instead of silently provisioning an empty ``~/.claude``.
 
+    With ``allow_work_dir_self_bind=False``, self-binds covering the work dir
+    are ignored and a private backing mount goes straight to the copy fallback.
+    Docker can restart a worker with this posture after the mount table is rebuilt.
+
     Best effort and never fatal: the worst case is the (correct) copy fallback.
     """
 
     target = Path(host_work_dir).expanduser()
-    entry = _work_dir_mount_entry(mountinfo_path, target)
+    entry = _work_dir_mount_entry(
+        mountinfo_path, target, ignore_work_dir_self_bind=not allow_work_dir_self_bind
+    )
     if entry is None:
         return WorkDirPropagationResult(
             propagation="rprivate",
@@ -641,7 +669,7 @@ def ensure_work_dir_mount_propagation(
             reason_code=SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED,
             detail=f"{target} is backed by a shared mount at {entry.mount_point}",
         )
-    if not _host_is_linux() or not _mount_binary_available():
+    if not allow_work_dir_self_bind or not _host_is_linux() or not _mount_binary_available():
         return WorkDirPropagationResult(
             propagation="rprivate",
             force_copy=True,
@@ -810,8 +838,8 @@ async def run_service_bootstrap(
     # Work-dir mount-propagation preflight (#376/#388). Runs for the explicitly
     # configured host work dir, and otherwise for compose's deterministic default
     # ``${HOME}/.awf/service``: detect whether it propagates so the worker's
-    # ``:rshared`` bind is gated and the overlay/copy posture is chosen before the
-    # api/worker containers start. Skipped only when even ``HOME`` is unknowable,
+    # ``:rshared`` bind is gated without relying on a self-bind that disappears
+    # on reboot. Skipped only when even ``HOME`` is unknowable,
     # leaving today's compose defaults (``:rshared`` / overlay) untouched. Best
     # effort: never fatal.
     host_work_dir = _resolve_bootstrap_host_work_dir(subprocess_env)
@@ -821,6 +849,7 @@ async def run_service_bootstrap(
             host_work_dir,
             run_subprocess=runner,
             environ=subprocess_env,
+            allow_work_dir_self_bind=False,
         )
         completed.append(propagation.to_stage_result())
         subprocess_env = _apply_work_dir_propagation_env(

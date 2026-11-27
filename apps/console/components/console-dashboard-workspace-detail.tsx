@@ -1,5 +1,6 @@
 "use client";
 
+import { consoleApiFetch, isConsoleSessionExpired } from "@/lib/console-api-session";
 import {
 Activity,
 AlertCircle,
@@ -460,7 +461,7 @@ export function TaskArtifactsSection({
     setDownloadError(null);
     setContent("");
     try {
-      const response = await fetch(artifactDownloadPath(workspaceId, name), { cache: "no-store" });
+      const response = await consoleApiFetch(artifactDownloadPath(workspaceId, name), { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`Request failed with HTTP ${response.status}.`);
       }
@@ -472,7 +473,7 @@ export function TaskArtifactsSection({
       }
       setContent(target === "validation" ? formatConformanceJson(text) : text);
     } catch (cause) {
-      if (seq !== requestSeq.current) {
+      if (isConsoleSessionExpired() || seq !== requestSeq.current) {
         return;
       }
       setDownloadError(cause instanceof Error ? cause.message : "Unable to load artifact.");

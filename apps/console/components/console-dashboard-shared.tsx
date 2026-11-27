@@ -1,5 +1,6 @@
 "use client";
 
+import { consoleApiFetch } from "@/lib/console-api-session";
 import { ExternalLink,XCircle } from "lucide-react";
 import { createContext,useContext } from "react";
 
@@ -584,7 +585,7 @@ export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
     controller.abort(new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`));
   }, pollRequestDeadlineMs);
   try {
-    const response = await fetch(path, { cache: "no-store", signal: controller.signal });
+    const response = await consoleApiFetch(path, { cache: "no-store", signal: controller.signal });
     return await parseApiResponse<T>(response);
   } catch (error) {
     return {
@@ -612,7 +613,7 @@ export async function apiPost<T>(
       init.headers = { "content-type": "application/json" };
       init.body = JSON.stringify(omitUndefined(body));
     }
-    const response = await fetch(path, init);
+    const response = await consoleApiFetch(path, init);
     return await parseApiResponse<T>(response);
   } catch (error) {
     return {

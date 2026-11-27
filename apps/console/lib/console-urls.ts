@@ -25,6 +25,17 @@ export type ConsoleUrlConfig = {
 
 export type ConsoleUrlQuery = Record<string, string | number | boolean | null | undefined>;
 
+const EMBEDDED_QUERY_KEY = "embedded";
+
+export function isEmbeddedConsole(search: Pick<URLSearchParams, "get">): boolean {
+  return search.get(EMBEDDED_QUERY_KEY) === "1";
+}
+
+export function isEmbeddedConsolePage(): boolean {
+  const search = resolvePageSearchParams();
+  return search !== null && isEmbeddedConsole(search);
+}
+
 const DEFAULT_API_BASE = "/api/awf";
 const DEFAULT_OPERATOR_BASE = "/api/operator";
 
@@ -73,7 +84,7 @@ export function getConsoleUrlConfig(overrides?: EnvLike): ConsoleUrlConfig {
 
 /**
  * Parse build-time context query key names. Deterministic and fail-closed:
- * invalid, oversized, or credential-like names are omitted (never thrown).
+ * invalid, oversized, credential-like, and reserved presentation keys are omitted.
  */
 export function parseContextQueryKeys(raw: string | undefined): string[] {
   if (raw === undefined || raw === null) {
@@ -86,7 +97,7 @@ export function parseContextQueryKeys(raw: string | undefined): string[] {
       break;
     }
     const key = segment.trim();
-    if (!key || seen.has(key)) {
+    if (!key || key === EMBEDDED_QUERY_KEY || seen.has(key)) {
       continue;
     }
     if (!isSafeContextQueryKey(key)) {

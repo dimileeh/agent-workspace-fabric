@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type MutableRefObject } from "react";
 import { parseApiResponse } from "@/components/console-dashboard-shared";
+import { consoleApiFetch, isConsoleSessionExpired } from "@/lib/console-api-session";
 import { workspaceTelemetryPath } from "@/lib/console-urls";
 import { parseTelemetryPresentation, isLegitimateNullOwnershipNoResource, type ParsedTelemetryPresentation, type TelemetryViewWindow } from "@/lib/console-workspace-telemetry";
 import { parseVMTelemetry, vmTelemetryResourceIdentity, type VMTelemetry } from "@/lib/console-vm-telemetry";
@@ -27,13 +28,13 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
     let timer = 0;
     let resourceIdentity: string | null = null;
     let controller: AbortController | null = null;
-    const current = () => !disposed && !denied && epochRef.current === authEpoch && workspaceTelemetryPath(workspaceId, view) === url;
+    const current = () => !disposed && !denied && !isConsoleSessionExpired() && epochRef.current === authEpoch && workspaceTelemetryPath(workspaceId, view) === url;
     const read = async () => {
       if (!current()) return;
       controller = new AbortController();
       const timeout = window.setTimeout(() => controller?.abort(new Error("Telemetry request timed out after 30000ms")), 30_000);
       try {
-        const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+        const response = await consoleApiFetch(url, { signal: controller.signal, cache: "no-store" });
         if (!current()) return;
         // Denial is feed-local: clear retained telemetry and stop this reader,
         // even if reading the error body fails. Other console access may remain valid.

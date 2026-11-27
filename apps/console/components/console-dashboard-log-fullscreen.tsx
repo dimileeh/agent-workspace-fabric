@@ -5,6 +5,8 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 
 import { formatAgentLabel } from "@/lib/agent-format";
 import { resolveWorkspaceStreamSubscription } from "@/lib/console-capabilities";
+import { expireConsoleSession, isConsoleSessionExpired } from "@/lib/console-api-session";
+import { openConsoleEventStream, type ConsoleEventStream } from "@/lib/console-event-stream";
 import { awfPath } from "@/lib/console-urls";
 import { pickWorkspaceLogStreams } from "@/lib/format";
 import type { ConsoleCapabilities, ListEnvelope, WorkspaceLogStream } from "@/lib/types";
@@ -340,7 +342,7 @@ export function WorkspaceLogColumn({
   // tailRefreshErrors. An older failure's queued updater must not overwrite a
   // newer warning, or re-stamp one a later success already cleared.
   const appliedTailFailureGenerationRef = useRef<Record<string, number>>({});
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventSourceRef = useRef<ConsoleEventStream | null>(null);
   const loadSelectedTailsRef = useRef<() => Promise<void>>(async () => undefined);
   const [listingDenied, setListingDenied] = useState(false);
   // Applied listing 200 generation. A static or closed listing does not change
@@ -997,7 +999,7 @@ export function WorkspaceLogColumn({
   };
 
   const scheduleStreamAuthProbe = () => {
-    if (streamProbeTimerRef.current !== null) {
+    if (isConsoleSessionExpired() || streamProbeTimerRef.current !== null) {
       return;
     }
     streamProbeTimerRef.current = window.setTimeout(() => {
@@ -1043,7 +1045,7 @@ export function WorkspaceLogColumn({
       }
       return;
     }
-    if (listingDenied || tailAuthDenied) {
+    if (isConsoleSessionExpired() || listingDenied || tailAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -1058,7 +1060,7 @@ export function WorkspaceLogColumn({
     // event history for a log column (same gates as the inspector stream).
     const { allowEvents, channels, tailBytes } = resolveWorkspaceStreamSubscription(capabilities);
     setStreamState("connecting");
-    const source = new EventSource(
+    const source = openConsoleEventStream(
       awfPath(`workspaces/${workspace.workspace_id}/stream`, {
         channels,
         tail_bytes: tailBytes,
@@ -1129,15 +1131,16 @@ export function WorkspaceLogColumn({
     };
 
     source.onmessage = (message) => {
+      const frame = parseFrame(message.data);
+      if (!frame) return;
+      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401 && expireConsoleSession()) {
+        return;
+      }
       if (
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
         openedEpoch !== columnEpochRef.current
       ) {
-        return;
-      }
-      const frame = parseFrame(message.data);
-      if (!frame) {
         return;
       }
       if (frame.type === "error" || frame.type === "closed") {

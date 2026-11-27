@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Mapping
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -547,6 +549,92 @@ def test_bootstrap_records_preflight_stage_and_injects_env(
     assert worker_env is not None
     assert worker_env["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
     assert worker_env["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("backing_shared", "work_dir_mount", "expected_propagation"),
+    [
+        pytest.param(False, None, "rprivate", id="private-backing-mount"),
+        pytest.param(False, "self-bind", "rprivate", id="legacy-self-bind"),
+        pytest.param(False, "ancestor-self-bind", "rprivate", id="below-legacy-self-bind"),
+        pytest.param(True, None, "rshared", id="shared-backing-mount"),
+        pytest.param(False, "separate", "rshared", id="separate-shared-mount"),
+        pytest.param(False, "other-subtree", "rshared", id="shared-bind-of-different-subtree"),
+    ],
+)
+def test_bootstrap_worker_posture_survives_loss_of_self_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backing_shared: bool,
+    work_dir_mount: str | None,
+    expected_propagation: str,
+) -> None:
+    root = _write_source_checkout(tmp_path / "checkout")
+    parent = tmp_path / "host"
+    work_dir = parent / "work"
+    legacy_work_dir = work_dir
+    if work_dir_mount == "ancestor-self-bind":
+        work_dir = legacy_work_dir / "new-work-dir"
+    work_dir.mkdir(parents=True)
+    env_file = tmp_path / "service.env"
+    mountinfo = tmp_path / "mountinfo"
+    parent_propagation = " shared:1" if backing_shared else ""
+    mounts = [f"23 22 8:1 /users {parent} rw{parent_propagation} - ext4 /dev/sda rw"]
+    if work_dir_mount == "separate":
+        mounts.append(f"24 23 8:2 / {work_dir} rw shared:2 - ext4 /dev/sdb rw")
+    elif work_dir_mount == "other-subtree":
+        mounts.append(f"24 23 8:1 /other {work_dir} rw shared:2 - ext4 /dev/sda rw")
+    if work_dir_mount in {"self-bind", "ancestor-self-bind"}:
+        mounts.append(f"24 23 8:1 /users/work {legacy_work_dir} rw shared:2 - ext4 /dev/sda rw")
+        env_file.write_text(
+            "AWF_WORK_DIR_BIND_PROPAGATION=rshared\n"
+            "AWF_CLAUDE_AUTH_FORCE_COPY=false\n"
+            "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2026-11-26T00:00:00+00:00\n",
+            encoding="utf-8",
+        )
+    else:
+        env_file.touch()
+    mountinfo.write_text("\n".join(mounts) + "\n", encoding="utf-8")
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(work_dir))
+    monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
+    monkeypatch.setattr(bootstrap, "_host_is_linux", lambda: True)
+    monkeypatch.setattr(bootstrap, "_mount_binary_available", lambda: True)
+
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_work_dir_mount_propagation",
+        partial(ensure_work_dir_mount_propagation, mountinfo_path=mountinfo),
+    )
+
+    commands: list[list[str]] = []
+    worker_env: dict[str, str] = {}
+
+    def _run(
+        args: list[str], *, env: Mapping[str, str] | None = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        if args[-2:] == ["api", "worker"]:
+            assert env is not None
+            worker_env.update(env)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            asset_root=root,
+            env_file=env_file,
+            service_environ=_read_env_file_values(env_file),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+        )
+    )
+
+    expected_force_copy = "true" if expected_propagation == "rprivate" else "false"
+    for env in (worker_env, _read_env_file_values(env_file)):
+        assert env["AWF_WORK_DIR_BIND_PROPAGATION"] == expected_propagation
+        assert env["AWF_CLAUDE_AUTH_FORCE_COPY"] == expected_force_copy
+    assert all(command[0] == "docker" for command in commands)
 
 
 @pytest.mark.unit
