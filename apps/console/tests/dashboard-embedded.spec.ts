@@ -210,7 +210,7 @@ for (const mode of ["embedded frame", "standalone frame", "top-level"] as const)
     await expect.poll(() => held?.length).toBe(2);
     const [first, second] = held;
     await fulfillJson(first, denial, 401);
-    await expect(consolePage.getByText("Console session has expired.")).toBeVisible();
+    await expect(consolePage.getByText("Console access denied because the session expired.")).toBeVisible();
     const requestCount = requests.length;
     await fulfillJson(second, denial, 401);
     await expect.poll(() => closed).toBe(1);
@@ -240,7 +240,7 @@ test("an embedded console sends no message to a cross-origin parent", async ({ p
   await page.route("**/api/awf/health", route => fulfillJson(route, denial, 401));
   await addHost(page, true);
   const consoleFrame = await mountConsole(page, "?embedded=1");
-  await expect(consoleFrame.getByText("Console session has expired.")).toBeVisible();
+  await expect(consoleFrame.getByText("Console access denied because the session expired.")).toBeVisible();
   expect(await page.evaluate(() => Reflect.get(window, "received"))).toEqual([]);
 });
 
@@ -274,7 +274,7 @@ for (const source of ["telemetry", "stream HTTP", "stream frame 401", "fullscree
       await expect.poll(polls).toBeGreaterThan(beforePoll);
       return;
     }
-    await expect(page.getByText("Console session has expired.")).toBeVisible();
+    await expect(page.getByText("Console access denied because the session expired.")).toBeVisible();
     await expect(refresh).toBeDisabled();
     const count = requests.length;
     await page.clock.fastForward(125_000);

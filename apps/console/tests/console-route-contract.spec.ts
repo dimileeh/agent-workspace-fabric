@@ -339,7 +339,7 @@ for (const source of ["artifact download", "operator action"] as const) {
       await page.getByRole("button", { name: "Cancel", exact: true }).click();
       await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
     }
-    await expect(page.getByText("Console session has expired.")).toBeVisible();
+    await expect(page.getByText("Console access denied because the session expired.")).toBeVisible();
     await expect(page.locator("main > header").getByRole("button", { name: "Refresh", exact: true })).toBeDisabled();
   });
 }

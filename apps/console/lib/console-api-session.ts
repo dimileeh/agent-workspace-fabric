@@ -1,6 +1,6 @@
 import { isEmbeddedConsole } from "./console-urls.ts";
 
-export const consoleSessionExpiredMessage = "Console session has expired.";
+export const consoleSessionExpiredMessage = "Console access denied because the session expired.";
 
 // The browser module instance keeps the same signal across client navigation.
 const session = new AbortController();
