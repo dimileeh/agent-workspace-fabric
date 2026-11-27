@@ -6,6 +6,7 @@ import {
   configuredContextFingerprint,
   consoleHref,
   getConsoleUrlConfig,
+  isEmbeddedConsole,
   normalizeBasePath,
   normalizeServiceBase,
   operatorPath,
@@ -389,5 +390,23 @@ test("telemetry selected URL carries only configured context and bounded views",
   } finally {
     if (oldBase === undefined) delete process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE; else process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE = oldBase;
     if (oldKeys === undefined) delete process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS; else process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = oldKeys;
+  }
+});
+
+test("embedded mode requires the exact opt-in and remains independent of API context", () => {
+  const previous = snapshotEnv();
+  clearConsoleEnv();
+  try {
+    for (const search of ["", "?embedded", "?embedded=0", "?embedded=true", "?embedded=01"]) {
+      assert.equal(isEmbeddedConsole(new URLSearchParams(search)), false);
+    }
+    const search = "?org_id=o1&embedded=1";
+    assert.equal(isEmbeddedConsole(new URLSearchParams(search)), true);
+    assert.equal(awfPath("health", undefined, search), "/api/awf/health");
+    process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = "org_id,embedded";
+    assert.equal(awfPath("health", undefined, search), "/api/awf/health?org_id=o1");
+    assert.equal(configuredContextFingerprint(search), configuredContextFingerprint("?org_id=o1"));
+  } finally {
+    restoreEnvSnapshot(previous);
   }
 });
