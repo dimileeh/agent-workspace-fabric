@@ -290,9 +290,10 @@ services:
       # host-side work dir must itself be a shared mount. The ``awf service
       # bootstrap`` work-dir mount-propagation preflight gates this flag: it sets
       # ``AWF_WORK_DIR_BIND_PROPAGATION=rprivate`` (and forces the copy fallback
-      # via ``AWF_CLAUDE_AUTH_FORCE_COPY``) on hosts whose work dir cannot be made
-      # an ``rshared`` mount, so the worker neither fails to start nor silently
-      # provisions an empty ``~/.claude``. Defaults to ``rshared``.
+      # via ``AWF_CLAUDE_AUTH_FORCE_COPY``) when the work dir lacks a shared
+      # backing mount independent of a temporary self-bind. This lets Docker
+      # restart the worker after a host reboot. Defaults to ``rshared`` when
+      # Compose is run without bootstrap settings.
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}
       - awf-gitconfig-source:/run/awf-gitconfig-source
       - *awf-gh-auth

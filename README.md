@@ -218,6 +218,10 @@ AWF Core comes back automatically after a host reboot or Docker restart,
 provided Docker starts on boot. To keep Core down across restarts, run
 `docker compose --profile '*' stop` from the AWF Core Compose directory or with
 the same Compose file used to start Core. Run `awf start` to bring it back up.
+After upgrading an existing installation, run `awf start` to apply the updated
+worker mount settings. On a private work-directory mount, the worker uses a
+private bind and per-workspace Claude auth copies so Docker can restart it
+after a reboot.
 
 For the source checkout with global tool install lane, run from the checkout:
 
