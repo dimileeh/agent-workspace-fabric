@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { expect, type Page, type Route } from "@playwright/test";
 
 import { OPERATOR_PREFERENCES_STORAGE_KEY as preferenceKey } from "../lib/operator-preferences";
@@ -21,6 +23,14 @@ const openWorkspace = "Open workspace details for Embedded test workspace";
 const sessionMessage = { type: "awf-console:unauthenticated" };
 const apiPattern = /\/api\/(awf|operator)\//;
 
+function telemetryCapabilities() {
+  const caps = localCapabilities() as { widgets: Array<Record<string, unknown>> };
+  caps.widgets = caps.widgets.map(widget => ["telemetry", "allocation", "cost"].includes(String(widget.id))
+    ? { ...widget, availability: "available", route: "/v1/workspaces/{workspace_id}/telemetry" }
+    : widget);
+  return caps;
+}
+
 async function mockWorkspace(page: Page, options: Parameters<typeof mockAwfConsoleApi>[1] = {}) {
   await mockAwfConsoleApi(page, { overviewItems: [workspace], ...options });
   await page.route(`**/api/awf/workspaces/${workspaceId}**`, async route => {
@@ -31,30 +41,38 @@ async function mockWorkspace(page: Page, options: Parameters<typeof mockAwfConso
   });
 }
 
-async function addHost(page: Page, origin = consoleOrigin) {
-  await page.route(`${origin}/embedded-test-host`, route => route.fulfill({
-    contentType: "text/html",
-    body: `<!doctype html><body><script>
-      window.received = [];
-      window.attempted = [];
-      window.addEventListener("message", event => {
-        if (event.data?.type === "awf-console:unauthenticated") {
-          window.received.push({
-            data: event.data,
-            origin: event.origin,
-            fromConsole: event.source === document.querySelector("iframe").contentWindow,
-          });
-        }
-      });
-    </script></body>`,
-  }));
-  await page.goto(`${origin}/embedded-test-host`);
+async function addHost(page: Page, crossOrigin = false) {
+  const hostUrl = crossOrigin
+    ? "http://127.0.0.1:3191/workspaces/test-harness/workspace-telemetry"
+    : `${consoleOrigin}/embedded-test-host`;
+  if (!crossOrigin) {
+    await page.route(hostUrl, route => route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><body></body>",
+    }));
+  }
+  // Use a network-served host for cross-origin framing. Chromium can classify
+  // a route-fulfilled document as public and block its loopback iframe.
+  await page.goto(hostUrl);
+  await page.evaluate(() => {
+    const received: unknown[] = [];
+    Object.assign(window, { received, attempted: [] });
+    window.addEventListener("message", event => {
+      if (event.data?.type === "awf-console:unauthenticated") {
+        received.push({
+          data: event.data,
+          origin: event.origin,
+          fromConsole: event.source === document.querySelector("iframe")?.contentWindow,
+        });
+      }
+    });
+  });
 }
 
 async function mountConsole(page: Page, query: string) {
   await page.evaluate(url => {
     const iframe = document.createElement("iframe");
-    iframe.style.cssText = "width: 1200px; height: 680px";
+    iframe.style.cssText = "position: fixed; top: 0; left: 0; width: 1200px; height: 680px";
     iframe.src = url;
     document.body.append(iframe);
   }, `${consoleOrigin}/${query}`);
@@ -80,7 +98,7 @@ test("embedded presentation follows host display preferences across workspace na
     version: 1, theme: "dark", fontSize: "large", contrast: "high",
   })), preferenceKey);
   const consoleFrame = await mountConsole(page, "?embedded=1");
-  const header = consoleFrame.getByRole("banner");
+  const header = consoleFrame.locator("main > header");
   await expect(header.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
   await expect(header.getByRole("heading", { name: "AWF Console" })).toHaveCount(0);
   await expect(header.locator(".lucide-boxes")).toHaveCount(0);
@@ -111,15 +129,28 @@ test("embedded presentation follows host display preferences across workspace na
   await page.evaluate(key => localStorage.removeItem(key), preferenceKey);
   await expect(root).toHaveAttribute("data-awf-theme-mode", "light");
   expect(await page.evaluate(key => localStorage.getItem(key), preferenceKey)).toBeNull();
+  await page.evaluate(({ key, value }) => localStorage.setItem(key, value), { key: preferenceKey, value: preferences });
+  await expect(root).toHaveAttribute("data-awf-theme-mode", "system");
+  await page.evaluate(() => localStorage.clear());
+  await expect(root).toHaveAttribute("data-awf-theme-mode", "light");
 
   await inspectorClose.click();
   await expect.poll(query).toBe("?embedded=1");
 });
 
-for (const mode of ["embedded frame", "standalone frame", "top-level", "cross-origin frame"] as const) {
+for (const mode of ["embedded frame", "standalone frame", "top-level"] as const) {
   test(`401 stops polling with ${mode} and only notifies a same-origin embedded parent`, async ({ page, openEventStream }) => {
     const requests = captureApiRequests(page);
-    await mockWorkspace(page);
+    if (mode === "embedded frame") {
+      await mockWorkspace(page, { capabilities: telemetryCapabilities() });
+      const telemetry = JSON.parse(readFileSync(
+        "lib/fixtures/console-workspace-telemetry/persisted_unpriced_allocation.json", "utf8",
+      ));
+      telemetry.ownership.workspace_record_id = workspaceId;
+      await page.route("**/telemetry?*", route => fulfillJson(route, telemetry));
+    } else {
+      await mockWorkspace(page);
+    }
     let closed = 0;
     const streamUrl = await openEventStream([{ type: "connected", workspace_id: workspaceId }], () => { closed++; });
     await page.route(`**/workspaces/${workspaceId}/stream?*`, route =>
@@ -137,37 +168,38 @@ for (const mode of ["embedded frame", "standalone frame", "top-level", "cross-or
         const original = window.postMessage;
         window.postMessage = function (message: unknown, ...args: unknown[]) {
           if ((message as { type?: string } | null)?.type === "awf-console:unauthenticated") {
-            (window as Window & { attempted: unknown[] }).attempted.push(message);
+            Reflect.get(window, "attempted").push(message);
           }
           Reflect.apply(original, this, [message, ...args]);
         };
       });
       await page.goto(`/${query}`);
     } else {
-      await addHost(page, mode === "cross-origin frame" ? "http://127.0.0.1:3191" : consoleOrigin);
-      if (mode !== "cross-origin frame") {
-        await page.addInitScript(() => {
-          if (window.parent === window) return;
-          const parent = window.parent as Window & { attempted: unknown[] };
-          const original = parent.postMessage;
-          parent.postMessage = function (data: { type?: string }, ...args: unknown[]) {
-            if (data?.type === "awf-console:unauthenticated") {
-              parent.attempted.push({ data, targetOrigin: args[0] });
-            }
-            Reflect.apply(original, parent, [data, ...args]);
-          };
-        });
-      }
+      await addHost(page);
+      await page.addInitScript(() => {
+        if (window.parent === window) return;
+        const parent = window.parent as Window & { attempted: unknown[] };
+        const original = parent.postMessage;
+        parent.postMessage = function (data: { type?: string }, ...args: unknown[]) {
+          if (data?.type === "awf-console:unauthenticated") {
+            parent.attempted.push({ data, targetOrigin: args[0] });
+          }
+          Reflect.apply(original, parent, [data, ...args]);
+        };
+      });
       await mountConsole(page, query);
     }
     const consolePage = mode === "top-level" ? page : page.frameLocator("iframe");
-    const header = consolePage.getByRole("banner");
+    const header = consolePage.locator("main > header");
     if (mode === "standalone frame") {
       await expect(header.getByRole("heading", { name: "AWF Console" })).toBeVisible();
       await expect(header.getByRole("button", { name: "Use dark theme" })).toBeVisible();
     }
     await consolePage.getByRole("button", { name: openWorkspace }).click();
     await expect(header.getByText("Stream: live", { exact: true })).toBeVisible();
+    if (mode === "embedded frame") {
+      await expect(consolePage.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+    }
     const polls = () => requests.filter(path => path === "/api/awf/workspaces/overview").length;
     const beforePoll = polls();
     await page.clock.fastForward(6_000);
@@ -179,12 +211,12 @@ for (const mode of ["embedded frame", "standalone frame", "top-level", "cross-or
     const [first, second] = held;
     await fulfillJson(first, denial, 401);
     await expect(consolePage.getByText("Console session has expired.")).toBeVisible();
+    const requestCount = requests.length;
     await fulfillJson(second, denial, 401);
     await expect.poll(() => closed).toBe(1);
     const refresh = header.getByRole("button", { name: "Refresh", exact: true });
     await expect(refresh).toBeDisabled();
-    await refresh.evaluate(button => button.click());
-    const requestCount = requests.length;
+    await refresh.evaluate((button: HTMLButtonElement) => button.click());
     await page.clock.fastForward(125_000);
     await page.clock.fastForward(25_000);
     expect(requests).toHaveLength(requestCount);
@@ -203,16 +235,21 @@ for (const mode of ["embedded frame", "standalone frame", "top-level", "cross-or
   });
 }
 
-for (const source of ["telemetry", "stream HTTP", "stream frame 401", "stream frame 403"] as const) {
+test("an embedded console sends no message to a cross-origin parent", async ({ page }) => {
+  await mockWorkspace(page);
+  await page.route("**/api/awf/health", route => fulfillJson(route, denial, 401));
+  await addHost(page, true);
+  const consoleFrame = await mountConsole(page, "?embedded=1");
+  await expect(consoleFrame.getByText("Console session has expired.")).toBeVisible();
+  expect(await page.evaluate(() => Reflect.get(window, "received"))).toEqual([]);
+});
+
+for (const source of ["telemetry", "stream HTTP", "stream frame 401", "fullscreen stream frame 401", "stream frame 403"] as const) {
   test(`${source} denial follows the appropriate shutdown scope`, async ({ page }) => {
     const requests = captureApiRequests(page);
-    const capabilities = localCapabilities() as { widgets: Array<Record<string, unknown>> };
-    if (source === "telemetry") {
-      capabilities.widgets = capabilities.widgets.map(widget => widget.id === "telemetry"
-        ? { ...widget, availability: "available", route: "/v1/workspaces/{workspace_id}/telemetry" }
-        : widget);
-    }
-    await mockWorkspace(page, { capabilities });
+    await mockWorkspace(page, {
+      capabilities: source === "telemetry" ? telemetryCapabilities() : localCapabilities(),
+    });
     await page.route("**/telemetry?*", route => fulfillJson(route, denial, 401));
     await page.route(`**/workspaces/${workspaceId}/stream?*`, async route => {
       if (source === "stream HTTP") return fulfillJson(route, denial, 401);
@@ -222,14 +259,19 @@ for (const source of ["telemetry", "stream HTTP", "stream frame 401", "stream fr
     });
     await page.clock.install();
     await page.goto("/?embedded=1");
-    await page.getByRole("button", { name: openWorkspace }).click();
-    const refresh = page.getByRole("banner").getByRole("button", { name: "Refresh", exact: true });
+    if (source.startsWith("fullscreen")) {
+      await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+    } else {
+      await page.getByRole("button", { name: openWorkspace }).click();
+    }
+    const refresh = page.locator("main > header").getByRole("button", { name: "Refresh", exact: true });
     if (source.endsWith("403")) {
-      await expect(page.getByText("Stream access denied")).toBeVisible();
+      await expect(page.getByText("Stream access denied").first()).toBeVisible();
       await expect(refresh).toBeEnabled();
-      const overview = page.waitForRequest(request => new URL(request.url()).pathname.endsWith("/workspaces/overview"));
-      await refresh.click();
-      await overview;
+      const polls = () => requests.filter(path => path === "/api/awf/workspaces/overview").length;
+      const beforePoll = polls();
+      await page.clock.fastForward(6_000);
+      await expect.poll(polls).toBeGreaterThan(beforePoll);
       return;
     }
     await expect(page.getByText("Console session has expired.")).toBeVisible();

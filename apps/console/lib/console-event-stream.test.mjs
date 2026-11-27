@@ -15,11 +15,13 @@ function sse(chunks) {
 
 test("stream joins chunked multiline messages, honors retry, and closes intentionally", async (t) => {
   const messages = [];
-  const requests = t.mock.method(globalThis, "fetch", async (_path, init) => {
+  let connectionCount = 0;
+  t.mock.method(globalThis, "fetch", async (_path, init) => {
+    connectionCount++;
     assert.equal(init.credentials, "same-origin");
     assert.equal(new Headers(init.headers).get("accept"), "text/event-stream");
-    assert.equal(new Headers(init.headers).get("last-event-id"), requests.mock.callCount() > 1 ? "4" : null);
-    return requests.mock.callCount() > 1
+    assert.equal(new Headers(init.headers).get("last-event-id"), connectionCount > 1 ? "4" : null);
+    return connectionCount > 1
       ? sse(["data: last\r\n\r\n"])
       : sse([": heartbeat\r", "\ndata: fir", "st\r\ndata: line\r\n\r\nretry: 1\nid: 4\nevent: internal\ndata: hidden\n\ndata: incomplete"]);
   });

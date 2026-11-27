@@ -5,6 +5,7 @@ import type { ReadonlyURLSearchParams } from "next/navigation";
 import type { OperatorPreferences, ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
+  OPERATOR_PREFERENCES_STORAGE_KEY,
   normalizeOperatorPreferences,
 } from "@/lib/operator-preferences";
 import {
@@ -17,7 +18,7 @@ import {
  * Hydrate, persist, and apply operator theme preferences.
  * Extracted from console-dashboard.tsx for the first-party 1500-line guard.
  */
-export function useOperatorThemePreferences() {
+export function useOperatorThemePreferences(embedded: boolean) {
   const [operatorPreferences, setOperatorPreferences] = useState<OperatorPreferences>(
     DEFAULT_OPERATOR_PREFERENCES,
   );
@@ -27,7 +28,16 @@ export function useOperatorThemePreferences() {
   useEffect(() => {
     setOperatorPreferences(readStoredOperatorPreferences());
     setOperatorPreferencesHydrated(true);
-  }, []);
+    if (!embedded) return;
+    const syncPreferences = (event: StorageEvent) => {
+      if ((event.key === OPERATOR_PREFERENCES_STORAGE_KEY || event.key === null) &&
+          event.storageArea === window.localStorage) {
+        setOperatorPreferences(readStoredOperatorPreferences());
+      }
+    };
+    window.addEventListener("storage", syncPreferences);
+    return () => window.removeEventListener("storage", syncPreferences);
+  }, [embedded]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -42,8 +52,8 @@ export function useOperatorThemePreferences() {
       return;
     }
     applyOperatorPreferenceAttributes(operatorPreferences, systemTheme);
-    writeStoredOperatorPreferences(operatorPreferences);
-  }, [operatorPreferences, operatorPreferencesHydrated, systemTheme]);
+    if (!embedded) writeStoredOperatorPreferences(operatorPreferences);
+  }, [embedded, operatorPreferences, operatorPreferencesHydrated, systemTheme]);
 
   const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
     setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));

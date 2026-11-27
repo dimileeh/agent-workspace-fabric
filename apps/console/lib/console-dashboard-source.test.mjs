@@ -485,7 +485,7 @@ test("periodic overview polls skip while a collection is still in flight", () =>
   );
   assert.match(
     dashboard,
-    /useSerializedPeriodicLoad\(\s*true,\s*loadOverview,\s*overviewLoadInFlightRef,/,
+    /useSerializedPeriodicLoad\(\s*!sessionExpired,\s*loadOverview,\s*overviewLoadInFlightRef,/,
     "Expected periodic overview polls to use the serialized loader",
   );
   assert.match(
@@ -523,7 +523,7 @@ test("periodic workspace detail polls skip while a request is still in flight", 
   );
   assert.match(
     detail,
-    /useSerializedPeriodicLoad\(\s*selectedId !== null,\s*loadSelectedWorkspace,\s*workspaceDetailLoadInFlightRef,/,
+    /useSerializedPeriodicLoad\(\s*enabled && selectedId !== null,\s*loadSelectedWorkspace,\s*workspaceDetailLoadInFlightRef,/,
     "Expected periodic detail polls to chain through the serialized loader",
   );
   assert.match(
@@ -1894,7 +1894,7 @@ test("browser API GETs have a deadline so serialized polling can resume", () => 
   );
   assert.match(
     apiGet,
-    /fetch\(path, \{ cache: "no-store", signal: controller\.signal \}\)/,
+    /consoleApiFetch\(path, \{ cache: "no-store", signal: controller\.signal \}\)/,
     "Expected browser GET fetches to use the deadline's abort signal",
   );
   assert.match(
@@ -1931,7 +1931,7 @@ test("periodic capability polls skip while a request is still in flight", () => 
   );
   assert.match(
     dashboard,
-    /useSerializedPeriodicLoad\(\s*true,\s*loadCapabilities,\s*capabilityLoadInFlightRef,/,
+    /useSerializedPeriodicLoad\(\s*!sessionExpired,\s*loadCapabilities,\s*capabilityLoadInFlightRef,/,
     "Expected periodic capability polls to use the serialized loader",
   );
 });
@@ -2189,7 +2189,7 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    /if \(isConsoleSessionExpired\(\) \|\| !selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
     "Expected inspector /stream to close when listing or tail authorization is denied, not only drop frames after they arrive",
   );
   assert.match(
@@ -2199,8 +2199,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;[\s\S]*?setWorkspaceDetailAuthDenied\(true\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?workspace: null,[\s\S]*?events: \[\],[\s\S]*?const streamAuthorizationDenied = \(frame: \{ status\?: number \}\) =>\s*frame\.status === 401 \|\| frame\.status === 403;[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
-    "Expected a workspace stream 401/403 frame to latch feed denial and clear previously rendered stream data",
+    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;[\s\S]*?setWorkspaceDetailAuthDenied\(true\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?workspace: null,[\s\S]*?events: \[\],[\s\S]*?const streamAuthorizationDenied = \(frame: \{ status\?: number \}\) =>\s*frame\.status === 403;[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
+    "Expected a workspace stream 403 frame to latch feed denial and clear previously rendered stream data",
   );
   assert.match(
     dashboardSource.dashboard,
@@ -2599,7 +2599,7 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     logs,
-    /if \(!allowStreamLogs\) \{[\s\S]*?streamAuthDeniedRef\.current = false;[\s\S]*?setStreamAuthDenied\(false\);[\s\S]*?setStreamProbeNonce\(0\);[\s\S]*?if \(!listingDeniedRef\.current && !tailAuthDeniedRef\.current\) \{[\s\S]*?void loadSelectedTailsRef\.current\(\);[\s\S]*?return;\s*\}[\s\S]*?if \(listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    /if \(!allowStreamLogs\) \{[\s\S]*?streamAuthDeniedRef\.current = false;[\s\S]*?setStreamAuthDenied\(false\);[\s\S]*?setStreamProbeNonce\(0\);[\s\S]*?if \(!listingDeniedRef\.current && !tailAuthDeniedRef\.current\) \{[\s\S]*?void loadSelectedTailsRef\.current\(\);[\s\S]*?return;\s*\}[\s\S]*?if \(isConsoleSessionExpired\(\) \|\| listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
     "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing or tail has not been auth-denied",
   );
   assert.match(
@@ -2625,7 +2625,7 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   assert.match(
     logs,
     /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?streamAuthDeniedRef\.current = true;[\s\S]*?setStreamAuthDenied\(true\);[\s\S]*?setEntries\(\(current\) => \(denialStillOwnsColumn\(\) \? \[\] : current\)\);[\s\S]*?setOffsets\(\(current\) => \(denialStillOwnsColumn\(\) \? \{\} : current\)\);[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(isFullscreenStreamAuthDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
-    "Expected a fullscreen stream 401/403 frame to latch denial and clear column caches",
+    "Expected a fullscreen stream 403 frame to latch denial and clear column caches",
   );
 });
 

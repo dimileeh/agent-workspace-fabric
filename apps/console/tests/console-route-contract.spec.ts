@@ -294,7 +294,7 @@ for (const [mode, origin] of [
     const overview = page.waitForRequest(request =>
       pathOf(request) === `${mode.apiPrefix}/workspaces/overview`);
     await page.goto(`${origin}${mode.homePath}?${query}`);
-    const header = page.getByRole("banner");
+    const header = page.locator("main > header");
     await expect(header.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
     await expect(header.getByRole("heading")).toHaveCount(0);
 
@@ -319,5 +319,27 @@ for (const [mode, origin] of [
     await expect(page).toHaveURL(url => url.pathname === mode.homePath &&
       !url.searchParams.has("workspaceId") &&
       [...query].every(([key, value]) => url.searchParams.get(key) === value));
+  });
+}
+
+for (const source of ["artifact download", "operator action"] as const) {
+  test(`a 401 on an embedded ${source} expires the console session`, async ({ page }) => {
+    await mockConsoleApis(page, localMode);
+    const endpoint = source === "artifact download"
+      ? `/api/awf/workspaces/${WORKSPACE_ID}/artifacts/download?*`
+      : `/api/operator/workspaces/${WORKSPACE_ID}/cancel`;
+    await page.route(endpoint, route => route.fulfill({ status: 401, body: "Session ended" }));
+    await page.goto(`/?embedded=1&workspaceId=${WORKSPACE_ID}`);
+
+    if (source === "artifact download") {
+      await page.getByTestId(`workspace-card-${WORKSPACE_ID}`)
+        .getByRole("button", { name: "Details", exact: true }).click();
+      await page.getByTestId("task-artifacts").getByRole("button", { name: "Plan", exact: true }).click();
+    } else {
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+    }
+    await expect(page.getByText("Console session has expired.")).toBeVisible();
+    await expect(page.locator("main > header").getByRole("button", { name: "Refresh", exact: true })).toBeDisabled();
   });
 }

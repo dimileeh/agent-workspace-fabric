@@ -3,7 +3,7 @@ import { test as base } from "@playwright/test";
 import type { AwfStreamFrame } from "@/lib/types";
 
 // Unlike route.fulfill(), this fixture leaves the SSE connection open so a
-// live-status assertion exercises a real EventSource, including reconnects.
+// live-status assertion exercises a real SSE connection, including reconnects.
 export const streamTest = base.extend<{
   openEventStream: (frames: AwfStreamFrame[], onClose?: () => void) => Promise<string>;
 }>({
