@@ -525,11 +525,11 @@ def _work_dir_mount_entry(
     for entry in entries:
         if not _path_within_mount(entry.mount_point, resolved):
             continue
-        if ignore_work_dir_self_bind and entry.shared and entry.mount_point == resolved:
+        if ignore_work_dir_self_bind and entry.shared:
             parent = entries_by_id.get(entry.parent_id)
             if parent is not None and parent is not entry and entry.device == parent.device:
-                # A legacy bootstrap self-bind exposes the exact same filesystem
-                # subtree at the work dir. Check the backing mount instead.
+                # A legacy bootstrap self-bind exposes the same filesystem
+                # subtree and can also cover a work dir moved beneath it.
                 relative = os.path.relpath(entry.mount_point, parent.mount_point)
                 if Path(entry.root) == Path(parent.root, relative):
                     continue
@@ -625,9 +625,9 @@ def ensure_work_dir_mount_propagation(
       ``rprivate`` + ``force_copy=True`` so the worker uses the per-workspace copy
       instead of silently provisioning an empty ``~/.claude``.
 
-    With ``allow_work_dir_self_bind=False``, a work-dir self-bind is ignored and
-    a private backing mount goes straight to the copy fallback. Docker can
-    restart a worker with this posture after the host mount table is rebuilt.
+    With ``allow_work_dir_self_bind=False``, self-binds covering the work dir
+    are ignored and a private backing mount goes straight to the copy fallback.
+    Docker can restart a worker with this posture after the mount table is rebuilt.
 
     Best effort and never fatal: the worst case is the (correct) copy fallback.
     """

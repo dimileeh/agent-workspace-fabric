@@ -557,6 +557,7 @@ def test_bootstrap_records_preflight_stage_and_injects_env(
     [
         pytest.param(False, None, "rprivate", id="private-backing-mount"),
         pytest.param(False, "self-bind", "rprivate", id="legacy-self-bind"),
+        pytest.param(False, "ancestor-self-bind", "rprivate", id="below-legacy-self-bind"),
         pytest.param(True, None, "rshared", id="shared-backing-mount"),
         pytest.param(False, "separate", "rshared", id="separate-shared-mount"),
         pytest.param(False, "other-subtree", "rshared", id="shared-bind-of-different-subtree"),
@@ -572,6 +573,9 @@ def test_bootstrap_worker_posture_survives_loss_of_self_bind(
     root = _write_source_checkout(tmp_path / "checkout")
     parent = tmp_path / "host"
     work_dir = parent / "work"
+    legacy_work_dir = work_dir
+    if work_dir_mount == "ancestor-self-bind":
+        work_dir = legacy_work_dir / "new-work-dir"
     work_dir.mkdir(parents=True)
     env_file = tmp_path / "service.env"
     mountinfo = tmp_path / "mountinfo"
@@ -581,8 +585,8 @@ def test_bootstrap_worker_posture_survives_loss_of_self_bind(
         mounts.append(f"24 23 8:2 / {work_dir} rw shared:2 - ext4 /dev/sdb rw")
     elif work_dir_mount == "other-subtree":
         mounts.append(f"24 23 8:1 /other {work_dir} rw shared:2 - ext4 /dev/sda rw")
-    if work_dir_mount == "self-bind":
-        mounts.append(f"24 23 8:1 /users/work {work_dir} rw shared:2 - ext4 /dev/sda rw")
+    if work_dir_mount in {"self-bind", "ancestor-self-bind"}:
+        mounts.append(f"24 23 8:1 /users/work {legacy_work_dir} rw shared:2 - ext4 /dev/sda rw")
         env_file.write_text(
             "AWF_WORK_DIR_BIND_PROPAGATION=rshared\n"
             "AWF_CLAUDE_AUTH_FORCE_COPY=false\n"
