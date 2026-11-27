@@ -79,6 +79,20 @@ async function mountConsole(page: Page, query: string) {
   return page.frameLocator("iframe");
 }
 
+async function captureParentMessageAttempts(page: Page) {
+  await page.addInitScript(() => {
+    if (window.parent === window) return;
+    const parent = window.parent as Window & { attempted: unknown[] };
+    const original = parent.postMessage;
+    parent.postMessage = function (data: { type?: string }, ...args: unknown[]) {
+      if (data?.type === "awf-console:unauthenticated") {
+        parent.attempted.push({ data, targetOrigin: args[0] });
+      }
+      Reflect.apply(original, parent, [data, ...args]);
+    };
+  });
+}
+
 function captureApiRequests(page: Page) {
   const requests: string[] = [];
   page.on("request", request => {
@@ -138,7 +152,46 @@ test("embedded presentation follows host display preferences across workspace na
   await expect.poll(query).toBe("?embedded=1");
 });
 
-for (const mode of ["embedded frame", "standalone frame", "top-level"] as const) {
+test("standalone frame continues polling and recovers after a capability 401 without notifying the parent", async ({ page }) => {
+  await mockWorkspace(page);
+  const requests = captureApiRequests(page);
+  const capabilityPath = "/api/awf/console/capabilities";
+  let denyNext = false;
+  await page.route(`**${capabilityPath}`, async route => {
+    if (denyNext) {
+      denyNext = false;
+      await fulfillJson(route, denial, 401);
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.clock.install();
+  await addHost(page);
+  await captureParentMessageAttempts(page);
+  const consoleFrame = await mountConsole(page, "");
+  const header = consoleFrame.locator("main > header");
+  const workspaceButton = consoleFrame.getByRole("button", { name: openWorkspace });
+  const refresh = header.getByRole("button", { name: "Refresh", exact: true });
+  await expect(header.getByRole("heading", { name: "AWF Console" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Use dark theme" })).toBeVisible();
+  await expect(workspaceButton).toBeVisible();
+
+  denyNext = true;
+  const denied = page.waitForResponse(response => new URL(response.url()).pathname === capabilityPath && response.status() === 401);
+  await page.clock.fastForward(6_000);
+  await denied;
+  await expect(workspaceButton).toHaveCount(0);
+  const capabilityRequests = () => requests.filter(path => path === capabilityPath).length;
+  const afterDenial = capabilityRequests();
+  await page.clock.fastForward(6_000);
+  await expect.poll(capabilityRequests).toBeGreaterThan(afterDenial);
+  await expect(workspaceButton).toBeVisible();
+  await expect(refresh).toBeEnabled();
+  expect(await page.evaluate(() => Reflect.get(window, "attempted"))).toEqual([]);
+  expect(await page.evaluate(() => Reflect.get(window, "received"))).toEqual([]);
+});
+
+for (const mode of ["embedded frame", "top-level"] as const) {
   test(`401 stops polling with ${mode} and only notifies a same-origin embedded parent`, async ({ page, openEventStream }) => {
     const requests = captureApiRequests(page);
     if (mode === "embedded frame") {
@@ -161,7 +214,7 @@ for (const mode of ["embedded frame", "standalone frame", "top-level"] as const)
       else await route.fallback();
     });
     await page.clock.install();
-    const query = mode === "standalone frame" ? "" : "?embedded=1";
+    const query = "?embedded=1";
     if (mode === "top-level") {
       await page.addInitScript(() => {
         Object.assign(window, { attempted: [] });
@@ -176,25 +229,11 @@ for (const mode of ["embedded frame", "standalone frame", "top-level"] as const)
       await page.goto(`/${query}`);
     } else {
       await addHost(page);
-      await page.addInitScript(() => {
-        if (window.parent === window) return;
-        const parent = window.parent as Window & { attempted: unknown[] };
-        const original = parent.postMessage;
-        parent.postMessage = function (data: { type?: string }, ...args: unknown[]) {
-          if (data?.type === "awf-console:unauthenticated") {
-            parent.attempted.push({ data, targetOrigin: args[0] });
-          }
-          Reflect.apply(original, parent, [data, ...args]);
-        };
-      });
+      await captureParentMessageAttempts(page);
       await mountConsole(page, query);
     }
     const consolePage = mode === "top-level" ? page : page.frameLocator("iframe");
     const header = consolePage.locator("main > header");
-    if (mode === "standalone frame") {
-      await expect(header.getByRole("heading", { name: "AWF Console" })).toBeVisible();
-      await expect(header.getByRole("button", { name: "Use dark theme" })).toBeVisible();
-    }
     await consolePage.getByRole("button", { name: openWorkspace }).click();
     await expect(header.getByText("Stream: live", { exact: true })).toBeVisible();
     if (mode === "embedded frame") {
@@ -228,9 +267,6 @@ for (const mode of ["embedded frame", "standalone frame", "top-level"] as const)
       ]);
     } else {
       expect(await attempted()).toEqual([]);
-      if (mode !== "top-level") {
-        expect(await page.evaluate(() => Reflect.get(window, "received"))).toEqual([]);
-      }
     }
   });
 }

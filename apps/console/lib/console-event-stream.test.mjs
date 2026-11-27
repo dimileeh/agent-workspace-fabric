@@ -13,6 +13,25 @@ function sse(chunks) {
   }), { headers: { "content-type": "text/event-stream; charset=utf-8" } });
 }
 
+test("standalone opens the native EventSource without starting a fetch", async (t) => {
+  class NativeEventSource {
+    constructor(url) { this.url = url; }
+  }
+  globalThis.window = { location: { search: "" } };
+  globalThis.EventSource = NativeEventSource;
+  t.after(() => {
+    delete globalThis.window;
+    delete globalThis.EventSource;
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => sse([]));
+  const stream = openConsoleEventStream("/stream");
+  await Promise.resolve();
+  if (!(stream instanceof NativeEventSource)) stream.close();
+  assert.ok(stream instanceof NativeEventSource);
+  assert.equal(stream.url, "/stream");
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test("replacing a stream before its first connection only opens the replacement", async (t) => {
   const fetch = t.mock.method(globalThis, "fetch", async () => sse(["data: connected\n\n"]));
   const discarded = openConsoleEventStream("/stream?selection=previous");

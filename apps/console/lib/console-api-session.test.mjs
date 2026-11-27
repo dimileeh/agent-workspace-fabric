@@ -30,7 +30,27 @@ test("opaque child origins and mismatched parent origins are skipped", () => {
   }
 });
 
-test("a 401 cancels active requests and rejects subsequent requests at the boundary", async (t) => {
+test("standalone requests preserve their signal and can recover after a 401", async (t) => {
+  const { consoleApiFetch, expireConsoleSession, isConsoleSessionExpired } = await import("./console-api-session.ts?standalone");
+  const location = { origin: "https://console.example", search: "" };
+  const postMessage = t.mock.fn();
+  globalThis.window = { location, parent: { location, postMessage } };
+  t.after(() => { delete globalThis.window; });
+
+  const denied = new Response(null, { status: 401 });
+  const recovered = new Response(null, { status: 200 });
+  const fetch = t.mock.method(globalThis, "fetch", async path => path === "/401" ? denied : recovered);
+  const init = { signal: new AbortController().signal };
+  assert.equal(await consoleApiFetch("/401", init), denied);
+  assert.equal(fetch.mock.calls[0].arguments[1], init);
+  expireConsoleSession();
+  assert.equal(isConsoleSessionExpired(), false);
+  assert.equal(await consoleApiFetch("/later", init), recovered);
+  assert.equal(fetch.mock.callCount(), 2);
+  assert.equal(postMessage.mock.callCount(), 0);
+});
+
+test("an embedded 401 cancels active requests and rejects subsequent requests at the boundary", async (t) => {
   const location = { origin: "https://console.example", search: "?embedded=1" };
   const postMessage = t.mock.fn();
   globalThis.window = { location, parent: { location, postMessage } };
