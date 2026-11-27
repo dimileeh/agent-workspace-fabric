@@ -204,8 +204,7 @@ for (const mode of ["embedded frame", "top-level"] as const) {
     } else {
       await mockWorkspace(page);
     }
-    let closed = 0;
-    const streamUrl = await openEventStream([{ type: "connected", workspace_id: workspaceId }], () => { closed++; });
+    const streamUrl = await openEventStream([{ type: "connected", workspace_id: workspaceId }]);
     await page.route(`**/workspaces/${workspaceId}/stream?*`, route =>
       route.fulfill({ status: 302, headers: { location: streamUrl } }));
     let held: Route[] | null = null;
@@ -248,11 +247,12 @@ for (const mode of ["embedded frame", "top-level"] as const) {
     await page.clock.fastForward(6_000);
     await expect.poll(() => held?.length).toBe(2);
     const [first, second] = held;
+    const streamClosed = page.waitForEvent("requestfailed", request => request.url() === streamUrl);
     await fulfillJson(first, denial, 401);
     await expect(consolePage.getByText("Console access denied because the session expired.")).toBeVisible();
     const requestCount = requests.length;
     await fulfillJson(second, denial, 401);
-    await expect.poll(() => closed).toBe(1);
+    await streamClosed;
     const refresh = header.getByRole("button", { name: "Refresh", exact: true });
     await expect(refresh).toBeDisabled();
     await refresh.evaluate((button: HTMLButtonElement) => button.click());
@@ -273,10 +273,15 @@ for (const mode of ["embedded frame", "top-level"] as const) {
 
 test("an embedded console sends no message to a cross-origin parent", async ({ page }) => {
   await mockWorkspace(page);
+  const requests = captureApiRequests(page);
   await page.route("**/api/awf/health", route => fulfillJson(route, denial, 401));
+  await page.clock.install();
   await addHost(page, true);
   const consoleFrame = await mountConsole(page, "?embedded=1");
   await expect(consoleFrame.getByText("Console access denied because the session expired.")).toBeVisible();
+  const count = requests.length;
+  await page.clock.fastForward(125_000);
+  expect(requests).toHaveLength(count);
   expect(await page.evaluate(() => Reflect.get(window, "received"))).toEqual([]);
 });
 

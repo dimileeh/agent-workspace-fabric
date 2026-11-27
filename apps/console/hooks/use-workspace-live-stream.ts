@@ -118,7 +118,7 @@ export function useWorkspaceLiveStream({
     // the EventSource down. Tail and base-detail denial are separate: a later
     // listing 200 must not reopen /stream, and a snapshot must not write
     // revoked workspace metadata back until a successful detail GET recovers.
-    // A route-scoped /stream 403 must wait for a stream probe: GET cannot recover it,
+    // A route-scoped /stream 401/403 must wait for a stream probe: GET cannot recover it,
     // but a later probe may open and clear that latch after it connects.
     if (isConsoleSessionExpired() || !selectedId || logListingAuthDenied || logTailAuthDenied) {
       setStreamState("idle");
@@ -199,7 +199,7 @@ export function useWorkspaceLiveStream({
     };
 
     const applyStreamAuthorizationDenial = (message: string) => {
-      // A stream 403 revokes access to this feed.
+      // Route-level /stream 401/403 is authorization revocation, not an outage.
       // Raise the detail revoke watermark before close() so an in-flight or
       // later authorized /workspaces/{id} GET cannot clear this latch, restore
       // the revoked snapshot, and reopen EventSource on the next poll.
@@ -227,13 +227,12 @@ export function useWorkspaceLiveStream({
     };
 
     const streamAuthorizationDenied = (frame: { status?: number }) =>
-      frame.status === 403;
+      frame.status === 401 || frame.status === 403;
 
     source.onmessage = (message) => {
       const frame = parseFrame(message.data);
       if (!frame) return;
-      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401) {
-        expireConsoleSession();
+      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401 && expireConsoleSession()) {
         return;
       }
       if (
@@ -446,7 +445,7 @@ export function useWorkspaceLiveStream({
         setStreamState("error");
         return;
       }
-      setStreamState(closedByServer || source.closed ? "idle" : "connecting");
+      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
     };
 
     return () => source.close();

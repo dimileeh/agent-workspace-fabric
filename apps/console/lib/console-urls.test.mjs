@@ -7,11 +7,16 @@ import {
   consoleHref,
   getConsoleUrlConfig,
   isEmbeddedConsole,
+  isEmbeddedConsolePage,
   normalizeBasePath,
   normalizeServiceBase,
   operatorPath,
   parseContextQueryKeys,
 } from "./console-urls.ts";
+
+test("embedded page mode defaults off without a browser location", () => {
+  assert.equal(isEmbeddedConsolePage(), false);
+});
 
 test("default config matches local console path defaults", () => {
   assert.deepEqual(getConsoleUrlConfig({}), {

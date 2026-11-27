@@ -93,7 +93,8 @@ export function ConsoleDashboard() {
   const searchParams = useSearchParams();
   const embedded = isEmbeddedConsole(searchParams);
   const { operatorPreferences, updateOperatorPreferences } = useOperatorThemePreferences(embedded);
-  const [sessionExpired, setSessionExpired] = useState(false);
+  const [embeddedSessionExpired, setEmbeddedSessionExpired] = useState(false);
+  const sessionExpired = embedded && embeddedSessionExpired;
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
   const { selectedId, selectedIdRef, setSelectedId } = useWorkspaceSelectionUrl(
     searchParams,
@@ -459,14 +460,15 @@ export function ConsoleDashboard() {
   }, [setSelectedId, setCapabilityError]);
 
   useEffect(() => {
+    if (!embedded) return;
     const shutDown = () => {
       revokedCapabilityGenerationRef.current = capabilityRequestGenerationRef.current;
       clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
-      setSessionExpired(true);
+      setEmbeddedSessionExpired(true);
     };
     if (isConsoleSessionExpired()) shutDown();
     return subscribeToConsoleSessionExpiry(shutDown);
-  }, [clearAuthorizedConsoleFeeds]);
+  }, [clearAuthorizedConsoleFeeds, embedded]);
 
   const releaseUnavailableWorkspaceStreamDenial = useCallback(() => {
     if (!workspaceStreamAuthDeniedRef.current) {

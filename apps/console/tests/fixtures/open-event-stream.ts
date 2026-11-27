@@ -3,15 +3,15 @@ import { test as base } from "@playwright/test";
 import type { AwfStreamFrame } from "@/lib/types";
 
 // Unlike route.fulfill(), this fixture leaves the SSE connection open so a
-// live-status assertion exercises a real SSE connection, including reconnects.
+// live-status assertion exercises a real EventSource, including reconnects.
 export const streamTest = base.extend<{
-  openEventStream: (frames: AwfStreamFrame[], onClose?: () => void) => Promise<string>;
+  openEventStream: (frames: AwfStreamFrame[]) => Promise<string>;
 }>({
   openEventStream: async ({}, provide) => {
     const servers: ReturnType<typeof createServer>[] = [];
     const responses = new Set<ServerResponse>();
     try {
-      await provide(async (frames, onClose) => {
+      await provide(async (frames) => {
         const server = createServer((_request, response) => {
           response.writeHead(200, {
             "content-type": "text/event-stream; charset=utf-8",
@@ -19,10 +19,7 @@ export const streamTest = base.extend<{
             "access-control-allow-origin": "*",
           });
           responses.add(response);
-          response.on("close", () => {
-            responses.delete(response);
-            onClose?.();
-          });
+          response.on("close", () => responses.delete(response));
           for (const frame of frames) {
             response.write(`data: ${JSON.stringify(frame)}\n\n`);
           }

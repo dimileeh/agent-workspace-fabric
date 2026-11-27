@@ -2199,8 +2199,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;[\s\S]*?setWorkspaceDetailAuthDenied\(true\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?workspace: null,[\s\S]*?events: \[\],[\s\S]*?const streamAuthorizationDenied = \(frame: \{ status\?: number \}\) =>\s*frame\.status === 403;[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
-    "Expected a workspace stream 403 frame to latch feed denial and clear previously rendered stream data",
+    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;[\s\S]*?setWorkspaceDetailAuthDenied\(true\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?workspace: null,[\s\S]*?events: \[\],[\s\S]*?const streamAuthorizationDenied = \(frame: \{ status\?: number \}\) =>\s*frame\.status === 401 \|\| frame\.status === 403;[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
+    "Expected a workspace stream 401/403 frame to latch feed denial and clear previously rendered stream data",
   );
   assert.match(
     dashboardSource.dashboard,
@@ -2625,7 +2625,7 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   assert.match(
     logs,
     /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?streamAuthDeniedRef\.current = true;[\s\S]*?setStreamAuthDenied\(true\);[\s\S]*?setEntries\(\(current\) => \(denialStillOwnsColumn\(\) \? \[\] : current\)\);[\s\S]*?setOffsets\(\(current\) => \(denialStillOwnsColumn\(\) \? \{\} : current\)\);[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(isFullscreenStreamAuthDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
-    "Expected a fullscreen stream 403 frame to latch denial and clear column caches",
+    "Expected a fullscreen stream 401/403 frame to latch denial and clear column caches",
   );
 });
 

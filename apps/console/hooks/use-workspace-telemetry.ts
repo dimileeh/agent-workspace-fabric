@@ -38,7 +38,7 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         if (!current()) return;
         // Denial is feed-local: clear retained telemetry and stop this reader,
         // even if reading the error body fails. Other console access may remain valid.
-        if (response.status === 403) {
+        if (response.status === 401 || response.status === 403) {
           denied = true;
           setState({ data: null, error: "Telemetry access denied", lastGoodAt: null });
           return;

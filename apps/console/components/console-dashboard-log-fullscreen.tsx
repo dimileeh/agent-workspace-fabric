@@ -41,7 +41,7 @@ function isFullscreenTailAuthFailure(status: number): boolean {
 }
 
 function isFullscreenStreamAuthDenied(frame: { status?: number }): boolean {
-  return frame.status === 403;
+  return frame.status === 401 || frame.status === 403;
 }
 
 function formatFullscreenTailRefreshError(
@@ -1022,7 +1022,7 @@ export function WorkspaceLogColumn({
     // Listing is required to pick/surface streams; do not open /stream or buffer
     // frames when workspace_logs is unsupported (even if workspace_stream is up).
     // Listing or tail 401/403 while workspace_logs stays advertised must close
-    // /stream. Those denials are separate from a route-level /stream 403:
+    // /stream. Those denials are separate from a route-level /stream 401/403:
     // a later listing or tail 200 must not reopen or restore revoked log text.
     // While streaming stays advertised, the route latch can clear only after a
     // later /stream probe connects. Stream withdrawal releases it below.
@@ -1109,7 +1109,7 @@ export function WorkspaceLogColumn({
     };
 
     const applyStreamAuthorizationDenial = (message: string) => {
-      // A stream 403 revokes access to this feed.
+      // Route-level /stream 401/403 is authorization revocation, not an outage.
       // Clear column caches and hold this EventSource closed. Listing and tail
       // can stay authorized; those 200s must not restore revoked log text or
       // reopen /stream. A later probe may clear this latch after it connects.
@@ -1133,8 +1133,7 @@ export function WorkspaceLogColumn({
     source.onmessage = (message) => {
       const frame = parseFrame(message.data);
       if (!frame) return;
-      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401) {
-        expireConsoleSession();
+      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401 && expireConsoleSession()) {
         return;
       }
       if (
@@ -1273,7 +1272,7 @@ export function WorkspaceLogColumn({
         setStreamState("error");
         return;
       }
-      setStreamState(closedByServer || source.closed ? "idle" : "connecting");
+      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
     };
 
     return () => {

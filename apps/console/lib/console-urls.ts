@@ -31,6 +31,11 @@ export function isEmbeddedConsole(search: Pick<URLSearchParams, "get">): boolean
   return search.get(EMBEDDED_QUERY_KEY) === "1";
 }
 
+export function isEmbeddedConsolePage(): boolean {
+  const search = resolvePageSearchParams();
+  return search !== null && isEmbeddedConsole(search);
+}
+
 const DEFAULT_API_BASE = "/api/awf";
 const DEFAULT_OPERATOR_BASE = "/api/operator";
 

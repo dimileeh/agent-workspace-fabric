@@ -3,6 +3,24 @@ import test from "node:test";
 
 import { openConsoleEventStream } from "./console-event-stream.ts";
 
+class NativeEventSource {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSED = 2;
+
+  constructor(url) { this.url = url; }
+}
+
+test.beforeEach(() => {
+  globalThis.window = { location: { search: "?embedded=1" } };
+  globalThis.EventSource = NativeEventSource;
+});
+
+test.afterEach(() => {
+  delete globalThis.window;
+  delete globalThis.EventSource;
+});
+
 function sse(chunks) {
   return new Response(new ReadableStream({
     start(controller) {
@@ -14,19 +32,10 @@ function sse(chunks) {
 }
 
 test("standalone opens the native EventSource without starting a fetch", async (t) => {
-  class NativeEventSource {
-    constructor(url) { this.url = url; }
-  }
-  globalThis.window = { location: { search: "" } };
-  globalThis.EventSource = NativeEventSource;
-  t.after(() => {
-    delete globalThis.window;
-    delete globalThis.EventSource;
-  });
+  window.location.search = "";
   const fetch = t.mock.method(globalThis, "fetch", async () => sse([]));
   const stream = openConsoleEventStream("/stream");
   await Promise.resolve();
-  if (!(stream instanceof NativeEventSource)) stream.close();
   assert.ok(stream instanceof NativeEventSource);
   assert.equal(stream.url, "/stream");
   assert.equal(fetch.mock.callCount(), 0);
@@ -61,10 +70,15 @@ test("stream joins chunked multiline messages, honors retry, and closes intentio
       : sse([": heartbeat\r", "\ndata: fir", "st\r\ndata: line\r\n\r\nretry: 1\nid: 4\nevent: internal\ndata: hidden\n\ndata: incomplete"]);
   });
   const stream = openConsoleEventStream("/stream");
+  assert.equal(stream.readyState, EventSource.CONNECTING);
   let disconnects = 0;
-  stream.onerror = () => { disconnects++; };
+  stream.onerror = () => {
+    assert.equal(stream.readyState, EventSource.CONNECTING);
+    disconnects++;
+  };
   await new Promise(resolve => {
     stream.onmessage = ({ data }) => {
+      assert.equal(stream.readyState, EventSource.OPEN);
       messages.push(data);
       if (data === "last") {
         stream.close();
@@ -74,13 +88,13 @@ test("stream joins chunked multiline messages, honors retry, and closes intentio
   });
   assert.deepEqual(messages, ["first\nline", "last"]);
   assert.equal(disconnects, 1);
-  assert.equal(stream.closed, true);
+  assert.equal(stream.readyState, EventSource.CLOSED);
 });
 
 test("a rejected HTTP handshake closes the stream without retrying", async (t) => {
   const fetch = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 403 }));
   const stream = openConsoleEventStream("/stream");
   await new Promise(resolve => { stream.onerror = resolve; });
-  assert.equal(stream.closed, true);
+  assert.equal(stream.readyState, EventSource.CLOSED);
   assert.equal(fetch.mock.callCount(), 1);
 });

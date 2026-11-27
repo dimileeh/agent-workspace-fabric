@@ -1,4 +1,4 @@
-import { isEmbeddedConsole } from "./console-urls.ts";
+import { isEmbeddedConsole, isEmbeddedConsolePage } from "./console-urls.ts";
 
 export const consoleSessionExpiredMessage = "Console access denied because the session expired.";
 
@@ -6,7 +6,7 @@ export const consoleSessionExpiredMessage = "Console access denied because the s
 const session = new AbortController();
 
 export function isConsoleSessionExpired(): boolean {
-  return session.signal.aborted;
+  return session.signal.aborted && isEmbeddedConsolePage();
 }
 
 export function subscribeToConsoleSessionExpiry(onExpiry: () => void): () => void {
@@ -29,13 +29,19 @@ export function notifyEmbeddedParent(browser: Window): void {
   }
 }
 
-export function expireConsoleSession(): void {
-  if (typeof window === "undefined" || isConsoleSessionExpired()) return;
-  session.abort(new DOMException(consoleSessionExpiredMessage, "AbortError"));
-  notifyEmbeddedParent(window);
+/** Returns whether the embedded session handled the denial. */
+export function expireConsoleSession(): boolean {
+  if (!isEmbeddedConsolePage()) return false;
+  if (!session.signal.aborted) {
+    session.abort(new DOMException(consoleSessionExpiredMessage, "AbortError"));
+    notifyEmbeddedParent(window);
+  }
+  return true;
 }
 
 export async function consoleApiFetch(path: string, init: RequestInit): Promise<Response> {
+  if (!isEmbeddedConsolePage()) return fetch(path, init);
+
   session.signal.throwIfAborted();
   const signal = init.signal
     ? AbortSignal.any([init.signal, session.signal])

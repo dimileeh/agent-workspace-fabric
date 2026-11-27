@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { consoleApiFetch, isConsoleSessionExpired, notifyEmbeddedParent } from "./console-api-session.ts";
+import { consoleApiFetch, expireConsoleSession, isConsoleSessionExpired, notifyEmbeddedParent } from "./console-api-session.ts";
 
 test("an inaccessible parent is never sent a notification", () => {
   const location = { origin: "https://console.example", search: "?embedded=1" };
@@ -43,11 +43,13 @@ test("standalone requests preserve their signal and can recover after a 401", as
   const init = { signal: new AbortController().signal };
   assert.equal(await consoleApiFetch("/401", init), denied);
   assert.equal(fetch.mock.calls[0].arguments[1], init);
-  expireConsoleSession();
+  assert.equal(expireConsoleSession(), false);
   assert.equal(isConsoleSessionExpired(), false);
   assert.equal(await consoleApiFetch("/later", init), recovered);
   assert.equal(fetch.mock.callCount(), 2);
   assert.equal(postMessage.mock.callCount(), 0);
+  location.search = "?embedded=1";
+  assert.equal(isConsoleSessionExpired(), false);
 });
 
 test("an embedded 401 cancels active requests and rejects subsequent requests at the boundary", async (t) => {
@@ -56,22 +58,29 @@ test("an embedded 401 cancels active requests and rejects subsequent requests at
   globalThis.window = { location, parent: { location, postMessage } };
   t.after(() => { delete globalThis.window; });
 
+  const lateResponse = Promise.withResolvers();
   const fetch = t.mock.method(globalThis, "fetch", async (path, init) => {
     if (path === "/held") {
       return new Promise((_resolve, reject) => {
         init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
       });
     }
+    if (path === "/late") return lateResponse.promise;
     return new Response(null, { status: 401 });
   });
   const controller = new AbortController();
   const held = assert.rejects(consoleApiFetch("/held", { signal: controller.signal }), { name: "AbortError" });
+  const late = assert.rejects(consoleApiFetch("/late", {}), { name: "AbortError" });
   const denied = assert.rejects(consoleApiFetch("/401", {}), { name: "AbortError" });
   await Promise.all([held, denied]);
+  lateResponse.resolve(new Response(null, { status: 200 }));
+  await late;
+  location.search = "?embedded=1&workspaceId=another";
+  assert.equal(expireConsoleSession(), true);
   await assert.rejects(consoleApiFetch("/later", {}), { name: "AbortError" });
   assert.equal(isConsoleSessionExpired(), true);
   assert.equal(controller.signal.aborted, false);
-  assert.equal(fetch.mock.callCount(), 2);
+  assert.equal(fetch.mock.callCount(), 3);
   assert.deepEqual(postMessage.mock.calls.map(call => call.arguments), [
     [{ type: "awf-console:unauthenticated" }, location.origin],
   ]);

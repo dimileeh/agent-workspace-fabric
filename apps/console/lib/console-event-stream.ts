@@ -3,30 +3,34 @@ import {
   isConsoleSessionExpired,
   subscribeToConsoleSessionExpiry,
 } from "./console-api-session.ts";
+import { isEmbeddedConsolePage } from "./console-urls.ts";
 
-export type ConsoleEventStream = {
-  readonly closed: boolean;
-  close: () => void;
-  onmessage: ((message: { data: string }) => void) | null;
-  onerror: (() => void) | null;
+export type ConsoleEventStream = Pick<EventSource, "close" | "readyState"> & {
+  onmessage: ((message: MessageEvent<string>) => void) | null;
+  onerror: ((event: Event) => void) | null;
 };
 
-// EventSource hides the HTTP handshake status. Read the SSE response through
-// the console request boundary so a 401 also ends the session on this path.
 export function openConsoleEventStream(path: string): ConsoleEventStream {
+  if (!isEmbeddedConsolePage()) return new EventSource(path);
+
+  // EventSource hides the HTTP handshake status. Use the request boundary to
+  // observe an embedded session's 401 before consuming the stream.
+  const { CONNECTING, OPEN, CLOSED } = EventSource;
   const controller = new AbortController();
+  let readyState: number = CONNECTING;
   let retryDelay = 3000;
   let lastEventId = "";
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   const unsubscribe = subscribeToConsoleSessionExpiry(close);
   const stream: ConsoleEventStream = {
-    get closed() { return controller.signal.aborted; },
+    get readyState() { return readyState; },
     close,
     onmessage: null,
     onerror: null,
   };
 
   function close() {
+    readyState = CLOSED;
     controller.abort();
     clearTimeout(retryTimer);
     unsubscribe();
@@ -40,20 +44,20 @@ export function openConsoleEventStream(path: string): ConsoleEventStream {
     let event = "";
     let data: string[] = [];
     try {
-      while (!stream.closed) {
+      while (!controller.signal.aborted) {
         const chunk = await reader.read();
         buffer += decoder.decode(chunk.value, { stream: !chunk.done });
         lineEnd.lastIndex = 0;
         let start = 0;
         let match: RegExpExecArray | null;
-        while (!stream.closed && (match = lineEnd.exec(buffer))) {
+        while (!controller.signal.aborted && (match = lineEnd.exec(buffer))) {
           // A CR at a chunk boundary may be the first half of CRLF.
           if (!chunk.done && match[0] === "\r" && lineEnd.lastIndex === buffer.length) break;
           const line = buffer.slice(start, match.index);
           start = lineEnd.lastIndex;
           if (line === "") {
             if (data.length > 0 && (event === "" || event === "message")) {
-              stream.onmessage?.({ data: data.join("\n") });
+              stream.onmessage?.(new MessageEvent("message", { data: data.join("\n") }));
             }
             event = "";
             data = [];
@@ -90,24 +94,26 @@ export function openConsoleEventStream(path: string): ConsoleEventStream {
       const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
       if (response.status !== 200 || contentType !== "text/event-stream" || !response.body) {
         close();
-        stream.onerror?.();
+        stream.onerror?.(new Event("error"));
         return;
       }
+      readyState = OPEN;
       await read(response.body);
     } catch {
       // Network interruptions reconnect. The abort signal distinguishes
       // intentional cleanup and session expiration from an interrupted stream.
     }
-    if (!stream.closed) {
-      stream.onerror?.();
-      if (!stream.closed) retryTimer = setTimeout(() => { void connect(); }, retryDelay);
+    if (!controller.signal.aborted) {
+      readyState = CONNECTING;
+      stream.onerror?.(new Event("error"));
+      if (!controller.signal.aborted) retryTimer = setTimeout(() => { void connect(); }, retryDelay);
     }
   }
 
   if (isConsoleSessionExpired()) close();
   else queueMicrotask(() => {
     // Let effect cleanup discard a superseded stream before starting its fetch.
-    if (!stream.closed) void connect();
+    if (!controller.signal.aborted) void connect();
   });
   return stream;
 }
