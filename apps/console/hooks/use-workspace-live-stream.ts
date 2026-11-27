@@ -6,6 +6,8 @@ import {
   resolveWorkspaceLogStreamAccess,
   resolveWorkspaceStreamSubscription,
 } from "@/lib/console-capabilities";
+import { expireConsoleSession, isConsoleSessionExpired } from "@/lib/console-api-session";
+import { openConsoleEventStream } from "@/lib/console-event-stream";
 import { awfPath } from "@/lib/console-urls";
 import {
   streamOffsetAfterLiveFrame,
@@ -90,7 +92,7 @@ export function useWorkspaceLiveStream({
   };
 
   const scheduleStreamAuthProbe = () => {
-    if (streamProbeTimerRef.current !== null) {
+    if (isConsoleSessionExpired() || streamProbeTimerRef.current !== null) {
       return;
     }
     streamProbeTimerRef.current = window.setTimeout(() => {
@@ -116,9 +118,9 @@ export function useWorkspaceLiveStream({
     // the EventSource down. Tail and base-detail denial are separate: a later
     // listing 200 must not reopen /stream, and a snapshot must not write
     // revoked workspace metadata back until a successful detail GET recovers.
-    // A route-scoped /stream 401/403 is different: GET must not recover it,
+    // A route-scoped /stream 401/403 must wait for a stream probe: GET cannot recover it,
     // but a later probe may open and clear that latch after it connects.
-    if (!selectedId || logListingAuthDenied || logTailAuthDenied) {
+    if (isConsoleSessionExpired() || !selectedId || logListingAuthDenied || logTailAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -144,7 +146,7 @@ export function useWorkspaceLiveStream({
     const { allowEvents, channels, tailBytes } = resolveWorkspaceStreamSubscription(capabilities);
     const epoch = authorizedFeedEpochRef.current;
     setStreamState("connecting");
-    const source = new EventSource(
+    const source = openConsoleEventStream(
       awfPath(`workspaces/${selectedId}/stream`, {
         channels,
         tail_bytes: tailBytes,
@@ -228,6 +230,11 @@ export function useWorkspaceLiveStream({
       frame.status === 401 || frame.status === 403;
 
     source.onmessage = (message) => {
+      const frame = parseFrame(message.data);
+      if (!frame) return;
+      if ((frame.type === "error" || frame.type === "closed") && frame.status === 401 && expireConsoleSession()) {
+        return;
+      }
       if (
         epoch !== authorizedFeedEpochRef.current ||
         selectedIdRef.current !== selectedId ||
@@ -240,10 +247,6 @@ export function useWorkspaceLiveStream({
       // frames. During a probe the route latch is held until this connection
       // proves authorized, so that latch alone must not discard the handshake.
       if (workspaceDetailAuthDeniedRef.current && !workspaceStreamAuthDeniedRef.current) {
-        return;
-      }
-      const frame = parseFrame(message.data);
-      if (!frame) {
         return;
       }
       if (frame.type === "error" || frame.type === "closed") {

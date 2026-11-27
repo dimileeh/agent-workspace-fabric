@@ -49,6 +49,7 @@ import {
 } from "@/components/console-dashboard-shared";
 
 type UseWorkspaceDetailLoaderArgs = {
+  enabled: boolean;
   selectedId: string | null;
   selectedIdRef: MutableRefObject<string | null>;
   capabilities: ConsoleCapabilities | null;
@@ -131,6 +132,7 @@ type UseWorkspaceDetailLoaderArgs = {
  * are kept.
  */
 export function useWorkspaceDetailLoader({
+  enabled,
   selectedId,
   selectedIdRef,
   capabilities,
@@ -1354,7 +1356,7 @@ export function useWorkspaceDetailLoader({
   // supersedes an in-flight detail request. Periodic ticks skip while that
   // request is slower than pollMs.
   useSerializedPeriodicLoad(
-    selectedId !== null,
+    enabled && selectedId !== null,
     loadSelectedWorkspace,
     workspaceDetailLoadInFlightRef,
     selectedId ?? "",

@@ -282,3 +282,64 @@ test.describe("console route contract (hosted /workspaces)", () => {
     await assertRouteContract(page, hostedMode);
   });
 });
+
+for (const [mode, origin] of [
+  [localMode, "http://127.0.0.1:3190"],
+  [hostedMode, "http://127.0.0.1:3191"],
+] as const) {
+  test(`embedded workspace navigation keeps page and API coordinates in ${mode.name} mode`, async ({ page }) => {
+    const context = { org_id: "org_test", project_id: "project_test" };
+    const query = new URLSearchParams({ embedded: "1", ...context });
+    await mockConsoleApis(page, mode);
+    const overview = page.waitForRequest(request =>
+      pathOf(request) === `${mode.apiPrefix}/workspaces/overview`);
+    await page.goto(`${origin}${mode.homePath}?${query}`);
+    const header = page.locator("main > header");
+    await expect(header.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+    await expect(header.getByRole("heading")).toHaveCount(0);
+
+    const detail = page.waitForRequest(request =>
+      pathOf(request) === `${mode.apiPrefix}/workspaces/${WORKSPACE_ID}`);
+    await page.getByRole("button", { name: "Open workspace details for Route contract workspace" }).click();
+    await expect(page).toHaveURL(url => url.pathname === mode.homePath &&
+      url.searchParams.get("workspaceId") === WORKSPACE_ID &&
+      [...query].every(([key, value]) => url.searchParams.get(key) === value));
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    const cancel = page.waitForRequest(request => request.method() === "POST" &&
+      pathOf(request) === `${mode.operatorPrefix}/workspaces/${WORKSPACE_ID}/cancel`);
+    await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+    for (const request of await Promise.all([overview, detail, cancel])) {
+      const params = new URL(request.url()).searchParams;
+      expect(params.has("embedded")).toBe(false);
+      for (const [key, value] of Object.entries(context)) {
+        expect(params.get(key)).toBe(mode === hostedMode ? value : null);
+      }
+    }
+    await page.getByRole("button", { name: "Close inspector" }).click();
+    await expect(page).toHaveURL(url => url.pathname === mode.homePath &&
+      !url.searchParams.has("workspaceId") &&
+      [...query].every(([key, value]) => url.searchParams.get(key) === value));
+  });
+}
+
+for (const source of ["artifact download", "operator action"] as const) {
+  test(`a 401 on an embedded ${source} expires the console session`, async ({ page }) => {
+    await mockConsoleApis(page, localMode);
+    const endpoint = source === "artifact download"
+      ? `/api/awf/workspaces/${WORKSPACE_ID}/artifacts/download?*`
+      : `/api/operator/workspaces/${WORKSPACE_ID}/cancel`;
+    await page.route(endpoint, route => route.fulfill({ status: 401, body: "Session ended" }));
+    await page.goto(`/?embedded=1&workspaceId=${WORKSPACE_ID}`);
+
+    if (source === "artifact download") {
+      await page.getByTestId(`workspace-card-${WORKSPACE_ID}`)
+        .getByRole("button", { name: "Details", exact: true }).click();
+      await page.getByTestId("task-artifacts").getByRole("button", { name: "Plan", exact: true }).click();
+    } else {
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+    }
+    await expect(page.getByText("Console access denied because the session expired.")).toBeVisible();
+    await expect(page.locator("main > header").getByRole("button", { name: "Refresh", exact: true })).toBeDisabled();
+  });
+}

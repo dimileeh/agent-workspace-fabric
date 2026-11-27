@@ -16,7 +16,12 @@ import {
   isWidgetAvailable,
 } from "@/lib/console-capabilities";
 import { fleetKpisFromDashboardSummary } from "@/lib/console-dashboard-summary";
-import { configuredContextFingerprint } from "@/lib/console-urls";
+import {
+  consoleSessionExpiredMessage,
+  isConsoleSessionExpired,
+  subscribeToConsoleSessionExpiry,
+} from "@/lib/console-api-session";
+import { configuredContextFingerprint, isEmbeddedConsole } from "@/lib/console-urls";
 import { subscribeToHistoryNavigation } from "@/lib/history-navigation";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useConsoleCapabilities } from "@/hooks/use-console-capabilities";
@@ -85,9 +90,12 @@ type OverviewPagination = {
 };
 
 export function ConsoleDashboard() {
-  const { operatorPreferences, updateOperatorPreferences } = useOperatorThemePreferences();
-  const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
   const searchParams = useSearchParams();
+  const embedded = isEmbeddedConsole(searchParams);
+  const { operatorPreferences, updateOperatorPreferences } = useOperatorThemePreferences(embedded);
+  const [embeddedSessionExpired, setEmbeddedSessionExpired] = useState(false);
+  const sessionExpired = embedded && embeddedSessionExpired;
+  const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
   const { selectedId, selectedIdRef, setSelectedId } = useWorkspaceSelectionUrl(
     searchParams,
     searchParams.get("workspaceId"),
@@ -451,6 +459,17 @@ export function ConsoleDashboard() {
     }
   }, [setSelectedId, setCapabilityError]);
 
+  useEffect(() => {
+    if (!embedded) return;
+    const shutDown = () => {
+      revokedCapabilityGenerationRef.current = capabilityRequestGenerationRef.current;
+      clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
+      setEmbeddedSessionExpired(true);
+    };
+    if (isConsoleSessionExpired()) shutDown();
+    return subscribeToConsoleSessionExpiry(shutDown);
+  }, [clearAuthorizedConsoleFeeds, embedded]);
+
   const releaseUnavailableWorkspaceStreamDenial = useCallback(() => {
     if (!workspaceStreamAuthDeniedRef.current) {
       return;
@@ -749,6 +768,7 @@ export function ConsoleDashboard() {
     noteWorkspaceStreamAuthorizationDenied,
     noteWorkspaceStreamAuthorizationRecovered,
   } = useWorkspaceDetailLoader({
+    enabled: !sessionExpired,
     selectedId,
     selectedIdRef,
     capabilities,
@@ -799,7 +819,7 @@ export function ConsoleDashboard() {
   // them here refreshes overview on filter edits without recreating loadOverview
   // (which would restart capability polling through loadCapabilities).
   useSerializedPeriodicLoad(
-    true,
+    !sessionExpired,
     loadOverview,
     overviewLoadInFlightRef,
     `${statusFilters.join("\0")}\n${agentFilters.join("\0")}\n${repoFilter}`,
@@ -809,11 +829,11 @@ export function ConsoleDashboard() {
   // generation on every pollMs tick and discard slower successes, so the
   // console stays unnegotiated. Explicit refresh and context-sync still call
   // loadCapabilities directly so a newer request can supersede.
-  useSerializedPeriodicLoad(true, loadCapabilities, capabilityLoadInFlightRef, "");
+  useSerializedPeriodicLoad(!sessionExpired, loadCapabilities, capabilityLoadInFlightRef, "");
 
   useEffect(() => {
     const syncConfiguredContext = () => {
-      if (!invalidateAuthorizedFeedsIfContextChanged()) {
+      if (isConsoleSessionExpired() || !invalidateAuthorizedFeedsIfContextChanged()) {
         return;
       }
       // Sequence overview after capabilities so an identity-change clear cannot
@@ -847,33 +867,34 @@ export function ConsoleDashboard() {
     return loadCloudRuntime(capabilities);
   }, [capabilities, loadCloudRuntime]);
 
+  const fleetPollingEnabled = !sessionExpired && capabilitiesReady && capabilities !== null;
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "fleet_summary")),
+    Boolean(fleetPollingEnabled && isWidgetAvailable(capabilities, "fleet_summary")),
     pollDashboardSummary,
   );
 
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "resource_capacity")),
+    Boolean(fleetPollingEnabled && isWidgetAvailable(capabilities, "resource_capacity")),
     loadResourceSaturation,
   );
 
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "cloud_runtime")),
+    Boolean(fleetPollingEnabled && isWidgetAvailable(capabilities, "cloud_runtime")),
     pollCloudRuntime,
   );
 
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "reliability")),
+    Boolean(fleetPollingEnabled && isDiagnosticAvailable(capabilities, "reliability")),
     loadWorkspaceSummary,
   );
 
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "merge_queue")),
+    Boolean(fleetPollingEnabled && isDiagnosticAvailable(capabilities, "merge_queue")),
     loadMergeQueue,
   );
 
   useCapabilityGatedPoll(
-    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "failures")),
+    Boolean(fleetPollingEnabled && isDiagnosticAvailable(capabilities, "failures")),
     loadFailureSummary,
   );
 
@@ -1204,6 +1225,7 @@ export function ConsoleDashboard() {
   );
 
   const refreshDashboard = useCallback(() => {
+    if (isConsoleSessionExpired()) return;
     startTransition(() => {
       void (async () => {
         const epoch = authorizedFeedEpochRef.current;
@@ -1228,10 +1250,14 @@ export function ConsoleDashboard() {
     });
   }, [loadCapabilities, loadOverview, loadWorkspace, reloadAvailableFeeds, selectedIdRef]);
 
+  const consoleError = sessionExpired ? consoleSessionExpiredMessage : capabilityError;
+
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
-        apiState={apiState}
+        embedded={embedded}
+        sessionExpired={sessionExpired}
+        apiState={sessionExpired ? "error" : apiState}
         streamState={streamState}
         lastRefresh={lastRefresh}
         selectedId={selectedId}
@@ -1296,7 +1322,7 @@ export function ConsoleDashboard() {
         />
 
         <section className="min-w-0">
-          {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
+          {consoleError ? <ErrorBanner message={consoleError} /> : null}
           {overviewTruncationWarning ? <ErrorBanner message={overviewTruncationWarning} /> : null}
           {overviewError ? <ErrorBanner message={overviewError} /> : null}
           {workspaceDetailError ? <ErrorBanner message={workspaceDetailError} /> : null}
