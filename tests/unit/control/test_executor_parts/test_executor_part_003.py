@@ -776,9 +776,15 @@ class TestHappyPathPart002:
             (0, "local-plan-only"),
             (0, "plans-output"),
             (0, "changed-head"),
+            (0, "report-only-commit"),
+            (0, "source-change-after-conformance"),
+            (0, "unrelated-head-after-conformance"),
+            (0, "diff-failure-after-conformance"),
+            (0, "missing-head-after-conformance"),
             (0, "comment-retry"),
             (0, "tip-propagation"),
             (0, "worker-restart"),
+            (0, "worker-restart-report-only"),
             (0, "worker-restart-descendant"),
             (0, "worker-restart-unrelated"),
             (0, "handoff-restart"),
@@ -822,6 +828,13 @@ class TestHappyPathPart002:
             },
         )
         report_path = f"docs/{ws_id}.conformance.json"
+        committed_report = outcome in {"report-only-commit", "worker-restart-report-only"}
+        unverified_head = outcome in {
+            "source-change-after-conformance",
+            "unrelated-head-after-conformance",
+            "diff-failure-after-conformance",
+            "missing-head-after-conformance",
+        }
         handoff_report = json.dumps(
             {
                 "status": "needs_iteration",
@@ -913,11 +926,17 @@ class TestHappyPathPart002:
                 if final and outcome == "satisfied"
                 else post_validation_gap_report,
             )
-            fake.queue_result(stdout=f"?? {report_path}\n")
-            fake.queue_result(stdout="")  # committed paths since scope HEAD
+            fake.queue_result(stdout="" if committed_report else f"?? {report_path}\n")
+            fake.queue_result(stdout=f"{report_path}\n" if committed_report else "")
             if final:
-                fake.queue_result(returncode=1)  # untracked report: fall back to unlink
-                fake.queue_result()  # post-unlink cleanliness check
+                if committed_report:
+                    fake.queue_result()  # restore from base
+                    fake.queue_result(stdout=f"D  {report_path}\n")
+                    fake.queue_result()  # restore from HEAD
+                    fake.queue_result()  # post-restore cleanliness check
+                else:
+                    fake.queue_result(returncode=1)  # untracked report: fall back to unlink
+                    fake.queue_result()  # post-unlink cleanliness check
                 break
             fake.queue_result(stdout="implemented missing behavior")
             fake.queue_result()  # fix git add
@@ -926,7 +945,22 @@ class TestHappyPathPart002:
 
         worker_restart = outcome.startswith("worker-restart")
         moved_pr_tip = outcome in {"worker-restart-descendant", "worker-restart-unrelated"}
-        pr_tip = "e" * 40 if moved_pr_tip else head
+        publication_head = "d" * 40 if committed_report or unverified_head else head
+        if outcome not in {"satisfied", "validation-failed"}:
+            fake.queue_result(
+                stdout=f"{publication_head}\n",
+                returncode=int(outcome == "missing-head-after-conformance"),
+            )  # capture candidate after conformance
+        if publication_head != head and outcome != "missing-head-after-conformance":
+            fake.queue_result(returncode=int(outcome == "unrelated-head-after-conformance"))
+            if outcome != "unrelated-head-after-conformance":
+                paths = f"{report_path}\0"
+                if outcome == "source-change-after-conformance":
+                    paths += "src/x.py\0"
+                fake.queue_result(
+                    stdout=paths, returncode=int(outcome == "diff-failure-after-conformance")
+                )
+        pr_tip = "e" * 40 if moved_pr_tip else publication_head
         if outcome in {"empty", "plan-only", "local-plan-only"}:
             paths = {
                 "empty": "",
@@ -934,8 +968,8 @@ class TestHappyPathPart002:
                 "local-plan-only": "plans/LOCAL_PLAN.md\ndocs/awf-plans/workspace.md\n",
             }
             fake.queue_result(stdout=paths[outcome])
-        elif outcome != "validation-failed":
-            pre_push_head = "f" * 40 if outcome == "changed-head" else head
+        elif outcome != "validation-failed" and not unverified_head:
+            pre_push_head = "f" * 40 if outcome == "changed-head" else publication_head
             output_path = "plans/subscriptions.py" if outcome == "plans-output" else "src/fix.py"
             _queue_pre_push_diagnostics(fake, head=pre_push_head, output_path=output_path)
             fake.queue_result()  # push
@@ -943,6 +977,7 @@ class TestHappyPathPart002:
             if worker_restart or outcome in {
                 "park",
                 "plans-output",
+                "report-only-commit",
                 "exhausted-handoff",
                 "comment-retry",
                 "comment-pending",
@@ -1119,10 +1154,12 @@ class TestHappyPathPart002:
         if outcome in {"empty", "plan-only", "local-plan-only"}:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.events[-1].reason_code == "PLAN_ONLY_OUTPUT"
-        if outcome == "changed-head":
+        if outcome == "changed-head" or unverified_head:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.events[-1].reason_code == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
-        if outcome in {
+        if unverified_head:
+            assert not any(e.reason_code == PLAN_CONFORMANCE_UNSATISFIED for e in ws.events)
+        if unverified_head or outcome in {
             "empty",
             "plan-only",
             "local-plan-only",
@@ -1141,7 +1178,26 @@ class TestHappyPathPart002:
         assert ws.pr_url == "https://github.com/a/b/pull/1"
         pushes = [call.args for call in fake.calls if "push" in call.args]
         assert len(pushes) == 1
-        assert pushes[0][-1] == f"{head}:refs/heads/awf/{ws_id}"
+        assert pushes[0][-1] == f"{publication_head}:refs/heads/awf/{ws_id}"
+        if committed_report:
+            assert any(
+                call.args[-4:] == ["merge-base", "--is-ancestor", head, publication_head]
+                for call in fake.calls
+            )
+            assert any(
+                call.args[-8:]
+                == [
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    "--ignore-submodules=none",
+                    "-z",
+                    head,
+                    publication_head,
+                    "--",
+                ]
+                for call in fake.calls
+            )
         _created_pr_body(fake)  # PR creation used the normal creator
         comments = [call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]]
         if moved_pr_tip:
@@ -1180,13 +1236,15 @@ class TestHappyPathPart002:
         assert response.awaiting_human_reason is not None
         assert PLAN_CONFORMANCE_UNSATISFIED in response.awaiting_human_reason
         assert gap in response.awaiting_human_reason
-        assert runs[-1]["workspace_head_sha"] == runs[-1]["target_head_sha"] == head
+        assert runs[-1]["workspace_head_sha"] == head
+        assert runs[-1]["target_head_sha"] == publication_head
         park = next(e for e in ws.events if e.reason_code == PLAN_CONFORMANCE_UNSATISFIED)
         assert park.payload["validation_run_id"] == runs[-1]["id"]
+        assert park.payload["head_sha"] == publication_head
         assert park.payload["conformance"]["gaps"] == [f"{gap}  [redacted]"]
         assert park.payload["conformance"]["iterations_used"] == budget
         assert park.payload["conformance"]["max_iterations"] == budget
-        assert not report_file.exists()
+        assert report_file.exists() == committed_report
         artifact = workspace_artifact_dir(tmp_path / "work", ws_id)
         assert gap in (artifact / DEPOSITED_CONFORMANCE_NAME).read_text()
 

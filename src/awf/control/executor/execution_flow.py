@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -1458,11 +1458,30 @@ async def execute(
             execution_owner_id=execution_owner_id,
         )
         return
+    publication_head_sha = successful_validation_workspace_head_sha
     planning_artifact_paths: tuple[Path, ...] = ()
     if conformance_park is not None:
         evidence = conformance_park.details["conformance"]
-        planning_artifact_paths = (Path(evidence["plan_path"]), Path(evidence["report_path"]))
+        report_path = Path(evidence["report_path"])
+        planning_artifact_paths = (Path(evidence["plan_path"]), report_path)
         carried_gaps = conformance_park.gaps
+        if validation_result.conformance_park is not None and publication_head_sha is not None:
+            # Conformance may commit its report after validation. Pin the
+            # publication to that exact commit once its scope is verified.
+            conformance_head_sha = await self._git_rev_parse_head(worktree_path)
+            if conformance_head_sha is None or not await _is_report_only_descendant(
+                _git_in_worktree, publication_head_sha, conformance_head_sha, report_path
+            ):
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="Could not verify that the conformance HEAD preserves validated work.",
+                    reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+                    execution_owner_id=execution_owner_id,
+                )
+                return
+            publication_head_sha = conformance_head_sha
     elif await handle_recovery_pr_handoff_after_validation(
         self,
         workspace_id=workspace_id,
@@ -1518,5 +1537,33 @@ async def execute(
         carried_gaps=carried_gaps,
         retry_gap_publication=retry_gap_publication,
         conformance_park=conformance_park,
-        validated_head_sha=successful_validation_workspace_head_sha,
+        validated_head_sha=publication_head_sha,
     )
+
+
+async def _is_report_only_descendant(
+    git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    validated_head_sha: str,
+    candidate_head_sha: str,
+    report_path: Path,
+) -> bool:
+    if candidate_head_sha == validated_head_sha:
+        return True
+    ancestry = await git_in_worktree(
+        ["merge-base", "--is-ancestor", validated_head_sha, candidate_head_sha]
+    )
+    if not ancestry.ok:
+        return False
+    diff = await git_in_worktree(
+        [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--ignore-submodules=none",
+            "-z",
+            validated_head_sha,
+            candidate_head_sha,
+            "--",
+        ]
+    )
+    return diff.ok and not (set(diff.stdout.split("\0")) - {"", report_path.as_posix()})
