@@ -510,12 +510,14 @@ def changed_paths_are_only_internal_plan_artifacts(
     changed_paths: list[str] | tuple[str, ...],
     *,
     planning_artifact_paths: tuple[Path, ...] = (),
+    planning_artifact_dir: str | None = None,
 ) -> bool:
-    if planning_artifact_paths:
+    if planning_artifact_paths or planning_artifact_dir is not None:
+        artifact_dir = Path(planning_artifact_dir) if planning_artifact_dir is not None else None
         decoded_paths = [Path(unquote_porcelain_path(path)) for path in changed_paths]
         return bool(decoded_paths) and all(
             path in planning_artifact_paths
-            or Path("plans") in path.parents
+            or artifact_dir in path.parents
             or _is_internal_plan_artifact_path(path.as_posix())
             for path in decoded_paths
         )

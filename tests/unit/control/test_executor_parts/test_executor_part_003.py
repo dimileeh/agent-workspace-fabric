@@ -106,7 +106,9 @@ def executor(
     )
 
 
-def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+def _queue_pre_push_diagnostics(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", output_path: str = "src/fix.py"
+) -> None:
     """Queue executor's committed-diff policy check plus the three canned
     git results ``PullRequestCreator`` reads for its pre-push diagnostic
     log line (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
@@ -123,9 +125,9 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
     captured output.
     """
     fake.queue_result(
-        returncode=0, stdout="src/fix.py\n"
+        returncode=0, stdout=f"{output_path}\n"
     )  # final plan-only gate: committed base..HEAD --name-only
-    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
+    fake.queue_result(returncode=0, stdout=f"M\0{output_path}\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
@@ -772,6 +774,7 @@ class TestHappyPathPart002:
             (0, "empty"),
             (0, "plan-only"),
             (0, "local-plan-only"),
+            (0, "plans-output"),
             (0, "changed-head"),
             (0, "comment-retry"),
             (0, "tip-propagation"),
@@ -804,6 +807,7 @@ class TestHappyPathPart002:
                 max_validation_fix_passes=0,
             ),
         )
+        planning_options = {"additional_artifact_dir": None} if outcome == "plans-output" else {}
         ws_id = await _seed_ready_workspace(
             factory,
             resolved_profile={
@@ -812,6 +816,7 @@ class TestHappyPathPart002:
                     "required": True,
                     "max_iterations": budget,
                     "conformance_report_path": "docs/{workspace_id}.conformance.json",
+                    **planning_options,
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
@@ -931,11 +936,13 @@ class TestHappyPathPart002:
             fake.queue_result(stdout=paths[outcome])
         elif outcome != "validation-failed":
             pre_push_head = "f" * 40 if outcome == "changed-head" else head
-            _queue_pre_push_diagnostics(fake, head=pre_push_head)
+            output_path = "plans/subscriptions.py" if outcome == "plans-output" else "src/fix.py"
+            _queue_pre_push_diagnostics(fake, head=pre_push_head, output_path=output_path)
             fake.queue_result()  # push
             fake.queue_result(stdout="https://github.com/a/b/pull/1")
             if worker_restart or outcome in {
                 "park",
+                "plans-output",
                 "exhausted-handoff",
                 "comment-retry",
                 "comment-pending",

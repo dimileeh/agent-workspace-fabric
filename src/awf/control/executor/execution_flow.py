@@ -1488,6 +1488,9 @@ async def execute(
         base_commit=base_commit,
         owned_paths=list(ws.owned_paths),
         planning_artifact_paths=planning_artifact_paths,
+        planning_artifact_dir=(
+            profile.planning.additional_artifact_dir if conformance_park is not None else None
+        ),
         execution_owner_id=execution_owner_id,
         repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
     ):

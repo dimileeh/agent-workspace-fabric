@@ -49,6 +49,7 @@ class TestPlanningConformancePublication:
             "exhausted",
             "exhausted-with-transient-diff-error",
             "exhausted-with-nul",
+            "exhausted-with-plans-output",
             "cancelled-at-compare",
             "reconciled-duplicate",
             "reconciled-transient",
@@ -71,6 +72,8 @@ class TestPlanningConformancePublication:
         monkeypatch: pytest.MonkeyPatch,
         outcome: str,
     ) -> None:
+        plans_output = outcome == "exhausted-with-plans-output"
+        planning_options = {"additional_artifact_dir": "internal/planning"} if plans_output else {}
         ws_id = await _seed_ready_workspace(
             factory,
             resolved_profile={
@@ -78,6 +81,7 @@ class TestPlanningConformancePublication:
                 "planning": {
                     "required": True,
                     "max_iterations": 1,
+                    **planning_options,
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
@@ -178,7 +182,11 @@ class TestPlanningConformancePublication:
                 fake.queue_result(returncode=1, stderr="temporary git diff failure")
             fake.queue_result(
                 returncode=0,
-                stdout="docs/awf-plans/workspace.md\ndocs/usage.md\n",
+                stdout=(
+                    "plans/usage.md\n"
+                    if plans_output
+                    else "docs/awf-plans/workspace.md\ndocs/usage.md\n"
+                ),
             )  # committed net diff from the provisioned base
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)

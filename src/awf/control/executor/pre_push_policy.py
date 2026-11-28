@@ -20,6 +20,7 @@ async def run_pre_push_policy_checks(
     execution_owner_id: str | None,
     repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool | str]],
     planning_artifact_paths: tuple[Path, ...] = (),
+    planning_artifact_dir: str | None = None,
 ) -> bool:
     """Run committed-output policy checks.
 
@@ -51,6 +52,7 @@ async def run_pre_push_policy_checks(
             base_commit=base_commit,
             expected_status=WorkspaceStatus.validating,
             planning_artifact_paths=planning_artifact_paths,
+            planning_artifact_dir=planning_artifact_dir,
         ):
             return True
         if await executor._fail_if_protected_quality_gate_committed_output(
