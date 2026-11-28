@@ -37,6 +37,7 @@ from awf.db.enums import (
     OperationType,
     WorkspaceStatus,
 )
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceEventRepository,
@@ -766,6 +767,7 @@ class TestHappyPathPart002:
             (1, "satisfied"),
             (0, "park"),
             (3, "park"),
+            (3, "exhausted-handoff"),
             (1, "validation-failed"),
             (0, "empty"),
             (0, "plan-only"),
@@ -774,6 +776,9 @@ class TestHappyPathPart002:
             (0, "comment-retry"),
             (0, "tip-propagation"),
             (0, "worker-restart"),
+            (0, "worker-restart-descendant"),
+            (0, "worker-restart-unrelated"),
+            (0, "handoff-restart"),
             (0, "comment-pending"),
         ],
     )
@@ -842,7 +847,8 @@ class TestHappyPathPart002:
             }
         )
 
-        report_file = _test_worktrees_root(factory) / ws_id / report_path
+        worktree_path = _test_worktrees_root(factory) / ws_id
+        report_file = worktree_path / report_path
         run_command = fake.run
 
         async def run_and_update_report(args: list[str], **kwargs: Any) -> Any:
@@ -853,6 +859,8 @@ class TestHappyPathPart002:
             return result
 
         monkeypatch.setattr(fake, "run", run_and_update_report)
+        handoff_iteration = budget if outcome == "exhausted-handoff" else 0
+        remaining_repairs = budget - handoff_iteration
         _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
@@ -860,23 +868,32 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
-        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
-        fake.queue_result(
-            returncode=0,
-            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
+        for iteration in range(handoff_iteration + 1):
+            fake.queue_result(stdout="implemented")  # execution adapter
+            fake.queue_result(stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+            fake.queue_result(stdout="base_commit_sha\n")  # conformance scope HEAD
+            inline_report = json.dumps(
+                {
+                    "status": "needs_iteration",
+                    "summary": f"Implementation pass {iteration} still has a gap.",
+                    "gaps": [f"Finish behavior for pass {iteration}."],
+                }
+            )
+            fake.queue_result(
+                stdout=handoff_report if iteration == handoff_iteration else inline_report
+            )
+            fake.queue_result(
+                stdout=f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n",
+            )
+            fake.queue_result(stdout="")  # committed paths since conformance HEAD
+            fake.queue_result(stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        for iteration in range(budget + 1):
+        for iteration in range(remaining_repairs + 1):
             head = chr(ord("b") + iteration) * 40
             _queue_validation_head(fake, head=head)
             if iteration and outcome == "validation-failed":
@@ -885,7 +902,7 @@ class TestHappyPathPart002:
             fake.queue_result(returncode=0, stdout="tests ok")
             fake.queue_result(returncode=0, stdout="")  # post-validation status
             fake.queue_result(returncode=0, stdout=f"{head}\n")  # conformance scope HEAD
-            final = iteration == budget
+            final = iteration == remaining_repairs
             fake.queue_result(
                 stdout=satisfied_report
                 if final and outcome == "satisfied"
@@ -902,6 +919,9 @@ class TestHappyPathPart002:
             fake.queue_result(stdout="src/x.py\n")  # fix cached diff
             fake.queue_result()  # fix commit
 
+        worker_restart = outcome.startswith("worker-restart")
+        moved_pr_tip = outcome in {"worker-restart-descendant", "worker-restart-unrelated"}
+        pr_tip = "e" * 40 if moved_pr_tip else head
         if outcome in {"empty", "plan-only", "local-plan-only"}:
             paths = {
                 "empty": "",
@@ -914,12 +934,13 @@ class TestHappyPathPart002:
             _queue_pre_push_diagnostics(fake, head=pre_push_head)
             fake.queue_result()  # push
             fake.queue_result(stdout="https://github.com/a/b/pull/1")
-            if outcome in {
+            if worker_restart or outcome in {
                 "park",
+                "exhausted-handoff",
                 "comment-retry",
                 "comment-pending",
                 "tip-propagation",
-                "worker-restart",
+                "handoff-restart",
             }:
                 monkeypatch.setattr(pr_open_step, "_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS", 0)
                 snapshot = json.dumps(
@@ -930,7 +951,7 @@ class TestHappyPathPart002:
                                     "merged": False,
                                     "closed": False,
                                     "headRefName": f"awf/{ws_id}",
-                                    "headRefOid": head,
+                                    "headRefOid": pr_tip,
                                 }
                             }
                         }
@@ -945,6 +966,13 @@ class TestHappyPathPart002:
 
                 def queue_comment_check(*, posted: bool = False) -> None:
                     fake.queue_result(stdout=snapshot)
+                    if moved_pr_tip:
+                        fake.queue_result(returncode=1)  # live tip needs a fetch
+                        fake.queue_result()  # fetch from the PR head repository
+                        unrelated = outcome == "worker-restart-unrelated"
+                        fake.queue_result(returncode=int(unrelated))  # ancestry check
+                        if unrelated:
+                            return
                     fake.queue_result(
                         stdout=json.dumps(
                             {
@@ -965,14 +993,15 @@ class TestHappyPathPart002:
                 if outcome == "tip-propagation":
                     fake.queue_result(stdout=snapshot.replace(head, ""))
                 queue_comment_check()
-                comment_failed = outcome in {"comment-retry", "comment-pending"}
-                fake.queue_result(returncode=int(comment_failed), stderr="comment failed")
-                if comment_failed:
-                    queue_comment_check(posted=outcome == "comment-retry")
-                if outcome == "comment-pending":
-                    fake.queue_result(returncode=1, stderr="comment retry failed")
+                if outcome != "worker-restart-unrelated":
+                    comment_failed = outcome in {"comment-retry", "comment-pending"}
+                    fake.queue_result(returncode=int(comment_failed), stderr="comment failed")
+                    if comment_failed:
+                        queue_comment_check(posted=outcome == "comment-retry")
+                    if outcome == "comment-pending":
+                        fake.queue_result(returncode=1, stderr="comment retry failed")
 
-        if outcome == "worker-restart":
+        if worker_restart:
             with monkeypatch.context() as patch:
                 patch.setattr(
                     pr_open_step,
@@ -986,11 +1015,13 @@ class TestHappyPathPart002:
                 ws = await repo.get(ws_id)
                 assert ws is not None
                 assert ws.status == WorkspaceStatus.pushing.value
+                if moved_pr_tip:
+                    ws.task_policy = {"pr_adoption": {"head_repo_slug": "example/fork"}}
                 preserved = await repo.add_event(ws, event_type="test.worker_restarted")
                 await session.commit()
             worker = ControlWorker(
                 session_factory=factory,
-                provisioner=AsyncMock(),
+                provisioner=SimpleNamespace(get_worktree_path=lambda _: worktree_path),
                 pr_publication_runner=fake,
                 config=WorkerConfig(),
             )
@@ -1003,9 +1034,27 @@ class TestHappyPathPart002:
                     "https://github.com/a/b/pull/1",
                     1,
                     f"awf/{ws_id}",
-                    head,
+                    pr_tip,
                 ),
             )
+        elif outcome == "handoff-restart":
+            commit = AsyncSession.commit
+
+            async def stop_after_monitoring_commit(session: AsyncSession) -> None:
+                handoff = any(
+                    isinstance(row, Workspace)
+                    and row.id == ws_id
+                    and row.status == WorkspaceStatus.monitoring_pr.value
+                    for row in session.identity_map.values()
+                )
+                await commit(session)
+                if handoff:
+                    raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(AsyncSession, "commit", stop_after_monitoring_commit)
+                with pytest.raises(asyncio.CancelledError):
+                    await executor.execute(ws_id)
         else:
             await executor.execute(ws_id)
 
@@ -1021,14 +1070,20 @@ class TestHappyPathPart002:
             if "Conformance phase" in prompt and "### Validation evidence" in prompt
         ]
 
-        assert len(fix_prompts) == budget
+        assert sum("## Execution phase" in prompt for prompt in adapter_prompts) == (
+            handoff_iteration + 1
+        )
+        assert len(fix_prompts) == remaining_repairs
         assert all("post-validation plan conformance" in prompt for prompt in fix_prompts)
         assert [
             line
             for prompt in post_validation_conformance_prompts
             for line in prompt.splitlines()
             if line.startswith("Iteration: ")
-        ] == [f"Iteration: {i + 1}" for i in range(budget + (outcome != "validation-failed"))]
+        ] == [
+            f"Iteration: {i + 1}"
+            for i in range(handoff_iteration, budget + (outcome != "validation-failed"))
+        ]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
@@ -1053,7 +1108,7 @@ class TestHappyPathPart002:
             assert runs[-1]["reason_code"] == "COMMAND_FAILED"
             assert ws.events[-1].reason_code == "COMMAND_FAILED"
         else:
-            assert [run["status"] for run in runs] == ["succeeded"] * (budget + 1)
+            assert [run["status"] for run in runs] == ["succeeded"] * (remaining_repairs + 1)
         if outcome in {"empty", "plan-only", "local-plan-only"}:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.events[-1].reason_code == "PLAN_ONLY_OUTPUT"
@@ -1082,6 +1137,23 @@ class TestHappyPathPart002:
         assert pushes[0][-1] == f"{head}:refs/heads/awf/{ws_id}"
         _created_pr_body(fake)  # PR creation used the normal creator
         comments = [call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]]
+        if moved_pr_tip:
+            assert any(
+                call.args[-4:] == ["fetch", "--no-tags", "git@github.com:example/fork.git", pr_tip]
+                and str(worktree_path) in call.args
+                for call in fake.calls
+            )
+            assert any(
+                call.args[-4:] == ["merge-base", "--is-ancestor", head, pr_tip]
+                for call in fake.calls
+            )
+        if outcome == "worker-restart-unrelated":
+            assert not comments
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert ws.awaiting_human_since is None
+            assert runs[-1]["target_head_sha"] is None
+            return
         assert len(comments) == (2 if outcome == "comment-pending" else 1)
         assert PLAN_CONFORMANCE_UNSATISFIED in comments[0][-1]
         assert gap in comments[0][-1]
@@ -1093,6 +1165,7 @@ class TestHappyPathPart002:
             assert ws.block_planning_conformance_handoff["conformance_park_head_sha"] == head
             return
         assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_last_commit_sha == pr_tip
         response = await WorkspaceService(factory).get(ws_id)
         assert response is not None
         assert response.attention_required

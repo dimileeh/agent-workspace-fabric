@@ -1,7 +1,4 @@
-"""Preserved active execution recovery flow.
-
-Mechanically extracted from recovery_preserved.py; behavior is unchanged.
-"""
+"""Preserved active execution recovery flow."""
 
 from __future__ import annotations
 
@@ -23,6 +20,7 @@ from awf.control.executor.constants import (
     _AUDIT_PR_CONFORMANCE_COMMENT_EVENT,
     _PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
 )
+from awf.control.executor.helpers import _existing_pr_remote_push_url
 from awf.control.executor.recovery_handoff import ensure_carried_gaps_published
 from awf.control.executor.recovery_payloads import _planning_carried_gaps_from_metadata
 from awf.control.worker.constants import (
@@ -692,6 +690,15 @@ async def _attach_preserved_active_pr_monitor(
         if carried_gaps:
             version, pr_url, pr_number = ws.version, ws.pr_url, ws.pr_number
             resolved_forge = (ws.resolved_profile or {}).get("forge")
+            park_verification = (
+                {
+                    "validated_head_sha": park_head,
+                    "worktree_path": self._preserved_active_worktree_path(ws.id),
+                    "fetch_remote": _existing_pr_remote_push_url(ws) or "origin",
+                }
+                if isinstance(park_head, str)
+                else {}
+            )
             await session.commit()
             session.expunge(ws)
             scope = getattr(self, "_workspace_scope", None)
@@ -702,7 +709,7 @@ async def _attach_preserved_active_pr_monitor(
                     pr_number=pr_number,
                     resolved_forge=resolved_forge,
                     carried_gaps=carried_gaps,
-                    validated_head_sha=park_head if isinstance(park_head, str) else None,
+                    **park_verification,
                 )
             ws = await repo.get_for_update(candidate.workspace_id)
             claim_cutoff = datetime.now(UTC)

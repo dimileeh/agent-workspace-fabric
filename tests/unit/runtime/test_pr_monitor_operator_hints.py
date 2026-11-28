@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -1396,6 +1397,7 @@ async def test_persist_state_preserves_concurrent_processed_operator_hint_marker
 async def test_conformance_park_waits_for_guide_after_monitor_reload(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     reason = f"{PLAN_CONFORMANCE_UNSATISFIED}: Add the planned edge-case test."
@@ -1430,7 +1432,9 @@ async def test_conformance_park_waits_for_guide_after_monitor_reload(
     assert isinstance(decide(replace(green, merged=True), state, config), ShortCircuitCompleted)
     assert isinstance(decide(replace(green, closed=True), state, config), Abort)
 
-    async def poll_park(action: NotifyHuman) -> None:
+    async def execute_action(
+        action: NotifyHuman | AddressOperatorHint, monitor_state: MonitorState
+    ) -> None:
         assert not await runner._execute(
             action=action,
             workspace_id=workspace_id,
@@ -1438,7 +1442,7 @@ async def test_conformance_park_waits_for_guide_after_monitor_reload(
             repo=RepoRef(owner="example", name="project"),
             pr_number=42,
             status=green,
-            state=state,
+            state=monitor_state,
             base_branch="development",
             remote_branch=f"awf/{workspace_id}",
             remote_push_url=None,
@@ -1447,21 +1451,68 @@ async def test_conformance_park_waits_for_guide_after_monitor_reload(
             monitor_log=None,
         )
 
-    await poll_park(NotifyHuman(message=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED))
+    park = NotifyHuman(message=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED)
+    await execute_action(park, state)
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in commands.calls)
     waiting = await runner._load_workspace(workspace_id)
     assert waiting.awaiting_human_reason == reason
 
     service = WorkspaceService(factory)
-    await service.guide_workspace(workspace_id, directive="Add the edge-case test.")
+    directive = "Add the edge-case test."
+    await service.guide_workspace(workspace_id, directive=directive)
     workspace = await runner._load_workspace(workspace_id)
     assert workspace.awaiting_human_since is None
-    action = decide(green, runner._load_state(workspace), config)
+    guided_state = runner._load_state(workspace)
+    action = decide(green, guided_state, config)
     assert isinstance(action, AddressOperatorHint)
-    assert action.hint.directive == "Add the edge-case test."
+    assert action.hint.directive == directive
 
     # A worker that decided to wait just before the guide arrived must not
     # reopen the attention episode using its stale hint.
-    await poll_park(NotifyHuman(message=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED))
+    await execute_action(park, state)
     workspace = await runner._load_workspace(workspace_id)
     assert workspace.awaiting_human_since is None
+
+    repaired_head = "d" * 40
+    repair = AsyncMock(return_value=VerdictResult(verdict="fix_committed"))
+    push = AsyncMock(return_value=_GitPushResult(pushed=True, failed=False, returncode=0))
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        AsyncMock(return_value=(green.head_sha, None)),
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", repair)
+    monkeypatch.setattr(
+        runner,
+        "_post_action_pr_terminal_push_result_if_moot",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(runner, "_protected_scope_push_block", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner, "_preserved_commit_already_on_remote", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(runner, "_validated_git_push_result", push)
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=repaired_head))
+
+    await execute_action(action, guided_state)
+
+    repair.assert_awaited_once()
+    assert directive in repair.await_args.kwargs["prompt"]
+    push.assert_awaited_once()
+    operation_id = action.hint.operation_id
+    assert operation_id is not None
+    reloaded = runner._load_state(await runner._load_workspace(workspace_id))
+    assert reloaded.pending_operator_hint is None
+    assert reloaded.threads_addressed_ids[operator_hint_processed_key(operation_id)] == "processed"
+    async with factory() as session:
+        operation = await session.scalar(
+            select(Operation).where(
+                Operation.workspace_id == workspace_id,
+                Operation.type == OperationType.comment_repair.value,
+            )
+        )
+    assert operation is not None
+    assert operation.status == OperationStatus.succeeded.value
+    assert operation.result["outcome"] == "operator_hint_pushed"
+    rechecked_pr = replace(green, head_sha=repaired_head)
+    assert isinstance(decide(rechecked_pr, reloaded, config), Merge)

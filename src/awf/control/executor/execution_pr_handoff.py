@@ -26,7 +26,7 @@ from awf.control.executor.types import _PlanningConformancePark
 from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
 from awf.runtime.operator_hints import persist_operator_hint
@@ -176,6 +176,7 @@ async def persist_pr_and_handoff(
     validated_head_sha: str | None = None,
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
+    target_head_sha = validated_head_sha if conformance_park is not None else pr.head_sha
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         persisted = await repo.get_for_update(workspace_id)
@@ -289,10 +290,19 @@ async def persist_pr_and_handoff(
                 to=WorkspaceStatus.completed,
                 reason_code=pr_reason_code,
             )
+        if (
+            conformance_park is not None
+            and successful_validation_run_id is not None
+            and target_head_sha
+        ):
+            # Recovery can start monitoring as soon as this transaction commits.
+            await ValidationRunRepository(session).update_target_head_sha(
+                successful_validation_run_id,
+                target_head_sha=target_head_sha,
+            )
         await session.commit()
 
-    target_head_sha = validated_head_sha if conformance_park is not None else pr.head_sha
-    if successful_validation_run_id is not None and target_head_sha:
+    if conformance_park is None and successful_validation_run_id is not None and target_head_sha:
         try:
             await self._set_validation_run_target_head_sha(
                 validation_run_id=successful_validation_run_id,
