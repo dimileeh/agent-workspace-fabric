@@ -1255,7 +1255,6 @@ export function ConsoleDashboard() {
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
-        embedded={embedded}
         sessionExpired={sessionExpired}
         apiState={sessionExpired ? "error" : apiState}
         streamState={streamState}

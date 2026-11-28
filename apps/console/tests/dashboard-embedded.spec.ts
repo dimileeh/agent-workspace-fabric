@@ -104,19 +104,33 @@ function captureApiRequests(page: Page) {
 
 const denial = { detail: { error_code: "UNAUTHORIZED", message: "Access denied" } };
 
-test("embedded presentation follows host display preferences across workspace navigation", async ({ page }) => {
+test("embedded presentation shares display preferences across workspace navigation", async ({ page }) => {
   await mockWorkspace(page);
   await page.emulateMedia({ colorScheme: "dark" });
   await addHost(page);
-  await page.evaluate(key => localStorage.setItem(key, JSON.stringify({
-    version: 1, theme: "dark", fontSize: "large", contrast: "high",
-  })), preferenceKey);
+  await page.evaluate(key => {
+    localStorage.setItem(key, JSON.stringify({
+      version: 1, theme: "dark", fontSize: "large", contrast: "high",
+    }));
+    const preferenceChanges: unknown[] = [];
+    Object.assign(window, { preferenceChanges });
+    window.addEventListener("storage", event => {
+      if (event.key === key && event.storageArea === localStorage) {
+        preferenceChanges.push(JSON.parse(event.newValue ?? "null"));
+      }
+    });
+  }, preferenceKey);
   const consoleFrame = await mountConsole(page, "?embedded=1");
   const header = consoleFrame.locator("main > header");
   await expect(header.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
-  await expect(header.getByRole("heading", { name: "AWF Console" })).toHaveCount(0);
-  await expect(header.locator(".lucide-boxes")).toHaveCount(0);
-  await expect(header.getByRole("button", { name: /theme|font|contrast/i })).toHaveCount(0);
+  await expect(header.getByRole("heading", { name: "AWF Console" })).toBeVisible();
+  await expect(header.locator(".lucide-boxes")).toBeVisible();
+  const lightTheme = header.getByRole("button", { name: "Use light theme" });
+  await expect(lightTheme).toBeVisible();
+  await expect(header.getByRole("button", { name: "Use dark theme" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Use system theme" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Enable high contrast" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Use larger font size" })).toBeVisible();
   await expect(header.getByText(/^API:/)).toBeVisible();
   await expect(header.getByText(/^Stream:/)).toBeVisible();
   await expect(header.getByText(/refreshed/)).toBeVisible();
@@ -125,6 +139,15 @@ test("embedded presentation follows host display preferences across workspace na
   await expect(root).toHaveAttribute("data-awf-theme", "dark");
   await expect(root).toHaveAttribute("data-awf-font-size", "large");
   await expect(root).toHaveAttribute("data-awf-contrast", "high");
+
+  await lightTheme.click();
+  await expect(root).toHaveAttribute("data-awf-theme-mode", "light");
+  await expect(root).toHaveAttribute("data-awf-theme", "light");
+  const lightPreferences = { version: 1, theme: "light", fontSize: "large", contrast: "high" };
+  await expect.poll(() => page.evaluate(() => Reflect.get(window, "preferenceChanges"))).toEqual([lightPreferences]);
+  const readPreferences = () => page.evaluate(key => localStorage.getItem(key), preferenceKey);
+  expect(JSON.parse(await readPreferences() ?? "null")).toEqual(lightPreferences);
+
   await consoleFrame.getByRole("button", { name: openWorkspace }).click();
   const inspectorClose = consoleFrame.getByRole("button", { name: "Close inspector" });
   await expect(inspectorClose).toBeVisible();
@@ -139,14 +162,15 @@ test("embedded presentation follows host display preferences across workspace na
   await expect(root).toHaveAttribute("data-awf-contrast", "normal");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(root).toHaveAttribute("data-awf-theme", "light");
-  expect(await page.evaluate(key => localStorage.getItem(key), preferenceKey)).toBe(preferences);
+  expect(await readPreferences()).toBe(preferences);
   await page.evaluate(key => localStorage.removeItem(key), preferenceKey);
   await expect(root).toHaveAttribute("data-awf-theme-mode", "light");
-  expect(await page.evaluate(key => localStorage.getItem(key), preferenceKey)).toBeNull();
+  expect(await readPreferences()).toBeNull();
   await page.evaluate(({ key, value }) => localStorage.setItem(key, value), { key: preferenceKey, value: preferences });
   await expect(root).toHaveAttribute("data-awf-theme-mode", "system");
   await page.evaluate(() => localStorage.clear());
   await expect(root).toHaveAttribute("data-awf-theme-mode", "light");
+  expect(await readPreferences()).toBeNull();
 
   await inspectorClose.click();
   await expect.poll(query).toBe("?embedded=1");

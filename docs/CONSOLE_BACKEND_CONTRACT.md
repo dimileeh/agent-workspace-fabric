@@ -63,6 +63,24 @@ routes use `{workspace_id}`.
 
 Never guess mode from hostname, browser location, query strings, or failed metrics calls.
 
+### Embedded console
+
+Use `?embedded=1` on the console page to opt in to embedded session handling.
+The `embedded` query key is reserved for the page and excluded from forwarded API
+query context. The header is the same as in standalone mode, including the AWF
+Console mark and title and the theme, contrast, and font size controls.
+
+An embedded console stops polling and closes streams on a `401`. It sends
+`{ "type": "awf-console:unauthenticated" }` to its parent when the parent is
+same-origin. The console stays stopped until the page reloads. The standalone
+console can recover through its normal refresh cycle.
+
+Display preferences are stored in local storage under `awf.operator.preferences.v1`.
+Changes made through the embedded console's controls update that key so a
+same-origin host can observe them. The embedded console also re-reads the key
+on storage events from other documents. Removing the key or clearing local
+storage restores the defaults in the embedded console and leaves the key absent.
+
 ## Dashboard summary semantics
 
 ### Counts
