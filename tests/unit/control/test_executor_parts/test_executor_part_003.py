@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.adapters.run_results import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -777,6 +779,7 @@ class TestHappyPathPart002:
             (0, "plans-output"),
             (0, "changed-head"),
             (0, "report-only-commit"),
+            (0, "hosted-report-only-commit"),
             (0, "source-change-after-conformance"),
             (0, "unrelated-head-after-conformance"),
             (0, "diff-failure-after-conformance"),
@@ -828,7 +831,13 @@ class TestHappyPathPart002:
             },
         )
         report_path = f"docs/{ws_id}.conformance.json"
-        committed_report = outcome in {"report-only-commit", "worker-restart-report-only"}
+        hosted_report = outcome == "hosted-report-only-commit"
+        committed_report = outcome in {
+            "report-only-commit",
+            "hosted-report-only-commit",
+            "worker-restart-report-only",
+        }
+        report_commit_sha = "d" * 40
         unverified_head = outcome in {
             "source-change-after-conformance",
             "unrelated-head-after-conformance",
@@ -871,12 +880,35 @@ class TestHappyPathPart002:
 
         async def run_and_update_report(args: list[str], **kwargs: Any) -> Any:
             result = await run_command(args, **kwargs)
-            if result.stdout == post_validation_gap_report:
+            update_report = (
+                args[-3:] == ["reset", "--hard", report_commit_sha]
+                if hosted_report
+                else result.stdout == post_validation_gap_report
+            )
+            if update_report:
                 report_file.parent.mkdir(parents=True, exist_ok=True)
-                report_file.write_text(result.stdout, encoding="utf-8")
+                report_file.write_text(post_validation_gap_report, encoding="utf-8")
             return result
 
         monkeypatch.setattr(fake, "run", run_and_update_report)
+        if hosted_report:
+            run_conformance = executor._run_post_validation_conformance_check
+
+            async def compare_on_host(**kwargs: Any) -> Any:
+                run_adapter = kwargs["adapter"].run
+
+                async def run_hosted_adapter(**agent_kwargs: Any) -> AgentRunResult:
+                    result = await run_adapter(**agent_kwargs)
+                    return replace(result, terminal_head_sha=report_commit_sha)
+
+                kwargs["adapter"] = SimpleNamespace(is_hosted=True, run=run_hosted_adapter)
+                kwargs["hosted_pr_identity"] = {
+                    "head_repo_url": "https://github.com/a/b.git",
+                    "head_ref": f"awf/{ws_id}",
+                }
+                return await run_conformance(**kwargs)
+
+            monkeypatch.setattr(executor, "_run_post_validation_conformance_check", compare_on_host)
         handoff_iteration = budget if outcome == "exhausted-handoff" else 0
         remaining_repairs = budget - handoff_iteration
         _queue_pre_agent_symlink_baseline(fake)
@@ -921,11 +953,17 @@ class TestHappyPathPart002:
             fake.queue_result(returncode=0, stdout="")  # post-validation status
             fake.queue_result(returncode=0, stdout=f"{head}\n")  # conformance scope HEAD
             final = iteration == remaining_repairs
-            fake.queue_result(
-                stdout=satisfied_report
-                if final and outcome == "satisfied"
-                else post_validation_gap_report,
-            )
+            if hosted_report:
+                fake.queue_result()  # hosted comparison writes the report to its branch
+                fake.queue_result()  # fetch hosted branch
+                fake.queue_result(stdout=f"{report_commit_sha}\n")  # rev-parse FETCH_HEAD
+                fake.queue_result()  # reset to the hosted report commit
+            else:
+                fake.queue_result(
+                    stdout=satisfied_report
+                    if final and outcome == "satisfied"
+                    else post_validation_gap_report,
+                )
             fake.queue_result(stdout="" if committed_report else f"?? {report_path}\n")
             fake.queue_result(stdout=f"{report_path}\n" if committed_report else "")
             if final:
@@ -945,7 +983,7 @@ class TestHappyPathPart002:
 
         worker_restart = outcome.startswith("worker-restart")
         moved_pr_tip = outcome in {"worker-restart-descendant", "worker-restart-unrelated"}
-        publication_head = "d" * 40 if committed_report or unverified_head else head
+        publication_head = report_commit_sha if committed_report or unverified_head else head
         if outcome not in {"satisfied", "validation-failed"}:
             fake.queue_result(
                 stdout=f"{publication_head}\n",
@@ -978,6 +1016,7 @@ class TestHappyPathPart002:
                 "park",
                 "plans-output",
                 "report-only-commit",
+                "hosted-report-only-commit",
                 "exhausted-handoff",
                 "comment-retry",
                 "comment-pending",
@@ -1179,6 +1218,13 @@ class TestHappyPathPart002:
         pushes = [call.args for call in fake.calls if "push" in call.args]
         assert len(pushes) == 1
         assert pushes[0][-1] == f"{publication_head}:refs/heads/awf/{ws_id}"
+        if hosted_report:
+            reset_index = next(
+                index
+                for index, call in enumerate(fake.calls)
+                if call.args[-3:] == ["reset", "--hard", report_commit_sha]
+            )
+            assert any(call.args == pushes[0] for call in fake.calls[reset_index + 1 :])
         if committed_report:
             assert any(
                 call.args[-4:] == ["merge-base", "--is-ancestor", head, publication_head]
