@@ -54,6 +54,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
+    _PlanningConformancePark,
     _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
@@ -225,6 +226,7 @@ async def run_validation_and_fix_cycle(
     last_failure_message: str | None = None
     validation_fix_passes_used = 0
     post_validation_conformance_fix_attempts = 0
+    conformance_park: _PlanningConformancePark | None = None
     post_validation_conformance_fix_pass_budget = (
         max(
             0,
@@ -597,7 +599,9 @@ async def run_validation_and_fix_cycle(
             coverage_evidence_source_run_id=coverage_evidence.source_run_id,
         )
         if val_result.all_passed:
-            conformance_failure: _PlanningRunFailure | _PlanningNeedsHuman | None = None
+            conformance_failure: (
+                _PlanningRunFailure | _PlanningNeedsHuman | _PlanningConformancePark | None
+            ) = None
             if planning_validation_handoff is not None:
                 conformance_handoff = planning_validation_handoff
                 if adapter is None or _is_adapter_retired(adapter):
@@ -654,6 +658,7 @@ async def run_validation_and_fix_cycle(
                                 base_commit=base_commit,
                                 hosted_pr_identity=_hosted_pr_identity,
                                 conformance_scope_baseline=_conformance_scope_baseline,
+                                publish_exhausted=_handoff.iteration >= _handoff.max_iterations,
                                 require_hosted_terminal_head=(
                                     not hosted_pr_adoption_validate_only_terminal_head_skip
                                 ),
@@ -838,6 +843,9 @@ async def run_validation_and_fix_cycle(
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     )
+                if isinstance(conformance_failure, _PlanningConformancePark):
+                    conformance_park = conformance_failure
+                    conformance_failure = None
                 if conformance_failure is not None:
                     remaining_conformance_iterations = max(
                         0,
@@ -933,7 +941,12 @@ async def run_validation_and_fix_cycle(
                     )
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
-                if recovery is not None and ws.pr_url and planning_validation_handoff is not None:
+                if (
+                    conformance_park is None
+                    and recovery is not None
+                    and ws.pr_url
+                    and planning_validation_handoff is not None
+                ):
                     post_conformance_head_sha = await self._capture_workspace_head_sha(
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
@@ -1105,6 +1118,7 @@ async def run_validation_and_fix_cycle(
 
     return ExecutionValidationResult(
         stop=False,
+        conformance_park=conformance_park,
         successful_validation_run_id=successful_validation_run_id,
         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
     )

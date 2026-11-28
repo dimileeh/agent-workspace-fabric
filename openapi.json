@@ -5442,6 +5442,20 @@
         "additionalProperties": false,
         "description": "Plan \u2192 execute \u2192 compare policy supplied by the workspace profile.",
         "properties": {
+          "additional_artifact_dir": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "plans",
+            "description": "Extra workspace-relative directory treated as planning artifacts by conformance output checks. Set to null when the project uses plans/ for deliverables.",
+            "title": "Additional Artifact Dir"
+          },
           "conformance_report_path": {
             "default": "docs/awf-plans/{workspace_id}.conformance.json",
             "maxLength": 512,

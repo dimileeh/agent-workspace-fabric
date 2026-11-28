@@ -606,6 +606,14 @@ class ProfilePlanning(BaseModel):
         default="docs/awf-plans/{workspace_id}.conformance.json",
         max_length=512,
     )
+    additional_artifact_dir: str | None = Field(
+        default="plans",
+        max_length=512,
+        description=(
+            "Extra workspace-relative directory treated as planning artifacts by conformance "
+            "output checks. Set to null when the project uses plans/ for deliverables."
+        ),
+    )
     max_iterations: int = Field(default=3, ge=0, le=5)
     enforce_plan_only_changes: bool = True
     fail_on_unexplained_deviation: bool = True
@@ -615,6 +623,12 @@ class ProfilePlanning(BaseModel):
 
     @model_validator(mode="after")
     def _validate_paths(self) -> ProfilePlanning:
+        if (directory := self.additional_artifact_dir) is not None:
+            _validate_workspace_relative_path("additional_artifact_dir", directory)
+            if not PurePosixPath(directory.strip()).parts:
+                raise ValueError(
+                    "additional_artifact_dir must be a workspace-relative subdirectory"
+                )
         for field_name in ("plan_path", "conformance_report_path"):
             value = getattr(self, field_name)
             if not value or value.startswith("/") or ".." in value.split("/"):

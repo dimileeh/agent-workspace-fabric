@@ -6,6 +6,7 @@ import fnmatch
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 from awf.control.quality_gates_common import (
@@ -15,6 +16,7 @@ from awf.control.quality_gates_common import (
     _violation,
 )
 from awf.db.repositories import owned_paths_overlap
+from awf.runtime.git_porcelain import unquote_porcelain_path
 
 
 @dataclass(frozen=True)
@@ -506,7 +508,19 @@ def unowned_protected_paths(
 
 def changed_paths_are_only_internal_plan_artifacts(
     changed_paths: list[str] | tuple[str, ...],
+    *,
+    planning_artifact_paths: tuple[Path, ...] = (),
+    planning_artifact_dir: str | None = None,
 ) -> bool:
+    if planning_artifact_paths or planning_artifact_dir is not None:
+        artifact_dir = Path(planning_artifact_dir) if planning_artifact_dir is not None else None
+        decoded_paths = [Path(unquote_porcelain_path(path)) for path in changed_paths]
+        return bool(decoded_paths) and all(
+            path in planning_artifact_paths
+            or artifact_dir in path.parents
+            or _is_internal_plan_artifact_path(path.as_posix())
+            for path in decoded_paths
+        )
     normalized = [_normalize_path(path) for path in changed_paths]
     paths = [path for path in normalized if path]
     return bool(paths) and all(_is_internal_plan_artifact_path(path) for path in paths)

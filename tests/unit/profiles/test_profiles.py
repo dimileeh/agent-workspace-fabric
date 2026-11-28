@@ -814,6 +814,28 @@ def test_profile_schema_accepts_planning_policy() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("directory", ["internal/planning", None])
+def test_planning_profile_round_trips_additional_artifact_directory(directory: str | None) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "project", "planning": {"additional_artifact_dir": directory}}
+    )
+
+    restored = WorkspaceProfile.model_validate_persisted(profile.model_dump(mode="json"))
+    assert restored.planning.additional_artifact_dir == directory
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory", ["", ".", "/plans", "plans/../docs"])
+def test_planning_profile_rejects_unsafe_additional_artifact_directory(directory: str) -> None:
+    with pytest.raises(
+        ValidationError, match="additional_artifact_dir must be a workspace-relative"
+    ):
+        WorkspaceProfile.model_validate(
+            {"name": "project", "planning": {"additional_artifact_dir": directory}}
+        )
+
+
+@pytest.mark.unit
 def test_profile_planning_default_max_iterations_is_three() -> None:
     profile = WorkspaceProfile.model_validate({"name": "awf-self", "planning": {"required": True}})
 

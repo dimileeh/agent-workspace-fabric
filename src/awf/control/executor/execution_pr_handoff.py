@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +23,16 @@ from awf.control.executor.helpers import (
     _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.quality_gates import _log
+from awf.control.executor.types import _PlanningConformancePark
 from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.operator_hints import persist_operator_hint
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     append_plan_conformance_advisory,
 )
@@ -49,14 +54,36 @@ async def push_and_handoff_pr(
     in_recovery: bool,
     carried_gaps: Sequence[dict[str, str]],
     retry_gap_publication: bool,
+    conformance_park: _PlanningConformancePark | None = None,
+    validated_head_sha: str | None = None,
 ) -> None:
     """Push a validated workspace, record the PR, and start its monitor."""
+    if conformance_park is not None and not validated_head_sha:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.validating,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="Could not identify the workspace HEAD that passed validation.",
+            reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+        )
+        return
+    transition_options = (
+        {
+            "extra_conditions": (Workspace.execution_claimed_by == ws.execution_claimed_by,),
+            "on_transition": partial(
+                _stage_conformance_park, park=conformance_park, head_sha=validated_head_sha
+            ),
+        }
+        if conformance_park is not None
+        else {}
+    )
     if not await self._transition_if_current(
         workspace_id,
         from_status=WorkspaceStatus.validating,
         to=WorkspaceStatus.pushing,
         reason="VALIDATION_OK",
         action="start_push",
+        **transition_options,
     ):
         return
 
@@ -71,6 +98,13 @@ async def push_and_handoff_pr(
         action="pr_push_open",
     ):
         return
+    if conformance_park is not None and not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.pushing,
+        action="pr_push_open",
+        owner_id=ws.execution_claimed_by,
+    ):
+        return
 
     pr = await pr_open_step.push_and_open_pr(
         self,
@@ -80,7 +114,10 @@ async def push_and_handoff_pr(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         carried_gaps=carried_gaps,
-        publish_gaps_on_reused_pr=not in_recovery or retry_gap_publication,
+        publish_gaps_on_reused_pr=(
+            not in_recovery or retry_gap_publication or conformance_park is not None
+        ),
+        expected_head_sha=validated_head_sha if conformance_park is not None else None,
         retry_gap_publication=retry_gap_publication,
     )
     if pr is None:
@@ -96,8 +133,41 @@ async def push_and_handoff_pr(
         successful_validation_run_id=successful_validation_run_id,
         compose_project=compose_project,
         compose_file=compose_file,
-        carried_gaps=() if in_recovery and pr.url == ws.pr_url else carried_gaps,
+        carried_gaps=(
+            () if conformance_park is None and in_recovery and pr.url == ws.pr_url else carried_gaps
+        ),
+        conformance_park=conformance_park,
+        validated_head_sha=validated_head_sha,
         **_monitor_execution_claim_kwargs(ws),
+    )
+
+
+async def _stage_conformance_park(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    park: _PlanningConformancePark,
+    head_sha: str | None,
+) -> None:
+    # A worker can recover as soon as the pushing transition commits.
+    workspace.monitor_threads_addressed = persist_operator_hint(
+        dict(workspace.monitor_threads_addressed or {}),
+        OperatorHint(
+            reason=park.reason,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            status="needs_human",
+        ),
+    )
+    workspace.block_planning_conformance_handoff = {
+        "carried_gaps": park.gaps,
+        "conformance_park_head_sha": head_sha,
+        **park.details,
+    }
+    await repo.add_event(
+        workspace,
+        event_type="workspace.plan_conformance_operator_wait",
+        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        payload={**park.details, "head_sha": head_sha},
     )
 
 
@@ -114,8 +184,11 @@ async def persist_pr_and_handoff(
     compose_file: Path,
     carried_gaps: Sequence[dict[str, str]] = (),
     dormancy_execution_claim: tuple[str, int] | None = None,
+    conformance_park: _PlanningConformancePark | None = None,
+    validated_head_sha: str | None = None,
 ) -> None:
     """Persist PR metadata and hand off to the monitor when configured."""
+    target_head_sha = validated_head_sha if conformance_park is not None else pr.head_sha
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         persisted = await repo.get_for_update(workspace_id)
@@ -207,7 +280,7 @@ async def persist_pr_and_handoff(
                 to=WorkspaceStatus.failed,
                 reason_code=_PR_CONFORMANCE_COMMENT_FAILED_REASON_CODE,
             )
-        elif monitor is not None:
+        elif monitor is not None or conformance_park is not None:
             if not had_existing_pr_url:
                 persisted.monitor_threads_addressed = _with_settled_disposition_baseline(
                     persisted.monitor_threads_addressed
@@ -217,29 +290,45 @@ async def persist_pr_and_handoff(
                 to=WorkspaceStatus.monitoring_pr,
                 reason_code=pr_reason_code,
             )
+            if conformance_park is not None:
+                await repo.set_workspace_attention(
+                    workspace_id,
+                    reason=conformance_park.reason,
+                    now=datetime.now(UTC),
+                )
         else:
             await repo.transition(
                 persisted,
                 to=WorkspaceStatus.completed,
                 reason_code=pr_reason_code,
             )
+        if (
+            conformance_park is not None
+            and successful_validation_run_id is not None
+            and target_head_sha
+        ):
+            # Recovery can start monitoring as soon as this transaction commits.
+            await ValidationRunRepository(session).update_target_head_sha(
+                successful_validation_run_id,
+                target_head_sha=target_head_sha,
+            )
         await session.commit()
 
-    if successful_validation_run_id is not None and pr.head_sha:
+    if conformance_park is None and successful_validation_run_id is not None and target_head_sha:
         try:
             await self._set_validation_run_target_head_sha(
                 validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
+                target_head_sha=target_head_sha,
             )
         except Exception:
             _log.exception(
                 "executor.validation_run_target_head_sha_update_failed",
                 workspace_id=workspace_id,
                 validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
+                target_head_sha=target_head_sha,
             )
 
-    if publication_pending:
+    if publication_pending or (conformance_park is not None and monitor is None):
         return
     if monitor is not None:
         _log.info(

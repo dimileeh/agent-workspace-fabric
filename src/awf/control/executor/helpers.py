@@ -398,9 +398,22 @@ def _call_pr_monitor_factory(
     raise bind_errors[0]
 
 
-def _render_pr_conformance_gaps(gaps: Sequence[dict[str, str]]) -> str:
+def _render_pr_conformance_gaps(
+    gaps: Sequence[dict[str, str]],
+    *,
+    operator_wait: bool = False,
+) -> str:
     """Format each compare finding as a single Markdown list item."""
     lines = ["### Unresolved plan-conformance gaps", ""]
+    if operator_wait:
+        lines.extend(
+            [
+                f"`{PLAN_CONFORMANCE_UNSATISFIED}`",
+                "",
+                "AWF validation passed. Use `workspace guide --directive` to address these gaps.",
+                "",
+            ]
+        )
     for gap in gaps:
         detail = escape(" ".join(gap["detail"].splitlines()), quote=False)
         detail = re.sub(r"([\\`*_~\[\]])", r"\\\1", detail)

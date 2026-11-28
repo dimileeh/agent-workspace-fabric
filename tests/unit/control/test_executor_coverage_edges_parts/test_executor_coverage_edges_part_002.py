@@ -1142,7 +1142,7 @@ async def test_post_validation_conformance_failure_counts_handoff_iterations(
 
     assert failure is not None
     assert failure.details is not None
-    assert failure.details["conformance"]["iterations_used"] == 3
+    assert failure.details["conformance"]["iterations_used"] == 1
     assert failure.details["conformance"]["max_iterations"] == 2
 
 
