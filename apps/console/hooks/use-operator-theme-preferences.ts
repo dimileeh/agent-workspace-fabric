@@ -22,17 +22,23 @@ export function useOperatorThemePreferences(embedded: boolean) {
   const [operatorPreferences, setOperatorPreferences] = useState<OperatorPreferences>(
     DEFAULT_OPERATOR_PREFERENCES,
   );
+  const operatorPreferencesRef = useRef(DEFAULT_OPERATOR_PREFERENCES);
   const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
   const [systemTheme, setSystemTheme] = useState<ResolvedOperatorTheme>("light");
 
   useEffect(() => {
-    setOperatorPreferences(readStoredOperatorPreferences());
+    const readPreferences = () => {
+      const preferences = readStoredOperatorPreferences();
+      operatorPreferencesRef.current = preferences;
+      setOperatorPreferences(preferences);
+    };
+    readPreferences();
     setOperatorPreferencesHydrated(true);
     if (!embedded) return;
     const syncPreferences = (event: StorageEvent) => {
       if ((event.key === OPERATOR_PREFERENCES_STORAGE_KEY || event.key === null) &&
           event.storageArea === window.localStorage) {
-        setOperatorPreferences(readStoredOperatorPreferences());
+        readPreferences();
       }
     };
     window.addEventListener("storage", syncPreferences);
@@ -56,8 +62,11 @@ export function useOperatorThemePreferences(embedded: boolean) {
   }, [embedded, operatorPreferences, operatorPreferencesHydrated, systemTheme]);
 
   const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
-    setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
-  }, []);
+    const preferences = normalizeOperatorPreferences({ ...operatorPreferencesRef.current, ...next });
+    operatorPreferencesRef.current = preferences;
+    setOperatorPreferences(preferences);
+    if (embedded) writeStoredOperatorPreferences(preferences);
+  }, [embedded]);
 
   return { operatorPreferences, updateOperatorPreferences };
 }

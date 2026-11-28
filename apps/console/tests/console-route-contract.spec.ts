@@ -296,7 +296,7 @@ for (const [mode, origin] of [
     await page.goto(`${origin}${mode.homePath}?${query}`);
     const header = page.locator("main > header");
     await expect(header.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
-    await expect(header.getByRole("heading")).toHaveCount(0);
+    await expect(header.getByRole("heading", { name: "AWF Console", exact: true })).toBeVisible();
 
     const detail = page.waitForRequest(request =>
       pathOf(request) === `${mode.apiPrefix}/workspaces/${WORKSPACE_ID}`);
