@@ -413,7 +413,6 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
 
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)
-
         missing_monitor_metadata = _remonitor_missing_metadata(workspace)
         if missing_monitor_metadata:
             raise WorkspaceRemonitorMetadataMissingError(
@@ -516,9 +515,8 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        # Remonitor resumes polling. A conformance park still requires a guide
-        # directive, including when remonitor retries delivery of the gap notice.
         woke_dormant = await _wake_dormant_monitor(repo, workspace, operation)
+        # Retry the gap notice while keeping the conformance park until a guide directive.
         if conformance_park is not None:
             await repo.set_workspace_attention(
                 workspace_id,
