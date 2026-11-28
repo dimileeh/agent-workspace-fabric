@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -66,12 +67,23 @@ async def push_and_handoff_pr(
             reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
         )
         return
+    transition_options = (
+        {
+            "extra_conditions": (Workspace.execution_claimed_by == ws.execution_claimed_by,),
+            "on_transition": partial(
+                _stage_conformance_park, park=conformance_park, head_sha=validated_head_sha
+            ),
+        }
+        if conformance_park is not None
+        else {}
+    )
     if not await self._transition_if_current(
         workspace_id,
         from_status=WorkspaceStatus.validating,
         to=WorkspaceStatus.pushing,
         reason="VALIDATION_OK",
         action="start_push",
+        **transition_options,
     ):
         return
 
@@ -86,42 +98,13 @@ async def push_and_handoff_pr(
         action="pr_push_open",
     ):
         return
-
-    if conformance_park is not None:
-        # The worker can discover the PR if publication is interrupted. Stage
-        # the park before any forge writes so its recovered monitor also waits.
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            persisted = await repo.get_for_update(workspace_id)
-            if (
-                persisted is None
-                or persisted.status != WorkspaceStatus.pushing.value
-                or persisted.execution_claimed_by != ws.execution_claimed_by
-            ):
-                return
-            persisted.monitor_threads_addressed = persist_operator_hint(
-                dict(persisted.monitor_threads_addressed or {}),
-                OperatorHint(
-                    reason=conformance_park.reason,
-                    reason_code=PLAN_CONFORMANCE_UNSATISFIED,
-                    status="needs_human",
-                ),
-            )
-            persisted.block_planning_conformance_handoff = {
-                "carried_gaps": conformance_park.gaps,
-                "conformance_park_head_sha": validated_head_sha,
-                **conformance_park.details,
-            }
-            await repo.add_event(
-                persisted,
-                event_type="workspace.plan_conformance_operator_wait",
-                reason_code=PLAN_CONFORMANCE_UNSATISFIED,
-                payload={
-                    **conformance_park.details,
-                    "head_sha": validated_head_sha,
-                },
-            )
-            await session.commit()
+    if conformance_park is not None and not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.pushing,
+        action="pr_push_open",
+        owner_id=ws.execution_claimed_by,
+    ):
+        return
 
     pr = await pr_open_step.push_and_open_pr(
         self,
@@ -156,6 +139,35 @@ async def push_and_handoff_pr(
         conformance_park=conformance_park,
         validated_head_sha=validated_head_sha,
         **_monitor_execution_claim_kwargs(ws),
+    )
+
+
+async def _stage_conformance_park(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    park: _PlanningConformancePark,
+    head_sha: str | None,
+) -> None:
+    # A worker can recover as soon as the pushing transition commits.
+    workspace.monitor_threads_addressed = persist_operator_hint(
+        dict(workspace.monitor_threads_addressed or {}),
+        OperatorHint(
+            reason=park.reason,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            status="needs_human",
+        ),
+    )
+    workspace.block_planning_conformance_handoff = {
+        "carried_gaps": park.gaps,
+        "conformance_park_head_sha": head_sha,
+        **park.details,
+    }
+    await repo.add_event(
+        workspace,
+        event_type="workspace.plan_conformance_operator_wait",
+        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        payload={**park.details, "head_sha": head_sha},
     )
 
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import (
     UTC,
     datetime,
@@ -22,6 +22,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
@@ -429,6 +430,8 @@ async def _transition_if_current(
     to: WorkspaceStatus,
     reason: str,
     action: str,
+    extra_conditions: tuple[ColumnElement[bool], ...] = (),
+    on_transition: Callable[[WorkspaceRepository, Workspace], Awaitable[None]] | None = None,
 ) -> bool:
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
@@ -437,8 +440,11 @@ async def _transition_if_current(
             from_status=from_status,
             to=to,
             reason_code=reason,
+            extra_conditions=extra_conditions,
         )
         if ws is not None:
+            if on_transition is not None:
+                await on_transition(repo, ws)
             await session.commit()
             return True
 

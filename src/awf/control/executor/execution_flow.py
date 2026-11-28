@@ -1432,13 +1432,26 @@ async def execute(
     )
 
     conformance_park = validation_result.conformance_park
+    staged_park_head = recovery.get("conformance_park_head_sha") if recovery else None
     if (
         conformance_park is None
         and recovery is not None
         and successful_validation_run_id is not None
-        and (not ws.pr_url or retry_gap_publication)
+        and (not ws.pr_url or retry_gap_publication or staged_park_head is not None)
     ):
         conformance_park = _pending_conformance_park(ws, successful_validation_run_id)
+    if staged_park_head is not None and (
+        conformance_park is None or successful_validation_workspace_head_sha != staged_park_head
+    ):
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.validating,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="Could not revalidate the staged plan-conformance handoff.",
+            reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+            execution_owner_id=execution_owner_id,
+        )
+        return
     planning_artifact_paths: tuple[Path, ...] = ()
     if conformance_park is not None:
         evidence = conformance_park.details["conformance"]

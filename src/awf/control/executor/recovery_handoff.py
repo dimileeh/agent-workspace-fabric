@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import parse_forge_pull_request_url
 from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
@@ -27,6 +29,7 @@ from awf.control.executor.helpers import (
     _render_pr_conformance_gaps,
 )
 from awf.control.executor.pr_open_step import (
+    _live_head_descends_from_pushed,
     _pr_snapshot_contains_pushed_tip,
     retry_pr_conformance_comment,
 )
@@ -47,6 +50,10 @@ from awf.hosted_node.identity import MaterialDeniedError
 from awf.profiles.models import WorkspaceProfile
 
 
+class GapNoticeRecovery(Enum):
+    push_required = "push_required"
+
+
 async def ensure_carried_gaps_published(
     runner: AsyncCommandRunner,
     *,
@@ -57,7 +64,8 @@ async def ensure_carried_gaps_published(
     validated_head_sha: str | None = None,
     worktree_path: Path | None = None,
     fetch_remote: str = "origin",
-) -> str | None:
+    allow_predecessor: bool = False,
+) -> str | GapNoticeRecovery | None:
     """Confirm the notice or publish it on the PR before attaching its monitor."""
     operator_wait = validated_head_sha is not None
     gap_section = _render_pr_conformance_gaps(carried_gaps, operator_wait=operator_wait)
@@ -76,6 +84,21 @@ async def ensure_carried_gaps_published(
                     worktree_path=worktree_path,
                     fetch_remote=fetch_remote,
                 ):
+                    if (
+                        allow_predecessor
+                        and snapshot.lifecycle is PullRequestLifecycle.open
+                        and snapshot.head_sha
+                        and validated_head_sha
+                        and worktree_path is not None
+                        and await _live_head_descends_from_pushed(
+                            runner=runner,
+                            worktree_path=worktree_path,
+                            ancestor_sha=snapshot.head_sha,
+                            descendant_sha=validated_head_sha,
+                            fetch_remote=fetch_remote,
+                        )
+                    ):
+                        return GapNoticeRecovery.push_required
                     return "The pull request does not contain the validated tip"
             else:
                 body = await client.fetch_pull_request_body(repo=repo, pr_number=pr_number)
