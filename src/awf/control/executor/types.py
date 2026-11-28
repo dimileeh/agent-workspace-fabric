@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from awf.runtime.planning import PlanConformanceReport
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED, PlanConformanceReport
 from awf.runtime.validation import ValidationCoverageResult
 
 # A non-terminal pause that the worker resumes in place. ``blocked`` is the
@@ -67,9 +67,21 @@ class _PlanningNeedsHuman:
 
 @dataclass(frozen=True)
 class _PlanningCarriedGaps:
-    """Redacted gaps from the exhausted initial compare loop."""
+    """Redacted gaps for PR disclosure and monitor repair."""
 
     gaps: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class _PlanningConformancePark(_PlanningCarriedGaps):
+    """Unresolved gaps on a validated head after all plan repairs were used."""
+
+    details: dict[str, Any]
+
+    @property
+    def reason(self) -> str:
+        gaps = "; ".join(gap["detail"] for gap in self.gaps)
+        return f"{PLAN_CONFORMANCE_UNSATISFIED}: {gaps}"[:2000]
 
 
 @dataclass(frozen=True)

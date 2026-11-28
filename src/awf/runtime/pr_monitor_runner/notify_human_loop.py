@@ -23,6 +23,8 @@ from awf.db.enums import (
 )
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.operator_hints import operator_hint_from_threads
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
@@ -304,7 +306,24 @@ async def handle_notify_human_action(
     # repeated NotifyHuman for the same block; the reason tracks the latest.
     threshold = self._config.human_wait_dormant_after_seconds if allow_dormancy else None
     wait_observed_at = self._deps.now() if threshold is not None else None
-    awaiting_since = await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
+    conformance_park = action.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    if conformance_park:
+        # A concurrent guide clears attention and replaces the persisted hint.
+        # Match that hint under the row lock before refreshing the old episode.
+        awaiting_since = None
+        async with self._deps.session_factory.begin() as session:
+            workspace_repo = WorkspaceRepository(session)
+            workspace = await workspace_repo.get_for_update(workspace_id)
+            if workspace is not None:
+                hint = operator_hint_from_threads(workspace.monitor_threads_addressed or {})
+                if hint is not None and hint == state.pending_operator_hint:
+                    awaiting_since = await workspace_repo.set_workspace_attention(
+                        workspace_id,
+                        reason=human_wait_reason,
+                        now=self._deps.now(),
+                    )
+    else:
+        awaiting_since = await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
     if awaiting_since is None:
         # A concurrent clear or replacement can reject the refresh while the
         # workspace still needs to poll. Use the suspension lock when settling
@@ -324,19 +343,20 @@ async def handle_notify_human_action(
                 )
                 return DormancyExit.SUPERSEDED
     try:
-        await self._post_human_notification_once(
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            blocker_reason=action.message,
-            disposition_count_rows=disposition_count_rows,
-            # No boundary re-read armed here: ``status`` is THIS cycle's poll
-            # snapshot that ``decide()`` just returned ``NotifyHuman`` on, with no
-            # long action in between — unlike the workflow-scope and merge-rejection
-            # arms, whose snapshots pre-date a push or a merge attempt. A merged or
-            # closed PR is caught by the next poll's ``decide()``.
-        )
+        if not conformance_park:  # The handoff already published the gap notice.
+            await self._post_human_notification_once(
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                blocker_reason=action.message,
+                disposition_count_rows=disposition_count_rows,
+                # No boundary re-read armed here: ``status`` is THIS cycle's poll
+                # snapshot that ``decide()`` just returned ``NotifyHuman`` on, with no
+                # long action in between — unlike the workflow-scope and merge-rejection
+                # arms, whose snapshots pre-date a push or a merge attempt. A merged or
+                # closed PR is caught by the next poll's ``decide()``.
+            )
     except ForgeClientError as exc:
         # Both forges post the human notification through ``self._deps.gh``;
         # either raises a ``ForgeClientError`` subclass. Catching the shared base
@@ -429,7 +449,7 @@ async def handle_notify_human_action(
         status=OperationStatus.succeeded,
         result={
             "status": "succeeded",
-            "outcome": "human_notification_posted",
+            "outcome": "human_wait" if conformance_park else "human_notification_posted",
             "slept_seconds": self._config.poll_interval_seconds,
         },
     )

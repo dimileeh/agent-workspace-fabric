@@ -133,6 +133,39 @@ async def test_committed_output_gate_fails_on_plan_only_net_diff() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("changed_path", "plan_only"),
+    [
+        (r'"internal/planning/caf\303\251.md"', True),
+        ("internal/planning-guide/usage.md", False),
+    ],
+)
+async def test_committed_output_gate_uses_configured_artifact_directory(
+    changed_path: str, plan_only: bool
+) -> None:
+    plan_path = Path("docs/ws_x.md")
+    executor = _committed_output_gate_executor({plan_path, Path(changed_path)})
+
+    result = await executor_quality_methods._fail_if_plan_only_committed_output(
+        executor,
+        workspace_id="ws_x",
+        worktree_path=Path("/wt"),
+        base_commit="b" * 40,
+        expected_status=WorkspaceStatus.validating,
+        planning_artifact_paths=(plan_path,),
+        planning_artifact_dir="internal/planning",
+    )
+
+    assert result is plan_only
+    if plan_only:
+        assert (
+            executor._mark_failed.await_args.kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
+        )
+    else:
+        executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_committed_output_gate_proceeds_on_real_net_diff() -> None:
     """Net committed output has a real file -> gate passes, no failure marked."""
     executor = _committed_output_gate_executor({Path("src/foo.py")})

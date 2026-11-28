@@ -517,8 +517,9 @@ def test_post_validation_conformance_failure_text_includes_structured_report_det
     ("conformance_fields", "payload_fields", "expected_iteration", "expected_max_iterations"),
     [
         ({"iteration": 2, "max_iterations": 5}, {}, 2, 5),
-        ({}, {"iteration": 1, "max_iterations": 0}, 1, 0),
+        ({}, {"iteration": 1, "max_iterations": 0}, 0, 0),
         ({}, {}, 0, 3),
+        ({"iteration": 5, "max_iterations": 3}, {}, 3, 3),
     ],
 )
 def test_recovery_conformance_handoff_preserves_iteration_budget(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -284,8 +285,10 @@ async def test_hosted_post_validation_conformance_syncs_terminal_head_before_sco
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("budget", [0, 3])
 async def test_hosted_post_validation_conformance_terminal_head_updates_pr_identity(
     tmp_path: Path,
+    budget: int,
 ) -> None:
     order: list[str] = []
     worktree_path = tmp_path / "worktree"
@@ -323,7 +326,7 @@ async def test_hosted_post_validation_conformance_terminal_head_updates_pr_ident
         compose_file=tmp_path / "compose.yml",
         worktree_path=worktree_path,
         model="gpt-5",
-        handoff=_handoff(report_path),
+        handoff=replace(_handoff(report_path), iteration=budget, max_iterations=budget),
         validation_run_id="val_hosted",
         base_commit=initial_head_sha,
         hosted_pr_identity=hosted_pr_identity,
@@ -336,6 +339,8 @@ async def test_hosted_post_validation_conformance_terminal_head_updates_pr_ident
 
     assert failure is not None
     assert failure.reason_code == "PLAN_CONFORMANCE_UNSATISFIED"
+    assert failure.details["conformance"]["iterations_used"] == budget
+    assert failure.details["conformance"]["max_iterations"] == budget
     assert hosted_pr_identity["expected_head_sha"] == terminal_head_sha
 
 

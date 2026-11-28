@@ -1110,11 +1110,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     is Merge, ShortCircuitCompleted, or Abort(pr_closed_externally).
     """
 
-    # 0. Terminal upstream states short-circuit everything.
     if status.merged:
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    # Planning reaches this module through the forge clients during import.
+    from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+
+    hint = state.pending_operator_hint
+    if hint is not None and hint.reason_code == PLAN_CONFORMANCE_UNSATISFIED:
+        return NotifyHuman(message=hint.reason, reason_code=hint.reason_code)
 
     # 0a. Failed conflict-undo park outranks Merge and every other action.
     from awf.runtime.pr_monitor_runner import ci_repair_conflict_rollback as _crb
@@ -1122,16 +1128,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if (pending_rollback := _crb.notify_human_for_conflict_rollback_pending(state)) is not None:
         return pending_rollback
 
-    # 0b. The PR was retargeted on the forge after provisioning. Every policy the
-    # monitor carries is keyed to the workspace's persisted ``branch_base``:
-    # ``auto_merge`` was resolved from ``monitor.auto_merge.by_base_branch`` at
-    # provision time, and SyncBase integrates that same branch. Acting on a
-    # retargeted PR would merge it into the new base under the OLD base's policy
-    # (e.g. an auto-merging ``development`` workspace retargeted onto a
-    # human-gated ``main``) and would push the wrong base's commits into the head.
-    # AWF owns merge safety and cannot re-resolve the new base's policy from a
-    # snapshot, so hand off. ``NotifyHuman`` is a live wait state, not a terminal
-    # failure: retargeting the PR back clears the drift on the next poll.
+    # 0b. Auto-merge policy and SyncBase use the workspace's persisted branch_base.
+    # Retargeting can apply the wrong merge policy or integrate the wrong base.
+    # Wait for the operator to restore the original target.
     if status.base_ref_drifted:
         return NotifyHuman(message=_base_ref_drift_human_message(status.base_ref))
 

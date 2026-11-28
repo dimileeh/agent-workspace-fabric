@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -68,6 +68,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _pending_conformance_park,
     _planning_carried_gaps_from_metadata,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
@@ -152,7 +153,9 @@ async def execute(
     worktree_path = self._config.worktrees_root / workspace_id
 
     def _deposit_planning_artifacts() -> None:
-        # Best-effort deposit before handlers return with a preserved FAILED worktree.
+        # Deposit best-effort before exiting early or publishing a failure/block.
+        # The console refetches artifacts when the transition bumps updated_at,
+        # so publishing first can leave it showing an empty artifact list.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
@@ -871,12 +874,6 @@ async def execute(
         expected=WorkspaceStatus.running,
         action="post_agent_commit",
     ):
-        # The workspace transitioned out of ``running`` concurrently (e.g. a
-        # cancel that preserves the worktree). Planning may already have
-        # finished and written the plan + conformance report into the worktree,
-        # but this skip returns before the post-validation deposit block.
-        # Deposit them first, mirroring the agent-phase failure handlers above,
-        # so the console can still surface them. Best-effort and idempotent.
         _deposit_planning_artifacts()
         return
 
@@ -900,11 +897,6 @@ async def execute(
     # inject the literal string "None" into a git command. Fail
     # cleanly instead of passing "None..HEAD" to git.
     if ws.base_commit is None:
-        # This invariant violation marks the workspace FAILED and returns
-        # before the post-validation deposit block, stranding any plan +
-        # conformance report the agent already wrote into the preserved-
-        # FAILED worktree. Deposit them first, mirroring the agent-phase
-        # failure handlers above. Best-effort and idempotent.
         _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
@@ -991,16 +983,6 @@ async def execute(
                     changed_paths=staged_paths,
                 )
                 if supply_chain_result.policy_blocked:
-                    # Planning ran before this post-agent policy gate, so the
-                    # preserved FAILED worktree can already hold the plan +
-                    # conformance report. Deposit them BEFORE ``_mark_failed``
-                    # publishes the terminal status: the console keys its artifact
-                    # refetch on the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window before
-                    # the deposit, record an empty artifact list, then never refetch
-                    # — hiding the Plan/Validation controls. Best-effort and
-                    # idempotent.
                     _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
@@ -1016,17 +998,6 @@ async def execute(
                         base_commit=base_commit,
                         staged_paths=staged_paths,
                     ):
-                        # Plan-only output will mark the workspace FAILED. Planning
-                        # ran before this gate, so the preserved worktree holds the
-                        # plan + conformance report. Deposit them BEFORE
-                        # ``_fail_if_plan_only_paths`` publishes the terminal status:
-                        # the console keys its artifact refetch on the workspace
-                        # ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
-                        # marking FAILED first would bump ``updated_at`` and let a
-                        # poll observe it in the window before the deposit, record an
-                        # empty artifact list, then never refetch — hiding the
-                        # Plan/Validation controls. This branch returns before the
-                        # post-validation deposit block. Best-effort and idempotent.
                         _deposit_planning_artifacts()
                         # The plan-only gate above already confirmed the staged
                         # delta is entirely internal plan artifacts, so this marks
@@ -1052,13 +1023,6 @@ async def execute(
                         ),
                     )
                     if violations:
-                        # A protected quality-gate edit outside owned_paths pauses
-                        # the workspace for an operator decision instead of throwing
-                        # away the spent work. Deposit the plan + conformance report
-                        # BEFORE the block transition for the same artifact-ordering
-                        # reason as the FAILED paths (the transition bumps
-                        # ``updated_at``, which the console keys its refetch on).
-                        # Best-effort and idempotent.
                         _deposit_planning_artifacts()
                         await self.enter_blocked_for_protected_violation(
                             workspace_id=workspace_id,
@@ -1175,17 +1139,6 @@ async def execute(
                     if agent_exit_note is not None:
                         message = f"{message}; {agent_exit_note}"
 
-                    # Planning ran before this no-work check, so the preserved
-                    # FAILED worktree can already hold the plan + conformance
-                    # report even though the implementation produced no commits.
-                    # Deposit them BEFORE ``_mark_failed`` publishes the terminal
-                    # status: the console keys its artifact refetch on the
-                    # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``),
-                    # and marking FAILED first would bump ``updated_at`` and let a
-                    # poll observe it in the window before the deposit, record an
-                    # empty artifact list, then never refetch — hiding the
-                    # Plan/Validation controls. This branch returns before the
-                    # post-validation deposit block. Best-effort and idempotent.
                     _deposit_planning_artifacts()
                     # A retryable provider failure with retry budget remaining diverts
                     # into the auto-healing ``recovering`` pause INSTEAD of going
@@ -1271,18 +1224,6 @@ async def execute(
                         reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                         error_message=message,
                     )
-                    # Planning may have run before this monitor-rebase recovery, so
-                    # the preserved FAILED worktree can already hold the plan +
-                    # conformance report. Deposit them BEFORE ``_mark_failed``
-                    # publishes the terminal status: the console keys its artifact
-                    # refetch on the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window before
-                    # the deposit, record an empty artifact list, then never refetch
-                    # — hiding the Plan/Validation controls. This branch returns from
-                    # inside the ``try`` before the post-validation deposit block,
-                    # and a plain ``return`` bypasses the ``except`` deposit handlers
-                    # below. Best-effort and idempotent.
                     _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
@@ -1295,17 +1236,6 @@ async def execute(
         except MirrorHooksPathRepairAbortedError:
             return
         except _PostAgentCommitStepError as exc:
-            # Planning ran before the commit step, so the worktree (preserved on
-            # the FAILED workspace) can already hold the plan + conformance report.
-            # Deposit them BEFORE ``_mark_post_agent_commit_failed`` publishes the
-            # terminal status: the console keys its artifact refetch on the
-            # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
-            # marking FAILED first would bump ``updated_at`` and let a poll observe
-            # it in the window before the deposit, record an empty artifact list,
-            # then never refetch — hiding the Plan/Validation controls. Otherwise a
-            # commit-step failure (e.g. a pre-commit hook rejecting the staged
-            # changes) strands the artifacts in the worktree. Best-effort and
-            # idempotent.
             _deposit_planning_artifacts()
             await self._mark_post_agent_commit_failed(
                 workspace_id=workspace_id,
@@ -1318,14 +1248,6 @@ async def execute(
             )
             return
         except Exception as exc:  # unexpected — mark infrastructure
-            # Planning ran before the commit step, so the worktree (preserved on the
-            # FAILED workspace) can already hold the plan + conformance report. Every
-            # failure-return path below marks the workspace FAILED and returns before
-            # the post-validation deposit block, so deposit them now — otherwise an
-            # unexpected commit-step error (e.g. a failed ``git rev-list`` or an
-            # unrecoverable missing-HEAD) strands the artifacts in the worktree and
-            # the console can never surface them. Best-effort and idempotent: the
-            # recovery fall-through redeposits at the post-validation block.
             _deposit_planning_artifacts()
             if _git_error_indicates_missing_head_object(str(exc)):
                 recover_missing_head = getattr(
@@ -1430,7 +1352,58 @@ async def execute(
         validation_result.successful_validation_workspace_head_sha
     )
 
-    if await handle_recovery_pr_handoff_after_validation(
+    conformance_park = validation_result.conformance_park
+    staged_park_head = recovery.get("conformance_park_head_sha") if recovery else None
+    if recovery is not None and not ws.pr_url:
+        # Older recovery operations may lack the staged SHA in their payload.
+        metadata = ws.block_planning_conformance_handoff or {}
+        staged_park_head = metadata.get("conformance_park_head_sha", staged_park_head)
+    staged_head_matches = (
+        staged_park_head is None or successful_validation_workspace_head_sha == staged_park_head
+    )
+    if (
+        conformance_park is None
+        and recovery is not None
+        and successful_validation_run_id is not None
+        and (not ws.pr_url or retry_gap_publication or staged_park_head is not None)
+        and staged_head_matches
+    ):
+        conformance_park = _pending_conformance_park(ws, successful_validation_run_id)
+    if not staged_head_matches or (staged_park_head is not None and conformance_park is None):
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.validating,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="Could not revalidate the staged plan-conformance handoff.",
+            reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+            execution_owner_id=execution_owner_id,
+        )
+        return
+    publication_head_sha = successful_validation_workspace_head_sha
+    planning_artifact_paths: tuple[Path, ...] = ()
+    if conformance_park is not None:
+        evidence = conformance_park.details["conformance"]
+        report_path = Path(evidence["report_path"])
+        planning_artifact_paths = (Path(evidence["plan_path"]), report_path)
+        carried_gaps = conformance_park.gaps
+        if validation_result.conformance_park is not None and publication_head_sha is not None:
+            # Conformance may commit its report after validation. Pin the
+            # publication to that exact commit once its scope is verified.
+            conformance_head_sha = await self._git_rev_parse_head(worktree_path)
+            if conformance_head_sha is None or not await _is_report_only_descendant(
+                _git_in_worktree, publication_head_sha, conformance_head_sha, report_path
+            ):
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="Could not verify that the conformance HEAD preserves validated work.",
+                    reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+                    execution_owner_id=execution_owner_id,
+                )
+                return
+            publication_head_sha = conformance_head_sha
+    elif await handle_recovery_pr_handoff_after_validation(
         self,
         workspace_id=workspace_id,
         ws=ws,
@@ -1454,6 +1427,10 @@ async def execute(
         worktree_path=worktree_path,
         base_commit=base_commit,
         owned_paths=list(ws.owned_paths),
+        planning_artifact_paths=planning_artifact_paths,
+        planning_artifact_dir=(
+            profile.planning.additional_artifact_dir if conformance_park is not None else None
+        ),
         execution_owner_id=execution_owner_id,
         repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
     ):
@@ -1480,4 +1457,34 @@ async def execute(
         in_recovery=recovery is not None,
         carried_gaps=carried_gaps,
         retry_gap_publication=retry_gap_publication,
+        conformance_park=conformance_park,
+        validated_head_sha=publication_head_sha,
     )
+
+
+async def _is_report_only_descendant(
+    git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    validated_head_sha: str,
+    candidate_head_sha: str,
+    report_path: Path,
+) -> bool:
+    if candidate_head_sha == validated_head_sha:
+        return True
+    ancestry = await git_in_worktree(
+        ["merge-base", "--is-ancestor", validated_head_sha, candidate_head_sha]
+    )
+    if not ancestry.ok:
+        return False
+    diff = await git_in_worktree(
+        [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--ignore-submodules=none",
+            "-z",
+            validated_head_sha,
+            candidate_head_sha,
+            "--",
+        ]
+    )
+    return diff.ok and not (set(diff.stdout.split("\0")) - {"", report_path.as_posix()})

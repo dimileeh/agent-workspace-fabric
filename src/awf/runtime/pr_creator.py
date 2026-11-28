@@ -173,6 +173,7 @@ class PullRequestCreator:
         existing_pr_url: str | None = None,
         remote_branch_name: str | None = None,
         remote_url: str | None = None,
+        expected_head_sha: str | None = None,
     ) -> PullRequestResult:
         if existing_pr_url and remote_branch_name:
             push_target_branch = _short_branch_name(remote_branch_name)
@@ -195,6 +196,17 @@ class PullRequestCreator:
             branch_name=push_target_branch,
             base_branch=base_branch,
         )
+
+        if expected_head_sha is not None:
+            if head_sha != expected_head_sha:
+                raise PullRequestError(
+                    operation="git push",
+                    returncode=1,
+                    stderr="workspace HEAD changed after validation",
+                    reason_code="VALIDATION_MISSING_FOR_CURRENT_HEAD",
+                    head_sha=head_sha,
+                )
+            push_ref = f"{expected_head_sha}:{_HEADS_REF_PREFIX}{push_target_branch}"
 
         # Step 1: push the branch.
         push = await self._runner.run(

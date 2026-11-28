@@ -9,22 +9,28 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common import github_transport as _github_transport
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import WorkspaceExecutor
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import pr_open_step as _pr_open_step
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.node.compose_manager import ComposeManager
+from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
+from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     load_applied_operator_directives,
 )
+from awf.runtime.validation import ValidationRunner
 from awf.service.artifacts import DEPOSITED_CONFORMANCE_NAME, workspace_artifact_dir
 from awf.service.doctor.reasons import reason_text_for_code
 from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_parts.test_executor_part_003 import (
+    _TEMPLATE,
     _adapter_prompt_calls,
     _adapter_prompts,
     _created_pr_body,
@@ -49,6 +55,7 @@ class TestPlanningConformancePublication:
             "exhausted",
             "exhausted-with-transient-diff-error",
             "exhausted-with-nul",
+            "exhausted-with-plans-output",
             "cancelled-at-compare",
             "reconciled-duplicate",
             "reconciled-transient",
@@ -71,6 +78,8 @@ class TestPlanningConformancePublication:
         monkeypatch: pytest.MonkeyPatch,
         outcome: str,
     ) -> None:
+        plans_output = outcome == "exhausted-with-plans-output"
+        planning_options = {"additional_artifact_dir": "internal/planning"} if plans_output else {}
         ws_id = await _seed_ready_workspace(
             factory,
             resolved_profile={
@@ -78,6 +87,7 @@ class TestPlanningConformancePublication:
                 "planning": {
                     "required": True,
                     "max_iterations": 1,
+                    **planning_options,
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
@@ -178,7 +188,11 @@ class TestPlanningConformancePublication:
                 fake.queue_result(returncode=1, stderr="temporary git diff failure")
             fake.queue_result(
                 returncode=0,
-                stdout="docs/awf-plans/workspace.md\ndocs/usage.md\n",
+                stdout=(
+                    "plans/usage.md\n"
+                    if plans_output
+                    else "docs/awf-plans/workspace.md\ndocs/usage.md\n"
+                ),
             )  # committed net diff from the provisioned base
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
@@ -460,3 +474,243 @@ class TestPlanningConformancePublication:
             assert events == []
             assert records == ()
             assert "Unresolved plan-conformance gaps" not in body
+
+    @pytest.mark.unit
+    async def test_post_validation_conformance_fix_does_not_consume_validation_fix_budget(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={AgentRuntime.codex: "gpt-5"},
+                max_validation_fix_passes=1,
+            ),
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 3,
+                    "enforce_plan_only_changes": True,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Only AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
+            }
+        )
+        post_validation_gap_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Validation passed, but the implementation still misses the plan.",
+                "gaps": ["Add the saved API behavior required by the plan."],
+            }
+        )
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation evidence satisfy the plan",
+                "gaps": [],
+            }
+        )
+
+        _queue_pre_agent_symlink_baseline(fake)
+        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
+        fake.queue_result(
+            returncode=0,
+            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
+        )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake, head="b" * 40)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=post_validation_gap_report)
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="implemented conformance fix")  # fix adapter
+        fake.queue_result(returncode=0)  # fix git add
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # fix cached diff
+        fake.queue_result(returncode=0)  # fix commit
+        _queue_validation_head(fake, head="c" * 40)
+        fake.queue_result(returncode=1, stderr="pytest: failed after conformance fix")
+        fake.queue_result(returncode=0, stdout="fixed pytest")  # validation fix adapter
+        fake.queue_result(returncode=0)  # validation fix git add
+        fake.queue_result(returncode=0, stdout="tests/test_x.py\n")  # validation fix diff
+        fake.queue_result(returncode=0)  # validation fix commit
+        _queue_validation_head(fake, head="d" * 40)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'d' * 40}\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
+        _queue_pre_push_diagnostics(fake, head="d" * 40)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        adapter_prompts = _adapter_prompts(fake)
+        fix_prompts = [
+            prompt
+            for prompt in adapter_prompts
+            if "Validation failed after your previous pass" in prompt
+        ]
+
+        assert len(fix_prompts) == 2
+        assert "post-validation plan conformance" in fix_prompts[0]
+        assert "pytest -q" in fix_prompts[1]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            runs = (
+                (
+                    await s.execute(
+                        text(
+                            "SELECT status, reason_code FROM validation_runs "
+                            "WHERE workspace_id = :workspace_id ORDER BY started_at"
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert [run["status"] for run in runs] == ["succeeded", "failed", "succeeded"]
+        assert [run["reason_code"] for run in runs] == [
+            "VALIDATION_OK",
+            "COMMAND_FAILED",
+            "VALIDATION_OK",
+        ]
+
+    @pytest.mark.unit
+    async def test_planning_mixed_validation_and_api_gap_stays_agent_owned(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        mixed_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Validation evidence is missing and a real API gap remains.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    "AWF-owned validation evidence is missing.",
+                    "Wire the API endpoint required by the plan.",
+                ],
+            }
+        )
+
+        _queue_pre_agent_symlink_baseline(fake)
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=mixed_report)
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
+        fake.queue_result(returncode=0, stdout="fixed api")  # iteration execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
+        fake.queue_result(
+            returncode=0,
+            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="src/x.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        adapter_prompt_calls = _adapter_prompt_calls(fake)
+        adapter_prompts = [prompt for _, prompt in adapter_prompt_calls]
+        validation_call_index = next(
+            index
+            for index, call in enumerate(fake.calls)
+            if "pytest -q" in call.args[-1] and "codex" not in call.args
+        )
+        iteration_prompt_index = next(
+            index
+            for index, prompt in adapter_prompt_calls
+            if "## Execution phase" in prompt and "Iteration 1" in prompt
+        )
+
+        assert len(adapter_prompts) == 5
+        assert iteration_prompt_index < validation_call_index
+        async with factory() as s:
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=100)
+        assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)

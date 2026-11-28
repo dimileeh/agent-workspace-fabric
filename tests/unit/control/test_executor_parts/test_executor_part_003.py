@@ -7,31 +7,39 @@ since each call is distinguishable by its argv.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.adapters.run_results import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+    pr_open_step,
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import planning_conformance as _planning_conformance
+from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.types import _ActiveExecutionCandidate, _OpenPullRequestSummary
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
     OperationType,
     WorkspaceStatus,
 )
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceEventRepository,
@@ -52,6 +60,8 @@ from awf.runtime.pr_monitor_operations import (
 from awf.runtime.validation import (
     ValidationRunner,
 )
+from awf.service.artifacts import DEPOSITED_CONFORMANCE_NAME, workspace_artifact_dir
+from awf.service.workspaces import WorkspaceService
 from tests.postgres import postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktrees_root
 
@@ -98,7 +108,9 @@ def executor(
     )
 
 
-def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+def _queue_pre_push_diagnostics(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", output_path: str = "src/fix.py"
+) -> None:
     """Queue executor's committed-diff policy check plus the three canned
     git results ``PullRequestCreator`` reads for its pre-push diagnostic
     log line (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
@@ -115,9 +127,9 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
     captured output.
     """
     fake.queue_result(
-        returncode=0, stdout="src/fix.py\n"
+        returncode=0, stdout=f"{output_path}\n"
     )  # final plan-only gate: committed base..HEAD --name-only
-    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
+    fake.queue_result(returncode=0, stdout=f"M\0{output_path}\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
@@ -753,11 +765,43 @@ class TestHappyPathPart002:
         assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("budget", "outcome"),
+        [
+            (1, "satisfied"),
+            (0, "park"),
+            (3, "park"),
+            (3, "exhausted-handoff"),
+            (1, "validation-failed"),
+            (0, "empty"),
+            (0, "plan-only"),
+            (0, "local-plan-only"),
+            (0, "plans-output"),
+            (0, "changed-head"),
+            (0, "report-only-commit"),
+            (0, "hosted-report-only-commit"),
+            (0, "source-change-after-conformance"),
+            (0, "unrelated-head-after-conformance"),
+            (0, "diff-failure-after-conformance"),
+            (0, "missing-head-after-conformance"),
+            (0, "comment-retry"),
+            (0, "tip-propagation"),
+            (0, "worker-restart"),
+            (0, "worker-restart-report-only"),
+            (0, "worker-restart-descendant"),
+            (0, "worker-restart-unrelated"),
+            (0, "handoff-restart"),
+            (0, "comment-pending"),
+        ],
+    )
     async def test_planning_validation_handoff_keeps_remaining_conformance_fix_iteration(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        budget: int,
+        outcome: str,
     ) -> None:
         executor = WorkspaceExecutor(
             session_factory=factory,
@@ -772,15 +816,34 @@ class TestHappyPathPart002:
                 max_validation_fix_passes=0,
             ),
         )
+        planning_options = {"additional_artifact_dir": None} if outcome == "plans-output" else {}
         ws_id = await _seed_ready_workspace(
             factory,
             resolved_profile={
                 "name": "planned",
-                "planning": {"required": True, "max_iterations": 1},
+                "planning": {
+                    "required": True,
+                    "max_iterations": budget,
+                    "conformance_report_path": "docs/{workspace_id}.conformance.json",
+                    **planning_options,
+                },
                 "phases": {"validate": ["pytest -q"]},
             },
         )
-        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        report_path = f"docs/{ws_id}.conformance.json"
+        hosted_report = outcome == "hosted-report-only-commit"
+        committed_report = outcome in {
+            "report-only-commit",
+            "hosted-report-only-commit",
+            "worker-restart-report-only",
+        }
+        report_commit_sha = "d" * 40
+        unverified_head = outcome in {
+            "source-change-after-conformance",
+            "unrelated-head-after-conformance",
+            "diff-failure-after-conformance",
+            "missing-head-after-conformance",
+        }
         handoff_report = json.dumps(
             {
                 "status": "needs_iteration",
@@ -794,11 +857,13 @@ class TestHappyPathPart002:
                 ],
             }
         )
+        gap = "Add the behavior required by the saved plan."
+        token = "ghp_" + "a" * 36
         post_validation_gap_report = json.dumps(
             {
                 "status": "needs_iteration",
                 "summary": "Validation passed, but the implementation still misses behavior.",
-                "gaps": ["Add the behavior required by the saved plan."],
+                "gaps": [f"{gap}\0 {token}"],
             }
         )
         satisfied_report = json.dumps(
@@ -809,6 +874,43 @@ class TestHappyPathPart002:
             }
         )
 
+        worktree_path = _test_worktrees_root(factory) / ws_id
+        report_file = worktree_path / report_path
+        run_command = fake.run
+
+        async def run_and_update_report(args: list[str], **kwargs: Any) -> Any:
+            result = await run_command(args, **kwargs)
+            update_report = (
+                args[-3:] == ["reset", "--hard", report_commit_sha]
+                if hosted_report
+                else result.stdout == post_validation_gap_report
+            )
+            if update_report:
+                report_file.parent.mkdir(parents=True, exist_ok=True)
+                report_file.write_text(post_validation_gap_report, encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(fake, "run", run_and_update_report)
+        if hosted_report:
+            run_conformance = executor._run_post_validation_conformance_check
+
+            async def compare_on_host(**kwargs: Any) -> Any:
+                run_adapter = kwargs["adapter"].run
+
+                async def run_hosted_adapter(**agent_kwargs: Any) -> AgentRunResult:
+                    result = await run_adapter(**agent_kwargs)
+                    return replace(result, terminal_head_sha=report_commit_sha)
+
+                kwargs["adapter"] = SimpleNamespace(is_hosted=True, run=run_hosted_adapter)
+                kwargs["hosted_pr_identity"] = {
+                    "head_repo_url": "https://github.com/a/b.git",
+                    "head_ref": f"awf/{ws_id}",
+                }
+                return await run_conformance(**kwargs)
+
+            monkeypatch.setattr(executor, "_run_post_validation_conformance_check", compare_on_host)
+        handoff_iteration = budget if outcome == "exhausted-handoff" else 0
+        remaining_repairs = budget - handoff_iteration
         _queue_pre_agent_symlink_baseline(fake)
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
@@ -816,48 +918,226 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
-        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
-        fake.queue_result(
-            returncode=0,
-            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
+        for iteration in range(handoff_iteration + 1):
+            fake.queue_result(stdout="implemented")  # execution adapter
+            fake.queue_result(stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+            fake.queue_result(stdout="base_commit_sha\n")  # conformance scope HEAD
+            inline_report = json.dumps(
+                {
+                    "status": "needs_iteration",
+                    "summary": f"Implementation pass {iteration} still has a gap.",
+                    "gaps": [f"Finish behavior for pass {iteration}."],
+                }
+            )
+            fake.queue_result(
+                stdout=handoff_report if iteration == handoff_iteration else inline_report
+            )
+            fake.queue_result(
+                stdout=f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n",
+            )
+            fake.queue_result(stdout="")  # committed paths since conformance HEAD
+            fake.queue_result(stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        _queue_validation_head(fake, head="b" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=post_validation_gap_report)
-        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        # No restore on unsatisfied conformance; the next runner call is the fix adapter.
-        fake.queue_result(returncode=0, stdout="implemented missing behavior")  # fix adapter
-        fake.queue_result(returncode=0)  # fix git add
-        fake.queue_result(returncode=0, stdout="src/x.py\n")  # fix cached diff
-        fake.queue_result(returncode=0)  # fix commit
-        _queue_validation_head(fake, head="c" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=satisfied_report)
-        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        fake.queue_result(returncode=0, stdout="")  # git restore report path after satisfaction
-        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
-        _queue_pre_push_diagnostics(fake, head="c" * 40)
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+        for iteration in range(remaining_repairs + 1):
+            head = chr(ord("b") + iteration) * 40
+            _queue_validation_head(fake, head=head)
+            if iteration and outcome == "validation-failed":
+                fake.queue_result(returncode=1, stderr="pytest: failed after conformance fix")
+                break
+            fake.queue_result(returncode=0, stdout="tests ok")
+            fake.queue_result(returncode=0, stdout="")  # post-validation status
+            fake.queue_result(returncode=0, stdout=f"{head}\n")  # conformance scope HEAD
+            final = iteration == remaining_repairs
+            if hosted_report:
+                fake.queue_result()  # hosted comparison writes the report to its branch
+                fake.queue_result()  # fetch hosted branch
+                fake.queue_result(stdout=f"{report_commit_sha}\n")  # rev-parse FETCH_HEAD
+                fake.queue_result()  # reset to the hosted report commit
+            else:
+                fake.queue_result(
+                    stdout=satisfied_report
+                    if final and outcome == "satisfied"
+                    else post_validation_gap_report,
+                )
+            fake.queue_result(stdout="" if committed_report else f"?? {report_path}\n")
+            fake.queue_result(stdout=f"{report_path}\n" if committed_report else "")
+            if final:
+                if committed_report:
+                    fake.queue_result()  # restore from base
+                    fake.queue_result(stdout=f"D  {report_path}\n")
+                    fake.queue_result()  # restore from HEAD
+                    fake.queue_result()  # post-restore cleanliness check
+                else:
+                    fake.queue_result(returncode=1)  # untracked report: fall back to unlink
+                    fake.queue_result()  # post-unlink cleanliness check
+                break
+            fake.queue_result(stdout="implemented missing behavior")
+            fake.queue_result()  # fix git add
+            fake.queue_result(stdout="src/x.py\n")  # fix cached diff
+            fake.queue_result()  # fix commit
 
-        await executor.execute(ws_id)
+        worker_restart = outcome.startswith("worker-restart")
+        moved_pr_tip = outcome in {"worker-restart-descendant", "worker-restart-unrelated"}
+        publication_head = report_commit_sha if committed_report or unverified_head else head
+        if outcome not in {"satisfied", "validation-failed"}:
+            fake.queue_result(
+                stdout=f"{publication_head}\n",
+                returncode=int(outcome == "missing-head-after-conformance"),
+            )  # capture candidate after conformance
+        if publication_head != head and outcome != "missing-head-after-conformance":
+            fake.queue_result(returncode=int(outcome == "unrelated-head-after-conformance"))
+            if outcome != "unrelated-head-after-conformance":
+                paths = f"{report_path}\0"
+                if outcome == "source-change-after-conformance":
+                    paths += "src/x.py\0"
+                fake.queue_result(
+                    stdout=paths, returncode=int(outcome == "diff-failure-after-conformance")
+                )
+        pr_tip = "e" * 40 if moved_pr_tip else publication_head
+        if outcome in {"empty", "plan-only", "local-plan-only"}:
+            paths = {
+                "empty": "",
+                "plan-only": f"{report_path}\n",
+                "local-plan-only": "plans/LOCAL_PLAN.md\ndocs/awf-plans/workspace.md\n",
+            }
+            fake.queue_result(stdout=paths[outcome])
+        elif outcome != "validation-failed" and not unverified_head:
+            pre_push_head = "f" * 40 if outcome == "changed-head" else publication_head
+            output_path = "plans/subscriptions.py" if outcome == "plans-output" else "src/fix.py"
+            _queue_pre_push_diagnostics(fake, head=pre_push_head, output_path=output_path)
+            fake.queue_result()  # push
+            fake.queue_result(stdout="https://github.com/a/b/pull/1")
+            if worker_restart or outcome in {
+                "park",
+                "plans-output",
+                "report-only-commit",
+                "hosted-report-only-commit",
+                "exhausted-handoff",
+                "comment-retry",
+                "comment-pending",
+                "tip-propagation",
+                "handoff-restart",
+            }:
+                monkeypatch.setattr(pr_open_step, "_PR_CONFORMANCE_COMMENT_RETRY_DELAY_SECONDS", 0)
+                snapshot = json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "merged": False,
+                                    "closed": False,
+                                    "headRefName": f"awf/{ws_id}",
+                                    "headRefOid": pr_tip,
+                                }
+                            }
+                        }
+                    }
+                )
+                notice = (
+                    "### Unresolved plan-conformance gaps\n\n"
+                    "`PLAN_CONFORMANCE_UNSATISFIED`\n\n"
+                    "AWF validation passed. Use `workspace guide --directive` to address these gaps.\n\n"
+                    rf"- **unknown**: {gap}  \[redacted\]"
+                )
+
+                def queue_comment_check(*, posted: bool = False) -> None:
+                    fake.queue_result(stdout=snapshot)
+                    if moved_pr_tip:
+                        fake.queue_result(returncode=1)  # live tip needs a fetch
+                        fake.queue_result()  # fetch from the PR head repository
+                        unrelated = outcome == "worker-restart-unrelated"
+                        fake.queue_result(returncode=int(unrelated))  # ancestry check
+                        if unrelated:
+                            return
+                    fake.queue_result(
+                        stdout=json.dumps(
+                            {
+                                "data": {
+                                    "repository": {
+                                        "pullRequest": {
+                                            "comments": {
+                                                "nodes": [{"body": notice}] if posted else [],
+                                                "pageInfo": {"hasNextPage": False},
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        ),
+                    )
+
+                if outcome == "tip-propagation":
+                    fake.queue_result(stdout=snapshot.replace(head, ""))
+                queue_comment_check()
+                if outcome != "worker-restart-unrelated":
+                    comment_failed = outcome in {"comment-retry", "comment-pending"}
+                    fake.queue_result(returncode=int(comment_failed), stderr="comment failed")
+                    if comment_failed:
+                        queue_comment_check(posted=outcome == "comment-retry")
+                    if outcome == "comment-pending":
+                        fake.queue_result(returncode=1, stderr="comment retry failed")
+
+        if worker_restart:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    pr_open_step,
+                    "_publish_pr_conformance_comment",
+                    AsyncMock(side_effect=asyncio.CancelledError),
+                )
+                with pytest.raises(asyncio.CancelledError):
+                    await executor.execute(ws_id)
+            async with factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(ws_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.pushing.value
+                if moved_pr_tip:
+                    ws.task_policy = {"pr_adoption": {"head_repo_slug": "example/fork"}}
+                preserved = await repo.add_event(ws, event_type="test.worker_restarted")
+                await session.commit()
+            worker = ControlWorker(
+                session_factory=factory,
+                provisioner=SimpleNamespace(get_worktree_path=lambda _: worktree_path),
+                pr_publication_runner=fake,
+                config=WorkerConfig(),
+            )
+            await worker._attach_preserved_active_pr_monitor(
+                _ActiveExecutionCandidate(ws_id, WorkspaceStatus.pushing, ws.compose_project_name),
+                preserved_event=preserved,
+                attempt_id=None,
+                task_id=None,
+                open_pr=_OpenPullRequestSummary(
+                    "https://github.com/a/b/pull/1",
+                    1,
+                    f"awf/{ws_id}",
+                    pr_tip,
+                ),
+            )
+        elif outcome == "handoff-restart":
+            commit = AsyncSession.commit
+
+            async def stop_after_monitoring_commit(session: AsyncSession) -> None:
+                handoff = any(
+                    isinstance(row, Workspace)
+                    and row.id == ws_id
+                    and row.status == WorkspaceStatus.monitoring_pr.value
+                    for row in session.identity_map.values()
+                )
+                await commit(session)
+                if handoff:
+                    raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(AsyncSession, "commit", stop_after_monitoring_commit)
+                with pytest.raises(asyncio.CancelledError):
+                    await executor.execute(ws_id)
+        else:
+            await executor.execute(ws_id)
 
         adapter_prompts = _adapter_prompts(fake)
         fix_prompts = [
@@ -871,21 +1151,28 @@ class TestHappyPathPart002:
             if "Conformance phase" in prompt and "### Validation evidence" in prompt
         ]
 
-        assert len(fix_prompts) == 1
-        assert "post-validation plan conformance" in fix_prompts[0]
+        assert sum("## Execution phase" in prompt for prompt in adapter_prompts) == (
+            handoff_iteration + 1
+        )
+        assert len(fix_prompts) == remaining_repairs
+        assert all("post-validation plan conformance" in prompt for prompt in fix_prompts)
         assert [
             line
             for prompt in post_validation_conformance_prompts
             for line in prompt.splitlines()
             if line.startswith("Iteration: ")
-        ] == ["Iteration: 1", "Iteration: 2"]
+        ] == [
+            f"Iteration: {i + 1}"
+            for i in range(handoff_iteration, budget + (outcome != "validation-failed"))
+        ]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
                 (
                     await s.execute(
                         text(
-                            "SELECT status, reason_code FROM validation_runs "
+                            "SELECT id, status, reason_code, workspace_head_sha, target_head_sha "
+                            "FROM validation_runs "
                             "WHERE workspace_id = :workspace_id ORDER BY started_at"
                         ),
                         {"workspace_id": ws_id},
@@ -896,249 +1183,116 @@ class TestHappyPathPart002:
             )
 
         assert ws is not None
-        assert ws.status == WorkspaceStatus.completed.value
-        assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
-        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK", "VALIDATION_OK"]
+        if outcome == "validation-failed":
+            assert ws.status == WorkspaceStatus.failed.value
+            assert [run["status"] for run in runs] == ["succeeded", "failed"]
+            assert runs[-1]["reason_code"] == "COMMAND_FAILED"
+            assert ws.events[-1].reason_code == "COMMAND_FAILED"
+        else:
+            assert [run["status"] for run in runs] == ["succeeded"] * (remaining_repairs + 1)
+        if outcome in {"empty", "plan-only", "local-plan-only"}:
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "PLAN_ONLY_OUTPUT"
+        if outcome == "changed-head" or unverified_head:
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
+        if unverified_head:
+            assert not any(e.reason_code == PLAN_CONFORMANCE_UNSATISFIED for e in ws.events)
+        if unverified_head or outcome in {
+            "empty",
+            "plan-only",
+            "local-plan-only",
+            "validation-failed",
+            "changed-head",
+        }:
+            assert ws.pr_url is None
+            assert ws.awaiting_human_since is None
+            assert not any("push" in call.args for call in fake.calls)
+            return
+        if outcome == "satisfied":
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.awaiting_human_since is None
+            return
 
-    @pytest.mark.unit
-    async def test_post_validation_conformance_fix_does_not_consume_validation_fix_budget(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        executor = WorkspaceExecutor(
-            session_factory=factory,
-            runner=fake,
-            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
-            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
-            pr_creator=PullRequestCreator(fake),
-            config=ExecutorConfig(
-                worktrees_root=tmp_path / "work" / "worktrees",
-                compose_projects_root=tmp_path / "work" / "compose",
-                default_models={AgentRuntime.codex: "gpt-5"},
-                max_validation_fix_passes=1,
-            ),
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned",
-                "planning": {
-                    "required": True,
-                    "plan_path": "docs/awf-plans/{workspace_id}.md",
-                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
-                    "max_iterations": 3,
-                    "enforce_plan_only_changes": True,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
-        handoff_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Only AWF validation evidence is missing.",
-                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": [
-                    {
-                        "kind": "awf_validation_evidence",
-                        "detail": "AWF-owned validation evidence is missing for pytest.",
-                    }
-                ],
-            }
-        )
-        post_validation_gap_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Validation passed, but the implementation still misses the plan.",
-                "gaps": ["Add the saved API behavior required by the plan."],
-            }
-        )
-        satisfied_report = json.dumps(
-            {
-                "status": "satisfied",
-                "summary": "implementation and validation evidence satisfy the plan",
-                "gaps": [],
-            }
-        )
-
-        _queue_pre_agent_symlink_baseline(fake)
-        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
-        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
-        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
-        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
-        fake.queue_result(
-            returncode=0,
-            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
-        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        _queue_validation_head(fake, head="b" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=post_validation_gap_report)
-        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        fake.queue_result(returncode=0, stdout="implemented conformance fix")  # fix adapter
-        fake.queue_result(returncode=0)  # fix git add
-        fake.queue_result(returncode=0, stdout="src/x.py\n")  # fix cached diff
-        fake.queue_result(returncode=0)  # fix commit
-        _queue_validation_head(fake, head="c" * 40)
-        fake.queue_result(returncode=1, stderr="pytest: failed after conformance fix")
-        fake.queue_result(returncode=0, stdout="fixed pytest")  # validation fix adapter
-        fake.queue_result(returncode=0)  # validation fix git add
-        fake.queue_result(returncode=0, stdout="tests/test_x.py\n")  # validation fix diff
-        fake.queue_result(returncode=0)  # validation fix commit
-        _queue_validation_head(fake, head="d" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'d' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
-        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        fake.queue_result(returncode=0, stdout="")  # git restore report path
-        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
-        _queue_pre_push_diagnostics(fake, head="d" * 40)
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
-
-        await executor.execute(ws_id)
-
-        adapter_prompts = _adapter_prompts(fake)
-        fix_prompts = [
-            prompt
-            for prompt in adapter_prompts
-            if "Validation failed after your previous pass" in prompt
-        ]
-
-        assert len(fix_prompts) == 2
-        assert "post-validation plan conformance" in fix_prompts[0]
-        assert "pytest -q" in fix_prompts[1]
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            runs = (
-                (
-                    await s.execute(
-                        text(
-                            "SELECT status, reason_code FROM validation_runs "
-                            "WHERE workspace_id = :workspace_id ORDER BY started_at"
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .all()
+        assert ws.pr_url == "https://github.com/a/b/pull/1"
+        pushes = [call.args for call in fake.calls if "push" in call.args]
+        assert len(pushes) == 1
+        assert pushes[0][-1] == f"{publication_head}:refs/heads/awf/{ws_id}"
+        if hosted_report:
+            reset_index = next(
+                index
+                for index, call in enumerate(fake.calls)
+                if call.args[-3:] == ["reset", "--hard", report_commit_sha]
             )
-
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.completed.value
-        assert [run["status"] for run in runs] == ["succeeded", "failed", "succeeded"]
-        assert [run["reason_code"] for run in runs] == [
-            "VALIDATION_OK",
-            "COMMAND_FAILED",
-            "VALIDATION_OK",
-        ]
-
-    @pytest.mark.unit
-    async def test_planning_mixed_validation_and_api_gap_stays_agent_owned(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned",
-                "planning": {
-                    "required": True,
-                    "max_iterations": 1,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        mixed_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Validation evidence is missing and a real API gap remains.",
-                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": [
-                    "AWF-owned validation evidence is missing.",
-                    "Wire the API endpoint required by the plan.",
-                ],
-            }
-        )
-
-        _queue_pre_agent_symlink_baseline(fake)
-        fake.queue_result(returncode=0, stdout="")  # before planning
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
-        fake.queue_result(returncode=0, stdout="plan written")  # planning
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
-        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
-        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=mixed_report)
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
-        fake.queue_result(returncode=0, stdout="fixed api")  # iteration execute
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
-        fake.queue_result(
-            returncode=0,
-            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
-        )
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
-        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="src/x.py\n")
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="1\n")
-        fake.queue_result(returncode=0)
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_diagnostics(fake)
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
-
-        await executor.execute(ws_id)
-
-        adapter_prompt_calls = _adapter_prompt_calls(fake)
-        adapter_prompts = [prompt for _, prompt in adapter_prompt_calls]
-        validation_call_index = next(
-            index
-            for index, call in enumerate(fake.calls)
-            if "pytest -q" in call.args[-1] and "codex" not in call.args
-        )
-        iteration_prompt_index = next(
-            index
-            for index, prompt in adapter_prompt_calls
-            if "## Execution phase" in prompt and "Iteration 1" in prompt
-        )
-
-        assert len(adapter_prompts) == 5
-        assert iteration_prompt_index < validation_call_index
-        async with factory() as s:
-            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=100)
-        assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
+            assert any(call.args == pushes[0] for call in fake.calls[reset_index + 1 :])
+        if committed_report:
+            assert any(
+                call.args[-4:] == ["merge-base", "--is-ancestor", head, publication_head]
+                for call in fake.calls
+            )
+            assert any(
+                call.args[-8:]
+                == [
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    "--ignore-submodules=none",
+                    "-z",
+                    head,
+                    publication_head,
+                    "--",
+                ]
+                for call in fake.calls
+            )
+        _created_pr_body(fake)  # PR creation used the normal creator
+        comments = [call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]]
+        if moved_pr_tip:
+            assert any(
+                call.args[-4:] == ["fetch", "--no-tags", "git@github.com:example/fork.git", pr_tip]
+                and str(worktree_path) in call.args
+                for call in fake.calls
+            )
+            assert any(
+                call.args[-4:] == ["merge-base", "--is-ancestor", head, pr_tip]
+                for call in fake.calls
+            )
+        if outcome == "worker-restart-unrelated":
+            assert not comments
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert ws.awaiting_human_since is None
+            assert runs[-1]["target_head_sha"] is None
+            return
+        assert len(comments) == (2 if outcome == "comment-pending" else 1)
+        assert PLAN_CONFORMANCE_UNSATISFIED in comments[0][-1]
+        assert gap in comments[0][-1]
+        assert token not in comments[0][-1]
+        assert "\0" not in comments[0][-1]
+        if outcome == "comment-pending":
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            assert ws.block_planning_conformance_handoff["conformance_park_head_sha"] == head
+            return
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_last_commit_sha == pr_tip
+        response = await WorkspaceService(factory).get(ws_id)
+        assert response is not None
+        assert response.attention_required
+        assert response.awaiting_human_since is not None
+        assert response.awaiting_human_reason is not None
+        assert PLAN_CONFORMANCE_UNSATISFIED in response.awaiting_human_reason
+        assert gap in response.awaiting_human_reason
+        assert runs[-1]["workspace_head_sha"] == head
+        assert runs[-1]["target_head_sha"] == publication_head
+        park = next(e for e in ws.events if e.reason_code == PLAN_CONFORMANCE_UNSATISFIED)
+        assert park.payload["validation_run_id"] == runs[-1]["id"]
+        assert park.payload["head_sha"] == publication_head
+        assert park.payload["conformance"]["gaps"] == [f"{gap}  [redacted]"]
+        assert park.payload["conformance"]["iterations_used"] == budget
+        assert park.payload["conformance"]["max_iterations"] == budget
+        assert report_file.exists() == committed_report
+        artifact = workspace_artifact_dir(tmp_path / "work", ws_id)
+        assert gap in (artifact / DEPOSITED_CONFORMANCE_NAME).read_text()
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1246,6 +1400,7 @@ class TestHappyPathPart002:
                 failed_event.payload["details"]["conformance"]["reason_code"]
                 == PLAN_CONFORMANCE_UNSATISFIED
             )
+            assert failed_event.payload["details"]["conformance"]["iterations_used"] == 0
             assert failed_event.payload["salvage"] == {
                 "hint": "Workspace worktree and branch were preserved for salvage.",
                 "worktree_path": str(_test_worktrees_root(factory) / ws_id),

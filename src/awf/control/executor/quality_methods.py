@@ -339,8 +339,14 @@ async def _fail_if_plan_only_paths(
     changed_paths: list[str] | tuple[str, ...],
     expected_status: WorkspaceStatus,
     mark_workspace_failed: bool = True,
+    planning_artifact_paths: tuple[Path, ...] = (),
+    planning_artifact_dir: str | None = None,
 ) -> bool:
-    if not changed_paths_are_only_internal_plan_artifacts(changed_paths):
+    if not changed_paths_are_only_internal_plan_artifacts(
+        changed_paths,
+        planning_artifact_paths=planning_artifact_paths,
+        planning_artifact_dir=planning_artifact_dir,
+    ):
         return False
     if not mark_workspace_failed:
         return True
@@ -386,6 +392,8 @@ async def _fail_if_plan_only_committed_output(
     worktree_path: Path,
     base_commit: str,
     expected_status: WorkspaceStatus,
+    planning_artifact_paths: tuple[Path, ...] = (),
+    planning_artifact_dir: str | None = None,
 ) -> bool:
     changed_paths = sorted(
         path.as_posix() for path in await self._committed_paths_since(worktree_path, base_commit)
@@ -424,6 +432,8 @@ async def _fail_if_plan_only_committed_output(
             workspace_id=workspace_id,
             changed_paths=changed_paths,
             expected_status=expected_status,
+            planning_artifact_paths=planning_artifact_paths,
+            planning_artifact_dir=planning_artifact_dir,
         ),
     )
 

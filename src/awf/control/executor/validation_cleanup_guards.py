@@ -10,6 +10,7 @@ from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.control.executor.planning_artifacts import _deposit_planning_artifacts_best_effort
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.control.executor.types import _PlanningConformancePark
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.validation_worktree import (
@@ -35,6 +36,7 @@ class ExecutionValidationResult:
     stop: bool
     successful_validation_run_id: str | None
     successful_validation_workspace_head_sha: str | None
+    conformance_park: _PlanningConformancePark | None = None
 
 
 async def fail_validation_worktree_guard(
