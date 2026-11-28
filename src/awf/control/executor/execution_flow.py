@@ -1433,16 +1433,22 @@ async def execute(
 
     conformance_park = validation_result.conformance_park
     staged_park_head = recovery.get("conformance_park_head_sha") if recovery else None
+    if recovery is not None and not ws.pr_url:
+        # Older recovery operations may lack the staged SHA in their payload.
+        metadata = ws.block_planning_conformance_handoff or {}
+        staged_park_head = metadata.get("conformance_park_head_sha", staged_park_head)
+    staged_head_matches = (
+        staged_park_head is None or successful_validation_workspace_head_sha == staged_park_head
+    )
     if (
         conformance_park is None
         and recovery is not None
         and successful_validation_run_id is not None
         and (not ws.pr_url or retry_gap_publication or staged_park_head is not None)
+        and staged_head_matches
     ):
         conformance_park = _pending_conformance_park(ws, successful_validation_run_id)
-    if staged_park_head is not None and (
-        conformance_park is None or successful_validation_workspace_head_sha != staged_park_head
-    ):
+    if not staged_head_matches or (staged_park_head is not None and conformance_park is None):
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.validating,

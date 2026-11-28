@@ -896,8 +896,12 @@ async def _request_preserved_active_validation(
         }
         if branch_pr_lookup is not None:
             extra["branch_pr_lookup"] = dict(branch_pr_lookup)
-        if pending_park is not None:
-            extra["conformance_park_head_sha"] = pending_park[0]
+        park_head = pending_park[0] if pending_park is not None else None
+        if not ws.pr_url:
+            metadata = ws.block_planning_conformance_handoff or {}
+            park_head = metadata.get("conformance_park_head_sha")
+        if park_head is not None:
+            extra["conformance_park_head_sha"] = park_head
         payload = _active_execution_salvage_payload(
             candidate,
             preserved_event=preserved_event,

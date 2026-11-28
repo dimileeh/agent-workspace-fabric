@@ -74,9 +74,11 @@ _IMPORTED_FIXTURES = (factory, fake)
         "unrelated-pr-tip",
         "changed-worktree",
         "changed-validation-head",
+        "fresh-pr",
+        "fresh-pr-changed-worktree",
     ],
 )
-async def test_retained_pr_conformance_park_recovers_before_push(
+async def test_conformance_park_recovers_before_push(
     factory: async_sessionmaker[AsyncSession],
     fake: FakeCommandRunner,
     tmp_path: Path,
@@ -87,7 +89,8 @@ async def test_retained_pr_conformance_park_recovers_before_push(
     gap = {"kind": "test_work", "detail": "Add a regression test"}
     ws_id = await _seed_ready_workspace_no_recovery(factory)
     worktree = _test_worktrees_root(factory) / ws_id
-    pr_url = "https://github.com/example/repo/pull/42"
+    fresh_pr = interruption.startswith("fresh-pr")
+    pr_url = f"https://github.com/example/repo/pull/{1 if fresh_pr else 42}"
 
     async def check_monitor_handoff(**_kwargs: Any) -> None:
         assert len(comments()) == 1
@@ -117,10 +120,11 @@ async def test_retained_pr_conformance_park_recovers_before_push(
         ws = await repo.get(ws_id)
         assert ws is not None
         ws.repo_url = "https://github.com/example/repo"
-        ws.pr_url = pr_url
-        ws.pr_number = 42
-        ws.monitor_last_commit_sha = old_tip
-        ws.remote_push_branch = "feature/retained"
+        if not fresh_pr:
+            ws.pr_url = pr_url
+            ws.pr_number = 42
+            ws.monitor_last_commit_sha = old_tip
+            ws.remote_push_branch = "feature/retained"
         task = await TaskRepository(session).create_or_get(
             repo_url=ws.repo_url,
             base_branch=ws.branch_base,
@@ -175,7 +179,7 @@ async def test_retained_pr_conformance_park_recovers_before_push(
             raise asyncio.CancelledError
 
     with monkeypatch.context() as patch:
-        if interruption == "pushing-commit":
+        if interruption == "pushing-commit" or fresh_pr:
             patch.setattr(AsyncSession, "commit", stop_after_pushing_commit)
         else:
             patch.setattr(
@@ -223,21 +227,26 @@ async def test_retained_pr_conformance_park_recovers_before_push(
     def comments() -> list[list[str]]:
         return [call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]]
 
+    open_pr_resolver = AsyncMock(return_value=[])
     worker = ControlWorker(
         session_factory=factory,
         provisioner=SimpleNamespace(get_worktree_path=lambda _: worktree),
         executor=executor,
         pr_publication_runner=fake,
+        open_pr_resolver=SimpleNamespace(resolve=open_pr_resolver),
         config=WorkerConfig(),
     )
     dispatch = Mock(return_value=True)
     monkeypatch.setattr(worker, "_dispatch_preserved_active_validation", dispatch)
+    changed_head = "f" * 40
+    worktree_head = (
+        changed_head
+        if interruption in {"changed-worktree", "fresh-pr-changed-worktree"}
+        else staged_head
+    )
     git_reads = {
         ("branch", "--show-current"): f"{ws.branch_name}\n",
-        (
-            "rev-parse",
-            "HEAD",
-        ): f"{'f' * 40 if interruption == 'changed-worktree' else staged_head}\n",
+        ("rev-parse", "HEAD"): f"{worktree_head}\n",
         ("status", "--porcelain=v1", "--untracked-files=all"): "",
         ("rev-list", "--count", f"{ws.base_commit}..HEAD"): "2\n",
     }
@@ -247,18 +256,20 @@ async def test_retained_pr_conformance_park_recovers_before_push(
         return True, git_reads[args], ""
 
     monkeypatch.setattr(worker, "_run_preserved_active_git", read_preserved_git)
-    _queue_open_pr_lifecycle_snapshot(fake, head_sha=old_tip)
-    fake.queue_result()  # retained tip is present locally
-    fake.queue_result(returncode=1)  # retained tip does not contain the staged head
-    fake.queue_result()  # staged head is present locally
-    fake.queue_result(returncode=int(interruption == "unrelated-pr-tip"))
+    if not fresh_pr:
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=old_tip)
+        fake.queue_result()  # retained tip is present locally
+        fake.queue_result(returncode=1)  # retained tip does not contain the staged head
+        fake.queue_result()  # staged head is present locally
+        fake.queue_result(returncode=int(interruption == "unrelated-pr-tip"))
     assert await worker._recover_preserved_active_execution(
         _ActiveExecutionCandidate(ws_id, WorkspaceStatus.pushing, ws.compose_project_name)
     )
     assert any(
         call.args[-4:] == ["merge-base", "--is-ancestor", old_tip, staged_head]
         for call in fake.calls
-    )
+    ) == (not fresh_pr)
+    assert open_pr_resolver.await_count == int(fresh_pr)
     monitor.assert_not_awaited()
     assert _all_push_and_pr_create_calls(fake) == []
     assert comments() == []
@@ -281,20 +292,22 @@ async def test_retained_pr_conformance_park_recovers_before_push(
         current = await WorkspaceRepository(session).get(ws_id)
         assert current is not None and current.status == WorkspaceStatus.running.value
 
-    _queue_validation_head(
-        fake, head="f" * 40 if interruption == "changed-validation-head" else staged_head
-    )
+    validation_head = changed_head if interruption == "changed-validation-head" else worktree_head
+    _queue_validation_head(fake, head=validation_head)
     fake.queue_result(stdout="tests ok")
     if interruption != "changed-validation-head":
-        fake.queue_result(stdout="src/fix.py\n")
-        fake.queue_result(stdout="M\0src/fix.py\0")
-        _queue_open_pr_lifecycle_snapshot(fake, head_sha=old_tip)
-        fake.queue_result(stdout=f"{staged_head}\n")
-        fake.queue_result(stdout=f"{ws.branch_name}\n")
-        fake.queue_result(stdout="abc1234 fix\n")
-        fake.queue_result()  # git push
-        _queue_open_pr_lifecycle_snapshot(fake, head_sha=staged_head)
-        _queue_open_pr_lifecycle_snapshot(fake, head_sha=staged_head)
+        if fresh_pr:
+            _queue_push_and_pr(fake, pr_url=pr_url, head=validation_head)
+        else:
+            fake.queue_result(stdout="src/fix.py\n")
+            fake.queue_result(stdout="M\0src/fix.py\0")
+            _queue_open_pr_lifecycle_snapshot(fake, head_sha=old_tip)
+            fake.queue_result(stdout=f"{staged_head}\n")
+            fake.queue_result(stdout=f"{ws.branch_name}\n")
+            fake.queue_result(stdout="abc1234 fix\n")
+            fake.queue_result()  # git push
+            _queue_open_pr_lifecycle_snapshot(fake, head_sha=staged_head)
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=validation_head)
         fake.queue_result(
             stdout=json.dumps(
                 {
@@ -326,20 +339,35 @@ async def test_retained_pr_conformance_park_recovers_before_push(
         execution_lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
-    if interruption == "changed-validation-head":
-        monitor.assert_not_awaited()
+    if validation_head != staged_head:
         assert _all_push_and_pr_create_calls(fake) == []
+        monitor.assert_not_awaited()
         assert comments() == []
         async with factory() as session:
             current = await WorkspaceRepository(session).get(ws_id)
             assert current is not None and current.status == WorkspaceStatus.failed.value
             assert current.events[-1].reason_code == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
+            assert current.pr_url == (None if fresh_pr else pr_url)
+            assert current.block_planning_conformance_handoff["conformance_park_head_sha"] == (
+                staged_head
+            )
+            runs = await ValidationRunRepository(session).list_for_workspace(ws_id)
+            (recovered_run,) = [candidate for candidate in runs if candidate.id != run.id]
+            assert recovered_run.status == "succeeded"
+            assert recovered_run.workspace_head_sha == changed_head
+            assert recovered_run.target_head_sha is None
+            (recovery,) = await OperationRepository(session).list_for_workspace(
+                ws_id, operation_type=OperationType.validate
+            )
+            assert recovery.payload["conformance_park_head_sha"] == staged_head
         return
     monitor.assert_awaited_once()
-    (push,) = _all_push_and_pr_create_calls(fake)
-    assert push[-1] == f"{staged_head}:refs/heads/feature/retained"
+    push, *creates = _all_push_and_pr_create_calls(fake)
+    remote_branch = ws.branch_name if fresh_pr else "feature/retained"
+    assert push[-1] == f"{staged_head}:refs/heads/{remote_branch}"
+    assert [create[:3] for create in creates] == ([["gh", "pr", "create"]] if fresh_pr else [])
     (comment,) = comments()
-    assert comment[3] == "42"
+    assert comment[3] == ("1" if fresh_pr else "42")
     assert PLAN_CONFORMANCE_UNSATISFIED in comment[-1]
     assert gap["detail"] in comment[-1]
     assert _all_adapter_args(fake) == []
@@ -821,13 +849,15 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("parked", [False, True])
+@pytest.mark.parametrize("scenario", ["inline-gaps", "staged-park", "staged-park-moved-head"])
 async def test_validate_only_recovery_publishes_carried_conformance_gaps(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    parked: bool,
+    scenario: str,
 ) -> None:
+    parked = scenario != "inline-gaps"
+    moved_head = scenario == "staged-park-moved-head"
     monitor_calls: list[str] = []
 
     class _FakeMonitor:
@@ -892,11 +922,12 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
         )
         await s.commit()
 
-    _queue_validation_head(fake, head=head)
+    validation_head = "f" * 40 if moved_head else head
+    _queue_validation_head(fake, head=validation_head)
     fake.queue_result(returncode=0, stdout="tests ok")
-    _queue_push_and_pr(fake, head=head if parked else "deadbeef01")
+    _queue_push_and_pr(fake, head=validation_head if parked else "deadbeef01")
     if parked:
-        _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=validation_head)
         fake.queue_result(
             stdout=json.dumps(
                 {
@@ -915,6 +946,10 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
     await executor.execute(ws_id)
 
     assert _all_adapter_args(fake) == []
+    if moved_head:
+        assert _all_push_and_pr_create_calls(fake) == []
+        assert monitor_calls == []
+        return
     (create_call,) = (
         call for call in _all_push_and_pr_create_calls(fake) if call[:3] == ["gh", "pr", "create"]
     )
