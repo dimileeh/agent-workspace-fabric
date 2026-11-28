@@ -31,10 +31,12 @@ from awf.node.cleanup import WorkspaceCleanupResult
 from awf.runtime.operator_hints import (
     arm_operator_hint_freeze,
     build_pending_operator_hint_payload,
+    operator_hint_from_threads,
     persist_operator_hint,
     remonitor_elapsed_settle_head_shas,
     utcnow,
 )
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
     ActiveWorkspaceDestroyError,
@@ -439,6 +441,12 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         monitor_state_changed = False
         reason_text = (reason or "").strip()
         monitor_state = dict(workspace.monitor_threads_addressed or {})
+        current_hint = operator_hint_from_threads(monitor_state)
+        conformance_park = (
+            current_hint
+            if current_hint is not None and current_hint.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+            else None
+        )
         candidate_repo = MergeCandidateRepository(self._session)
         candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
         current_head_sha = _remonitor_current_head_sha(workspace, candidate, monitor_state)
@@ -459,7 +467,8 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         )
         past_settle = bool(settle_head_shas)
         requested_at = utcnow() if reason_text or past_settle else None
-        if reason_text:
+        request_hint = bool(reason_text) and conformance_park is None
+        if request_hint:
             requested_at = _require_operator_remonitor_requested_at(requested_at)
             hint = OperatorHint(
                 reason=reason_text,
@@ -484,7 +493,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                     warning_code=_REMONITOR_PAST_SETTLE_WARNING_CODE,
                     message=(
                         _REMONITOR_PAST_SETTLE_HINT_MESSAGE
-                        if reason_text
+                        if request_hint
                         else _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE
                     ),
                 )
@@ -507,11 +516,17 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        # Explicit remonitor supersedes HUMAN_WAIT, as in-process resume does.
-        # Clear its persisted attention fields so the row no longer needs a human.
-        # The repository's awaiting_human_since guard avoids writes when absent.
+        # Remonitor resumes polling. A conformance park still requires a guide
+        # directive, including when remonitor retries delivery of the gap notice.
         woke_dormant = await _wake_dormant_monitor(repo, workspace, operation)
-        await repo.clear_workspace_attention(workspace_id)
+        if conformance_park is not None:
+            await repo.set_workspace_attention(
+                workspace_id,
+                reason=conformance_park.reason,
+                now=utcnow(),
+            )
+        else:
+            await repo.clear_workspace_attention(workspace_id)
         if state_reset is None and (
             woke_dormant
             or claims_will_reset

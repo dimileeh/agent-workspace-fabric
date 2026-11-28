@@ -1216,7 +1216,7 @@ async def _run_agent_task_with_optional_planning(
                     baseline_sha=implementation_baseline_sha,
                     last_report=last_report,
                     stall=stall,
-                    iterations_used=last_iteration + 1,
+                    iterations_used=last_iteration,
                     max_iterations=planning.max_iterations,
                     plan_path=plan_path,
                     report_path=report_path,
@@ -1299,7 +1299,7 @@ async def _run_agent_task_with_optional_planning(
         details={
             "conformance": build_conformance_failure_evidence(
                 report=last_report,
-                iterations_used=last_iteration + 1,
+                iterations_used=last_iteration,
                 max_iterations=planning.max_iterations,
                 plan_path=plan_path,
                 report_path=report_path,

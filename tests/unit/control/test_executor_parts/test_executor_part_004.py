@@ -1106,6 +1106,9 @@ class TestHappyPathPart003:
             assert failed_event.payload is not None
             stall = failed_event.payload["details"]["conformance_stall"]
             assert stall["kind"] == "repeated_output"
+            conformance = failed_event.payload["details"]["conformance"]
+            assert conformance["iterations_used"] == stall["iteration_index"] == 3
+            assert conformance["iterations_used"] <= conformance["max_iterations"]
             assert stall["repeated_output_count"] == 3
 
     @pytest.mark.unit

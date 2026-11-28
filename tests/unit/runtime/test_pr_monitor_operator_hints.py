@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +26,9 @@ from awf.runtime.operator_hints import (
     operator_hint_processed_key,
     persist_operator_hint,
 )
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_monitor import (
+    Abort,
     AddressOperatorHint,
     CheckState,
     CheckTiming,
@@ -33,8 +37,10 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     OperatorHint,
     PRStatus,
+    ShortCircuitCompleted,
     decide,
 )
 from awf.runtime.pr_monitor_models import ActionsRunsState
@@ -48,6 +54,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
+from awf.service.workspaces import WorkspaceService
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -1383,3 +1390,78 @@ async def test_persist_state_preserves_concurrent_processed_operator_hint_marker
     assert monitor_state[operator_hint_processed_key("op_hint_processed_elsewhere")] == "processed"
     assert monitor_state["review-thread"] == "fix_committed"
     assert monitor_state["second-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_conformance_park_waits_for_guide_after_monitor_reload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    reason = f"{PLAN_CONFORMANCE_UNSATISFIED}: Add the planned edge-case test."
+    hint = OperatorHint(
+        reason=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED, status="needs_human"
+    )
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await repo.set_workspace_attention(workspace_id, reason=reason, now=datetime.now(UTC))
+        await session.commit()
+
+    commands = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=commands,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = runner._load_state(await runner._load_workspace(workspace_id))
+    config = MonitorConfig(auto_merge=True)
+    green = _ready_status()
+    for status in (green, replace(green, base_behind_count=1)):
+        action = decide(status, state, config)
+        assert isinstance(action, NotifyHuman)
+        assert action.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+        assert action.message == reason
+
+    assert isinstance(decide(replace(green, merged=True), state, config), ShortCircuitCompleted)
+    assert isinstance(decide(replace(green, closed=True), state, config), Abort)
+
+    async def poll_park(action: NotifyHuman) -> None:
+        assert not await runner._execute(
+            action=action,
+            workspace_id=workspace_id,
+            repo_url="https://github.com/example/project",
+            repo=RepoRef(owner="example", name="project"),
+            pr_number=42,
+            status=green,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            remote_push_url=None,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    await poll_park(NotifyHuman(message=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED))
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in commands.calls)
+    waiting = await runner._load_workspace(workspace_id)
+    assert waiting.awaiting_human_reason == reason
+
+    service = WorkspaceService(factory)
+    await service.guide_workspace(workspace_id, directive="Add the edge-case test.")
+    workspace = await runner._load_workspace(workspace_id)
+    assert workspace.awaiting_human_since is None
+    action = decide(green, runner._load_state(workspace), config)
+    assert isinstance(action, AddressOperatorHint)
+    assert action.hint.directive == "Add the edge-case test."
+
+    # A worker that decided to wait just before the guide arrived must not
+    # reopen the attention episode using its stale hint.
+    await poll_park(NotifyHuman(message=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED))
+    workspace = await runner._load_workspace(workspace_id)
+    assert workspace.awaiting_human_since is None

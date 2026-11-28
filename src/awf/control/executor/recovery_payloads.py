@@ -15,13 +15,19 @@ from awf.control.executor.constants import (
     _VALIDATE_ONLY_RECOVERY_SOURCES,
 )
 from awf.control.executor.metadata import _int_or_none, _str_or_none
-from awf.control.executor.types import _PlanningValidationHandoff, _RebaseRecoveryResult
+from awf.control.executor.types import (
+    _PlanningConformancePark,
+    _PlanningValidationHandoff,
+    _RebaseRecoveryResult,
+)
 from awf.db.enums import OperationType
 from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.operator_hints import operator_hint_from_threads
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     MAX_CONFORMANCE_GAPS,
+    PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceReport,
     PlanConformanceStatus,
     render_workspace_path,
@@ -125,6 +131,9 @@ def _planning_validation_handoff_from_recovery_payload(
     max_iterations = _int_or_none(conformance.get("max_iterations"))
     if max_iterations is None:
         max_iterations = _int_or_none(recovery_payload.get("max_iterations"))
+    budget = max(
+        0, max_iterations if max_iterations is not None else profile.planning.max_iterations
+    )
     return _PlanningValidationHandoff(
         report=PlanConformanceReport(
             status=PlanConformanceStatus.needs_iteration,
@@ -134,10 +143,8 @@ def _planning_validation_handoff_from_recovery_payload(
         ),
         plan_path=plan_path,
         report_path=report_path,
-        iteration=iteration if iteration is not None else 0,
-        max_iterations=(
-            max_iterations if max_iterations is not None else profile.planning.max_iterations
-        ),
+        iteration=min(max(0, iteration or 0), budget),
+        max_iterations=budget,
     )
 
 
@@ -178,6 +185,25 @@ def _planning_carried_gaps_from_metadata(metadata: object) -> list[dict[str, str
         and isinstance(kind := gap.get("kind"), str)
         and isinstance(detail := gap.get("detail"), str)
     ]
+
+
+def _pending_conformance_park(
+    workspace: Workspace,
+    validation_run_id: str,
+) -> _PlanningConformancePark | None:
+    """Carry a staged park through a validation retry before PR publication."""
+    hint = operator_hint_from_threads(workspace.monitor_threads_addressed or {})
+    if hint is None or hint.reason_code != PLAN_CONFORMANCE_UNSATISFIED:
+        return None
+    metadata = workspace.block_planning_conformance_handoff or {}
+    evidence = metadata.get("conformance")
+    gaps = _planning_carried_gaps_from_metadata(metadata)
+    if not isinstance(evidence, dict) or not gaps:
+        return None
+    return _PlanningConformancePark(
+        gaps=gaps,
+        details={"conformance": evidence, "validation_run_id": validation_run_id},
+    )
 
 
 def _pr_conformance_publication_pending(workspace: Workspace) -> bool:
@@ -244,12 +270,13 @@ def _planning_validation_handoff_from_metadata(
     )
     iteration = _int_or_none(metadata.get("iteration"))
     max_iterations = _int_or_none(metadata.get("max_iterations"))
+    budget = max(0, max_iterations or 0)
     return _PlanningValidationHandoff(
         report=report,
         plan_path=Path(plan_path),
         report_path=Path(report_path),
-        iteration=iteration if iteration is not None else 0,
-        max_iterations=max_iterations if max_iterations is not None else 0,
+        iteration=min(max(0, iteration or 0), budget),
+        max_iterations=budget,
     )
 
 

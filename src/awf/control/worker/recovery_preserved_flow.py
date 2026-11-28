@@ -79,6 +79,7 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceRepository,
 )
 from awf.hosted_node.identity import (
@@ -86,6 +87,8 @@ from awf.hosted_node.identity import (
     WorkspaceScopeDeniedError,
 )
 from awf.runtime.inspection import RuntimeSnapshot
+from awf.runtime.operator_hints import operator_hint_from_threads
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     append_plan_conformance_advisory,
@@ -683,7 +686,9 @@ async def _attach_preserved_active_pr_monitor(
 
         # Persist a recovered PR identity first. Forge calls can recheck hosted
         # authority and stop the workspace, so they must run outside the row lock.
-        carried_gaps = _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+        metadata = ws.block_planning_conformance_handoff or {}
+        carried_gaps = _planning_carried_gaps_from_metadata(metadata)
+        park_head = metadata.get("conformance_park_head_sha")
         if carried_gaps:
             version, pr_url, pr_number = ws.version, ws.pr_url, ws.pr_number
             resolved_forge = (ws.resolved_profile or {}).get("forge")
@@ -697,6 +702,7 @@ async def _attach_preserved_active_pr_monitor(
                     pr_number=pr_number,
                     resolved_forge=resolved_forge,
                     carried_gaps=carried_gaps,
+                    validated_head_sha=park_head if isinstance(park_head, str) else None,
                 )
             ws = await repo.get_for_update(candidate.workspace_id)
             claim_cutoff = datetime.now(UTC)
@@ -705,8 +711,7 @@ async def _attach_preserved_active_pr_monitor(
                 or ws.status != candidate.status.value
                 or (ws.version, ws.pr_url, ws.pr_number) != (version, pr_url, pr_number)
                 or not _execution_claim_is_stale(ws, claim_cutoff)
-                or _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
-                != carried_gaps
+                or (ws.block_planning_conformance_handoff or {}) != metadata
             ):
                 return
             reason = (
@@ -802,6 +807,18 @@ async def _attach_preserved_active_pr_monitor(
             reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
             payload=payload,
         )
+        if (
+            isinstance(park_head, str)
+            and (hint := operator_hint_from_threads(ws.monitor_threads_addressed or {})) is not None
+            and hint.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+        ):
+            await repo.set_workspace_attention(ws.id, reason=hint.reason, now=claim_cutoff)
+            run_id = metadata.get("validation_run_id")
+            if isinstance(run_id, str):
+                await ValidationRunRepository(session).update_target_head_sha(
+                    run_id,
+                    target_head_sha=park_head,
+                )
         await repo.add_event(
             ws,
             event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,

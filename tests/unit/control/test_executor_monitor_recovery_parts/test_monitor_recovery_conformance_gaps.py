@@ -15,7 +15,9 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import runtime_setup_replay
 from awf.db.enums import FailureReason, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.operator_hints import operator_hint_from_threads, persist_operator_hint
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.applied_operator_directives import (
     AppliedOperatorDirective,
     append_applied_operator_directive,
@@ -53,6 +55,9 @@ _IMPORTED_FIXTURES = (factory, fake)
         ("post_failed", 3, "Comment transport failed"),
         ("missing_gaps", 0, "stored gap details are missing"),
         ("superseded", 2, None),
+        ("operator-park-posted", 2, None),
+        ("operator-park-unpublished", 3, None),
+        ("operator-park-tip-mismatch", 1, "does not contain the validated tip"),
     ],
 )
 async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
@@ -64,7 +69,16 @@ async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
     forge_calls: int,
     failure: str | None,
 ) -> None:
-    notice = "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test"
+    parked = scenario.startswith("operator-park-")
+    reason = f"{PLAN_CONFORMANCE_UNSATISFIED}: Add a regression test"
+    heading = "### Unresolved plan-conformance gaps\n\n"
+    notice = heading + "- **test_work**: Add a regression test"
+    if parked:
+        notice = (
+            heading + f"`{PLAN_CONFORMANCE_UNSATISFIED}`\n\n"
+            "AWF validation passed. Use `workspace guide --directive` to address these gaps.\n\n"
+            "- **test_work**: Add a regression test"
+        )
     pr_url = "https://github.com/x/y/pull/42"
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services: {}\n")
@@ -81,6 +95,14 @@ async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
                 else [{"kind": "test_work", "detail": "Add a regression test"}]
             )
         }
+        if parked:
+            ws.block_planning_conformance_handoff["conformance_park_head_sha"] = "d" * 40
+            ws.monitor_threads_addressed = persist_operator_hint(
+                {},
+                OperatorHint(
+                    reason=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED, status="needs_human"
+                ),
+            )
         await repo.add_audit_event(
             ws,
             event_type="workspace.audit.pr_created",
@@ -100,11 +122,35 @@ async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
         await session.commit()
 
         service, _, _ = _service(session)
-        await service.remonitor_workspace(ws_id, reason=None)
+        await service.remonitor_workspace(ws_id, reason="Retry the notice" if parked else None)
         ws.monitor_claimed_by = "original-worker"
         await session.commit()
 
-    nodes = [{"body": notice}] if scenario in {"already_posted", "superseded"} else []
+    if parked:
+        fake.respond_when(
+            lambda args: (
+                args[:3] == ["gh", "api", "graphql"] and any("headRefOid" in arg for arg in args)
+            ),
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "merged": False,
+                                "closed": False,
+                                "headRefName": "awf/example",
+                                "headRefOid": "" if scenario.endswith("mismatch") else "d" * 40,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+    nodes = (
+        [{"body": notice}]
+        if scenario in {"already_posted", "superseded", "operator-park-posted"}
+        else []
+    )
     comments = {"nodes": nodes, "pageInfo": {"hasNextPage": False}}
     fake.respond_when(
         lambda args: args[:3] == ["gh", "api", "graphql"],
@@ -160,7 +206,7 @@ async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
         assert monitor_run.await_count == 2
     calls = actual_forge_calls()
     assert len(calls) == forge_calls
-    if scenario in {"unpublished", "post_failed"}:
+    if scenario in {"unpublished", "post_failed", "operator-park-unpublished"}:
         assert calls[-1][:4] == ["gh", "pr", "comment", "42"]
         assert calls[-1][-1] == notice
     async with factory() as session:
@@ -176,10 +222,22 @@ async def test_remonitor_requires_pending_carried_gaps_on_retained_pr(
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == FailureReason.infrastructure_failure.value
             assert ws.failure_message and failure in ws.failure_message
-            assert ws.events[-1].reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
+            last_transition = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+            )
+            assert last_transition.reason_code == "PR_CONFORMANCE_COMMENT_FAILED"
         else:
             assert ws.status == WorkspaceStatus.monitoring_pr.value
-        if scenario in {"unpublished", "already_posted"}:
+        if parked:
+            hint = operator_hint_from_threads(ws.monitor_threads_addressed)
+            assert hint is not None
+            assert hint.reason == reason
+            assert hint.status == "needs_human"
+            if failure is None:
+                assert ws.awaiting_human_reason == reason
+        if scenario in {"unpublished", "already_posted"} or (parked and failure is None):
             (publication,) = publications
             assert publication.reason_code == "PR_CONFORMANCE_COMMENT_PUBLISHED"
             assert publication.payload and publication.payload["outcome"] == "succeeded"
@@ -454,10 +512,12 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("parked", [False, True])
 async def test_validate_only_recovery_publishes_carried_conformance_gaps(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    parked: bool,
 ) -> None:
     monitor_calls: list[str] = []
 
@@ -468,6 +528,8 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
                 assert ws is not None
                 assert ws.status == WorkspaceStatus.monitoring_pr.value
                 assert ws.pr_url == "https://github.com/x/y/pull/1"
+                if parked:
+                    assert ws.awaiting_human_reason == reason
                 (directive,) = load_applied_operator_directives(
                     MonitorState(threads_addressed_ids=ws.monitor_threads_addressed or {})
                 )
@@ -484,10 +546,31 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
     ws_id = await _seed_ready_workspace_no_recovery(factory)
     gap = {"kind": "test_work", "detail": "Add a regression test"}
     head = "d" * 40
+    reason = f"{PLAN_CONFORMANCE_UNSATISFIED}: Add a regression test"
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
-        ws.block_planning_conformance_handoff = {"carried_gaps": [gap]}
+        metadata: dict[str, Any] = {"carried_gaps": [gap]}
+        if parked:
+            metadata.update(
+                conformance_park_head_sha=head,
+                validation_run_id="previous-run",
+                conformance={
+                    "summary": "Add a regression test",
+                    "gaps": [gap["detail"]],
+                    "iterations_used": 3,
+                    "max_iterations": 3,
+                    "plan_path": "docs/awf-plans/plan.md",
+                    "report_path": "docs/awf-plans/conformance.json",
+                },
+            )
+            ws.monitor_threads_addressed = persist_operator_hint(
+                {},
+                OperatorHint(
+                    reason=reason, reason_code=PLAN_CONFORMANCE_UNSATISFIED, status="needs_human"
+                ),
+            )
+        ws.block_planning_conformance_handoff = metadata
         await OperationRepository(s).create(
             workspace_id=ws_id,
             operation_type=OperationType.validate,
@@ -502,7 +585,23 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
 
     _queue_validation_head(fake, head=head)
     fake.queue_result(returncode=0, stdout="tests ok")
-    _queue_push_and_pr(fake)
+    _queue_push_and_pr(fake, head=head if parked else "deadbeef01")
+    if parked:
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
+        fake.queue_result(
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "comments": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        fake.queue_result()  # PR gap comment
 
     await executor.execute(ws_id)
 
@@ -511,5 +610,18 @@ async def test_validate_only_recovery_publishes_carried_conformance_gaps(
         call for call in _all_push_and_pr_create_calls(fake) if call[:3] == ["gh", "pr", "create"]
     )
     body = create_call[create_call.index("--body") + 1]
-    assert "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test" in body
+    if parked:
+        (notice,) = [
+            call.args[-1] for call in fake.calls if call.args[:3] == ["gh", "pr", "comment"]
+        ]
+        assert PLAN_CONFORMANCE_UNSATISFIED in notice
+        assert gap["detail"] in notice
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.block_planning_conformance_handoff["validation_run_id"] != "previous-run"
+    else:
+        assert (
+            "### Unresolved plan-conformance gaps\n\n- **test_work**: Add a regression test" in body
+        )
     assert monitor_calls == [ws_id]

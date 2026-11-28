@@ -48,6 +48,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.types import (
     _ConformanceSalvageExecutionResult,
+    _PlanningConformancePark,
     _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
@@ -68,6 +69,10 @@ from awf.db.validation_runs import (
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    MAX_CONFORMANCE_GAPS,
+    MAX_CONFORMANCE_TEXT_CHARS,
+    ConformanceGap,
+    GapKind,
     PlanConformanceReport,
     PlanConformanceStatus,
     agent_artifact_path,
@@ -268,7 +273,8 @@ async def _run_post_validation_conformance_check(
     hosted_pr_identity: dict[str, Any] | None = None,
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
     require_hosted_terminal_head: bool = True,
-) -> _PlanningRunFailure | _PlanningNeedsHuman | None:
+    publish_exhausted: bool = False,
+) -> _PlanningRunFailure | _PlanningNeedsHuman | _PlanningConformancePark | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy. ``profile`` is still needed
     # to pin the AWF validation command set in the prompt (#743).
@@ -442,6 +448,7 @@ async def _run_post_validation_conformance_check(
             phase="post_validation_conformance",
             validation_run_id=validation_run_id,
         )
+    park = None
     if not report.satisfied:
         # This recheck runs only inside the ``val_result.all_passed`` branch, so
         # AWF has produced every piece of evidence it is configured to produce.
@@ -451,20 +458,42 @@ async def _run_post_validation_conformance_check(
         # protected ``.awf/workspace.yml`` to force AWF to run them (#743).
         ci_delegated_report = satisfied_report_for_ci_delegated_validation(report)
         if ci_delegated_report is None:
-            return _build_unsatisfied_failure(report, handoff, validation_run_id)
-        _log.info(
-            "executor.post_validation_conformance_ci_delegated_satisfied",
-            workspace_id=workspace.id,
-            validation_run_id=validation_run_id,
-            gaps=list(report.gaps),
-            reason_code=report.reason_code,
-        )
-        report = ci_delegated_report
-        # The agent's on-disk report is the not-satisfied one we just coerced, so
-        # it no longer matches the satisfied report we serve. Force the rewrite
-        # below so the served artifact and the recorded event agree.
+            failure = _build_unsatisfied_failure(report, handoff, validation_run_id)
+            if not publish_exhausted:
+                return failure
+            assert failure.details is not None
+            summary = _redact_park_text(report.summary)
+            gaps = [
+                ConformanceGap(gap.kind, _redact_park_text(gap.detail))
+                for gap in report.gaps[:MAX_CONFORMANCE_GAPS]
+            ] or [ConformanceGap(GapKind.unknown, summary)]
+            evidence = failure.details["conformance"]
+            evidence.update(
+                summary=summary,
+                gaps=[gap.detail for gap in gaps],
+                report_reason_code=_redact_park_text(report.reason_code),
+            )
+            park = _PlanningConformancePark(
+                gaps=[{"kind": gap.kind.value, "detail": gap.detail} for gap in gaps],
+                details=failure.details,
+            )
+            report = PlanConformanceReport(
+                status=report.status,
+                summary=summary,
+                reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+                gaps=gaps,
+            )
+        else:
+            _log.info(
+                "executor.post_validation_conformance_ci_delegated_satisfied",
+                workspace_id=workspace.id,
+                validation_run_id=validation_run_id,
+                gaps=list(report.gaps),
+                reason_code=report.reason_code,
+            )
+            report = ci_delegated_report
         report_from_fresh_file = False
-    # Track whether the on-worktree report actually carries the satisfied
+    # Track whether the on-worktree report actually carries the expected
     # report we want to serve. A fresh file is already correct; an AWF-
     # synthesized rewrite from stdout/stale disk is correct only when the
     # write call itself succeeds. We must not infer success from file presence,
@@ -472,7 +501,7 @@ async def _run_post_validation_conformance_check(
     # rewrite, which would make the served artifact disagree with the recorded
     # event (PRRT_kwDOSJAM6s6KL7-o).
     rewrite_succeeded = report_from_fresh_file
-    if not report_from_fresh_file:
+    if park is None and not report_from_fresh_file:
         try:
             self._write_satisfied_post_validation_conformance_report(
                 worktree_path=worktree_path,
@@ -496,9 +525,8 @@ async def _run_post_validation_conformance_check(
                 error_type=type(exc).__name__,
                 errno=exc.errno,
             )
-    # For successful planned workspaces where the report was produced from
-    # stdout or a fresh on-disk file, deposit a snapshot into the served
-    # artifact dir BEFORE removing the on-worktree copy. The deposit is
+    # Deposit a snapshot before removing the on-worktree copy. For a park,
+    # serve the redacted report directly from memory. The deposit is
     # best-effort and gated on ``planning.required`` so the console still
     # surfaces the conformance report after teardown.
     #
@@ -513,7 +541,7 @@ async def _run_post_validation_conformance_check(
         validation_run_id=validation_run_id,
     )
     if artifact_work_dir is not None:
-        if not report_from_fresh_file and report_text is not None and not rewrite_succeeded:
+        if park is not None or (report_text is not None and not rewrite_succeeded):
             _deposit_satisfied_conformance_report(
                 work_dir=artifact_work_dir,
                 workspace_id=workspace.id,
@@ -529,8 +557,9 @@ async def _run_post_validation_conformance_check(
                 plan_path=handoff.plan_path,
                 report_path=handoff.report_path,
             )
-    # The satisfied conformance report is an AWF artifact/event, not source
-    # work. Remove the on-worktree copy so project-specific profiles that
+
+    # The conformance report is an AWF artifact. Remove the on-worktree copy
+    # so project-specific profiles that
     # track the conformance report path do not see a dirty worktree at
     # pre-push validation time. The outcome is already captured by the event
     # above and by the validation-run artifact deposit.
@@ -544,6 +573,16 @@ async def _run_post_validation_conformance_check(
     # untracked/gitignored, the restore will fail; fall back to a plain unlink
     # in that case. Use a literal pathspec to avoid interpreting report paths
     # that contain Git pathspec metacharacters.
+    async def finish_check() -> _PlanningConformancePark | None:
+        if park is None:
+            await self._record_post_validation_conformance_event(
+                workspace_id=workspace.id,
+                handoff=handoff,
+                report=report,
+                validation_run_id=validation_run_id,
+            )
+        return park
+
     report_pathspec = _git_literal_pathspec(handoff.report_path)
     restore_result = await self._runner.run(
         [
@@ -565,13 +604,7 @@ async def _run_post_validation_conformance_check(
     )
     if restore_succeeded:
         # Tracked report: restore put the committed copy back; leave it there.
-        await self._record_post_validation_conformance_event(
-            workspace_id=workspace.id,
-            handoff=handoff,
-            report=report,
-            validation_run_id=validation_run_id,
-        )
-        return None
+        return await finish_check()
     if restore_result.ok:
         # ``git restore --source=base_commit`` can leave the path staged
         # relative to HEAD when base_commit differs from HEAD (e.g. an earlier
@@ -596,13 +629,7 @@ async def _run_post_validation_conformance_check(
         if head_restore_result.ok and not await _report_path_is_dirty(
             self, worktree_path, handoff.report_path
         ):
-            await self._record_post_validation_conformance_event(
-                workspace_id=workspace.id,
-                handoff=handoff,
-                report=report,
-                validation_run_id=validation_run_id,
-            )
-            return None
+            return await finish_check()
         # The path is still dirty after restoring from both base_commit and
         # HEAD. Log the partial restore so we do not silently leave the stale
         # AWF-authored report in the push candidate.
@@ -642,13 +669,7 @@ async def _run_post_validation_conformance_check(
             base_commit=base_commit,
         )
         return _build_report_cleanup_failure(handoff, validation_run_id)
-    await self._record_post_validation_conformance_event(
-        workspace_id=workspace.id,
-        handoff=handoff,
-        report=report,
-        validation_run_id=validation_run_id,
-    )
-    return None
+    return await finish_check()
 
 
 def _post_validation_conformance_artifact_work_dir(
@@ -733,6 +754,10 @@ def _empty_report_parent_residue_is_dirty(path: Path, *, worktree_path: Path) ->
     return False
 
 
+def _redact_park_text(text: str) -> str:
+    return redact_audit_text(text, limit=MAX_CONFORMANCE_TEXT_CHARS).replace("\0", " ").strip()
+
+
 def _build_unsatisfied_failure(
     report: PlanConformanceReport,
     handoff: _PlanningValidationHandoff,
@@ -745,7 +770,7 @@ def _build_unsatisfied_failure(
         details={
             "conformance": build_conformance_failure_evidence(
                 report=report,
-                iterations_used=handoff.iteration + 2,
+                iterations_used=handoff.iteration,
                 max_iterations=handoff.max_iterations,
                 plan_path=handoff.plan_path,
                 report_path=handoff.report_path,

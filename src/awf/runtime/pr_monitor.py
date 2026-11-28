@@ -82,6 +82,7 @@ from awf.runtime.monitor_state_keys import (
     _preserved_attempt_retired_key,
     _retired_operator_decision_key,
 )
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_monitor_actions import (
     BOT_REVIEWER_LOGINS,
     PR_HEAD_NOT_SYNCHRONIZED_REASON,
@@ -1115,6 +1116,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    hint = state.pending_operator_hint
+    if hint is not None and hint.reason_code == PLAN_CONFORMANCE_UNSATISFIED:
+        return NotifyHuman(message=hint.reason, reason_code=hint.reason_code)
 
     # 0a. Failed conflict-undo park outranks Merge and every other action.
     from awf.runtime.pr_monitor_runner import ci_repair_conflict_rollback as _crb

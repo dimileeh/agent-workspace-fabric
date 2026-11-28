@@ -68,6 +68,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _pending_conformance_park,
     _planning_carried_gaps_from_metadata,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
@@ -1430,7 +1431,20 @@ async def execute(
         validation_result.successful_validation_workspace_head_sha
     )
 
-    if await handle_recovery_pr_handoff_after_validation(
+    conformance_park = validation_result.conformance_park
+    if (
+        conformance_park is None
+        and recovery is not None
+        and successful_validation_run_id is not None
+        and (not ws.pr_url or retry_gap_publication)
+    ):
+        conformance_park = _pending_conformance_park(ws, successful_validation_run_id)
+    planning_artifact_paths: tuple[Path, ...] = ()
+    if conformance_park is not None:
+        evidence = conformance_park.details["conformance"]
+        planning_artifact_paths = (Path(evidence["plan_path"]), Path(evidence["report_path"]))
+        carried_gaps = conformance_park.gaps
+    elif await handle_recovery_pr_handoff_after_validation(
         self,
         workspace_id=workspace_id,
         ws=ws,
@@ -1454,6 +1468,7 @@ async def execute(
         worktree_path=worktree_path,
         base_commit=base_commit,
         owned_paths=list(ws.owned_paths),
+        planning_artifact_paths=planning_artifact_paths,
         execution_owner_id=execution_owner_id,
         repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
     ):
@@ -1480,4 +1495,6 @@ async def execute(
         in_recovery=recovery is not None,
         carried_gaps=carried_gaps,
         retry_gap_publication=retry_gap_publication,
+        conformance_park=conformance_park,
+        validated_head_sha=successful_validation_workspace_head_sha,
     )

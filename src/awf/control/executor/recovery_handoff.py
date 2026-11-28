@@ -21,11 +21,15 @@ from awf.control.executor.constants import (
 )
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
+    _existing_pr_remote_push_url,
     _monitor_execution_claim_kwargs,
     _provider_recovery_default_model_for_monitor_handoff,
     _render_pr_conformance_gaps,
 )
-from awf.control.executor.pr_open_step import retry_pr_conformance_comment
+from awf.control.executor.pr_open_step import (
+    _pr_snapshot_contains_pushed_tip,
+    retry_pr_conformance_comment,
+)
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.recovery_payloads import (
@@ -50,18 +54,33 @@ async def ensure_carried_gaps_published(
     pr_number: int,
     resolved_forge: object,
     carried_gaps: Sequence[dict[str, str]],
+    validated_head_sha: str | None = None,
+    worktree_path: Path | None = None,
+    fetch_remote: str = "origin",
 ) -> str | None:
     """Confirm the notice or publish it on the PR before attaching its monitor."""
-    gap_section = _render_pr_conformance_gaps(carried_gaps)
+    operator_wait = validated_head_sha is not None
+    gap_section = _render_pr_conformance_gaps(carried_gaps, operator_wait=operator_wait)
     try:
         forge = concrete_forge_for_repo(resolved_forge, pr_url)
         repo, number_from_url = parse_forge_pull_request_url(pr_url, forge=forge)
         if number_from_url != pr_number:
             raise ValueError("Stored pull request number does not match its URL")
         async with make_forge_client(forge, runner) as client:
-            body = await client.fetch_pull_request_body(repo=repo, pr_number=pr_number)
-            if f"\n{gap_section}\n" in f"\n{body}\n".replace("\r\n", "\n"):
-                return None
+            if operator_wait:
+                snapshot = await client.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)
+                if not await _pr_snapshot_contains_pushed_tip(
+                    snapshot=snapshot,
+                    pushed_head_sha=validated_head_sha,
+                    runner=runner,
+                    worktree_path=worktree_path,
+                    fetch_remote=fetch_remote,
+                ):
+                    return "The pull request does not contain the validated tip"
+            else:
+                body = await client.fetch_pull_request_body(repo=repo, pr_number=pr_number)
+                if f"\n{gap_section}\n" in f"\n{body}\n".replace("\r\n", "\n"):
+                    return None
             comments = await client.fetch_pull_request_comment_bodies(
                 repo=repo, pr_number=pr_number
             )
@@ -83,7 +102,18 @@ async def confirm_pending_gap_notice(self: Any, ws: Workspace) -> bool:
 
     # The resume metadata check has already verified the PR identity is present.
     assert ws.pr_url and ws.pr_number is not None
-    carried_gaps = _planning_carried_gaps_from_metadata(ws.block_planning_conformance_handoff)
+    metadata = ws.block_planning_conformance_handoff or {}
+    carried_gaps = _planning_carried_gaps_from_metadata(metadata)
+    park_head = metadata.get("conformance_park_head_sha")
+    park_verification = (
+        {
+            "validated_head_sha": park_head,
+            "worktree_path": self._config.worktrees_root / ws.id,
+            "fetch_remote": _existing_pr_remote_push_url(ws) or "origin",
+        }
+        if isinstance(park_head, str) and park_head
+        else {}
+    )
     error = (
         await ensure_carried_gaps_published(
             self._runner,
@@ -91,6 +121,7 @@ async def confirm_pending_gap_notice(self: Any, ws: Workspace) -> bool:
             pr_number=ws.pr_number,
             resolved_forge=(ws.resolved_profile or {}).get("forge"),
             carried_gaps=carried_gaps,
+            **park_verification,
         )
         if carried_gaps
         else "The stored gap details are missing"

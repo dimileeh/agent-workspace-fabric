@@ -12,6 +12,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,7 @@ async def _publish_pr_conformance_comment(
     worktree_path: Path,
     fetch_remote: str,
     reused_pr_number: int | None = None,
+    operator_wait: bool = False,
 ) -> PullRequestResult:
     """Publish gaps when the PR creation body may have been bypassed."""
     if not gap_section:
@@ -354,7 +356,11 @@ async def _publish_pr_conformance_comment(
             recorded_tip = metadata.get("pushed_head_sha")
             pushed_head_sha = recorded_tip if isinstance(recorded_tip, str) else None
         elif pr_number is None:
-            return pr
+            if not operator_wait:
+                return pr
+            pr_number = _extract_pr_number(pr.url)
+            if pr_number is None:
+                raise ValueError("Could not determine the pull request number")
         elif not pr.head_sha:
             # Reuse can keep an open PR when the local pushed tip is unavailable.
             return replace(
@@ -378,10 +384,10 @@ async def _publish_pr_conformance_comment(
     # Retry publication in place so the already successful push is preserved.
     retried = False
     # Reused PRs already passed the post-push containment check.
-    pushed_tip_verified = reconcile_client is None
+    pushed_tip_verified = reconcile_client is None and not operator_wait
     while True:
         try:
-            if reconcile_client is not None or retried:
+            if operator_wait or reconcile_client is not None or retried:
                 snapshot = await forge_client.fetch_pull_request_snapshot(
                     repo=repo, pr_number=pr_number
                 )
@@ -392,7 +398,7 @@ async def _publish_pr_conformance_comment(
                     worktree_path=worktree_path,
                     fetch_remote=fetch_remote,
                 ):
-                    if pushed_tip_verified:
+                    if operator_wait or pushed_tip_verified:
                         raise ValueError("The pull request no longer contains the pushed tip")
                     error = "Could not verify that the reconciled PR contains the pushed tip"
                     _log.warning(
@@ -405,7 +411,16 @@ async def _publish_pr_conformance_comment(
                         pr, open_metadata={**metadata, "conformance_comment_error": error}
                     )
                 pushed_tip_verified = True
-            if reconcile_client is not None:
+            if operator_wait:
+                comments = await forge_client.fetch_pull_request_comment_bodies(
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                if any(
+                    comment.replace("\r\n", "\n").strip() == gap_section for comment in comments
+                ):
+                    break
+            elif reconcile_client is not None:
                 body = await reconcile_client.fetch_pull_request_body(
                     repo=repo, pr_number=pr_number
                 )
@@ -522,6 +537,7 @@ async def push_and_open_pr(
     workspace_id: str,
     worktree_path: Path,
     carried_gaps: Sequence[dict[str, str]] = (),
+    expected_head_sha: str | None = None,
     publish_gaps_on_reused_pr: bool = True,
     retry_gap_publication: bool = False,
 ) -> Any | None:
@@ -549,9 +565,17 @@ async def push_and_open_pr(
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, profile=profile, defaults=defaults)
-    gap_section = _render_pr_conformance_gaps(carried_gaps) if carried_gaps else ""
-    if gap_section:
+    operator_wait = expected_head_sha is not None
+    gap_section = (
+        _render_pr_conformance_gaps(carried_gaps, operator_wait=operator_wait)
+        if carried_gaps
+        else ""
+    )
+    if gap_section and not operator_wait:
         pr_body += "\n" + gap_section
+    push_and_open = self._pr_creator.push_and_open
+    if expected_head_sha is not None:
+        push_and_open = partial(push_and_open, expected_head_sha=expected_head_sha)
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
     existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
@@ -724,7 +748,7 @@ async def push_and_open_pr(
                         )
                         existing_pr_remote_branch = live_head_ref
                         audit_remote_branch = live_head_ref
-                    pr = await self._pr_creator.push_and_open(
+                    pr = await push_and_open(
                         worktree_path=worktree_path,
                         branch_name=push_branch_name,
                         base_branch=ws.branch_base,
@@ -833,7 +857,7 @@ async def push_and_open_pr(
                             ws=ws,
                         )
                         audit_remote_branch = push_branch_name
-                        pr = await self._pr_creator.push_and_open(
+                        pr = await push_and_open(
                             worktree_path=worktree_path,
                             branch_name=push_branch_name,
                             base_branch=ws.branch_base,
@@ -852,7 +876,7 @@ async def push_and_open_pr(
                         ws=ws,
                     )
                     audit_remote_branch = push_branch_name
-                    pr = await self._pr_creator.push_and_open(
+                    pr = await push_and_open(
                         worktree_path=worktree_path,
                         branch_name=push_branch_name,
                         base_branch=ws.branch_base,
@@ -877,6 +901,7 @@ async def push_and_open_pr(
                     worktree_path=worktree_path,
                     fetch_remote=existing_pr_remote_url or "origin",
                     reused_pr_number=reused_pr_number,
+                    operator_wait=operator_wait,
                 )
         else:
             # New PR: ``make_forge_client`` builds the Bitbucket client eagerly
@@ -939,7 +964,7 @@ async def push_and_open_pr(
                 )
                 return None
             async with forge_client:
-                pr = await self._pr_creator.push_and_open(
+                pr = await push_and_open(
                     worktree_path=worktree_path,
                     branch_name=push_branch_name,
                     base_branch=ws.branch_base,
@@ -961,6 +986,7 @@ async def push_and_open_pr(
                     runner=self._runner,
                     worktree_path=worktree_path,
                     fetch_remote=existing_pr_remote_url or "origin",
+                    operator_wait=operator_wait,
                 )
     except PullRequestError as exc:
         _log.error(
@@ -1030,7 +1056,9 @@ async def push_and_open_pr(
             message=f"unexpected error during PR creation: {exc!r}"[:2000],
         )
         return None
-    if retry_gap_publication and (error := _conformance_comment_error(pr)) is not None:
+    if (retry_gap_publication or operator_wait) and (
+        error := _conformance_comment_error(pr)
+    ) is not None:
         return replace(
             pr,
             open_metadata={
